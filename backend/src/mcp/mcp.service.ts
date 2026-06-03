@@ -1,0 +1,237 @@
+/**
+ * Builds a per-request MCP server scoped to one authenticated user.
+ *
+ * Brigade (or any MCP client — including Customer-Ops federating us) opens a
+ * Streamable HTTP session against /api/v1/mcp. For each request we mint a fresh
+ * McpServer + transport, register the Email-Ops tool set, and let the SDK handle
+ * the protocol. The user is captured by closure on the tool handlers, so all
+ * data access runs with their identity / membership and inside the RLS
+ * transaction (via EmailService).
+ *
+ * THE CONTRACT (what Customer-Ops calls — its email-ops.client.ts): the three
+ * tools list_threads_with_contact / list_thread_messages / compose_email, plus
+ * the foundation tools and the agent-inbox approval tools. Each tool's payload
+ * is returned BOTH as `structuredContent` (the cockpit's client reads this
+ * first) AND as a text content block (the fallback), so the federation seam maps
+ * cleanly.
+ */
+
+import { Injectable, Logger } from '@nestjs/common';
+import { User } from '@prisma/client';
+import { z } from 'zod';
+import { MembershipService } from '../common/workspace/membership.service';
+import { EmailService } from '../email/email.service';
+import { EmailOpsTools } from './mcp.tools';
+
+const EMAIL_MODE = z.enum(['send', 'draft']);
+const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
+
+@Injectable()
+export class McpService {
+  private readonly logger = new Logger(McpService.name);
+
+  constructor(
+    private readonly membership: MembershipService,
+    private readonly email: EmailService,
+  ) {}
+
+  /**
+   * Build a fresh MCP server bound to one authenticated user. Returns the server
+   * instance; the caller connects a transport to it. The SDK is imported lazily
+   * so we pay the resolve cost only when MCP is actually called.
+   */
+  async createServerForUser(user: User) {
+    // Lazy require: the SDK ships dual CJS/ESM; resolve only when MCP is called.
+    const sdk = require('@modelcontextprotocol/sdk/server/mcp.js'); // eslint-disable-line @typescript-eslint/no-var-requires
+    const McpServer = sdk.McpServer;
+
+    const server = new McpServer(
+      {
+        name: 'email-ops',
+        version: '0.1.0',
+      },
+      {
+        capabilities: { tools: {} },
+        instructions:
+          'Email-Ops MCP server — the mailbox / thread surface (over the Stalwart ' +
+          'mail server) + the agent-inbox approval surface of the Unicorn Commander ' +
+          'suite. Foundation tools check service health and list the caller’s ' +
+          'workspaces. The contract tools let a cockpit (e.g. Customer-Ops) federate ' +
+          'mailboxes by workspace: list the threads with a contact, list a thread’s ' +
+          'messages (previews only), and compose an outbound email — mode=send queues ' +
+          'delivery now (Stalwart/Postmark), mode=draft stages it into the AGENT ' +
+          'INBOX for a human to approve before it leaves. compose_email is idempotent ' +
+          'on (workspace_id, external_source, external_ref) and requires BOTH ' +
+          'customer-ops and email-ops entitlements; reading threads is viewer-level. ' +
+          'The agent-inbox tools list the pending queue and approve/reject a draft ' +
+          '(approve sends it). Email-Ops owns the mailboxes, threads, and agent inbox; ' +
+          'it federates the Stalwart engine and never reinvents a mail server.',
+      },
+    );
+
+    const tools = new EmailOpsTools(this.membership, this.email);
+
+    // ── Foundation tools ──
+
+    server.registerTool(
+      'health',
+      {
+        title: 'Email-Ops health',
+        description:
+          'Liveness + configuration check. Returns service status, whether suite ' +
+          'tenancy is enabled, and the server time.',
+        inputSchema: {},
+      },
+      async () => wrap(tools.health()),
+    );
+
+    server.registerTool(
+      'list_my_workspaces',
+      {
+        title: 'List my workspaces',
+        description:
+          'Return the workspaces the calling user is an active member of, with their ' +
+          'canonical suite role and which one is the default. Empty when the user has ' +
+          'no membership.',
+        inputSchema: {
+          _ack: z.boolean().optional(),
+        },
+      },
+      async () => wrap(await tools.listMyWorkspaces(user)),
+    );
+
+    // ── EmailOpsPort contract tools ──
+
+    server.registerTool(
+      'list_threads_with_contact',
+      {
+        title: 'List threads with a contact',
+        description:
+          'List the mailbox THREADS with a customer’s contact (the customer-360 email ' +
+          'history). Federated from the Stalwart mailbox + the workspace’s own outbound ' +
+          'SoR rows, deduped by thread. Read-only / viewer-level — does NOT require the ' +
+          'dual SKU. Returns { threads: [...] }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          contact_id: z.string(),
+        },
+      },
+      async (args: any) => wrap(await tools.listThreadsWithContact(user, args)),
+    );
+
+    server.registerTool(
+      'list_thread_messages',
+      {
+        title: 'List thread messages',
+        description:
+          'List the MESSAGES in one thread, bodies as PREVIEWS only (the full message ' +
+          'lives in Stalwart). Read-only / viewer-level. Returns { messages: [...] }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          thread_id: z.string(),
+        },
+      },
+      async (args: any) => wrap(await tools.listThreadMessages(user, args)),
+    );
+
+    server.registerTool(
+      'compose_email',
+      {
+        title: 'Compose an outbound email',
+        description:
+          'Compose an outbound email to a customer’s contact. mode=send queues delivery ' +
+          'now (Stalwart, or Postmark for the transactional high-rep lane); mode=draft ' +
+          'stages it into the AGENT INBOX approval surface (a human approves before it ' +
+          'leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, ' +
+          'external_source, external_ref): a repeat returns the EXISTING message and ' +
+          'queues NO second send. Requires BOTH customer-ops and email-ops entitlements. ' +
+          'Email-Ops stores no contact record (contact_id is a thin reference) and is ' +
+          'the system-of-record for the message it created.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          contact_id: z.string().optional(),
+          to_address: z.string().min(1).max(320),
+          subject: z.string().min(1).max(500),
+          body: z.string().min(1).max(100000),
+          mode: EMAIL_MODE.optional(),
+          in_reply_to_thread_id: z.string().max(200).optional(),
+          external_source: z.string().min(1).max(64),
+          external_ref: z.string().min(1).max(256),
+        },
+      },
+      async (args: any) => wrap(await tools.composeEmail(user, args)),
+    );
+
+    // ── Agent-inbox approval tools ──
+
+    server.registerTool(
+      'list_agent_inbox',
+      {
+        title: 'List the agent inbox',
+        description:
+          'List the agent-inbox queue: agent-drafted messages awaiting human approval ' +
+          'before send (mode=draft composes land here). Defaults to PENDING; pass state ' +
+          'to filter. Returns { items: [...], count }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          state: INBOX_STATE.optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.listAgentInbox(user, args ?? {})),
+    );
+
+    server.registerTool(
+      'approve_agent_inbox_item',
+      {
+        title: 'Approve an agent-inbox draft (sends it)',
+        description:
+          'Approve a PENDING agent-inbox draft: hand it to the send lane and advance the ' +
+          'message to queued/sent. This is the human-in-the-loop SEND, so it requires ' +
+          'BOTH customer-ops and email-ops entitlements. Returns the updated inbox item ' +
+          '+ message.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          item_id: z.string(),
+          note: z.string().max(2000).optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.approveAgentInboxItem(user, args)),
+    );
+
+    server.registerTool(
+      'reject_agent_inbox_item',
+      {
+        title: 'Reject an agent-inbox draft',
+        description:
+          'Reject a PENDING agent-inbox draft: mark it REJECTED; the message is never ' +
+          'sent. Returns the updated inbox item + message.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          item_id: z.string(),
+          note: z.string().max(2000).optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.rejectAgentInboxItem(user, args)),
+    );
+
+    return server;
+  }
+}
+
+/**
+ * Wrap a tool payload for the MCP transport. We return BOTH `structuredContent`
+ * (the cockpit's federation client reads result.structuredContent FIRST) AND a
+ * text content block (the fallback the client parses if structuredContent is
+ * absent), so the EmailOpsPort seam maps either way.
+ */
+function wrap(payload: unknown) {
+  return {
+    structuredContent: payload as Record<string, unknown>,
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify(payload, null, 2),
+      },
+    ],
+  };
+}

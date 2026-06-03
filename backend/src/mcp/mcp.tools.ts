@@ -1,0 +1,198 @@
+/**
+ * Tool implementations for the Email-Ops MCP server.
+ *
+ * Each tool runs as the *calling user*: the controller pulls the user out of the
+ * JWT and passes it in. The user carries the verified workspace claim + the
+ * verified entitlement SKUs (surfaced by JwtStrategy), so the tools resolve the
+ * tenant via the membership gate and re-derive the compose entitlement
+ * server-side.
+ *
+ * THE CONTRACT (matching Customer-Ops' EmailOpsPort — its email-ops.client.ts):
+ *   - list_threads_with_contact(workspace_id, contact_id)
+ *       -> { threads: ThreadView[] }     (viewer-level; no dual SKU)
+ *   - list_thread_messages(workspace_id, thread_id)
+ *       -> { messages: MessageView[] }   (viewer-level; previews only)
+ *   - compose_email(workspace_id, contact_id, to_address, subject, body, mode,
+ *       in_reply_to_thread_id?, external_source, external_ref)
+ *       -> MessageComposeView. mode='send' queues delivery; mode='draft' stages
+ *       the agent-inbox approval surface. IDEMPOTENT on (workspace_id,
+ *       external_source, external_ref). Requires BOTH customer-ops + email-ops.
+ *
+ * Plus the foundation tools (health, list_my_workspaces) and the agent-inbox
+ * approval tools (list_agent_inbox, approve_agent_inbox_item,
+ * reject_agent_inbox_item). All data access runs through EmailService inside the
+ * RLS transaction.
+ */
+
+import { ForbiddenException } from '@nestjs/common';
+import { AgentInboxState, User } from '@prisma/client';
+import { MembershipService } from '../common/workspace/membership.service';
+import { listMyWorkspaces, MyWorkspace } from '../common/workspace/list-my-workspaces';
+import { tenancyEnabled } from '../common/workspace/feature-flags';
+import { entitlementsOf, ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
+import { EmailService } from '../email/email.service';
+import { checkComposeEntitlement } from '../email/entitlement';
+
+export class EmailOpsTools {
+  constructor(
+    private readonly membership: MembershipService,
+    private readonly email: EmailService,
+  ) {}
+
+  /** Health/info — safe for any authenticated caller. */
+  health(): {
+    status: string;
+    service: string;
+    tenancyEnabled: boolean;
+    time: string;
+  } {
+    return {
+      status: 'ok',
+      service: 'email-ops',
+      tenancyEnabled: tenancyEnabled(),
+      time: new Date().toISOString(),
+    };
+  }
+
+  /** The caller's active workspaces (membership-gated; empty when none). */
+  async listMyWorkspaces(user: User): Promise<{ workspaces: MyWorkspace[]; count: number }> {
+    const workspaces = await listMyWorkspaces(this.membership, user);
+    return { workspaces, count: workspaces.length };
+  }
+
+  // ── EmailOpsPort contract tools ────────────────────────────────────────
+
+  async listThreadsWithContact(
+    user: User,
+    args: { workspace_id?: string; contact_id: string },
+  ): Promise<{ threads: unknown[] }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const threads = await this.email.listThreadsWithContact(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.contact_id,
+    );
+    return { threads };
+  }
+
+  async listThreadMessages(
+    user: User,
+    args: { workspace_id?: string; thread_id: string },
+  ): Promise<{ messages: unknown[] }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const messages = await this.email.listThreadMessages(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.thread_id,
+    );
+    return { messages };
+  }
+
+  async composeEmail(
+    user: User,
+    args: {
+      workspace_id?: string;
+      contact_id?: string;
+      to_address: string;
+      subject: string;
+      body: string;
+      mode?: 'send' | 'draft';
+      in_reply_to_thread_id?: string;
+      external_source: string;
+      external_ref: string;
+    },
+  ): Promise<unknown> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+
+    // Defense-in-depth: re-derive the dual-SKU gate server-side off the verified
+    // token. A federated call can never bypass the entitlement boundary.
+    const gate = checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    if (!gate.allowed) {
+      throw new ForbiddenException(gate.reason);
+    }
+
+    return this.email.composeEmail(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
+      contactId: args.contact_id ?? null,
+      toAddress: args.to_address,
+      subject: args.subject,
+      body: args.body,
+      mode: args.mode === 'draft' ? 'draft' : 'send',
+      inReplyToThreadId: args.in_reply_to_thread_id ?? null,
+      externalSource: args.external_source,
+      externalRef: args.external_ref,
+      draftedBy: args.external_source,
+    });
+  }
+
+  // ── agent-inbox approval tools ─────────────────────────────────────────
+
+  async listAgentInbox(
+    user: User,
+    args: { workspace_id?: string; state?: 'pending' | 'approved' | 'rejected' },
+  ): Promise<{ items: unknown[]; count: number }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const state = this.inboxState(args.state);
+    const items = await this.email.listAgentInbox(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      state,
+    );
+    return { items, count: items.length };
+  }
+
+  async approveAgentInboxItem(
+    user: User,
+    args: { workspace_id?: string; item_id: string; note?: string },
+  ): Promise<unknown> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    // Approving a draft is the human-in-the-loop SEND — gate it like a compose.
+    const gate = checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    if (!gate.allowed) {
+      throw new ForbiddenException(gate.reason);
+    }
+    const res = await this.email.approveAgentInboxItem(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.item_id,
+      args.note ?? null,
+    );
+    if (!res) return { ok: false, reason: 'agent-inbox item not found in this workspace' };
+    return { ok: true, ...res };
+  }
+
+  async rejectAgentInboxItem(
+    user: User,
+    args: { workspace_id?: string; item_id: string; note?: string },
+  ): Promise<unknown> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const res = await this.email.rejectAgentInboxItem(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.item_id,
+      args.note ?? null,
+    );
+    if (!res) return { ok: false, reason: 'agent-inbox item not found in this workspace' };
+    return { ok: true, ...res };
+  }
+
+  // ── helpers ────────────────────────────────────────────────────────────
+
+  /** Resolve + authorize the workspace for this user (membership-gated when
+   *  tenancy is on; the requested id is the wire claim from the tool args). */
+  private async resolve(user: User, requested?: string): Promise<string> {
+    return this.membership.resolveAndAuthorize(user, requested ?? null);
+  }
+
+  private inboxState(s?: string): AgentInboxState | undefined {
+    switch ((s ?? '').toLowerCase()) {
+      case 'approved':
+        return AgentInboxState.APPROVED;
+      case 'rejected':
+        return AgentInboxState.REJECTED;
+      case 'pending':
+        return AgentInboxState.PENDING;
+      default:
+        return undefined; // service defaults to PENDING
+    }
+  }
+}

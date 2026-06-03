@@ -1,0 +1,49 @@
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
+
+import { PrismaModule } from './prisma/prisma.module';
+import { WorkspaceModule } from './common/workspace/workspace.module';
+import { AuthModule } from './auth/auth.module';
+import { HealthModule } from './health/health.module';
+import { StalwartModule } from './stalwart/stalwart.module';
+import { EmailModule } from './email/email.module';
+import { McpModule } from './mcp/mcp.module';
+
+@Module({
+  imports: [
+    // Configuration — global, sourced from .env.
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '.env',
+    }),
+
+    // Rate limiting — named throttlers for different security levels.
+    ThrottlerModule.forRoot([
+      { name: 'short', ttl: 60000, limit: 20 },
+      { name: 'long', ttl: 3600000, limit: 200 },
+    ]),
+
+    // Core tenancy + identity.
+    PrismaModule,
+    WorkspaceModule,
+    AuthModule,
+    HealthModule,
+    // The mail engine seam (Stalwart IMAP/JMAP + Postmark lane; degrade-clean).
+    StalwartModule,
+    // The Email-Ops core domain: the SoR + the EmailOpsPort contract + the
+    // agent-inbox approval flow.
+    EmailModule,
+    // MCP last so it can consume the contract + agent-inbox tools.
+    McpModule,
+  ],
+  providers: [
+    // Rate limiting globally via guard.
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+  ],
+})
+export class AppModule {}

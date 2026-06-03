@@ -1,0 +1,357 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// Email-Ops — the mailbox / thread surface + the agent-inbox
+// approval surface of the Unicorn Commander suite.
+//
+// THE GOLDEN RULE (SUITE-ARCHITECTURE-MAP §2/§3): Email-Ops is the
+// APP that FRONTS the Stalwart mail server (IMAP/JMAP) for mailbox
+// state + threads, and is the system-of-record for every mailbox,
+// thread, and outbound message IT initiated. It "federates the
+// engine, doesn't reinvent a mail server": Stalwart runs the
+// mailboxes; transactional outbound routes via Postmark (the
+// high-rep deliverability lane). Email-Ops owns the AGENT INBOX (the
+// human-in-the-loop approval queue for agent-drafted mail) outright.
+//
+// Customer-Ops (and any cockpit) FEDERATES Email-Ops over MCP by
+// workspace_id — it never runs a mail server, never stores a message
+// body, never copies a thread. The contract Email-Ops implements
+// (the 3 tools) is mirrored from Customer-Ops backend/src/email-ops/
+// (EmailOpsPort / email-ops.types.ts) so the cockpit calls us for real.
+//
+// PHASE 1 (this layer) = the tenancy FOUNDATION (Workspace+Membership
+// tenancy boundary per SUITE-IDENTITY §2, SSO identity, RLS + the
+// 4-role split + current_workspace_id() GUC + withWorkspace(), the
+// Keycloak auth aud=email-ops membership-gated, the StalwartPort +
+// degrade-clean client, the EmailOpsPort contract MCP server, and the
+// agent-inbox). RLS is ENABLE+FORCE-d on every scoped table; the fence
+// goes live the moment the runtime DATABASE_URL flips to the
+// NOBYPASSRLS email_ops_app role.
+// ============================================================
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+// ── Suite tenancy (SUITE-IDENTITY.md §2 / §7) ────────────
+//
+// The canonical suite roles + membership lifecycle. Roles rank
+// viewer < member < manager < admin < owner (SUITE-IDENTITY §7).
+enum WorkspaceRole {
+  VIEWER
+  MEMBER
+  MANAGER
+  ADMIN
+  OWNER
+}
+
+enum MembershipStatus {
+  ACTIVE
+  SUSPENDED
+  REVOKED
+}
+
+// ── Outbound message lane (Email-Ops OWNS this) ──
+//
+// The compose lane selected by the cockpit / an agent:
+//   - SEND  : queue it for delivery now (Email-Ops → Stalwart/Postmark).
+//   - DRAFT : stage it into the agent-inbox approval surface; a human
+//             approves before it leaves.
+enum EmailMode {
+  SEND
+  DRAFT
+}
+
+// ── Outbound message lifecycle (Email-Ops OWNS this) ──
+//
+// The status the cockpit caches on its thin link. QUEUED→SENT→DELIVERED is
+// the send lane; DRAFT→PENDING_APPROVAL→(approve)→QUEUED is the agent-inbox
+// lane; FAILED is terminal-error; REJECTED is a human declining a draft.
+enum EmailMessageStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  DRAFT
+  PENDING_APPROVAL
+  REJECTED
+  FAILED
+}
+
+// ── Message direction within a mailbox (Email-Ops OWNS this) ──
+enum EmailDirection {
+  RECEIVED
+  SENT
+  DRAFT
+}
+
+// ── Agent-inbox approval state (Email-Ops OWNS this) ──
+//
+// The lifecycle of an agent-drafted message awaiting human approval before
+// send. PENDING is the default a mode=draft compose lands at; APPROVED means a
+// human approved it and it was handed to the send lane; REJECTED means a human
+// declined it (it never leaves). One inbox item per outbound DRAFT message.
+enum AgentInboxState {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// ============================================================
+// SUITE TENANCY (SUITE-IDENTITY.md §2 — VERBATIM)
+// ============================================================
+//
+// Phase 1 of the suite tenancy foundation. These two models + a
+// `workspaceId` on every tenant-scoped model land the DB-enforced
+// tenancy boundary. RLS is created-and-FORCED by the migration but
+// inert for the running app until the runtime DATABASE_URL is flipped
+// to the NOBYPASSRLS `email_ops_app` role (a later phase). Nothing
+// here changes the running app's default behavior.
+
+/// Thin mirror of the uc-registry workspace record. Email-Ops NEVER mints workspace_id.
+model Workspace {
+  id                String       @id // == uc-registry workspace_id (uuidv7). NO @default.
+  slug              String       @unique
+  displayName       String
+  parentWorkspaceId String?
+  isolationMode     String       @default("standard") // 'strict'|'standard'|'open'  (TEXT+CHECK, §5)
+  isolationTier     String       @default("shared") // 'shared'|'premium'|'enterprise'|'dedicated'
+  hipaaMode         Boolean      @default(false)
+  gdprMode          Boolean      @default(false)
+  dataResidency     String?      @default("us-east")
+  status            String       @default("active") // active|suspended|archived|deleting
+  entitlementCache  Json? // offline/dedicated only; null on shared SaaS
+  syncedAt          DateTime     @default(now())
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  memberships       Membership[]
+  mailboxAccounts   MailboxAccount[]
+  emailMessages     EmailMessage[]
+  agentInboxItems   AgentInboxItem[]
+
+  @@index([slug])
+  @@index([status])
+  @@map("workspaces")
+}
+
+model Membership {
+  userKey     String // == User.keycloakId == uchub sub
+  workspaceId String
+  role        WorkspaceRole    @default(MEMBER)
+  status      MembershipStatus @default(ACTIVE)
+  isDefault   Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@id([userKey, workspaceId])
+  @@index([userKey])
+  @@index([workspaceId])
+  @@map("memberships")
+}
+
+// ============================================================
+// IDENTITY
+// ============================================================
+//
+// The SSO-linked user. NOT workspace-scoped (SUITE-IDENTITY §2: User is
+// a global identity; the Membership row is the tenancy boundary). A valid
+// uchub token JIT-provisions this row (gated by the access list), but it
+// grants ZERO workspace access until an explicit Membership exists (§D5).
+model User {
+  id          String    @id @default(uuid())
+  email       String    @unique
+  username    String    @unique
+  firstName   String    @default("")
+  lastName    String    @default("")
+  keycloakId  String?   @unique // == uchub sub once SSO-linked; the Membership.userKey
+  isActive    Boolean   @default(true)
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([email])
+  @@index([keycloakId])
+  @@map("users")
+}
+
+// ============================================================
+// MAILBOX ACCOUNT (Email-Ops OWNS this — tenant-scoped)
+// ============================================================
+//
+// The per-workspace binding to a Stalwart mailbox account (the IMAP/JMAP
+// login Email-Ops fronts for THIS workspace). Email-Ops federates the engine:
+// Stalwart holds the actual mailbox; this row is just the addressing/credential
+// reference + the default outbound identity, scoped to the workspace.
+//
+// We store NO password in plaintext: the secret is referenced indirectly
+// (`secretRef` — a key into the node's secret store / env), so a DB read never
+// leaks a mailbox credential. The host/port/protocol describe how to reach the
+// Stalwart node for this account.
+//
+// RLS-fenced on workspaceId: a no-GUC read returns zero rows (fail-closed), and
+// a write into another workspace is blocked by the WITH CHECK. ENABLE + FORCE.
+model MailboxAccount {
+  id           String   @id @default(uuid())
+  workspaceId  String
+  // The mailbox email address this account fronts (the workspace's deliverable
+  // identity for sends; the IMAP/JMAP login user).
+  emailAddress String
+  // The display name to put on outbound From headers (optional).
+  displayName  String?
+  // Transport reachability to the Stalwart node (host:port). When null, the
+  // global STALWART_* env config is used (single-tenant dogfood).
+  imapHost     String?
+  imapPort     Int?
+  jmapUrl      String?
+  smtpHost     String?
+  smtpPort     Int?
+  // Indirect credential reference — a key into the node secret store / env,
+  // NEVER the secret itself. Email-Ops resolves it at connect time.
+  secretRef    String?
+  // Whether this is the workspace's default outbound mailbox (one per workspace).
+  isDefault    Boolean  @default(false)
+  // Whether transactional sends from this account should route via Postmark
+  // (the high-rep lane) rather than Stalwart SMTP (per the suite comms lanes).
+  postmarkLane Boolean  @default(true)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  // One mailbox identity per address per workspace.
+  @@unique([workspaceId, emailAddress])
+  @@index([workspaceId])
+  @@index([workspaceId, isDefault])
+  @@map("mailbox_accounts")
+}
+
+// ============================================================
+// EMAIL MESSAGE (Email-Ops OWNS this — tenant-scoped; the SoR)
+// ============================================================
+//
+// The system-of-record row for every OUTBOUND message Email-Ops created (a send
+// or a drafted agent-inbox approval), plus the thin index of a message's place
+// in a thread. Email-Ops is the SoR for the message it initiated; the live
+// thread/message bodies of RECEIVED mail live in Stalwart and are federated at
+// read time (never stored here — we keep a snippet/preview only, mirroring the
+// federate-don't-fork rule the cockpit holds toward us).
+//
+// IDEMPOTENCY (the contract): the compose tool is idempotent on
+//   (workspaceId, externalSource, externalRef)
+// so a retry from the cockpit never double-sends — the unique index enforces it
+// and the tool returns the EXISTING row on a repeat.
+//
+// `contactId` is the federated Contact-Ops contact id this message is to/from
+// (a thin reference; never a copy of the contact record). `threadId` is the
+// JMAP/Stalwart thread id (or a synthesized one for a brand-new outbound).
+//
+// RLS-fenced on workspaceId exactly like the other scoped tables. ENABLE +
+// FORCE, identical policy. A no-GUC read returns zero rows (fail-closed).
+model EmailMessage {
+  id          String  @id @default(uuid())
+  workspaceId String
+  // The mailbox account this message belongs to (the workspace's identity).
+  mailboxAccountId String?
+  // The federated Contact-Ops contact id this message is to/from (thin
+  // reference; the contact record is NEVER copied — golden rule).
+  contactId   String?
+  // The thread the message belongs to (JMAP/Stalwart thread id, or synthesized
+  // for a new outbound thread). Opaque to the cockpit.
+  threadId    String?
+  // The deterministic idempotency tuple the compose tool is idempotent on.
+  // externalSource is the originating app ('customer-ops' for cockpit-initiated
+  // sends); externalRef is the caller's deterministic key.
+  externalSource String?
+  externalRef    String?
+  mode        EmailMode          @default(SEND)
+  status      EmailMessageStatus @default(QUEUED)
+  direction   EmailDirection     @default(SENT)
+  // Addressing + subject (kept for list rendering; the FULL body lives in
+  // Stalwart for received mail — we keep the composed body of outbound mail
+  // we initiated so the agent-inbox can render it for approval).
+  fromAddress String?
+  toAddress   String?
+  subject     String?
+  // The composed plain-text body (outbound we initiated). A PREVIEW/snippet of
+  // received mail is in `preview`; full received bodies stay in Stalwart.
+  body        String?
+  preview     String?
+  // If this message is a reply, the thread it replied within (for threading).
+  inReplyToThreadId String?
+  // The provider message id once delivery is handed off (Stalwart/Postmark id).
+  providerMessageId String?
+  // Attribution + provenance.
+  actorUcUid  String?
+  sentAt      DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agentInbox  AgentInboxItem?
+
+  // The idempotency tuple is unique per workspace (partial on the non-null
+  // source/ref — see the migration's partial unique index for the NULL case).
+  @@unique([workspaceId, externalSource, externalRef])
+  @@index([workspaceId])
+  @@index([workspaceId, contactId, createdAt])
+  @@index([workspaceId, threadId])
+  @@index([workspaceId, status])
+  @@map("email_messages")
+}
+
+// ============================================================
+// AGENT INBOX (Email-Ops OWNS this — tenant-scoped; the approval queue)
+// ============================================================
+//
+// The human-in-the-loop approval surface (SUITE-ARCHITECTURE-MAP §2: Email-Ops
+// owns "agent inboxes — the human-in-the-loop approval surface for agent mail").
+// When a compose lands with mode=draft, a row lands HERE in state PENDING,
+// pointing at the staged EmailMessage. An APPROVE action transitions the item to
+// APPROVED and hands the message to the send lane; a REJECT marks it REJECTED
+// and the message never leaves.
+//
+// This is the brief's "tenant-scoped (RLS) queue of agent-drafted messages
+// awaiting human approval before send". RLS-fenced on workspaceId exactly like
+// the other scoped tables. ENABLE + FORCE, identical policy. A no-GUC read
+// returns zero rows (fail-closed) — an agent draft is never visible across the
+// tenant fence.
+model AgentInboxItem {
+  id          String          @id @default(uuid())
+  workspaceId String
+  // The staged outbound message awaiting approval (1:1).
+  messageId   String          @unique
+  state       AgentInboxState @default(PENDING)
+  // Which agent/source drafted this (provenance; 'customer-ops' for a cockpit
+  // agent draft).
+  draftedBy   String?
+  // A one-line summary the queue renders without opening the full body.
+  summary     String?
+  // Who approved/rejected it + when (the human-in-the-loop attribution).
+  reviewedByUcUid String?
+  reviewedAt  DateTime?
+  reviewNote  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  message   EmailMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  // The queue reads pending items newest-first.
+  @@index([workspaceId, state, createdAt])
+  @@map("agent_inbox_items")
+}
+
+// NOTE: The Workspace↔MailboxAccount / Workspace↔EmailMessage /
+// Workspace↔AgentInboxItem relations are declared here to satisfy Prisma's
+// relation requirement. They do NOT make Workspace a tenant-scoped table —
+// Workspace is the tenancy CONTROL table (not RLS-fenced); MailboxAccount +
+// EmailMessage + AgentInboxItem are the scoped projections (RLS-fenced by the
+// migrations).

@@ -1,0 +1,549 @@
+/**
+ * EmailService — the Email-Ops system-of-record + the EmailOpsPort contract +
+ * the agent-inbox approval flow.
+ *
+ * This is the ONE implementation both the MCP contract tools and (future) REST
+ * surface delegate to, so an agent and a human hit one set of rules + one RLS
+ * path. Every method runs inside `withWorkspace(workspaceId, ucUid, …)` — the
+ * GUC chokepoint — so Postgres RLS scopes every row to the workspace the moment
+ * the runtime flips to the NOBYPASSRLS email_ops_app role. The mailbox engine is
+ * the injected StalwartPort (degrade-clean): reads federate Stalwart; sends route
+ * Stalwart/Postmark; nothing throws when the engine is unconfigured.
+ *
+ * The three contract behaviors (matching Customer-Ops' EmailOpsPort):
+ *   1. listThreadsWithContact — the live mailbox threads with a contact
+ *      (federated from Stalwart) UNION the workspace's own outbound thread rows
+ *      (the SoR), deduped by thread id. Read-only / viewer-level.
+ *   2. listThreadMessages — the messages in a thread (Stalwart previews UNION
+ *      the SoR outbound rows). Read-only / viewer-level.
+ *   3. composeEmail — IDEMPOTENT on (workspaceId, externalSource, externalRef):
+ *        - mode=send  → record the SoR row, hand to the mail engine, set status
+ *          from the engine result (queued/sent/failed).
+ *        - mode=draft → record the SoR row in status PENDING_APPROVAL and stage
+ *          an AgentInboxItem (PENDING). The send happens later on approve().
+ *      A repeat with the same tuple returns the EXISTING message, queues NO
+ *      second send.
+ *
+ * The agent-inbox approval flow:
+ *   - listAgentInbox(state?) — the queue (pending by default).
+ *   - approveAgentInboxItem — PENDING → APPROVED, hand the staged draft to the
+ *     send lane, advance the message to queued/sent/failed.
+ *   - rejectAgentInboxItem  — PENDING → REJECTED; the message is marked REJECTED
+ *     and never leaves.
+ */
+
+import { Injectable, Logger } from '@nestjs/common';
+import {
+  AgentInboxState,
+  EmailDirection,
+  EmailMessageStatus,
+  EmailMode,
+  Prisma,
+} from '@prisma/client';
+import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
+import { StalwartPort } from '../stalwart/stalwart.port';
+import { StalwartThread } from '../stalwart/stalwart.types';
+import {
+  AgentInboxView,
+  ComposeInput,
+  MessageComposeView,
+  MessageView,
+  ThreadView,
+} from './email.types';
+
+@Injectable()
+export class EmailService {
+  private readonly logger = new Logger(EmailService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly stalwart: StalwartPort,
+  ) {}
+
+  // ── status mapping ─────────────────────────────────────────────────────
+
+  private statusWire(status: EmailMessageStatus): string {
+    return status.toLowerCase();
+  }
+
+  private modeWire(mode: EmailMode): string {
+    return mode.toLowerCase();
+  }
+
+  // ── 1. list_threads_with_contact ───────────────────────────────────────
+
+  /**
+   * The mailbox threads with a contact: the live Stalwart threads (when the
+   * engine is configured) UNION the workspace's own outbound thread rows (the
+   * SoR), deduped by thread id, newest-first. Viewer-level (no dual SKU).
+   */
+  async listThreadsWithContact(
+    workspaceId: string,
+    ucUid: string | null,
+    contactId: string,
+  ): Promise<ThreadView[]> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      // The deliverable address + default mailbox for the workspace (if any).
+      const mailbox = await this.defaultMailbox(tx);
+      const address = await this.contactAddress(tx, contactId);
+
+      // Live Stalwart threads (degrade-clean: [] when unconfigured).
+      let live: StalwartThread[] = [];
+      if (mailbox && address) {
+        live = await this.stalwart.listThreads(mailbox.emailAddress, address);
+      }
+
+      // The workspace's own outbound SoR rows for this contact, projected as
+      // thin threads (so a brand-new outbound the cockpit just composed shows in
+      // the 360 even before the engine surfaces it).
+      const own = await tx.emailMessage.findMany({
+        where: { contactId, threadId: { not: null } },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      const byThread = new Map<string, ThreadView>();
+      for (const t of live) {
+        byThread.set(t.id, {
+          id: t.id,
+          subject: t.subject,
+          message_count: t.messageCount,
+          unread: t.unread,
+          last_message_at: t.lastMessageAt,
+          last_snippet: t.lastSnippet,
+          participants: t.participants.map((p) => ({ address: p.address, name: p.name })),
+        });
+      }
+      for (const m of own) {
+        const tid = m.threadId as string;
+        if (byThread.has(tid)) continue; // live thread wins (richer).
+        byThread.set(tid, {
+          id: tid,
+          subject: m.subject ?? null,
+          message_count: 1,
+          unread: false,
+          last_message_at: (m.sentAt ?? m.createdAt)?.toISOString() ?? null,
+          last_snippet: m.preview ?? this.snippet(m.body),
+          participants: [
+            ...(m.fromAddress ? [{ address: m.fromAddress, name: null }] : []),
+            ...(m.toAddress ? [{ address: m.toAddress, name: null }] : []),
+          ],
+        });
+      }
+      return [...byThread.values()];
+    });
+  }
+
+  // ── 2. list_thread_messages ────────────────────────────────────────────
+
+  /**
+   * The messages in a thread: live Stalwart previews UNION the SoR outbound
+   * rows, deduped by message id, oldest-first. Viewer-level.
+   */
+  async listThreadMessages(
+    workspaceId: string,
+    ucUid: string | null,
+    threadId: string,
+  ): Promise<MessageView[]> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const mailbox = await this.defaultMailbox(tx);
+
+      let live: MessageView[] = [];
+      if (mailbox) {
+        const msgs = await this.stalwart.listMessages(mailbox.emailAddress, threadId);
+        live = msgs.map((m) => ({
+          id: m.id,
+          thread_id: m.threadId,
+          from: m.from ? { address: m.from.address, name: m.from.name } : null,
+          to: m.to.map((p) => ({ address: p.address, name: p.name })),
+          subject: m.subject,
+          sent_at: m.sentAt,
+          preview: m.preview,
+          direction: m.direction,
+        }));
+      }
+
+      const own = await tx.emailMessage.findMany({
+        where: { threadId },
+        orderBy: { createdAt: 'asc' },
+      });
+
+      const byId = new Map<string, MessageView>();
+      for (const m of live) byId.set(m.id, m);
+      for (const m of own) {
+        if (byId.has(m.id)) continue;
+        byId.set(m.id, {
+          id: m.id,
+          thread_id: m.threadId ?? threadId,
+          from: m.fromAddress ? { address: m.fromAddress, name: null } : null,
+          to: m.toAddress ? [{ address: m.toAddress, name: null }] : [],
+          subject: m.subject ?? null,
+          sent_at: (m.sentAt ?? m.createdAt)?.toISOString() ?? null,
+          preview: m.preview ?? this.snippet(m.body),
+          direction: m.direction.toLowerCase(),
+        });
+      }
+      return [...byId.values()];
+    });
+  }
+
+  // ── 3. compose_email (idempotent; send vs draft) ───────────────────────
+
+  /**
+   * Compose an outbound email. IDEMPOTENT on (workspaceId, externalSource,
+   * externalRef): a repeat returns the EXISTING message and queues NO second
+   * send. mode=send hands to the mail engine; mode=draft stages the agent-inbox.
+   */
+  async composeEmail(
+    workspaceId: string,
+    ucUid: string | null,
+    input: ComposeInput,
+  ): Promise<MessageComposeView> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      // Idempotency: a prior row with the same tuple returns unchanged.
+      const existing = await tx.emailMessage.findUnique({
+        where: {
+          workspaceId_externalSource_externalRef: {
+            workspaceId,
+            externalSource: input.externalSource,
+            externalRef: input.externalRef,
+          },
+        },
+      });
+      if (existing) {
+        this.logger.log(
+          `compose_email idempotent hit for (${workspaceId}, ${input.externalSource}, ${input.externalRef}) — returning existing message ${existing.id} (no second send)`,
+        );
+        return this.composeView(existing);
+      }
+
+      const mailbox = await this.defaultMailbox(tx);
+      const fromAddress = mailbox?.emailAddress ?? null;
+      const mode = input.mode === 'draft' ? EmailMode.DRAFT : EmailMode.SEND;
+
+      if (mode === EmailMode.DRAFT) {
+        // Stage the draft into the agent-inbox approval surface.
+        const msg = await tx.emailMessage.create({
+          data: {
+            workspaceId,
+            mailboxAccountId: mailbox?.id ?? null,
+            contactId: input.contactId,
+            threadId: input.inReplyToThreadId ?? null,
+            inReplyToThreadId: input.inReplyToThreadId ?? null,
+            externalSource: input.externalSource,
+            externalRef: input.externalRef,
+            mode: EmailMode.DRAFT,
+            status: EmailMessageStatus.PENDING_APPROVAL,
+            direction: EmailDirection.DRAFT,
+            fromAddress,
+            toAddress: input.toAddress,
+            subject: input.subject,
+            body: input.body,
+            preview: this.snippet(input.body),
+            actorUcUid: ucUid,
+          },
+        });
+        await tx.agentInboxItem.create({
+          data: {
+            workspaceId,
+            messageId: msg.id,
+            state: AgentInboxState.PENDING,
+            draftedBy: input.draftedBy ?? input.externalSource,
+            summary: this.summary(input.subject, input.toAddress),
+          },
+        });
+        this.logger.log(
+          `compose_email DRAFT staged into agent-inbox: message ${msg.id} (workspace ${workspaceId}) pending human approval`,
+        );
+        return this.composeView(msg);
+      }
+
+      // mode=send — record the SoR row, then hand to the mail engine.
+      const msg = await tx.emailMessage.create({
+        data: {
+          workspaceId,
+          mailboxAccountId: mailbox?.id ?? null,
+          contactId: input.contactId,
+          threadId: input.inReplyToThreadId ?? null,
+          inReplyToThreadId: input.inReplyToThreadId ?? null,
+          externalSource: input.externalSource,
+          externalRef: input.externalRef,
+          mode: EmailMode.SEND,
+          status: EmailMessageStatus.QUEUED,
+          direction: EmailDirection.SENT,
+          fromAddress,
+          toAddress: input.toAddress,
+          subject: input.subject,
+          body: input.body,
+          preview: this.snippet(input.body),
+          actorUcUid: ucUid,
+        },
+      });
+
+      const sent = await this.handToEngine(tx, msg.id, {
+        fromAddress: fromAddress ?? input.toAddress, // engine requires a From; degrade-safe
+        fromName: mailbox?.displayName ?? null,
+        toAddress: input.toAddress,
+        subject: input.subject,
+        body: input.body,
+        inReplyToThreadId: input.inReplyToThreadId ?? null,
+        transactional: mailbox?.postmarkLane ?? true,
+      });
+      return this.composeView(sent);
+    });
+  }
+
+  // ── agent-inbox: list / approve / reject ───────────────────────────────
+
+  /** The agent-inbox queue (PENDING by default), newest-first. */
+  async listAgentInbox(
+    workspaceId: string,
+    ucUid: string | null,
+    state?: AgentInboxState,
+  ): Promise<AgentInboxView[]> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const items = await tx.agentInboxItem.findMany({
+        where: state ? { state } : { state: AgentInboxState.PENDING },
+        orderBy: { createdAt: 'desc' },
+        include: { message: true },
+      });
+      return items.map((it) => this.inboxView(it, it.message));
+    });
+  }
+
+  /**
+   * Approve a pending agent-inbox draft: PENDING → APPROVED, hand the staged
+   * draft to the send lane, advance the message to queued/sent/failed. Returns
+   * the updated message view. Idempotent-ish: approving a non-pending item is a
+   * no-op that returns the current message view.
+   */
+  async approveAgentInboxItem(
+    workspaceId: string,
+    ucUid: string | null,
+    itemId: string,
+    note?: string | null,
+  ): Promise<{ inbox: AgentInboxView; message: MessageComposeView } | null> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const item = await tx.agentInboxItem.findUnique({
+        where: { id: itemId },
+        include: { message: true },
+      });
+      if (!item) return null;
+      if (item.state !== AgentInboxState.PENDING) {
+        return {
+          inbox: this.inboxView(item, item.message),
+          message: this.composeView(item.message),
+        };
+      }
+
+      const mailbox = item.message.mailboxAccountId
+        ? await tx.mailboxAccount.findUnique({ where: { id: item.message.mailboxAccountId } })
+        : await this.defaultMailbox(tx);
+
+      // Hand the approved draft to the mail engine.
+      const sent = await this.handToEngine(tx, item.message.id, {
+        fromAddress: item.message.fromAddress ?? mailbox?.emailAddress ?? item.message.toAddress!,
+        fromName: mailbox?.displayName ?? null,
+        toAddress: item.message.toAddress!,
+        subject: item.message.subject ?? '',
+        body: item.message.body ?? '',
+        inReplyToThreadId: item.message.inReplyToThreadId ?? null,
+        transactional: mailbox?.postmarkLane ?? true,
+      });
+
+      const updated = await tx.agentInboxItem.update({
+        where: { id: itemId },
+        data: {
+          state: AgentInboxState.APPROVED,
+          reviewedByUcUid: ucUid,
+          reviewedAt: new Date(),
+          reviewNote: note ?? null,
+        },
+        include: { message: true },
+      });
+      this.logger.log(
+        `agent-inbox item ${itemId} APPROVED by ${ucUid ?? '(unknown)'} — draft handed to send lane (message ${item.message.id})`,
+      );
+      return { inbox: this.inboxView(updated, sent), message: this.composeView(sent) };
+    });
+  }
+
+  /**
+   * Reject a pending agent-inbox draft: PENDING → REJECTED; the message is
+   * marked REJECTED and never leaves. No-op (returns current) if not pending.
+   */
+  async rejectAgentInboxItem(
+    workspaceId: string,
+    ucUid: string | null,
+    itemId: string,
+    note?: string | null,
+  ): Promise<{ inbox: AgentInboxView; message: MessageComposeView } | null> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const item = await tx.agentInboxItem.findUnique({
+        where: { id: itemId },
+        include: { message: true },
+      });
+      if (!item) return null;
+      if (item.state !== AgentInboxState.PENDING) {
+        return {
+          inbox: this.inboxView(item, item.message),
+          message: this.composeView(item.message),
+        };
+      }
+      const msg = await tx.emailMessage.update({
+        where: { id: item.messageId },
+        data: { status: EmailMessageStatus.REJECTED },
+      });
+      const updated = await tx.agentInboxItem.update({
+        where: { id: itemId },
+        data: {
+          state: AgentInboxState.REJECTED,
+          reviewedByUcUid: ucUid,
+          reviewedAt: new Date(),
+          reviewNote: note ?? null,
+        },
+      });
+      this.logger.log(
+        `agent-inbox item ${itemId} REJECTED by ${ucUid ?? '(unknown)'} — message ${item.messageId} will not be sent`,
+      );
+      return { inbox: this.inboxView(updated, msg), message: this.composeView(msg) };
+    });
+  }
+
+  // ── helpers ────────────────────────────────────────────────────────────
+
+  /**
+   * Hand a recorded outbound message to the mail engine and persist the result
+   * status. Degrade-clean: an unconfigured/failed engine marks the row FAILED
+   * (the SoR row + agent-inbox state are already durable) rather than throwing.
+   */
+  private async handToEngine(
+    tx: WorkspaceTxClient,
+    messageId: string,
+    req: {
+      fromAddress: string;
+      fromName: string | null;
+      toAddress: string;
+      subject: string;
+      body: string;
+      inReplyToThreadId: string | null;
+      transactional: boolean;
+    },
+  ) {
+    const result = await this.stalwart.send(
+      req.fromAddress,
+      {
+        fromAddress: req.fromAddress,
+        fromName: req.fromName,
+        toAddress: req.toAddress,
+        subject: req.subject,
+        body: req.body,
+        inReplyToThreadId: req.inReplyToThreadId,
+      },
+      req.transactional,
+    );
+    const status = result.accepted ? EmailMessageStatus.SENT : EmailMessageStatus.FAILED;
+    if (!result.accepted) {
+      this.logger.warn(
+        `message ${messageId} send NOT accepted by mail engine (lane=${result.lane ?? 'none'}): ${result.reason ?? 'unknown'} — recorded FAILED (degrade-clean)`,
+      );
+    }
+    return tx.emailMessage.update({
+      where: { id: messageId },
+      data: {
+        status,
+        providerMessageId: result.providerMessageId,
+        threadId: result.threadId ?? undefined,
+        sentAt: result.accepted ? new Date() : null,
+      },
+    });
+  }
+
+  /** The workspace's default mailbox account (RLS-scoped), or null. */
+  private async defaultMailbox(tx: WorkspaceTxClient) {
+    const def = await tx.mailboxAccount.findFirst({
+      where: { isDefault: true, active: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (def) return def;
+    return tx.mailboxAccount.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+  }
+
+  /**
+   * Resolve a contact's deliverable address. Contact-Ops is the canonical
+   * phonebook (federated), but Email-Ops doesn't store contacts; for the read
+   * path we use the most recent outbound `toAddress` we recorded for this
+   * contact as the address hint (a brand-new contact with no history yields null
+   * and the live-thread lookup is skipped — degrade-clean).
+   */
+  private async contactAddress(tx: WorkspaceTxClient, contactId: string): Promise<string | null> {
+    const last = await tx.emailMessage.findFirst({
+      where: { contactId, toAddress: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      select: { toAddress: true },
+    });
+    return last?.toAddress ?? null;
+  }
+
+  private composeView(m: {
+    id: string;
+    threadId: string | null;
+    status: EmailMessageStatus;
+    mode: EmailMode;
+    externalSource: string | null;
+    externalRef: string | null;
+    createdAt: Date;
+  }): MessageComposeView {
+    return {
+      id: m.id,
+      thread_id: m.threadId ?? null,
+      status: this.statusWire(m.status),
+      mode: this.modeWire(m.mode),
+      external_source: m.externalSource ?? null,
+      external_ref: m.externalRef ?? null,
+      created_at: m.createdAt ? m.createdAt.toISOString() : null,
+    };
+  }
+
+  private inboxView(
+    it: {
+      id: string;
+      messageId: string;
+      state: AgentInboxState;
+      draftedBy: string | null;
+      summary: string | null;
+      reviewedByUcUid: string | null;
+      reviewedAt: Date | null;
+      reviewNote: string | null;
+      createdAt: Date;
+    },
+    msg: { toAddress: string | null; subject: string | null } | null,
+  ): AgentInboxView {
+    return {
+      id: it.id,
+      message_id: it.messageId,
+      state: it.state.toLowerCase(),
+      drafted_by: it.draftedBy ?? null,
+      summary: it.summary ?? null,
+      to_address: msg?.toAddress ?? null,
+      subject: msg?.subject ?? null,
+      reviewed_by_uc_uid: it.reviewedByUcUid ?? null,
+      reviewed_at: it.reviewedAt ? it.reviewedAt.toISOString() : null,
+      review_note: it.reviewNote ?? null,
+      created_at: it.createdAt ? it.createdAt.toISOString() : null,
+    };
+  }
+
+  private snippet(body: string | null | undefined): string | null {
+    if (!body) return null;
+    const flat = body.replace(/\s+/g, ' ').trim();
+    return flat.length > 140 ? `${flat.slice(0, 137)}…` : flat;
+  }
+
+  private summary(subject: string | null | undefined, to: string | null | undefined): string {
+    const s = subject?.trim() || '(no subject)';
+    return to ? `${s} → ${to}` : s;
+  }
+
+  /** Surfaced for a future REST seam / tests that want a Prisma type alias. */
+  static readonly _txType: Prisma.TransactionClient | undefined = undefined;
+}
