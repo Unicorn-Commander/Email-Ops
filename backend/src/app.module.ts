@@ -10,6 +10,8 @@ import { HealthModule } from './health/health.module';
 import { StalwartModule } from './stalwart/stalwart.module';
 import { EmailModule } from './email/email.module';
 import { McpModule } from './mcp/mcp.module';
+import { WebhooksModule } from './webhooks/webhooks.module';
+import { AgentInboxModule } from './agent-inbox/agent-inbox.module';
 
 @Module({
   imports: [
@@ -35,6 +37,12 @@ import { McpModule } from './mcp/mcp.module';
     // The Email-Ops core domain: the SoR + the EmailOpsPort contract + the
     // agent-inbox approval flow.
     EmailModule,
+    // Phase 2, Part A: the provider-webhook receiver (Postmark engagement
+    // capture). Provider-authed; inert by default (flag + secret gated).
+    WebhooksModule,
+    // Phase 2, Part B: the agent-inbox REST surface (JWT + membership guarded),
+    // delegating to the same EmailService approval flow the MCP tools use.
+    AgentInboxModule,
     // MCP last so it can consume the contract + agent-inbox tools.
     McpModule,
   ],

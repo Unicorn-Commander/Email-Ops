@@ -79,8 +79,55 @@ export interface AgentInboxView {
   summary: string | null;
   to_address: string | null;
   subject: string | null;
+  // A short preview of the drafted BODY so the reviewer sees what the agent
+  // actually wrote without opening the full message (Email-Ops' own agent-inbox
+  // surface — NOT the federation contract, which is the 3 EmailOpsPort tools).
+  body_preview: string | null;
   reviewed_by_uc_uid: string | null;
   reviewed_at: string | null;
   review_note: string | null;
   created_at: string | null;
+}
+
+/**
+ * Internal: a normalized inbound engagement signal the webhook layer hands to
+ * EmailService.recordEngagementEvent. The webhook (Part A) has already mapped a
+ * raw provider record to this shape; the service performs the privileged
+ * id→workspace resolve and the RLS-scoped idempotent persist + status advance.
+ *
+ * `providerMessageId` is the engine's message id (Postmark `MessageID`) used to
+ * resolve the owning EmailMessage → its workspaceId. `providerEventId` is the
+ * provider's dedupe key for THIS record (the idempotency anchor). `statusTarget`
+ * is the EmailMessageStatus this record implies (null = engagement-only, no
+ * status change). `normalizedKind` is the suite engagement kind (null when the
+ * record maps to none, e.g. a bare Delivery).
+ */
+export interface EngagementCaptureInput {
+  provider: string; // 'postmark'
+  providerMessageId: string;
+  providerEventId: string;
+  recordType: string; // verbatim provider RecordType
+  normalizedKind: import('@prisma/client').EmailEngagementKind | null;
+  statusTarget: import('@prisma/client').EmailMessageStatus | null;
+  occurredAt: Date | null;
+  raw: unknown;
+}
+
+/**
+ * The outcome of recording an engagement signal. `outcome`:
+ *   - 'recorded'   : a new event row was written (+ maybe a status advance).
+ *   - 'duplicate'  : the (workspace, provider, providerEventId) was already seen
+ *                    — a webhook re-delivery; nothing changed (idempotent no-op).
+ *   - 'unmatched'  : no EmailMessage owns this providerMessageId (a signal for a
+ *                    message Email-Ops didn't send, or sent before capture) — the
+ *                    webhook still ACKs 200 so the provider stops retrying.
+ */
+export interface EngagementCaptureResult {
+  outcome: 'recorded' | 'duplicate' | 'unmatched';
+  workspaceId: string | null;
+  emailMessageId: string | null;
+  normalizedKind: string | null; // the wire vocabulary (lowercased), or null
+  statusBefore: string | null;
+  statusAfter: string | null;
+  statusAdvanced: boolean;
 }

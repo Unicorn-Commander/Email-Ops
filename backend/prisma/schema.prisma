@@ -74,6 +74,15 @@ enum EmailMode {
 // The status the cockpit caches on its thin link. QUEUED→SENT→DELIVERED is
 // the send lane; DRAFT→PENDING_APPROVAL→(approve)→QUEUED is the agent-inbox
 // lane; FAILED is terminal-error; REJECTED is a human declining a draft.
+// BOUNCED is the engine reporting a hard/soft bounce post-send (Postmark Bounce
+// webhook) — a terminal deliverability failure distinct from a pre-send FAILED.
+//
+// MONOTONIC ORDER (the webhook status ladder, Part A): a later engagement event
+// must never REGRESS the row to an earlier rung. The send/delivery progression
+// is QUEUED(0) < SENT(1) < DELIVERED(2); BOUNCED/FAILED/REJECTED are terminal
+// off-ramps that always win once set. The webhook updater consults this rank so
+// an out-of-order Postmark re-delivery (e.g. an Open arriving before the
+// Delivery it implies) cannot pull DELIVERED back down to SENT.
 enum EmailMessageStatus {
   QUEUED
   SENT
@@ -82,6 +91,7 @@ enum EmailMessageStatus {
   PENDING_APPROVAL
   REJECTED
   FAILED
+  BOUNCED
 }
 
 // ── Message direction within a mailbox (Email-Ops OWNS this) ──
@@ -103,6 +113,23 @@ enum AgentInboxState {
   REJECTED
 }
 
+// ── Normalized engagement vocabulary (Email-Ops OWNS the capture) ──
+//
+// The suite's normalized engagement vocabulary (SUITE contract / Customer-Ops'
+// EngagementKind / the suite OutreachEngagementKind): the 5 lowercase kinds a
+// downstream cockpit reads. Captured from the mail engine's delivery/engagement
+// webhooks (Postmark today) and persisted on EmailEngagementEvent. The WIRE
+// vocabulary is exactly these 5 lowercased values; this enum is the storage
+// shape. `REPLIED` is reserved (a reply is surfaced from the inbound thread, not
+// a Postmark engagement record) so the captured set stays a strict subset.
+enum EmailEngagementKind {
+  REPLIED
+  CLICKED
+  OPENED
+  BOUNCED
+  UNSUBSCRIBED
+}
+
 // ============================================================
 // SUITE TENANCY (SUITE-IDENTITY.md §2 — VERBATIM)
 // ============================================================
@@ -116,24 +143,25 @@ enum AgentInboxState {
 
 /// Thin mirror of the uc-registry workspace record. Email-Ops NEVER mints workspace_id.
 model Workspace {
-  id                String       @id // == uc-registry workspace_id (uuidv7). NO @default.
-  slug              String       @unique
+  id                String                 @id // == uc-registry workspace_id (uuidv7). NO @default.
+  slug              String                 @unique
   displayName       String
   parentWorkspaceId String?
-  isolationMode     String       @default("standard") // 'strict'|'standard'|'open'  (TEXT+CHECK, §5)
-  isolationTier     String       @default("shared") // 'shared'|'premium'|'enterprise'|'dedicated'
-  hipaaMode         Boolean      @default(false)
-  gdprMode          Boolean      @default(false)
-  dataResidency     String?      @default("us-east")
-  status            String       @default("active") // active|suspended|archived|deleting
+  isolationMode     String                 @default("standard") // 'strict'|'standard'|'open'  (TEXT+CHECK, §5)
+  isolationTier     String                 @default("shared") // 'shared'|'premium'|'enterprise'|'dedicated'
+  hipaaMode         Boolean                @default(false)
+  gdprMode          Boolean                @default(false)
+  dataResidency     String?                @default("us-east")
+  status            String                 @default("active") // active|suspended|archived|deleting
   entitlementCache  Json? // offline/dedicated only; null on shared SaaS
-  syncedAt          DateTime     @default(now())
-  createdAt         DateTime     @default(now())
-  updatedAt         DateTime     @updatedAt
+  syncedAt          DateTime               @default(now())
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
   memberships       Membership[]
   mailboxAccounts   MailboxAccount[]
   emailMessages     EmailMessage[]
   agentInboxItems   AgentInboxItem[]
+  engagementEvents  EmailEngagementEvent[]
 
   @@index([slug])
   @@index([status])
@@ -255,50 +283,59 @@ model MailboxAccount {
 // RLS-fenced on workspaceId exactly like the other scoped tables. ENABLE +
 // FORCE, identical policy. A no-GUC read returns zero rows (fail-closed).
 model EmailMessage {
-  id          String  @id @default(uuid())
-  workspaceId String
+  id                String             @id @default(uuid())
+  workspaceId       String
   // The mailbox account this message belongs to (the workspace's identity).
-  mailboxAccountId String?
+  mailboxAccountId  String?
   // The federated Contact-Ops contact id this message is to/from (thin
   // reference; the contact record is NEVER copied — golden rule).
-  contactId   String?
+  contactId         String?
   // The thread the message belongs to (JMAP/Stalwart thread id, or synthesized
   // for a new outbound thread). Opaque to the cockpit.
-  threadId    String?
+  threadId          String?
   // The deterministic idempotency tuple the compose tool is idempotent on.
   // externalSource is the originating app ('customer-ops' for cockpit-initiated
   // sends); externalRef is the caller's deterministic key.
-  externalSource String?
-  externalRef    String?
-  mode        EmailMode          @default(SEND)
-  status      EmailMessageStatus @default(QUEUED)
-  direction   EmailDirection     @default(SENT)
+  externalSource    String?
+  externalRef       String?
+  mode              EmailMode          @default(SEND)
+  status            EmailMessageStatus @default(QUEUED)
+  direction         EmailDirection     @default(SENT)
   // Addressing + subject (kept for list rendering; the FULL body lives in
   // Stalwart for received mail — we keep the composed body of outbound mail
   // we initiated so the agent-inbox can render it for approval).
-  fromAddress String?
-  toAddress   String?
-  subject     String?
+  fromAddress       String?
+  toAddress         String?
+  subject           String?
   // The composed plain-text body (outbound we initiated). A PREVIEW/snippet of
   // received mail is in `preview`; full received bodies stay in Stalwart.
-  body        String?
-  preview     String?
+  body              String?
+  preview           String?
   // If this message is a reply, the thread it replied within (for threading).
   inReplyToThreadId String?
   // The provider message id once delivery is handed off (Stalwart/Postmark id).
+  // This is ALSO the key the inbound engagement webhook (Part A) resolves a
+  // Postmark `MessageID` back to: provider event → this row → its workspaceId.
+  // The resolve is a MINIMAL privileged (RLS-bypass) id→workspace lookup; the
+  // actual status mutation then runs inside withWorkspace(resolvedWorkspaceId).
   providerMessageId String?
   // Attribution + provenance.
-  actorUcUid  String?
-  sentAt      DateTime?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  actorUcUid        String?
+  sentAt            DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
 
-  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  agentInbox  AgentInboxItem?
+  workspace        Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agentInbox       AgentInboxItem?
+  engagementEvents EmailEngagementEvent[]
 
   // The idempotency tuple is unique per workspace (partial on the non-null
   // source/ref — see the migration's partial unique index for the NULL case).
   @@unique([workspaceId, externalSource, externalRef])
+  // The webhook resolves provider→row by providerMessageId; index it so the
+  // privileged id→workspace lookup is a single-row hit (provider ids are unique
+  // in practice; we don't UNIQUE it because a NULL is allowed pre-send).
+  @@index([providerMessageId])
   @@index([workspaceId])
   @@index([workspaceId, contactId, createdAt])
   @@index([workspaceId, threadId])
@@ -323,22 +360,22 @@ model EmailMessage {
 // returns zero rows (fail-closed) — an agent draft is never visible across the
 // tenant fence.
 model AgentInboxItem {
-  id          String          @id @default(uuid())
-  workspaceId String
+  id              String          @id @default(uuid())
+  workspaceId     String
   // The staged outbound message awaiting approval (1:1).
-  messageId   String          @unique
-  state       AgentInboxState @default(PENDING)
+  messageId       String          @unique
+  state           AgentInboxState @default(PENDING)
   // Which agent/source drafted this (provenance; 'customer-ops' for a cockpit
   // agent draft).
-  draftedBy   String?
+  draftedBy       String?
   // A one-line summary the queue renders without opening the full body.
-  summary     String?
+  summary         String?
   // Who approved/rejected it + when (the human-in-the-loop attribution).
   reviewedByUcUid String?
-  reviewedAt  DateTime?
-  reviewNote  String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  reviewedAt      DateTime?
+  reviewNote      String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
 
   workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   message   EmailMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
@@ -349,9 +386,83 @@ model AgentInboxItem {
   @@map("agent_inbox_items")
 }
 
+// ============================================================
+// EMAIL ENGAGEMENT EVENT (Email-Ops OWNS this — tenant-scoped; the capture log)
+// ============================================================
+//
+// PHASE 2 (this layer): the durable, idempotent, auditable capture of every
+// delivery/engagement signal the mail engine reports for a message Email-Ops
+// sent. Postmark is the first provider; the inbound webhook (Part A) maps each
+// Postmark record (Delivery|Open|Click|Bounce|SpamComplaint|SubscriptionChange)
+// → one row here, AND advances the owning EmailMessage's status idempotently
+// (never regressing a later status). This is the table the existing PULL
+// federation (Customer-Ops over MCP, via the thread/last_message_at views)
+// surfaces engagement through — Email-Ops CAPTURES + PERSISTS; the cockpit
+// PULLS. There is deliberately NO push-to-Customer-Ops seam.
+//
+// IDEMPOTENCY (the contract): UNIQUE on (workspaceId, provider, providerEventId)
+// so a webhook re-delivery is a NO-OP — the second insert hits the unique index
+// and the handler treats it as already-seen (no duplicate row, no double status
+// advance). `providerEventId` is the provider's own dedupe key for the record
+// (Postmark's per-record id; when a record type carries none we synthesize a
+// deterministic one from MessageID + recordType + occurredAt so re-delivery
+// still dedupes).
+//
+// `normalizedKind` is the suite's normalized engagement vocabulary
+// (opened|clicked|bounced|unsubscribed; REPLIED is reserved — see the enum) when
+// the record maps to one, else NULL (e.g. a raw Delivery is a status signal, not
+// one of the 5 engagement kinds). `raw` keeps the verbatim provider payload for
+// audit/replay; we never depend on it at read time.
+//
+// RLS-fenced on workspaceId exactly like the other scoped tables. ENABLE +
+// FORCE, identical workspace_isolation policy. A no-GUC read returns zero rows
+// (fail-closed) — an engagement signal is never visible across the tenant fence.
+// The webhook arrives workspace-agnostic, so the write is performed INSIDE
+// withWorkspace(resolvedWorkspaceId) after a minimal privileged id→workspace
+// resolve; the WITH CHECK guarantees the row can only land in the resolved
+// workspace.
+model EmailEngagementEvent {
+  id              String               @id @default(uuid())
+  workspaceId     String
+  // The message this signal is about (the SoR row Email-Ops sent). Thin FK; the
+  // resolve from a provider MessageID → this id → its workspaceId is the
+  // privileged id-only step the webhook performs before scoping the write.
+  emailMessageId  String
+  // The reporting provider. 'postmark' today; the column generalizes to other
+  // engines (Stalwart bounce, etc.) without a schema change.
+  provider        String               @default("postmark")
+  // The provider's own dedupe key for THIS record (the idempotency anchor).
+  providerEventId String
+  // The raw provider record type, verbatim (Postmark RecordType:
+  // Delivery|Open|Click|Bounce|SpamComplaint|SubscriptionChange). Kept raw so a
+  // new record type is auditable even before it's mapped.
+  recordType      String
+  // The normalized suite engagement kind (opened|clicked|bounced|unsubscribed),
+  // or NULL for a non-engagement signal (a bare Delivery). The WIRE value the
+  // pull-federation reads is this enum lowercased.
+  normalizedKind  EmailEngagementKind?
+  // When the engine says the event occurred (provider timestamp), defaulting to
+  // capture time when the record carries none.
+  occurredAt      DateTime             @default(now())
+  // The verbatim provider payload (audit / replay). Never read at query time.
+  raw             Json?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  message   EmailMessage @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
+
+  // Re-delivery is a no-op: one row per provider event per workspace.
+  @@unique([workspaceId, provider, providerEventId])
+  @@index([workspaceId])
+  // The per-message engagement timeline (newest-first reads).
+  @@index([workspaceId, emailMessageId, occurredAt])
+  @@map("email_engagement_events")
+}
+
 // NOTE: The Workspace↔MailboxAccount / Workspace↔EmailMessage /
-// Workspace↔AgentInboxItem relations are declared here to satisfy Prisma's
-// relation requirement. They do NOT make Workspace a tenant-scoped table —
-// Workspace is the tenancy CONTROL table (not RLS-fenced); MailboxAccount +
-// EmailMessage + AgentInboxItem are the scoped projections (RLS-fenced by the
-// migrations).
+// Workspace↔AgentInboxItem / Workspace↔EmailEngagementEvent relations are
+// declared here to satisfy Prisma's relation requirement. They do NOT make
+// Workspace a tenant-scoped table — Workspace is the tenancy CONTROL table (not
+// RLS-fenced); MailboxAccount + EmailMessage + AgentInboxItem +
+// EmailEngagementEvent are the scoped projections (RLS-fenced by the migrations).

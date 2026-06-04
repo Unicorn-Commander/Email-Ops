@@ -31,3 +31,21 @@ function truthy(value: string | undefined | null, fallback: boolean): boolean {
 export function tenancyEnabled(getEnv: EnvGetter = defaultGetter): boolean {
   return truthy(getEnv('EMAIL_OPS_TENANCY_ENABLED'), false);
 }
+
+/**
+ * Inbound provider-webhook master switch (Phase 2, Part A).
+ *
+ * Default OFF == today's behavior: the POST /webhooks/postmark route exists but
+ * is NEVER open — it returns 503 (Service Unavailable) so a forged or premature
+ * call can do nothing, and no engagement capture happens. Flip to true (AND set
+ * POSTMARK_WEBHOOK_SECRET) to make the receiver live: it then authenticates the
+ * shared secret, maps Postmark records to engagement events, and advances the
+ * owning message's status.
+ *
+ * The flag and the secret are BOTH required for the route to do anything: the
+ * guard 503s when EITHER is missing. This is the brief's "NEVER open by default"
+ * posture — a deploy that hasn't been deliberately turned on is inert.
+ */
+export function webhooksEnabled(getEnv: EnvGetter = defaultGetter): boolean {
+  return truthy(getEnv('EMAIL_WEBHOOKS_ENABLED'), false);
+}

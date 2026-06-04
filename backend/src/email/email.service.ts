@@ -46,10 +46,13 @@ import { StalwartThread } from '../stalwart/stalwart.types';
 import {
   AgentInboxView,
   ComposeInput,
+  EngagementCaptureInput,
+  EngagementCaptureResult,
   MessageComposeView,
   MessageView,
   ThreadView,
 } from './email.types';
+import { shouldAdvanceStatus } from './message-status';
 
 @Injectable()
 export class EmailService {
@@ -409,6 +412,168 @@ export class EmailService {
     });
   }
 
+  // ── inbound engagement capture (Phase 2, Part A) ───────────────────────
+
+  /**
+   * Record an inbound engagement/delivery signal from the mail engine for a
+   * message Email-Ops sent (Postmark today), idempotently + RLS-scoped.
+   *
+   * THE CRITICAL RLS PATTERN (brief): a provider webhook arrives
+   * WORKSPACE-AGNOSTIC. We must NOT widen the RLS bypass to the mutation. So:
+   *
+   *   1. MINIMAL privileged resolve — a single owner-role / RLS-bypass lookup
+   *      that resolves the provider `MessageID` → { id, workspaceId } ONLY. This
+   *      is the smallest possible privileged surface: it reads exactly the id +
+   *      the owning workspace, nothing else, and never writes. It runs on
+   *      `this.prisma` (the base client = the owner connection) deliberately,
+   *      because under the live NOBYPASSRLS runtime role a no-GUC read returns 0
+   *      rows (fail-closed) and we'd never find the row to scope to.
+   *
+   *   2. SCOPED mutation — the actual event INSERT + the message status advance
+   *      run INSIDE `withWorkspace(resolvedWorkspaceId, …)`, so RLS fences them
+   *      to the resolved workspace and the table's WITH CHECK guarantees the row
+   *      can only land there. The privileged step never touches a writable
+   *      surface; the writable step is always RLS-scoped.
+   *
+   * IDEMPOTENT: the event is unique on (workspaceId, provider, providerEventId).
+   * A re-delivery hits the unique index and is a clean no-op ('duplicate') — no
+   * second row, no double/regressed status. The status advance is monotonic
+   * (`shouldAdvanceStatus`) so an out-of-order record can't pull a later status
+   * back down.
+   *
+   * UNMATCHED: a signal for a message we didn't send (no row owns the
+   * providerMessageId) returns 'unmatched' — the webhook still ACKs 200 so the
+   * provider stops retrying (it's not an error, just not ours).
+   */
+  async recordEngagementEvent(input: EngagementCaptureInput): Promise<EngagementCaptureResult> {
+    // ── Step 1: MINIMAL privileged id→workspace resolve (read-only, id-only) ──
+    // Resolve the most-recent message carrying this provider id. `select` is
+    // restricted to exactly { id, workspaceId, status } — the id+workspace the
+    // scoping needs, plus the current status for the monotonic-advance decision.
+    // No body, no addressing, no contact — the bypass surface stays minimal.
+    const owner = await this.prisma.emailMessage.findFirst({
+      where: { providerMessageId: input.providerMessageId },
+      select: { id: true, workspaceId: true, status: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!owner) {
+      this.logger.warn(
+        `engagement ${input.provider}/${input.recordType} for providerMessageId=${input.providerMessageId} (event ${input.providerEventId}) matched NO Email-Ops message — ACKing as unmatched (not ours)`,
+      );
+      return {
+        outcome: 'unmatched',
+        workspaceId: null,
+        emailMessageId: null,
+        normalizedKind: input.normalizedKind ? input.normalizedKind.toLowerCase() : null,
+        statusBefore: null,
+        statusAfter: null,
+        statusAdvanced: false,
+      };
+    }
+
+    // ── Step 2: the ACTUAL mutation, RLS-scoped to the resolved workspace ──
+    return this.prisma.withWorkspace(owner.workspaceId, null, async (tx) => {
+      // Idempotent insert: a re-delivery (same workspace+provider+eventId) is a
+      // clean no-op. We pre-check then create; a concurrent racing insert is
+      // caught by the unique-constraint guard below (P2002) and also treated as
+      // a duplicate, so the path is safe under at-least-once webhook delivery.
+      const already = await tx.emailEngagementEvent.findUnique({
+        where: {
+          workspaceId_provider_providerEventId: {
+            workspaceId: owner.workspaceId,
+            provider: input.provider,
+            providerEventId: input.providerEventId,
+          },
+        },
+        select: { id: true },
+      });
+      if (already) {
+        this.logger.log(
+          `engagement ${input.provider} event ${input.providerEventId} already captured for message ${owner.id} (workspace ${owner.workspaceId}) — idempotent no-op`,
+        );
+        return this.duplicateResult(owner.workspaceId, owner.id, input, owner.status);
+      }
+
+      try {
+        await tx.emailEngagementEvent.create({
+          data: {
+            workspaceId: owner.workspaceId,
+            emailMessageId: owner.id,
+            provider: input.provider,
+            providerEventId: input.providerEventId,
+            recordType: input.recordType,
+            normalizedKind: input.normalizedKind ?? undefined,
+            occurredAt: input.occurredAt ?? new Date(),
+            raw:
+              input.raw === undefined || input.raw === null
+                ? undefined
+                : (input.raw as Prisma.InputJsonValue),
+          },
+        });
+      } catch (err) {
+        // A concurrent insert of the same provider event raced us — treat the
+        // unique-violation as the idempotent no-op it is.
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+          this.logger.log(
+            `engagement ${input.provider} event ${input.providerEventId} raced a concurrent capture for message ${owner.id} — idempotent no-op`,
+          );
+          return this.duplicateResult(owner.workspaceId, owner.id, input, owner.status);
+        }
+        throw err;
+      }
+
+      // Monotonic status advance: never regress a later status (the webhook is
+      // the only non-regressing writer; see message-status.ts).
+      const before = owner.status;
+      const advance = shouldAdvanceStatus(before, input.statusTarget);
+      let after = before;
+      if (input.statusTarget && advance) {
+        const updated = await tx.emailMessage.update({
+          where: { id: owner.id },
+          data: { status: input.statusTarget },
+          select: { status: true },
+        });
+        after = updated.status;
+        this.logger.log(
+          `engagement ${input.provider}/${input.recordType} advanced message ${owner.id} status ${before} → ${after} (workspace ${owner.workspaceId})`,
+        );
+      } else if (input.statusTarget && !advance) {
+        this.logger.log(
+          `engagement ${input.provider}/${input.recordType} for message ${owner.id} implies ${input.statusTarget} but current ${before} is >= that rung — status held (non-regressing)`,
+        );
+      }
+
+      return {
+        outcome: 'recorded' as const,
+        workspaceId: owner.workspaceId,
+        emailMessageId: owner.id,
+        normalizedKind: input.normalizedKind ? input.normalizedKind.toLowerCase() : null,
+        statusBefore: before.toLowerCase(),
+        statusAfter: after.toLowerCase(),
+        statusAdvanced: after !== before,
+      };
+    });
+  }
+
+  /** Shared shape for an idempotent-duplicate engagement capture (no change). */
+  private duplicateResult(
+    workspaceId: string,
+    emailMessageId: string,
+    input: EngagementCaptureInput,
+    currentStatus: EmailMessageStatus,
+  ): EngagementCaptureResult {
+    return {
+      outcome: 'duplicate',
+      workspaceId,
+      emailMessageId,
+      normalizedKind: input.normalizedKind ? input.normalizedKind.toLowerCase() : null,
+      statusBefore: currentStatus.toLowerCase(),
+      statusAfter: currentStatus.toLowerCase(),
+      statusAdvanced: false,
+    };
+  }
+
   // ── helpers ────────────────────────────────────────────────────────────
 
   /**
@@ -516,7 +681,12 @@ export class EmailService {
       reviewNote: string | null;
       createdAt: Date;
     },
-    msg: { toAddress: string | null; subject: string | null } | null,
+    msg: {
+      toAddress: string | null;
+      subject: string | null;
+      body?: string | null;
+      preview?: string | null;
+    } | null,
   ): AgentInboxView {
     return {
       id: it.id,
@@ -526,6 +696,9 @@ export class EmailService {
       summary: it.summary ?? null,
       to_address: msg?.toAddress ?? null,
       subject: msg?.subject ?? null,
+      // Prefer a stored preview; else snippet the body. Either way it's a short,
+      // safe preview of what the agent drafted (the full body is on the message).
+      body_preview: msg ? (msg.preview ?? this.snippet(msg.body)) : null,
       reviewed_by_uc_uid: it.reviewedByUcUid ?? null,
       reviewed_at: it.reviewedAt ? it.reviewedAt.toISOString() : null,
       review_note: it.reviewNote ?? null,

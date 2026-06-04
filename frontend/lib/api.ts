@@ -45,16 +45,63 @@ export function ssoLoginUrl(): string {
   return `${API_BASE}/auth/keycloak`;
 }
 
-/** Authenticated GET against the backend. Throws on non-2xx. */
+/** An HTTP error that carries the status code so the UI can branch (401/403/404). */
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+/** Best-effort extraction of a backend error message ({ message } | string). */
+async function errorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const data = await res.json();
+    if (typeof data?.message === 'string') return data.message;
+    if (Array.isArray(data?.message)) return data.message.join(', ');
+    if (typeof data === 'string') return data;
+  } catch {
+    /* non-JSON body */
+  }
+  return fallback;
+}
+
+/** Authenticated GET against the backend. Throws ApiError on non-2xx. */
 export async function apiGet<T = unknown>(path: string, token?: string): Promise<T> {
   const bearer = token ?? getToken();
   const res = await fetch(`${API_BASE}${path}`, {
     headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
   });
   if (!res.ok) {
-    throw new Error(`GET ${path} failed: ${res.status}`);
+    throw new ApiError(res.status, await errorMessage(res, `GET ${path} failed: ${res.status}`));
   }
   return (await res.json()) as T;
+}
+
+/** Authenticated POST against the backend. Throws ApiError on non-2xx. */
+export async function apiPost<T = unknown>(
+  path: string,
+  body?: unknown,
+  token?: string,
+): Promise<T> {
+  const bearer = token ?? getToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, await errorMessage(res, `POST ${path} failed: ${res.status}`));
+  }
+  // Tolerate an empty 200/204 body.
+  const text = await res.text();
+  return (text ? JSON.parse(text) : {}) as T;
 }
 
 export interface EmailOpsUser {
@@ -71,4 +118,92 @@ export interface MyWorkspace {
   display_name: string;
   role: string;
   is_default: boolean;
+}
+
+/** Fetch the workspaces the signed-in user is an active member of. */
+export async function fetchMyWorkspaces(token?: string): Promise<MyWorkspace[]> {
+  const data = await apiGet<{ workspaces: MyWorkspace[] }>('/auth/me/workspaces', token);
+  return data.workspaces ?? [];
+}
+
+// ── Agent-inbox (Phase 2) ─────────────────────────────────────────────────
+
+export type AgentInboxState = 'pending' | 'approved' | 'rejected';
+
+/** One agent-inbox item (mirrors the backend AgentInboxView wire shape). */
+export interface AgentInboxItemView {
+  id: string;
+  message_id: string;
+  state: AgentInboxState;
+  drafted_by: string | null;
+  summary: string | null;
+  to_address: string | null;
+  subject: string | null;
+  body_preview: string | null;
+  reviewed_by_uc_uid: string | null;
+  reviewed_at: string | null;
+  review_note: string | null;
+  created_at: string | null;
+}
+
+/** The compose/message projection echoed back on approve/reject. */
+export interface MessageView {
+  id: string;
+  thread_id: string | null;
+  status: string;
+  mode: string;
+  external_source: string | null;
+  external_ref: string | null;
+  created_at: string | null;
+}
+
+export interface AgentInboxListResponse {
+  items: AgentInboxItemView[];
+  count: number;
+}
+
+export interface ReviewResult {
+  inbox: AgentInboxItemView;
+  message: MessageView;
+}
+
+const inboxBase = (workspaceId: string) =>
+  `/workspaces/${encodeURIComponent(workspaceId)}/agent-inbox`;
+
+/** List the agent-inbox queue for a workspace (defaults to pending). */
+export async function listAgentInbox(
+  workspaceId: string,
+  state?: AgentInboxState,
+  token?: string,
+): Promise<AgentInboxListResponse> {
+  const qs = state ? `?state=${encodeURIComponent(state)}` : '';
+  return apiGet<AgentInboxListResponse>(`${inboxBase(workspaceId)}${qs}`, token);
+}
+
+/** Approve a pending draft (this SENDS it). */
+export async function approveAgentInboxItem(
+  workspaceId: string,
+  itemId: string,
+  note?: string,
+  token?: string,
+): Promise<ReviewResult> {
+  return apiPost<ReviewResult>(
+    `${inboxBase(workspaceId)}/${encodeURIComponent(itemId)}/approve`,
+    note ? { note } : {},
+    token,
+  );
+}
+
+/** Reject a pending draft (it is never sent). */
+export async function rejectAgentInboxItem(
+  workspaceId: string,
+  itemId: string,
+  note?: string,
+  token?: string,
+): Promise<ReviewResult> {
+  return apiPost<ReviewResult>(
+    `${inboxBase(workspaceId)}/${encodeURIComponent(itemId)}/reject`,
+    note ? { note } : {},
+    token,
+  );
 }
