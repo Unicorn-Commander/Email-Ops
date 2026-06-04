@@ -61,6 +61,25 @@ export class ConnectedAccountsService {
     });
   }
 
+  async getConnectUrl(
+    workspaceId: string,
+    ucUid: string | null,
+    provider: string,
+    redirectUri: string,
+  ): Promise<{ authorizeUrl: string | null }> {
+    const normalized = this.normalizeProvider(provider);
+    if (!this.engine.isConfigured()) {
+      return { authorizeUrl: null };
+    }
+
+    try {
+      const authorizeUrl = await this.engine.getOAuthUrl(normalized, redirectUri);
+      return { authorizeUrl };
+    } catch {
+      return { authorizeUrl: null };
+    }
+  }
+
   async connectAccount(
     workspaceId: string,
     ucUid: string | null,

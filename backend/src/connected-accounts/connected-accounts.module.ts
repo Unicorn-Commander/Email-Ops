@@ -5,9 +5,11 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { ConnectedAccountsEnginePort } from './connected-accounts.port';
 import { CleanerEngineClient } from './connected-accounts.client';
 import { ConnectedAccountsService } from './connected-accounts.service';
+import { ConnectedAccountsController } from './connected-accounts.controller';
 
 @Module({
   imports: [AuthModule, WorkspaceModule, PrismaModule],
+  controllers: [ConnectedAccountsController],
   providers: [
     ConnectedAccountsService,
     { provide: ConnectedAccountsEnginePort, useClass: CleanerEngineClient },
