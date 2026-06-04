@@ -32,6 +32,8 @@ import { tenancyEnabled } from '../common/workspace/feature-flags';
 import { entitlementsOf, ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { EmailService } from '../email/email.service';
 import { checkComposeEntitlement } from '../email/entitlement';
+import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
+import { checkCleanerEntitlement } from '../connected-accounts/entitlement';
 
 export class EmailOpsTools {
   constructor(
@@ -194,5 +196,56 @@ export class EmailOpsTools {
       default:
         return undefined; // service defaults to PENDING
     }
+  }
+}
+
+export class ConnectedAccountsTools {
+  constructor(
+    private readonly membership: MembershipService,
+    private readonly connectedAccounts: ConnectedAccountsService,
+  ) {}
+
+  async listConnectedAccounts(
+    user: User,
+    args: { workspace_id?: string },
+  ): Promise<{ accounts: unknown[]; count: number }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.connectedAccounts.listConnectedAccounts(workspaceId, ucUidOf(user as WithWorkspaceClaim));
+  }
+
+  async getInboxStats(
+    user: User,
+    args: { workspace_id?: string; account_id: string },
+  ): Promise<unknown> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    if (!gate.allowed) {
+      throw new ForbiddenException(gate.reason);
+    }
+    return this.connectedAccounts.getInboxStats(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.account_id,
+    );
+  }
+
+  async analyzeInbox(
+    user: User,
+    args: { workspace_id?: string; account_id: string },
+  ): Promise<unknown> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    if (!gate.allowed) {
+      throw new ForbiddenException(gate.reason);
+    }
+    return this.connectedAccounts.analyzeInbox(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.account_id,
+    );
+  }
+
+  private async resolve(user: User, requested?: string): Promise<string> {
+    return this.membership.resolveAndAuthorize(user, requested ?? null);
   }
 }

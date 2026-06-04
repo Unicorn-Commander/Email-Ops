@@ -21,7 +21,8 @@ import { User } from '@prisma/client';
 import { z } from 'zod';
 import { MembershipService } from '../common/workspace/membership.service';
 import { EmailService } from '../email/email.service';
-import { EmailOpsTools } from './mcp.tools';
+import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
+import { ConnectedAccountsTools, EmailOpsTools } from './mcp.tools';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
@@ -33,6 +34,7 @@ export class McpService {
   constructor(
     private readonly membership: MembershipService,
     private readonly email: EmailService,
+    private readonly connectedAccounts: ConnectedAccountsService,
   ) {}
 
   /**
@@ -64,12 +66,16 @@ export class McpService {
           'on (workspace_id, external_source, external_ref) and requires BOTH ' +
           'customer-ops and email-ops entitlements; reading threads is viewer-level. ' +
           'The agent-inbox tools list the pending queue and approve/reject a draft ' +
-          '(approve sends it). Email-Ops owns the mailboxes, threads, and agent inbox; ' +
-          'it federates the Stalwart engine and never reinvents a mail server.',
+          '(approve sends it). The connected-accounts tools let a workspace bind an ' +
+          'external Gmail or Microsoft 365 account, read inbox stats, and run inbox ' +
+          'analysis through the stateless Cleaner Engine. Email-Ops owns the ' +
+          'mailboxes, threads, connected accounts, and agent inbox; it federates the ' +
+          'Stalwart and Cleaner engines and never reinvents either service.',
       },
     );
 
     const tools = new EmailOpsTools(this.membership, this.email);
+    const connectedTools = new ConnectedAccountsTools(this.membership, this.connectedAccounts);
 
     // ── Foundation tools ──
 
@@ -160,6 +166,52 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await tools.composeEmail(user, args)),
+    );
+
+    // ── Connected-accounts / Cleaner Engine tools ──
+
+    server.registerTool(
+      'list_connected_accounts',
+      {
+        title: 'List connected accounts',
+        description:
+          'List the external Gmail / Microsoft 365 accounts bound in this workspace. ' +
+          'Viewer-level; no SKU gate. Returns { accounts: [...], count }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await connectedTools.listConnectedAccounts(user, args ?? {})),
+    );
+
+    server.registerTool(
+      'get_inbox_stats',
+      {
+        title: 'Get inbox stats',
+        description:
+          'Return the cleaner-engine inbox stats for a connected account. Requires ' +
+          'the email-ops SKU.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          account_id: z.string(),
+        },
+      },
+      async (args: any) => wrap(await connectedTools.getInboxStats(user, args)),
+    );
+
+    server.registerTool(
+      'analyze_inbox',
+      {
+        title: 'Analyze inbox',
+        description:
+          'Run the stateless Cleaner Engine analysis for a connected account. ' +
+          'Requires the email-ops SKU.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          account_id: z.string(),
+        },
+      },
+      async (args: any) => wrap(await connectedTools.analyzeInbox(user, args)),
     );
 
     // ── Agent-inbox approval tools ──
