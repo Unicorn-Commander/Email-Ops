@@ -197,59 +197,13 @@ export class ConnectedAccountsService {
       .filter((id) => safeIds.has(id));
 
     if (mode === 'delete') {
-      const backup = await this.createVerifiedBackup(provider, accessToken, serverPlan.backup_query);
-      if (!backup.verified) {
-        throw new ForbiddenException('Permanent delete requires a verified backup first.');
-      }
-      return this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
-        const completed = await this.engine.batchDelete(
-          provider,
-          this.credentialsFor(provider, accessToken),
-          requested,
-        );
-        const result = this.cleanupResult({
-          completed: completed?.count ?? 0,
-          failed: Math.max(0, requested.length - (completed?.count ?? 0)),
-          bytesFreed: this.estimateBytes(serverPlan.safe, requested),
-          totalAttempted: requested.length,
-        });
-        const batch = await tx.cleanupBatch.create({
-          data: {
-            workspaceId,
-            provider,
-            action: CleanupActionKind.DELETE,
-            mode,
-            state: CleanupBatchState.COMPLETED,
-            criteria: serverPlan.criteria as any,
-            plan: serverPlan as any,
-            result,
-            backupRef: backup.path,
-            backupVerified: true,
-            requestedByUcUid: options.requestedByUcUid ?? ucUidOf(user as WithWorkspaceClaim),
-            approvedByUcUid: options.requestedByUcUid ?? ucUidOf(user as WithWorkspaceClaim),
-            agentInboxItemId: options.agentInboxItemId ?? null,
-            summary: this.batchSummary('delete', provider, requested.length, backup.path),
-            params: this.batchParams(plan.criteria),
-            completedAt: new Date(),
-          },
-        });
-        return {
-          ok: true,
-          provider,
-          mode,
-          batch_id: batch.id,
-          action: 'delete',
-          plan: serverPlan,
-          result,
-          backup_ref: {
-            path: backup.path,
-            verified: true,
-            created_at: backup.created_at ?? null,
-            total_messages: backup.total_messages,
-          },
-          status: 'completed',
-        };
-      });
+      // Gated OFF until archive-and-purge exists: permanent delete (Gmail
+      // batchDelete) is irreversible and today's backup is an ephemeral tmp
+      // file with no restore path. Re-enabled in Phase 6.1 as export→download→
+      // purge. Trash (reversible) is the live cleanup until then.
+      throw new ForbiddenException(
+        'Permanent purge is temporarily disabled while archive-and-purge is built — nothing was deleted. Use trash (reversible) for now.',
+      );
     }
 
     return this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
@@ -301,7 +255,12 @@ export class ConnectedAccountsService {
     criteria: CleanupCriteria,
   ): Promise<CleanupExecutionResult> {
     const plan = await this.planCleanup(user, provider, criteria);
-    return this.persistNoopBatch(user, provider, 'archive', 'ORGANIZE', plan, criteria);
+    return this.unsupportedResult(
+      provider,
+      'archive',
+      plan,
+      'Organize/archive is coming with the archive release — no messages were changed.',
+    );
   }
 
   async unsubscribe(
@@ -311,7 +270,12 @@ export class ConnectedAccountsService {
   ): Promise<CleanupExecutionResult> {
     const criteria: CleanupCriteria = { senderGroup, query: '' };
     const plan = await this.planCleanup(user, provider, criteria);
-    return this.persistNoopBatch(user, provider, 'unsubscribe', 'UNSUBSCRIBE', plan, criteria);
+    return this.unsupportedResult(
+      provider,
+      'unsubscribe',
+      plan,
+      'Unsubscribe is coming with the archive release — no messages were changed.',
+    );
   }
 
   async undoBatch(user: User, provider: ConnectedProvider, batchId: string): Promise<CleanupExecutionResult> {
@@ -325,25 +289,22 @@ export class ConnectedAccountsService {
       throw new NotFoundException('Cleanup batch not found.');
     }
 
-    const updated = await this.prisma.cleanupBatch.update({
-      where: { id: batchId },
-      data: {
-        state: CleanupBatchState.UNDONE,
-        undoneAt: new Date(),
-        result: {
-          ...((batch.result as Record<string, unknown> | null) ?? {}),
-          undone: true,
-          undo_reason:
-            'Mailbox restore is not exposed by the cleaner engine; this undo records the reversal request and clears the audit state.',
-        },
-      },
-    });
+    // Programmatic restore is not built yet (Phase 6.1). Do NOT flip the batch
+    // to UNDONE — that would falsely claim the mailbox was reverted. Return
+    // honest, action-specific guidance instead.
+    const providerTrash = provider === 'gmail' ? 'Gmail Trash' : 'Outlook Deleted Items';
+    const reason =
+      batch.action === CleanupActionKind.TRASH
+        ? `Trashed messages are in your ${providerTrash} and can be restored there (~30 days). One-click restore arrives with the archive release.`
+        : batch.action === CleanupActionKind.DELETE
+          ? 'A permanent purge cannot be undone — restore-from-archive arrives with the archive release.'
+          : 'Undo is not available for this action yet.';
 
     return {
-      ok: true,
+      ok: false,
       provider,
       mode: 'undo',
-      batch_id: updated.id,
+      batch_id: batch.id,
       action: 'undo',
       plan: batch.plan as unknown as CleanupPlanResult,
       result: this.cleanupResult({
@@ -352,7 +313,8 @@ export class ConnectedAccountsService {
         bytesFreed: 0,
         totalAttempted: 0,
       }),
-      status: 'undone',
+      status: 'rejected',
+      reason,
     };
   }
 
@@ -371,6 +333,18 @@ export class ConnectedAccountsService {
     }
 
     const plan = await this.planCleanup(user, provider, criteria);
+
+    if (action !== CleanupActionKind.TRASH) {
+      // Only trash stages today. delete/organize/unsubscribe are gated until
+      // Phase 6.1 — don't create a PENDING approval item that would fail on
+      // execution. Return the read-only plan + an honest reason instead.
+      const reason =
+        action === CleanupActionKind.DELETE
+          ? 'Permanent purge is temporarily disabled while archive-and-purge is built — nothing was staged. Use trash (reversible) for now.'
+          : `${action.charAt(0)}${action.slice(1).toLowerCase()} is coming with the archive release — nothing was staged.`;
+      return this.unsupportedResult(provider, mode, plan, reason);
+    }
+
     const requestedByUcUid = ucUidOf(user as WithWorkspaceClaim);
     return this.prisma.withWorkspace(workspaceId, requestedByUcUid, async (tx) => {
       const batch = await tx.cleanupBatch.create({
@@ -453,19 +427,46 @@ export class ConnectedAccountsService {
         `no linked ${batch.provider} account — sign in via ${batch.provider} first`,
       );
     }
-    const result = await this.executeCleanupInternal(
-      workspaceId,
-      ucUidOf(user as WithWorkspaceClaim),
-      batch.provider as ConnectedProvider,
-      plan,
-      batch.mode as CleanupMode,
-      accessToken,
-      {
-        batchId: batch.id,
-        agentInboxItemId: batch.agentInboxItemId,
-        requestedByUcUid: ucUidOf(user as WithWorkspaceClaim),
-      },
-    );
+    let result: CleanupExecutionResult;
+    try {
+      result = await this.executeCleanupInternal(
+        workspaceId,
+        ucUidOf(user as WithWorkspaceClaim),
+        batch.provider as ConnectedProvider,
+        plan,
+        batch.mode as CleanupWriteMode,
+        accessToken,
+        {
+          batchId: batch.id,
+          agentInboxItemId: batch.agentInboxItemId,
+          requestedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+        },
+      );
+    } catch (err) {
+      // A disabled (delete) or not-yet-implemented (archive/unsubscribe) mode
+      // throws here. Record the batch as FAILED with the reason — never leave
+      // it PENDING and never fall through to a destructive default.
+      const reason = err instanceof Error ? err.message : 'cleanup could not be executed';
+      await this.prisma.cleanupBatch.update({
+        where: { id: batch.id },
+        data: {
+          state: CleanupBatchState.FAILED,
+          approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+          result: { completed: 0, failed: 0, bytes_freed: 0, total_attempted: 0, reason } as any,
+        },
+      });
+      return {
+        ok: false,
+        provider: batch.provider as ConnectedProvider,
+        mode: batch.mode as CleanupWriteMode,
+        batch_id: batch.id,
+        action: batch.action.toLowerCase(),
+        plan,
+        result: this.cleanupResult({ completed: 0, failed: 0, bytesFreed: 0, totalAttempted: 0 }),
+        status: 'failed',
+        reason,
+      };
+    }
     await this.prisma.cleanupBatch.update({
       where: { id: batch.id },
       data: {
@@ -494,49 +495,31 @@ export class ConnectedAccountsService {
     ucUid: string,
     provider: ConnectedProvider,
     plan: CleanupPlanResult,
-    mode: CleanupMode,
+    mode: CleanupWriteMode,
     accessToken: string,
     options: CleanupExecutionOptions = {},
   ): Promise<CleanupExecutionResult> {
+    if (mode === 'delete') {
+      // See executeCleanup: permanent purge is gated OFF until Phase 6.1
+      // archive-and-purge. Approving a staged DELETE fails loudly (caught by
+      // approveCleanupBatch → batch FAILED) rather than purging irreversibly.
+      throw new ForbiddenException(
+        'Permanent purge is temporarily disabled while archive-and-purge is built — nothing was deleted. Use trash (reversible) for now.',
+      );
+    }
+    if (mode !== 'trash') {
+      // archive / organize / unsubscribe land in Phase 6.1. Until then they
+      // must NOT silently fall through to trash (the original bug).
+      throw new BadRequestException(
+        `"${mode}" cleanup is not implemented yet (coming with the archive release) — no messages were changed.`,
+      );
+    }
+
     const serverPlan = plan;
     const safeIds = new Set(serverPlan.safe.map((row) => row.id));
     const requested = (plan.safe.length ? plan.safe : serverPlan.safe)
       .map((row) => row.id)
       .filter((id) => safeIds.has(id));
-
-    if (mode === 'delete') {
-      const backup = await this.createVerifiedBackup(provider, accessToken, serverPlan.backup_query);
-      if (!backup.verified) {
-        throw new ForbiddenException('Permanent delete requires a verified backup first.');
-      }
-      const count = await this.engine.batchDelete(
-        provider,
-        this.credentialsFor(provider, accessToken),
-        requested,
-      );
-      const result = this.cleanupResult({
-        completed: count?.count ?? 0,
-        failed: Math.max(0, requested.length - (count?.count ?? 0)),
-        bytesFreed: this.estimateBytes(serverPlan.safe, requested),
-        totalAttempted: requested.length,
-      });
-      return {
-        ok: true,
-        provider,
-        mode,
-        batch_id: options.batchId ?? randomUUID(),
-        action: 'delete',
-        plan: serverPlan,
-        result,
-        backup_ref: {
-          path: backup.path,
-          verified: true,
-          created_at: backup.created_at ?? null,
-          total_messages: backup.total_messages,
-        },
-        status: 'completed',
-      };
-    }
 
     const count = await this.engine.batchTrash(
       provider,
@@ -561,58 +544,34 @@ export class ConnectedAccountsService {
     };
   }
 
-  private async persistNoopBatch(
-    user: User,
+  /**
+   * Honest result for actions that are planned but not yet executable (archive /
+   * organize / unsubscribe land in Phase 6.1). Returns the read-only plan so the
+   * UI can preview what WOULD be affected, but does NOT persist a COMPLETED batch
+   * and does NOT touch the mailbox.
+   */
+  private unsupportedResult(
     provider: ConnectedProvider,
-    mode: CleanupMode | 'archive' | 'unsubscribe',
-    action: 'ORGANIZE' | 'UNSUBSCRIBE',
+    mode: CleanupWriteMode,
     plan: CleanupPlanResult,
-    criteria: CleanupCriteria,
-  ): Promise<CleanupExecutionResult> {
-    const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
-    const requestedByUcUid = ucUidOf(user as WithWorkspaceClaim);
-
-    return this.prisma.withWorkspace(workspaceId, requestedByUcUid, async (tx) => {
-      const batch = await tx.cleanupBatch.create({
-        data: {
-          workspaceId,
-          provider,
-          action:
-            action === 'ORGANIZE' ? CleanupActionKind.ORGANIZE : CleanupActionKind.UNSUBSCRIBE,
-          mode,
-          state: CleanupBatchState.COMPLETED,
-          criteria: plan.criteria as any,
-          plan: plan as any,
-          result: this.cleanupResult({
-            completed: 0,
-            failed: 0,
-            bytesFreed: 0,
-            totalAttempted: plan.safe.length,
-          }),
-          requestedByUcUid,
-          approvedByUcUid: requestedByUcUid,
-          summary: this.batchSummary(mode, provider, plan.safe.length, null),
-          params: this.batchParams(criteria),
-          completedAt: new Date(),
-        },
-      });
-      return {
-        ok: true,
-        provider,
-        mode: mode as CleanupWriteMode,
-        batch_id: batch.id,
-        action: action.toLowerCase(),
-        plan,
-        result: this.cleanupResult({
-          completed: 0,
-          failed: 0,
-          bytesFreed: 0,
-          totalAttempted: plan.safe.length,
-        }),
-        status: 'completed',
-      };
-    });
+    reason: string,
+  ): CleanupExecutionResult {
+    return {
+      ok: false,
+      provider,
+      mode,
+      batch_id: '',
+      action: mode,
+      plan,
+      result: this.cleanupResult({
+        completed: 0,
+        failed: 0,
+        bytesFreed: 0,
+        totalAttempted: plan.safe.length,
+      }),
+      status: 'rejected',
+      reason,
+    };
   }
 
   private cleanupResult(input: {
@@ -687,7 +646,9 @@ export class ConnectedAccountsService {
       params: row.params ?? '',
       result: JSON.stringify(row.result ?? {}),
       backup_ref: row.backupRef,
-      undoable: row.state === CleanupBatchState.COMPLETED && row.action !== CleanupActionKind.UNDO,
+      // Programmatic restore lands in Phase 6.1; until then "undo" is non-functional
+      // (trashed mail is recoverable directly in the provider Trash), so don't offer it.
+      undoable: false,
       created_at: row.createdAt.toISOString(),
       updated_at: row.updatedAt.toISOString(),
     };

@@ -233,8 +233,9 @@ export default function CleanupPage() {
           </h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-tertiary">
             The safety workbench splits protected mail from safe mail before anything executes.
-            Trash is the default action; permanent delete is gated by a backup check and typed
-            confirmation.
+            <span className="text-primary"> Trash is reversible</span> and is the available action
+            today. Archive-and-purge — export to a downloadable archive, then free the space — is
+            coming with the archive release.
           </p>
           {message && <p className="mt-3 text-sm text-warning">{message}</p>}
         </div>
@@ -362,28 +363,31 @@ export default function CleanupPage() {
             onClick={() => void runTrash()}
             disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
           >
-            Back up & Trash
+            Trash {selectedSafe.length || ''} (reversible)
           </Button>
           <Button
             variant="secondary"
             onClick={() => void runOrganize()}
-            disabled={!activeAccount.linked || busy !== null}
+            disabled
+            title="Coming with the archive release"
           >
-            Organize
+            Organize · soon
           </Button>
           <Button
             variant="secondary"
             onClick={() => void runUnsubscribe()}
-            disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
+            disabled
+            title="Coming with the archive release"
           >
-            Unsubscribe
+            Unsubscribe · soon
           </Button>
           <Button
-            variant="danger"
-            disabled={!activeAccount.linked || !backupVerified || selectedSafe.length === 0}
+            variant="secondary"
+            disabled
+            title="Permanent purge returns as archive-and-purge: export a downloadable backup first, then free the space."
             onClick={() => setDeleteDialogOpen(true)}
           >
-            Permanently delete
+            Archive &amp; purge · coming
           </Button>
         </div>
       </section>
@@ -416,6 +420,7 @@ export default function CleanupPage() {
                   variant="ghost"
                   size="sm"
                   disabled={!row.undoable || busy === `undo:${row.id}`}
+                  title="One-click restore arrives with the archive release; trashed mail is recoverable in your provider Trash meanwhile."
                   onClick={() => void runUndo(row.id)}
                 >
                   Undo
@@ -462,11 +467,14 @@ export default function CleanupPage() {
         <div className="fixed bottom-4 right-4 z-40 w-[min(92vw,420px)] rounded-token-lg border border-subtle bg-surface-elevated p-4 shadow-token-lg">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="text-sm font-medium text-primary">Batch complete</p>
-              <p className="mt-1 text-xs text-tertiary">{undoToast.summary}</p>
+              <p className="text-sm font-medium text-primary">Trashed — recoverable</p>
+              <p className="mt-1 text-xs text-tertiary">
+                In your {meta.label} Trash for ~30 days. One-click restore arrives with the archive
+                release.
+              </p>
             </div>
-            <Button variant="ghost" size="sm" onClick={() => void runUndo(undoToast.id)}>
-              Undo
+            <Button variant="ghost" size="sm" onClick={() => setUndoToast(null)}>
+              Dismiss
             </Button>
           </div>
         </div>

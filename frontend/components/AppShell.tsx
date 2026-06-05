@@ -235,7 +235,8 @@ function Sidebar({
               <div className="mt-3">
                 <p className="text-xs font-medium text-primary">Scope boundary</p>
                 <p className="mt-1 text-[11px] leading-4 text-tertiary">
-                  Can analyze and stage review. Cannot permanently delete or send.
+                  Agents stage; you approve. Trash is reversible — permanent purge stays gated
+                  behind a downloadable backup.
                 </p>
               </div>
             )}

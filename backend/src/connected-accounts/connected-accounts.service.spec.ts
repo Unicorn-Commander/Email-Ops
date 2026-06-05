@@ -123,26 +123,18 @@ describe('ConnectedAccountsService', () => {
     expect(result.status).toBe('completed');
   });
 
-  it('refuses permanent delete until backup verification succeeds', async () => {
+  it('disables permanent delete entirely until archive-and-purge ships', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
       messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
       next_token: null,
     });
-    (engine.backupCreate as jest.Mock).mockResolvedValue({
-      version: '1.0',
-      created_at: '2026-06-05T00:00:00Z',
-      query: '',
-      total_messages: 1,
-      errors: 0,
-      path: '/tmp/backup',
-      provider: 'gmail',
-    });
-    (engine.backupVerify as jest.Mock).mockResolvedValue({ success: false });
 
     const plan = await service().planCleanup(user, 'gmail', { query: '' });
     await expect(service().executeCleanup(user, 'gmail', plan, 'delete')).rejects.toBeInstanceOf(
       ForbiddenException,
     );
+    // gated OFF — not even a backup is attempted, and nothing is destroyed
+    expect(engine.backupCreate).not.toHaveBeenCalled();
     expect(engine.batchDelete).not.toHaveBeenCalled();
   });
 
@@ -160,7 +152,7 @@ describe('ConnectedAccountsService', () => {
     expect(engine.batchTrash).not.toHaveBeenCalled();
   });
 
-  it('marks cleanup batches undone', async () => {
+  it('undo is honest: never flips state to UNDONE without a real restore', async () => {
     (prisma.cleanupBatch.findFirst as jest.Mock).mockResolvedValue({
       id: 'batch-1',
       provider: 'gmail',
@@ -174,12 +166,43 @@ describe('ConnectedAccountsService', () => {
     });
 
     const res = await service().undoBatch(user, 'gmail', 'batch-1');
-    expect(prisma.cleanupBatch.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 'batch-1' },
-        data: expect.objectContaining({ state: CleanupBatchState.UNDONE }),
-      }),
-    );
-    expect(res.status).toBe('undone');
+    // does NOT claim a restore happened
+    expect(prisma.cleanupBatch.update).not.toHaveBeenCalled();
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe('rejected');
+    expect(res.reason).toMatch(/Gmail Trash/i);
+  });
+
+  it('organize and unsubscribe report unsupported without touching the mailbox', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      next_token: null,
+    });
+
+    const organized = await service().organize(user, 'gmail', { query: '' });
+    expect(organized.ok).toBe(false);
+    expect(organized.status).toBe('rejected');
+
+    const unsub = await service().unsubscribe(user, 'gmail', ['promo@example.com']);
+    expect(unsub.ok).toBe(false);
+    expect(unsub.status).toBe('rejected');
+
+    // the original bug: these must never trash and never fake a completed batch
+    expect(engine.batchTrash).not.toHaveBeenCalled();
+    expect(engine.batchDelete).not.toHaveBeenCalled();
+    expect(tx.cleanupBatch.create).not.toHaveBeenCalled();
+  });
+
+  it('does not stage delete/organize for approval (gated until archive)', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      next_token: null,
+    });
+
+    const del = await service().stageCleanupRequest(user, 'gmail', 'delete', CleanupActionKind.DELETE, {
+      query: '',
+    });
+    expect(del.status).toBe('rejected');
+    expect(tx.agentInboxItem.create).not.toHaveBeenCalled();
   });
 });
