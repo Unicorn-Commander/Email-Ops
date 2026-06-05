@@ -159,7 +159,6 @@ model Workspace {
   updatedAt         DateTime               @updatedAt
   memberships       Membership[]
   mailboxAccounts   MailboxAccount[]
-  connectedAccounts ConnectedAccount[]
   emailMessages     EmailMessage[]
   agentInboxItems   AgentInboxItem[]
   engagementEvents  EmailEngagementEvent[]
@@ -199,6 +198,8 @@ model User {
   firstName   String    @default("")
   lastName    String    @default("")
   keycloakId  String?   @unique // == uchub sub once SSO-linked; the Membership.userKey
+  kcRefreshTokenEnc String?
+  kcRefreshUpdatedAt DateTime?
   isActive    Boolean   @default(true)
   lastLoginAt DateTime?
   createdAt   DateTime  @default(now())
@@ -259,37 +260,6 @@ model MailboxAccount {
   @@index([workspaceId])
   @@index([workspaceId, isDefault])
   @@map("mailbox_accounts")
-}
-
-// ============================================================
-// CONNECTED ACCOUNT (Email-Ops OWNS this — tenant-scoped)
-// ============================================================
-//
-// The per-workspace binding to an external customer email account (Gmail /
-// Microsoft 365). Email-Ops owns the tenancy, the encrypted credential vault,
-// and the system-of-record row; the Cleaner Engine is stateless and receives
-// the encrypted credentials on each call.
-//
-// RLS-fenced on workspaceId exactly like the other scoped tables. ENABLE +
-// FORCE, identical policy. A no-GUC read returns zero rows (fail-closed).
-model ConnectedAccount {
-  id                     String   @id @default(uuid())
-  workspaceId            String
-  provider               String // gmail | microsoft
-  emailAddress           String
-  displayName            String?
-  status                 String   @default("active") // active|disconnected|error
-  encryptedCredentials   String   // base64(iv|tag|ciphertext)
-  credentialsExpireAt    DateTime?
-  lastAnalyzedAt         DateTime?
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
-
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-
-  @@unique([workspaceId, provider, emailAddress])
-  @@index([workspaceId])
-  @@map("connected_accounts")
 }
 
 // ============================================================

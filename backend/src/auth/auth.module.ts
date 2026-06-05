@@ -8,6 +8,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { KeycloakStrategy } from './strategies/keycloak.strategy';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { WorkspaceModule } from '../common/workspace/workspace.module';
+import { KeycloakBrokerService } from './keycloak-broker.service';
 
 @Module({
   imports: [
@@ -25,7 +26,7 @@ import { WorkspaceModule } from '../common/workspace/workspace.module';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, KeycloakStrategy, JwtAuthGuard],
-  exports: [AuthService, JwtModule, JwtAuthGuard],
+  providers: [AuthService, JwtStrategy, KeycloakStrategy, KeycloakBrokerService, JwtAuthGuard],
+  exports: [AuthService, JwtModule, JwtAuthGuard, KeycloakBrokerService],
 })
 export class AuthModule {}

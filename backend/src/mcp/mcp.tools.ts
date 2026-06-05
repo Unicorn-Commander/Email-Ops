@@ -208,41 +208,33 @@ export class ConnectedAccountsTools {
   async listConnectedAccounts(
     user: User,
     args: { workspace_id?: string },
-  ): Promise<{ accounts: unknown[]; count: number }> {
-    const workspaceId = await this.resolve(user, args.workspace_id);
-    return this.connectedAccounts.listConnectedAccounts(workspaceId, ucUidOf(user as WithWorkspaceClaim));
+  ): Promise<{ accounts: unknown[] }> {
+    await this.resolve(user, args.workspace_id);
+    return this.connectedAccounts.listConnectedAccounts(user);
   }
 
   async getInboxStats(
     user: User,
-    args: { workspace_id?: string; account_id: string },
+    args: { workspace_id?: string; provider: 'gmail' | 'microsoft' },
   ): Promise<unknown> {
     const workspaceId = await this.resolve(user, args.workspace_id);
     const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
-    return this.connectedAccounts.getInboxStats(
-      workspaceId,
-      ucUidOf(user as WithWorkspaceClaim),
-      args.account_id,
-    );
+    return this.connectedAccounts.getInboxStats(user, args.provider);
   }
 
   async analyzeInbox(
     user: User,
-    args: { workspace_id?: string; account_id: string },
+    args: { workspace_id?: string; provider: 'gmail' | 'microsoft' },
   ): Promise<unknown> {
     const workspaceId = await this.resolve(user, args.workspace_id);
     const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
-    return this.connectedAccounts.analyzeInbox(
-      workspaceId,
-      ucUidOf(user as WithWorkspaceClaim),
-      args.account_id,
-    );
+    return this.connectedAccounts.analyzeInbox(user, args.provider);
   }
 
   private async resolve(user: User, requested?: string): Promise<string> {

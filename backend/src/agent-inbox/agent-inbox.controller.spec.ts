@@ -23,6 +23,8 @@ describe('AgentInboxController (delegation)', () => {
       firstName: 'Aaron',
       lastName: 'S',
       keycloakId: 'kc-sub-aaron',
+      kcRefreshTokenEnc: null,
+      kcRefreshUpdatedAt: null,
       isActive: true,
       lastLoginAt: null,
       createdAt: new Date(),

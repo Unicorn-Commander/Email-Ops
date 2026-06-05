@@ -66,11 +66,12 @@ export class McpService {
           'on (workspace_id, external_source, external_ref) and requires BOTH ' +
           'customer-ops and email-ops entitlements; reading threads is viewer-level. ' +
           'The agent-inbox tools list the pending queue and approve/reject a draft ' +
-          '(approve sends it). The connected-accounts tools let a workspace bind an ' +
-          'external Gmail or Microsoft 365 account, read inbox stats, and run inbox ' +
-          'analysis through the stateless Cleaner Engine. Email-Ops owns the ' +
-          'mailboxes, threads, connected accounts, and agent inbox; it federates the ' +
-          'Stalwart and Cleaner engines and never reinvents either service.',
+          '(approve sends it). The connected-accounts tools reflect the caller’s ' +
+          'brokered Gmail/Microsoft account links in Keycloak and use the linked ' +
+          'provider token to read inbox stats or run inbox analysis through the ' +
+          'stateless Cleaner Engine. Email-Ops owns the mailboxes, threads, and ' +
+          'agent inbox; it federates the Stalwart and Cleaner engines and never ' +
+          'reinvents either service.',
       },
     );
 
@@ -175,8 +176,8 @@ export class McpService {
       {
         title: 'List connected accounts',
         description:
-          'List the external Gmail / Microsoft 365 accounts bound in this workspace. ' +
-          'Viewer-level; no SKU gate. Returns { accounts: [...], count }.',
+          'List whether the caller has linked Gmail or Microsoft in Keycloak. ' +
+          'Viewer-level; no SKU gate. Returns { accounts: [{ provider, linked }] }.',
         inputSchema: {
           workspace_id: z.string().optional(),
         },
@@ -189,11 +190,11 @@ export class McpService {
       {
         title: 'Get inbox stats',
         description:
-          'Return the cleaner-engine inbox stats for a connected account. Requires ' +
-          'the email-ops SKU.',
+          'Return Cleaner Engine inbox stats using the caller’s brokered provider ' +
+          'token. Requires the email-ops SKU.',
         inputSchema: {
           workspace_id: z.string().optional(),
-          account_id: z.string(),
+          provider: z.enum(['gmail', 'microsoft']),
         },
       },
       async (args: any) => wrap(await connectedTools.getInboxStats(user, args)),
@@ -204,11 +205,11 @@ export class McpService {
       {
         title: 'Analyze inbox',
         description:
-          'Run the stateless Cleaner Engine analysis for a connected account. ' +
-          'Requires the email-ops SKU.',
+          'Run the stateless Cleaner Engine analysis using the caller’s brokered ' +
+          'provider token. Requires the email-ops SKU.',
         inputSchema: {
           workspace_id: z.string().optional(),
-          account_id: z.string(),
+          provider: z.enum(['gmail', 'microsoft']),
         },
       },
       async (args: any) => wrap(await connectedTools.analyzeInbox(user, args)),

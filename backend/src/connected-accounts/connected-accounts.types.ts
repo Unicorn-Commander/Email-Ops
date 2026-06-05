@@ -1,12 +1,4 @@
-export interface EngineProfile {
-  email: string;
-  display_name: string | null;
-  total_messages: number;
-  total_threads: number;
-  storage_used_bytes: number;
-  storage_limit_bytes: number;
-  [key: string]: unknown;
-}
+export type ConnectedProvider = 'gmail' | 'microsoft';
 
 export interface EngineInboxStats {
   total_messages: number;
@@ -19,29 +11,32 @@ export interface EngineInboxStats {
   [key: string]: unknown;
 }
 
-export interface ConnectedAccountView {
-  id: string;
-  workspaceId: string;
-  provider: string;
-  emailAddress: string;
-  displayName: string | null;
-  status: string;
-  credentialsExpireAt: string | null;
-  lastAnalyzedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
+export interface LinkedAccountView {
+  provider: ConnectedProvider;
+  linked: boolean;
 }
 
-export interface ConnectedAccountStatsResult {
-  engineAvailable: boolean;
-  account: ConnectedAccountView;
-  inboxStats: EngineInboxStats | null;
-  reason?: string;
+export interface ConnectedAccountsListResult {
+  accounts: LinkedAccountView[];
 }
 
-export interface ConnectedAccountAnalysisResult {
-  engineAvailable: boolean;
-  account: ConnectedAccountView;
-  analysis: Record<string, unknown> | null;
-  reason?: string;
+export interface ProviderUnavailableResult {
+  available: false;
+  provider: ConnectedProvider;
+  reason: string;
 }
+
+export interface ProviderInboxStatsResult {
+  available: true;
+  provider: ConnectedProvider;
+  stats: EngineInboxStats;
+}
+
+export interface ProviderAnalysisResult {
+  available: true;
+  provider: ConnectedProvider;
+  analysis: Record<string, unknown>;
+}
+
+export type ConnectedAccountsStatsResult = ProviderUnavailableResult | ProviderInboxStatsResult;
+export type ConnectedAccountsAnalysisResult = ProviderUnavailableResult | ProviderAnalysisResult;

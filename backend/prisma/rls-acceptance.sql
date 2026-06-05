@@ -2,8 +2,7 @@
 -- Email-Ops RLS acceptance proof (run AS email_ops_app)
 -- ============================================================================
 -- Re-proves the tenant fence on EVERY scoped table (mailbox_accounts,
--- email_messages, agent_inbox_items, email_engagement_events, and
--- connected_accounts)
+-- email_messages, agent_inbox_items, and email_engagement_events)
 -- as the NOBYPASSRLS runtime role. Connect:
 --
 --   PGPASSWORD=verify_app /opt/homebrew/bin/psql \
@@ -12,14 +11,13 @@
 --
 -- Expectations (asserted inline):
 --   A. role posture: rolbypassrls = f  (NOBYPASSRLS — the fence is live for it)
---   B. FORCE + ENABLE on all FIVE scoped tables = t/t
---   C. no-GUC reads on all five tables = 0 rows (fail-closed)
+--   B. FORCE + ENABLE on all FOUR scoped tables = t/t
+--   C. no-GUC reads on all four tables = 0 rows (fail-closed)
 --   D. seed two workspaces' rows under their own GUC, then prove cross-read = 0
---      (incl. an agent_inbox_item, an email_engagement_event, and a
---      connected_account per workspace)
+--      (incl. an agent_inbox_item and an email_engagement_event per workspace)
 --   E. WITH CHECK blocks writing a row into a workspace other than the GUC's
---      (mailbox_accounts, email_messages, agent_inbox_items, email_engagement_events,
---      AND connected_accounts — the encrypted OAuth vault)
+--      (mailbox_accounts, email_messages, agent_inbox_items, AND
+--      email_engagement_events — the webhook capture table)
 --   F. UPDATE/DELETE across the fence are no-ops (0 rows)
 
 \echo '==================================================================='
@@ -34,7 +32,7 @@ FROM pg_roles WHERE rolname = current_user;
 \echo '==================================================================='
 SELECT relname, relrowsecurity AS enabled, relforcerowsecurity AS forced
 FROM pg_class
-WHERE relname IN ('mailbox_accounts', 'email_messages', 'agent_inbox_items', 'email_engagement_events', 'connected_accounts')
+WHERE relname IN ('mailbox_accounts', 'email_messages', 'agent_inbox_items', 'email_engagement_events')
 ORDER BY relname;
 
 \echo ''
@@ -47,9 +45,7 @@ SELECT 'email_messages', count(*) FROM email_messages
 UNION ALL
 SELECT 'agent_inbox_items', count(*) FROM agent_inbox_items
 UNION ALL
-SELECT 'email_engagement_events', count(*) FROM email_engagement_events
-UNION ALL
-SELECT 'connected_accounts', count(*) FROM connected_accounts;
+SELECT 'email_engagement_events', count(*) FROM email_engagement_events;
 
 \echo ''
 \echo '==================================================================='
@@ -70,14 +66,11 @@ INSERT INTO agent_inbox_items (id, "workspaceId", "messageId", state, "draftedBy
 VALUES ('inbox-aaaa-1', '0190a000-7e57-7000-8000-0000000eaaaa', 'msg-aaaa-1', 'PENDING', 'customer-ops', 'Hi AAAA → lead-aaaa@acme.test', now(), now());
 INSERT INTO email_engagement_events (id, "workspaceId", "emailMessageId", provider, "providerEventId", "recordType", "normalizedKind", "occurredAt", "createdAt", "updatedAt")
 VALUES ('eng-aaaa-1', '0190a000-7e57-7000-8000-0000000eaaaa', 'msg-aaaa-1', 'postmark', 'pm-evt-aaaa-1', 'Open', 'OPENED', now(), now(), now());
-INSERT INTO connected_accounts (id, "workspaceId", provider, "emailAddress", "displayName", status, "encryptedCredentials", "createdAt", "updatedAt")
-VALUES ('acct-aaaa-1', '0190a000-7e57-7000-8000-0000000eaaaa', 'gmail', 'desk-aaaa@magicunicorn.tech', 'Desk AAAA', 'active', 'cipher-aaaa', now(), now());
 \echo '-- under GUC=AAAA, I can see only my own rows:'
 SELECT count(*) AS aaaa_mailboxes FROM mailbox_accounts;
 SELECT count(*) AS aaaa_messages FROM email_messages;
 SELECT count(*) AS aaaa_inbox FROM agent_inbox_items;
 SELECT count(*) AS aaaa_engagement FROM email_engagement_events;
-SELECT count(*) AS aaaa_accounts FROM connected_accounts;
 COMMIT;
 
 -- --- Workspace BBBB -------------------------------------------------------
@@ -92,20 +85,16 @@ INSERT INTO agent_inbox_items (id, "workspaceId", "messageId", state, "draftedBy
 VALUES ('inbox-bbbb-1', '0190a000-7e57-7000-8000-0000000ebbbb', 'msg-bbbb-1', 'PENDING', 'customer-ops', 'Hi BBBB → lead-bbbb@acme.test', now(), now());
 INSERT INTO email_engagement_events (id, "workspaceId", "emailMessageId", provider, "providerEventId", "recordType", "normalizedKind", "occurredAt", "createdAt", "updatedAt")
 VALUES ('eng-bbbb-1', '0190a000-7e57-7000-8000-0000000ebbbb', 'msg-bbbb-1', 'postmark', 'pm-evt-bbbb-1', 'Click', 'CLICKED', now(), now(), now());
-INSERT INTO connected_accounts (id, "workspaceId", provider, "emailAddress", "displayName", status, "encryptedCredentials", "createdAt", "updatedAt")
-VALUES ('acct-bbbb-1', '0190a000-7e57-7000-8000-0000000ebbbb', 'microsoft', 'desk-bbbb@magicunicorn.tech', 'Desk BBBB', 'active', 'cipher-bbbb', now(), now());
 \echo '-- under GUC=BBBB, I can see only BBBB rows (AAAA invisible):'
 SELECT count(*) AS bbbb_mailboxes FROM mailbox_accounts;
 SELECT count(*) AS bbbb_messages FROM email_messages;
 SELECT count(*) AS bbbb_inbox FROM agent_inbox_items;
 SELECT count(*) AS bbbb_engagement FROM email_engagement_events;
-SELECT count(*) AS bbbb_accounts FROM connected_accounts;
 \echo '-- explicit cross-read: AAAA rows from BBBB context MUST be 0:'
 SELECT count(*) AS aaaa_msg_visible_from_bbbb FROM email_messages WHERE id = 'msg-aaaa-1';
 SELECT count(*) AS aaaa_mbx_visible_from_bbbb FROM mailbox_accounts WHERE id = 'mbx-aaaa';
 SELECT count(*) AS aaaa_inbox_visible_from_bbbb FROM agent_inbox_items WHERE id = 'inbox-aaaa-1';
 SELECT count(*) AS aaaa_engagement_visible_from_bbbb FROM email_engagement_events WHERE id = 'eng-aaaa-1';
-SELECT count(*) AS aaaa_account_visible_from_bbbb FROM connected_accounts WHERE id = 'acct-aaaa-1';
 COMMIT;
 
 \echo ''
@@ -145,13 +134,6 @@ INSERT INTO email_engagement_events (id, "workspaceId", "emailMessageId", provid
 VALUES ('eng-evil', '0190a000-7e57-7000-8000-0000000ebbbb', 'msg-bbbb-1', 'postmark', 'pm-evt-evil', 'Delivery', now(), now(), now());
 ROLLBACK;
 
-BEGIN;
-SELECT set_config('app.current_workspace', '0190a000-7e57-7000-8000-0000000eaaaa', true);
-\echo '-- E5: cross-write a connected_account -> MUST raise:'
-INSERT INTO connected_accounts (id, "workspaceId", provider, "emailAddress", status, "encryptedCredentials", "createdAt", "updatedAt")
-VALUES ('acct-evil', '0190a000-7e57-7000-8000-0000000ebbbb', 'gmail', 'evil@x.test', 'active', 'cipher-evil', now(), now());
-ROLLBACK;
-
 \echo ''
 \echo '==================================================================='
 \echo 'F. UPDATE/DELETE across the fence are no-ops (0 rows) from AAAA.'
@@ -165,8 +147,6 @@ UPDATE email_messages SET status = 'FAILED' WHERE id = 'msg-bbbb-1';
 DELETE FROM agent_inbox_items WHERE id = 'inbox-bbbb-1';
 \echo '-- DELETE BBBB engagement event from AAAA (expect DELETE 0):'
 DELETE FROM email_engagement_events WHERE id = 'eng-bbbb-1';
-\echo '-- DELETE BBBB connected account from AAAA (expect DELETE 0):'
-DELETE FROM connected_accounts WHERE id = 'acct-bbbb-1';
 \echo '-- DELETE BBBB mailbox from AAAA (expect DELETE 0):'
 DELETE FROM mailbox_accounts WHERE id = 'mbx-bbbb';
 ROLLBACK;
@@ -181,7 +161,6 @@ DELETE FROM email_engagement_events WHERE "workspaceId" = '0190a000-7e57-7000-80
 DELETE FROM agent_inbox_items WHERE "workspaceId" = '0190a000-7e57-7000-8000-0000000eaaaa';
 DELETE FROM email_messages WHERE "workspaceId" = '0190a000-7e57-7000-8000-0000000eaaaa';
 DELETE FROM mailbox_accounts WHERE "workspaceId" = '0190a000-7e57-7000-8000-0000000eaaaa';
-DELETE FROM connected_accounts WHERE "workspaceId" = '0190a000-7e57-7000-8000-0000000eaaaa';
 COMMIT;
 BEGIN;
 SELECT set_config('app.current_workspace', '0190a000-7e57-7000-8000-0000000ebbbb', true);
@@ -189,7 +168,6 @@ DELETE FROM email_engagement_events WHERE "workspaceId" = '0190a000-7e57-7000-80
 DELETE FROM agent_inbox_items WHERE "workspaceId" = '0190a000-7e57-7000-8000-0000000ebbbb';
 DELETE FROM email_messages WHERE "workspaceId" = '0190a000-7e57-7000-8000-0000000ebbbb';
 DELETE FROM mailbox_accounts WHERE "workspaceId" = '0190a000-7e57-7000-8000-0000000ebbbb';
-DELETE FROM connected_accounts WHERE "workspaceId" = '0190a000-7e57-7000-8000-0000000ebbbb';
 COMMIT;
 
 \echo 'DONE.'

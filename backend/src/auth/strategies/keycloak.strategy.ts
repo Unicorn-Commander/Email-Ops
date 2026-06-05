@@ -37,7 +37,7 @@ export class KeycloakStrategy extends PassportStrategy(Strategy, 'keycloak') {
     this.userinfoURL = `${keycloakUrl}/realms/${realm}/protocol/openid-connect/userinfo`;
   }
 
-  async validate(accessToken: string, _refreshToken: string, profile: any): Promise<any> {
+  async validate(accessToken: string, refreshToken: string, profile: any): Promise<any> {
     // passport-oauth2 does not fetch userinfo automatically, so we call the
     // Keycloak userinfo endpoint to get the full profile (sub, email, names).
     let userProfile = profile;
@@ -57,6 +57,8 @@ export class KeycloakStrategy extends PassportStrategy(Strategy, 'keycloak') {
     }
 
     const keycloakId = userProfile.sub || userProfile.id;
-    return this.authService.validateKeycloakUser(keycloakId, userProfile);
+    const user = await this.authService.validateKeycloakUser(keycloakId, userProfile);
+    await this.authService.storeKcRefreshToken(user, refreshToken);
+    return user;
   }
 }

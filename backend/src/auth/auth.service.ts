@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import { User } from '@prisma/client';
 import { resolveUserAccess, describeAccessList } from './access-list';
+import { encrypt, isEncryptionConfigured } from '../connected-accounts/crypto';
 
 export interface JwtPayload {
   sub: string;
@@ -110,6 +111,33 @@ export class AuthService {
         lastName: user.lastName,
       },
     };
+  }
+
+  /**
+   * Store the user's Keycloak refresh token encrypted at rest. This is a
+   * degrade-clean side-effect: if the token is empty or the encryption key is
+   * unset, the call is a no-op.
+   */
+  async storeKcRefreshToken(user: User, refreshToken?: string | null): Promise<void> {
+    const token = refreshToken?.trim();
+    if (!token || !isEncryptionConfigured()) {
+      return;
+    }
+
+    let encrypted: string;
+    try {
+      encrypted = encrypt({ refresh_token: token });
+    } catch {
+      return;
+    }
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        kcRefreshTokenEnc: encrypted,
+        kcRefreshUpdatedAt: new Date(),
+      },
+    });
   }
 
   /**
