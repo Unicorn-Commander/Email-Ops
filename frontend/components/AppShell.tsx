@@ -28,31 +28,34 @@ type IconName =
   | 'mail';
 
 const NAV = [
-  {
-    href: '/dashboard',
-    label: 'Overview',
-    eyebrow: 'Needs-you',
-    icon: 'dashboard' as const,
-  },
-  {
-    href: '/accounts',
-    label: 'Accounts',
-    eyebrow: 'Broker access',
-    icon: 'accounts' as const,
-  },
-  {
-    href: '/insights',
-    label: 'Insights',
-    eyebrow: 'Read-only scan',
-    icon: 'insights' as const,
-  },
-  {
-    href: '/cleanup',
-    label: 'Cleanup',
-    eyebrow: 'Safety workbench',
-    icon: 'cleanup' as const,
-  },
+  { href: '/dashboard', label: 'Overview', eyebrow: 'Needs-you', icon: 'dashboard' as const, tone: 'accent' as const },
+  { href: '/accounts', label: 'Accounts', eyebrow: 'Broker access', icon: 'accounts' as const, tone: 'info' as const },
+  { href: '/insights', label: 'Insights', eyebrow: 'Read-only scan', icon: 'insights' as const, tone: 'keep' as const },
+  { href: '/cleanup', label: 'Cleanup', eyebrow: 'Safety workbench', icon: 'cleanup' as const, tone: 'review' as const },
 ];
+
+const NAV_TONE: Record<'accent' | 'info' | 'keep' | 'review', { row: string; chipActive: string; chipIdle: string }> = {
+  accent: {
+    row: 'bg-accent/14 ring-accent/30',
+    chipActive: 'bg-gradient-to-br from-accent to-[rgb(var(--accent-2))] text-white shadow-lg shadow-accent/40 ring-1 ring-white/15',
+    chipIdle: 'bg-gradient-to-br from-accent to-accent/55 text-white shadow-md shadow-accent/25 ring-1 ring-white/10',
+  },
+  info: {
+    row: 'bg-info/12 ring-info/30',
+    chipActive: 'bg-gradient-to-br from-info to-info/55 text-white shadow-lg shadow-info/40 ring-1 ring-white/15',
+    chipIdle: 'bg-gradient-to-br from-info to-info/55 text-white shadow-md shadow-info/25 ring-1 ring-white/10',
+  },
+  keep: {
+    row: 'bg-success/12 ring-success/30',
+    chipActive: 'bg-gradient-to-br from-success to-success/55 text-white shadow-lg shadow-success/40 ring-1 ring-white/15',
+    chipIdle: 'bg-gradient-to-br from-success to-success/55 text-white shadow-md shadow-success/25 ring-1 ring-white/10',
+  },
+  review: {
+    row: 'bg-warning/12 ring-warning/30',
+    chipActive: 'bg-gradient-to-br from-warning to-warning/55 text-white shadow-lg shadow-warning/40 ring-1 ring-white/15',
+    chipIdle: 'bg-gradient-to-br from-warning to-warning/55 text-white shadow-md shadow-warning/25 ring-1 ring-white/10',
+  },
+};
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
@@ -171,7 +174,7 @@ function Sidebar({
   return (
     <div className="flex h-full flex-col bg-surface-base">
       <div className="flex h-16 items-center gap-3 border-b border-subtle px-3">
-        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-token-lg bg-accent text-sm font-semibold text-accent-contrast shadow-token">
+        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-token-lg bg-gradient-to-br from-accent to-[rgb(var(--accent-2))] text-sm font-semibold text-accent-contrast shadow-lg shadow-accent/40 ring-1 ring-white/15">
           EO
         </div>
         {expanded && (
@@ -200,7 +203,7 @@ function Sidebar({
               className={cn(
                 'group flex min-h-[44px] items-center gap-3 rounded-token px-2.5 text-sm transition-colors duration-fast ease-token',
                 active
-                  ? 'bg-accent/14 text-primary ring-1 ring-accent/25'
+                  ? cn('text-primary ring-1', NAV_TONE[item.tone].row)
                   : 'text-secondary hover:bg-surface-raised hover:text-primary',
                 !expanded && 'justify-center px-0',
               )}
@@ -208,8 +211,8 @@ function Sidebar({
             >
               <span
                 className={cn(
-                  'grid h-8 w-8 shrink-0 place-items-center rounded-token',
-                  active ? 'bg-accent text-accent-contrast' : 'bg-surface-raised text-tertiary',
+                  'grid h-8 w-8 shrink-0 place-items-center rounded-token transition-colors duration-fast',
+                  active ? NAV_TONE[item.tone].chipActive : NAV_TONE[item.tone].chipIdle,
                 )}
               >
                 <Icon name={item.icon} />
@@ -228,7 +231,7 @@ function Sidebar({
       <div className="border-t border-subtle p-2">
         <Card className={cn('overflow-hidden', !expanded && 'p-0')}>
           <div className={cn('p-3', !expanded && 'grid place-items-center p-2')}>
-            <span className="grid h-8 w-8 place-items-center rounded-token bg-protected-subtle text-protected">
+            <span className="grid h-8 w-8 place-items-center rounded-token bg-gradient-to-br from-info to-info/55 text-white shadow-md shadow-info/25 ring-1 ring-white/10">
               <Icon name="shield" />
             </span>
             {expanded && (
