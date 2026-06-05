@@ -1,5 +1,9 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // Pin engines so a slim build image (no libssl at generate time) still ships
+  // the OpenSSL 3.0 query engine the bookworm runtime needs. Without this,
+  // generate falls back to debian-openssl-1.1.x and the client fails to boot.
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
