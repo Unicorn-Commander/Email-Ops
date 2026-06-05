@@ -1,0 +1,4 @@
+# Filled deploy secrets — never commit. The .example template is tracked.
+.env.your-host
+.env.your-host.*
+!.env.your-host.example
