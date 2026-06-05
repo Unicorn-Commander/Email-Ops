@@ -1,6 +1,6 @@
 export type ConnectedProvider = 'gmail' | 'microsoft';
 
-export type CleanupMode = 'trash' | 'delete';
+export type CleanupMode = 'trash' | 'delete' | 'archive_purge';
 export type CleanupWriteMode = CleanupMode | 'archive' | 'label' | 'unsubscribe' | 'undo';
 
 export interface EngineMessageSummary {
@@ -37,6 +37,30 @@ export interface EngineBackupManifest {
   provider: string;
 }
 
+export interface EngineArchiveRef {
+  bucket: string;
+  key: string;
+  format: string;
+  total_messages: number;
+  bytes: number;
+  content_bytes?: number;
+  sha256: string;
+  created_at: string;
+}
+
+export interface EngineArchiveVerifyResult {
+  success: boolean;
+  total_messages: number;
+  bytes: number;
+  sha256?: string;
+  message: string;
+}
+
+export interface EngineArchiveRestoreResult {
+  restored: number;
+  failed: Array<{ id?: string; error?: string }> | number;
+}
+
 export interface CleanupPlanMessageView {
   id: string;
   sender: string | null;
@@ -70,6 +94,13 @@ export interface CleanupExecutionBackupRef {
   verified: boolean;
   created_at: string | null;
   total_messages: number;
+  bucket?: string;
+  key?: string;
+  bytes?: number;
+  sha256?: string;
+  expires_at?: string | null;
+  retained?: boolean;
+  download_url?: string | null;
 }
 
 export interface CleanupExecutionResult {
@@ -102,6 +133,13 @@ export interface CleanupBatchView {
   params: string;
   result: string;
   backup_ref: string | null;
+  archive_bucket?: string | null;
+  archive_key?: string | null;
+  archive_bytes?: number | null;
+  archive_sha256?: string | null;
+  archive_expires_at?: string | null;
+  archive_retained?: boolean;
+  restored_at?: string | null;
   undoable: boolean;
   created_at: string;
   updated_at: string;

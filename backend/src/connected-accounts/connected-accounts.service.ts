@@ -13,13 +13,12 @@ import {
   User,
 } from '@prisma/client';
 import { randomUUID } from 'crypto';
-import os from 'os';
-import path from 'path';
 import { KeycloakBrokerService } from '../auth/keycloak-broker.service';
 import { MembershipService } from '../common/workspace/membership.service';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { PrismaService } from '../prisma/prisma.service';
-import { checkCleanerEntitlement } from './entitlement';
+import { checkCleanerEntitlement, checkVaultEntitlement } from './entitlement';
+import { ArchiveStorageService } from './archive-storage.service';
 import { ConnectedAccountsEnginePort } from './connected-accounts.port';
 import {
   CleanupBatchView,
@@ -33,7 +32,6 @@ import {
   ConnectedAccountsListResult,
   ConnectedAccountsStatsResult,
   ConnectedProvider,
-  EngineBackupManifest,
   EngineInboxStats,
   EngineMessageSummary,
   LinkedAccountView,
@@ -57,6 +55,7 @@ interface CleanupExecutionOptions {
   batchId?: string;
   agentInboxItemId?: string | null;
   requestedByUcUid?: string | null;
+  archiveRetained?: boolean;
 }
 
 @Injectable()
@@ -68,6 +67,7 @@ export class ConnectedAccountsService {
     private readonly membership: MembershipService,
     private readonly engine: ConnectedAccountsEnginePort,
     private readonly prisma: PrismaService,
+    private readonly archiveStorage: ArchiveStorageService,
   ) {}
 
   async listConnectedAccounts(user: User): Promise<ConnectedAccountsListResult> {
@@ -196,54 +196,88 @@ export class ConnectedAccountsService {
       .map((row) => row.id)
       .filter((id) => safeIds.has(id));
 
-    if (mode === 'delete') {
-      // Gated OFF until archive-and-purge exists: permanent delete (Gmail
-      // batchDelete) is irreversible and today's backup is an ephemeral tmp
-      // file with no restore path. Re-enabled in Phase 6.1 as export→download→
-      // purge. Trash (reversible) is the live cleanup until then.
-      throw new ForbiddenException(
-        'Permanent purge is temporarily disabled while archive-and-purge is built — nothing was deleted. Use trash (reversible) for now.',
-      );
-    }
-
     return this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
-      const count = await this.engine.batchTrash(
-        provider,
-        this.credentialsFor(provider, accessToken),
-        requested,
-      );
+      const batchId = options.batchId ?? randomUUID();
+      const credentials = this.credentialsFor(provider, accessToken);
+      const vault = this.hasVaultEntitlement(user, workspaceId);
+      const archiveExpiresAt = vault ? null : this.daysFromNow(7);
+      let archiveRef: CleanupExecutionBackupRef | null = null;
+      let action: CleanupActionKind = CleanupActionKind.TRASH;
+      let completedCount = 0;
+
+      if (mode === 'delete' || mode === 'archive_purge') {
+        action = CleanupActionKind.DELETE;
+        archiveRef = await this.createVerifiedGarageArchive({
+          workspaceId,
+          provider,
+          credentials,
+          messageIds: requested,
+          batchId,
+          query: serverPlan.backup_query,
+          archiveExpiresAt,
+          archiveRetained: vault,
+        });
+        const count = await this.engine.batchDelete(provider, credentials, requested);
+        completedCount = count?.count ?? 0;
+      } else if (mode === 'trash') {
+        const count = await this.engine.batchTrash(provider, credentials, requested);
+        completedCount = count?.count ?? 0;
+      } else {
+        throw new BadRequestException(`"${mode}" cleanup is not implemented for direct execution.`);
+      }
+
       const result = this.cleanupResult({
-        completed: count?.count ?? 0,
-        failed: Math.max(0, requested.length - (count?.count ?? 0)),
+        completed: completedCount,
+        failed: Math.max(0, requested.length - completedCount),
         bytesFreed: this.estimateBytes(serverPlan.safe, requested),
         totalAttempted: requested.length,
       });
       const batch = await tx.cleanupBatch.create({
         data: {
+          id: batchId,
           workspaceId,
           provider,
-          action: CleanupActionKind.TRASH,
+          action,
           mode,
           state: CleanupBatchState.COMPLETED,
-            criteria: serverPlan.criteria as any,
-            plan: serverPlan as any,
+          criteria: serverPlan.criteria as any,
+          plan: serverPlan as any,
           result,
+          backupRef: archiveRef?.key ?? null,
+          backupVerified: archiveRef?.verified ?? false,
+          archiveBucket: archiveRef?.bucket ?? null,
+          archiveKey: archiveRef?.key ?? null,
+          archiveBytes: archiveRef?.bytes ? BigInt(archiveRef.bytes) : null,
+          archiveSha256: archiveRef?.sha256 ?? null,
+          archiveExpiresAt,
+          archiveRetained: vault,
           requestedByUcUid: options.requestedByUcUid ?? ucUidOf(user as WithWorkspaceClaim),
           approvedByUcUid: options.requestedByUcUid ?? ucUidOf(user as WithWorkspaceClaim),
           agentInboxItemId: options.agentInboxItemId ?? null,
-          summary: this.batchSummary('trash', provider, requested.length, null),
+          summary: this.batchSummary(action.toLowerCase(), provider, requested.length, archiveRef?.key ?? null),
           params: this.batchParams(plan.criteria),
           completedAt: new Date(),
         },
       });
+      if (options.agentInboxItemId) {
+        await tx.agentInboxItem.update({
+          where: { id: options.agentInboxItemId },
+          data: {
+            state: AgentInboxState.APPROVED,
+            reviewedByUcUid: options.requestedByUcUid ?? ucUidOf(user as WithWorkspaceClaim),
+            reviewedAt: new Date(),
+          },
+        });
+      }
       return {
         ok: true,
         provider,
         mode,
         batch_id: batch.id,
-        action: 'trash',
+        action: action.toLowerCase(),
         plan: serverPlan,
         result,
+        backup_ref: archiveRef,
         status: 'completed',
       };
     });
@@ -254,13 +288,52 @@ export class ConnectedAccountsService {
     provider: ConnectedProvider,
     criteria: CleanupCriteria,
   ): Promise<CleanupExecutionResult> {
+    const workspaceId = await this.resolveWorkspace(user);
+    this.requireCleanerEntitlement(user, workspaceId);
+    const accessToken = await this.requireAccessToken(user, provider);
     const plan = await this.planCleanup(user, provider, criteria);
-    return this.unsupportedResult(
+    const requested = plan.safe.map((row) => row.id);
+    const count = await this.engine.batchArchive(
       provider,
-      'archive',
-      plan,
-      'Organize/archive is coming with the archive release — no messages were changed.',
+      this.credentialsFor(provider, accessToken),
+      requested,
+      typeof plan.criteria.label === 'string' ? plan.criteria.label : null,
     );
+    const result = this.cleanupResult({
+      completed: count?.count ?? 0,
+      failed: Math.max(0, requested.length - (count?.count ?? 0)),
+      bytesFreed: 0,
+      totalAttempted: requested.length,
+    });
+    return this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
+      const batch = await tx.cleanupBatch.create({
+        data: {
+          workspaceId,
+          provider,
+          action: CleanupActionKind.ORGANIZE,
+          mode: 'archive',
+          state: CleanupBatchState.COMPLETED,
+          criteria: plan.criteria as any,
+          plan: plan as any,
+          result,
+          requestedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+          approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+          summary: this.batchSummary('organize', provider, requested.length, null),
+          params: this.batchParams(criteria),
+          completedAt: new Date(),
+        },
+      });
+      return {
+        ok: true,
+        provider,
+        mode: 'archive',
+        batch_id: batch.id,
+        action: 'organize',
+        plan,
+        result,
+        status: 'completed',
+      };
+    });
   }
 
   async unsubscribe(
@@ -289,15 +362,50 @@ export class ConnectedAccountsService {
       throw new NotFoundException('Cleanup batch not found.');
     }
 
-    // Programmatic restore is not built yet (Phase 6.1). Do NOT flip the batch
-    // to UNDONE — that would falsely claim the mailbox was reverted. Return
-    // honest, action-specific guidance instead.
+    if (this.archiveLive(batch)) {
+      const accessToken = await this.requireAccessToken(user, provider);
+      const restored = await this.engine.archiveRestore(
+        provider,
+        this.credentialsFor(provider, accessToken),
+        batch.archiveBucket!,
+        batch.archiveKey!,
+      );
+      if (!restored) {
+        throw new ForbiddenException('Cleaner Engine unavailable while restoring archive.');
+      }
+      await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
+        await tx.cleanupBatch.update({
+          where: { id: batch.id },
+          data: {
+            state: CleanupBatchState.UNDONE,
+            restoredAt: new Date(),
+            undoneAt: new Date(),
+          },
+        });
+      });
+      return {
+        ok: true,
+        provider,
+        mode: 'undo',
+        batch_id: batch.id,
+        action: 'undo',
+        plan: batch.plan as unknown as CleanupPlanResult,
+        result: this.cleanupResult({
+          completed: restored.restored,
+          failed: Array.isArray(restored.failed) ? restored.failed.length : Number(restored.failed ?? 0),
+          bytesFreed: 0,
+          totalAttempted: restored.restored + (Array.isArray(restored.failed) ? restored.failed.length : Number(restored.failed ?? 0)),
+        }),
+        status: 'undone',
+      };
+    }
+
     const providerTrash = provider === 'gmail' ? 'Gmail Trash' : 'Outlook Deleted Items';
     const reason =
       batch.action === CleanupActionKind.TRASH
         ? `Trashed messages are in your ${providerTrash} and can be restored there (~30 days). One-click restore arrives with the archive release.`
         : batch.action === CleanupActionKind.DELETE
-          ? 'A permanent purge cannot be undone — restore-from-archive arrives with the archive release.'
+          ? 'This archive is no longer live in the cloud. Use your downloaded archive to re-import manually.'
           : 'Undo is not available for this action yet.';
 
     return {
@@ -334,15 +442,13 @@ export class ConnectedAccountsService {
 
     const plan = await this.planCleanup(user, provider, criteria);
 
-    if (action !== CleanupActionKind.TRASH) {
-      // Only trash stages today. delete/organize/unsubscribe are gated until
-      // Phase 6.1 — don't create a PENDING approval item that would fail on
-      // execution. Return the read-only plan + an honest reason instead.
-      const reason =
-        action === CleanupActionKind.DELETE
-          ? 'Permanent purge is temporarily disabled while archive-and-purge is built — nothing was staged. Use trash (reversible) for now.'
-          : `${action.charAt(0)}${action.slice(1).toLowerCase()} is coming with the archive release — nothing was staged.`;
-      return this.unsupportedResult(provider, mode, plan, reason);
+    if (action === CleanupActionKind.UNSUBSCRIBE) {
+      return this.unsupportedResult(
+        provider,
+        mode,
+        plan,
+        'Unsubscribe is not implemented yet — no messages were changed.',
+      );
     }
 
     const requestedByUcUid = ucUidOf(user as WithWorkspaceClaim);
@@ -440,6 +546,7 @@ export class ConnectedAccountsService {
           batchId: batch.id,
           agentInboxItemId: batch.agentInboxItemId,
           requestedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+          archiveRetained: this.hasVaultEntitlement(user, workspaceId),
         },
       );
     } catch (err) {
@@ -447,13 +554,15 @@ export class ConnectedAccountsService {
       // throws here. Record the batch as FAILED with the reason — never leave
       // it PENDING and never fall through to a destructive default.
       const reason = err instanceof Error ? err.message : 'cleanup could not be executed';
-      await this.prisma.cleanupBatch.update({
-        where: { id: batch.id },
-        data: {
-          state: CleanupBatchState.FAILED,
-          approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
-          result: { completed: 0, failed: 0, bytes_freed: 0, total_attempted: 0, reason } as any,
-        },
+      await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
+        await tx.cleanupBatch.update({
+          where: { id: batch.id },
+          data: {
+            state: CleanupBatchState.FAILED,
+            approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+            result: { completed: 0, failed: 0, bytes_freed: 0, total_attempted: 0, reason } as any,
+          },
+        });
       });
       return {
         ok: false,
@@ -467,14 +576,24 @@ export class ConnectedAccountsService {
         reason,
       };
     }
-    await this.prisma.cleanupBatch.update({
-      where: { id: batch.id },
-      data: {
-        state: CleanupBatchState.COMPLETED,
-        completedAt: new Date(),
-        approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
-        result: result.result as any,
-      },
+    await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
+      await tx.cleanupBatch.update({
+        where: { id: batch.id },
+        data: {
+          state: CleanupBatchState.COMPLETED,
+          completedAt: new Date(),
+          approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+          result: result.result as any,
+          backupRef: result.backup_ref?.key ?? batch.backupRef,
+          backupVerified: result.backup_ref?.verified ?? batch.backupVerified,
+          archiveBucket: result.backup_ref?.bucket ?? (batch as any).archiveBucket ?? null,
+          archiveKey: result.backup_ref?.key ?? (batch as any).archiveKey ?? null,
+          archiveBytes: result.backup_ref?.bytes ? BigInt(result.backup_ref.bytes) : ((batch as any).archiveBytes ?? null),
+          archiveSha256: result.backup_ref?.sha256 ?? (batch as any).archiveSha256 ?? null,
+          archiveExpiresAt: result.backup_ref?.expires_at ? new Date(result.backup_ref.expires_at) : ((batch as any).archiveExpiresAt ?? null),
+          archiveRetained: result.backup_ref?.retained ?? (batch as any).archiveRetained ?? false,
+        },
+      });
     });
     return result;
   }
@@ -490,6 +609,22 @@ export class ConnectedAccountsService {
     return rows.map((row) => this.batchView(row));
   }
 
+  async getArchiveDownloadUrl(user: User, provider: ConnectedProvider, batchId: string): Promise<{ url: string; expires_in_seconds: number }> {
+    const workspaceId = await this.resolveWorkspace(user);
+    this.requireCleanerEntitlement(user, workspaceId);
+    const batch = await this.prisma.cleanupBatch.findFirst({
+      where: { id: batchId, workspaceId, provider },
+    });
+    if (!batch || !this.archiveLive(batch)) {
+      throw new NotFoundException('Live archive not found for this batch.');
+    }
+    const ttl = 900;
+    return {
+      url: await this.archiveStorage.presignGet(batch.archiveBucket!, batch.archiveKey!, ttl),
+      expires_in_seconds: ttl,
+    };
+  }
+
   private async executeCleanupInternal(
     workspaceId: string,
     ucUid: string,
@@ -499,33 +634,60 @@ export class ConnectedAccountsService {
     accessToken: string,
     options: CleanupExecutionOptions = {},
   ): Promise<CleanupExecutionResult> {
-    if (mode === 'delete') {
-      // See executeCleanup: permanent purge is gated OFF until Phase 6.1
-      // archive-and-purge. Approving a staged DELETE fails loudly (caught by
-      // approveCleanupBatch → batch FAILED) rather than purging irreversibly.
-      throw new ForbiddenException(
-        'Permanent purge is temporarily disabled while archive-and-purge is built — nothing was deleted. Use trash (reversible) for now.',
-      );
-    }
-    if (mode !== 'trash') {
-      // archive / organize / unsubscribe land in Phase 6.1. Until then they
-      // must NOT silently fall through to trash (the original bug).
-      throw new BadRequestException(
-        `"${mode}" cleanup is not implemented yet (coming with the archive release) — no messages were changed.`,
-      );
-    }
-
     const serverPlan = plan;
     const safeIds = new Set(serverPlan.safe.map((row) => row.id));
     const requested = (plan.safe.length ? plan.safe : serverPlan.safe)
       .map((row) => row.id)
       .filter((id) => safeIds.has(id));
 
-    const count = await this.engine.batchTrash(
-      provider,
-      this.credentialsFor(provider, accessToken),
-      requested,
-    );
+    let count: { count: number } | null;
+    let action: string;
+    if (mode === 'trash') {
+      action = 'trash';
+      count = await this.engine.batchTrash(provider, this.credentialsFor(provider, accessToken), requested);
+    } else if (mode === 'archive') {
+      action = 'organize';
+      count = await this.engine.batchArchive(
+        provider,
+        this.credentialsFor(provider, accessToken),
+        requested,
+        typeof serverPlan.criteria.label === 'string' ? serverPlan.criteria.label : null,
+      );
+    } else if (mode === 'delete' || mode === 'archive_purge') {
+      action = 'delete';
+      const archiveRetained = options.archiveRetained ?? false;
+      const archiveExpiresAt = archiveRetained ? null : this.daysFromNow(7);
+      const archiveRef = await this.createVerifiedGarageArchive({
+        workspaceId,
+        provider,
+        credentials: this.credentialsFor(provider, accessToken),
+        messageIds: requested,
+        batchId: options.batchId ?? randomUUID(),
+        query: serverPlan.backup_query,
+        archiveExpiresAt,
+        archiveRetained,
+      });
+      count = await this.engine.batchDelete(provider, this.credentialsFor(provider, accessToken), requested);
+      const result = this.cleanupResult({
+        completed: count?.count ?? 0,
+        failed: Math.max(0, requested.length - (count?.count ?? 0)),
+        bytesFreed: this.estimateBytes(serverPlan.safe, requested),
+        totalAttempted: requested.length,
+      });
+      return {
+        ok: true,
+        provider,
+        mode,
+        batch_id: options.batchId ?? randomUUID(),
+        action,
+        plan: serverPlan,
+        result,
+        backup_ref: archiveRef,
+        status: 'completed',
+      };
+    } else {
+      throw new BadRequestException(`"${mode}" cleanup is not implemented — no messages were changed.`);
+    }
     const result = this.cleanupResult({
       completed: count?.count ?? 0,
       failed: Math.max(0, requested.length - (count?.count ?? 0)),
@@ -537,7 +699,7 @@ export class ConnectedAccountsService {
       provider,
       mode,
       batch_id: options.batchId ?? randomUUID(),
-      action: 'trash',
+      action,
       plan: serverPlan,
       result,
       status: 'completed',
@@ -597,6 +759,12 @@ export class ConnectedAccountsService {
     result: unknown;
     backupRef: string | null;
     backupVerified: boolean;
+    archiveBucket?: string | null;
+    archiveKey?: string | null;
+    archiveBytes?: bigint | number | null;
+    archiveSha256?: string | null;
+    archiveExpiresAt?: Date | null;
+    archiveRetained?: boolean;
   }): CleanupExecutionResult {
     return {
       ok: true,
@@ -617,6 +785,12 @@ export class ConnectedAccountsService {
             verified: batch.backupVerified,
             created_at: null,
             total_messages: 0,
+            bucket: batch.archiveBucket ?? undefined,
+            key: batch.archiveKey ?? undefined,
+            bytes: batch.archiveBytes == null ? undefined : Number(batch.archiveBytes),
+            sha256: batch.archiveSha256 ?? undefined,
+            expires_at: batch.archiveExpiresAt?.toISOString() ?? null,
+            retained: batch.archiveRetained ?? false,
           }
         : undefined,
       status: 'completed',
@@ -633,6 +807,13 @@ export class ConnectedAccountsService {
     params: string | null;
     result: unknown;
     backupRef: string | null;
+    archiveBucket?: string | null;
+    archiveKey?: string | null;
+    archiveBytes?: bigint | number | null;
+    archiveSha256?: string | null;
+    archiveExpiresAt?: Date | null;
+    archiveRetained?: boolean;
+    restoredAt?: Date | null;
     createdAt: Date;
     updatedAt: Date;
   }): CleanupBatchView {
@@ -646,32 +827,60 @@ export class ConnectedAccountsService {
       params: row.params ?? '',
       result: JSON.stringify(row.result ?? {}),
       backup_ref: row.backupRef,
-      // Programmatic restore lands in Phase 6.1; until then "undo" is non-functional
-      // (trashed mail is recoverable directly in the provider Trash), so don't offer it.
-      undoable: false,
+      archive_bucket: row.archiveBucket ?? null,
+      archive_key: row.archiveKey ?? null,
+      archive_bytes: row.archiveBytes == null ? null : Number(row.archiveBytes),
+      archive_sha256: row.archiveSha256 ?? null,
+      archive_expires_at: row.archiveExpiresAt?.toISOString() ?? null,
+      archive_retained: row.archiveRetained ?? false,
+      restored_at: row.restoredAt?.toISOString() ?? null,
+      undoable: this.archiveLive(row),
       created_at: row.createdAt.toISOString(),
       updated_at: row.updatedAt.toISOString(),
     };
   }
 
-  private async createVerifiedBackup(
-    provider: ConnectedProvider,
-    accessToken: string,
-    query: string,
-  ): Promise<CleanupExecutionBackupRef> {
-    const base = path.join(os.tmpdir(), 'email-ops-cleaner');
-    const backupPath = path.join(base, provider, `${Date.now()}-${randomUUID()}`);
-    const manifest = await this.engine.backupCreate(provider, this.credentialsFor(provider, accessToken), query, backupPath);
-    if (!manifest) {
-      throw new ForbiddenException('Cleaner Engine unavailable while creating backup.');
+  private async createVerifiedGarageArchive(input: {
+    workspaceId: string;
+    provider: ConnectedProvider;
+    credentials: Record<string, unknown>;
+    messageIds: string[];
+    batchId: string;
+    query: string;
+    archiveExpiresAt: Date | null;
+    archiveRetained: boolean;
+  }): Promise<CleanupExecutionBackupRef> {
+    const key = this.archiveKey(input.workspaceId, input.provider, input.batchId);
+    const archive = await this.engine.archiveCreate(
+      input.provider,
+      input.credentials,
+      input.messageIds,
+      { bucket: this.archiveStorage.bucket, key_prefix: key },
+      {
+        query: input.query,
+        workspaceId: input.workspaceId,
+        expiresAt: input.archiveExpiresAt?.toISOString() ?? null,
+      },
+    );
+    if (!archive) {
+      throw new ForbiddenException('Cleaner Engine unavailable while creating archive.');
     }
-    const verification = await this.engine.backupVerify(manifest.path);
-    const verified = Boolean(verification && (verification as Record<string, unknown>).success);
+    const verification = await this.engine.archiveVerify(archive.bucket, archive.key);
+    const verified = Boolean(verification?.success);
+    if (!verified) {
+      throw new ForbiddenException(`Archive verification failed: ${verification?.message ?? 'unknown error'}`);
+    }
     return {
-      path: manifest.path,
+      path: archive.key,
+      bucket: archive.bucket,
+      key: archive.key,
       verified,
-      created_at: manifest.created_at,
-      total_messages: manifest.total_messages,
+      created_at: archive.created_at,
+      total_messages: archive.total_messages,
+      bytes: archive.bytes,
+      sha256: archive.sha256,
+      expires_at: input.archiveExpiresAt?.toISOString() ?? null,
+      retained: input.archiveRetained,
     };
   }
 
@@ -827,6 +1036,14 @@ export class ConnectedAccountsService {
     return this.membership.resolveAndAuthorize(user, null);
   }
 
+  private async requireAccessToken(user: User, provider: ConnectedProvider): Promise<string> {
+    const accessToken = await this.safeBrokerToken(user, provider);
+    if (!accessToken) {
+      throw new ForbiddenException(`no linked ${provider} account — sign in via ${provider} first`);
+    }
+    return accessToken;
+  }
+
   private requireCleanerEntitlement(user: User, workspaceId: string): void {
     const gate = checkCleanerEntitlement(this.entitlementsOf(user), workspaceId);
     if (!gate.allowed) {
@@ -838,6 +1055,32 @@ export class ConnectedAccountsService {
     return Array.isArray((user as WithWorkspaceClaim).__entitlements)
       ? ((user as WithWorkspaceClaim).__entitlements as string[])
       : [];
+  }
+
+  private hasVaultEntitlement(user: User, workspaceId: string): boolean {
+    return checkVaultEntitlement(this.entitlementsOf(user), workspaceId).allowed;
+  }
+
+  private daysFromNow(days: number): Date {
+    return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+  }
+
+  private archiveKey(workspaceId: string, provider: ConnectedProvider, batchId: string): string {
+    const iso = new Date().toISOString().replace(/[:.]/g, '-');
+    return `workspaces/${workspaceId}/archives/${provider}/${batchId}-${iso}.eml.zip`;
+  }
+
+  private archiveLive(batch: {
+    archiveKey?: string | null;
+    archiveBucket?: string | null;
+    archiveExpiresAt?: Date | null;
+    archiveRetained?: boolean | null;
+    restoredAt?: Date | null;
+  }): boolean {
+    if (!batch.archiveKey || !batch.archiveBucket) return false;
+    if (batch.restoredAt) return false;
+    if (batch.archiveRetained) return true;
+    return !!batch.archiveExpiresAt && batch.archiveExpiresAt.getTime() > Date.now();
   }
 
   private aliasFor(provider: ConnectedProvider): IdpAlias {

@@ -3,6 +3,9 @@ import { ConfigService } from '@nestjs/config';
 import { ConnectedAccountsEnginePort } from './connected-accounts.port';
 import {
   EngineBackupManifest,
+  EngineArchiveRef,
+  EngineArchiveRestoreResult,
+  EngineArchiveVerifyResult,
   EngineInboxStats,
   EngineListMessagesResult,
   EngineMessageSummary,
@@ -227,6 +230,56 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       provider,
       credentials,
       message_ids: messageIds,
+    });
+  }
+
+  async batchArchive(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageIds: string[],
+    label?: string | null,
+  ): Promise<{ count: number } | null> {
+    return this.postJson<{ count: number }>('/cleanup/organize', {
+      provider,
+      credentials,
+      message_ids: messageIds,
+      label: label ?? null,
+    });
+  }
+
+  async archiveCreate(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageIds: string[],
+    garage: { bucket: string; key_prefix: string },
+    options: { query?: string; workspaceId?: string; expiresAt?: string | null } = {},
+  ): Promise<EngineArchiveRef | null> {
+    return this.postJson<EngineArchiveRef>('/archive/create', {
+      provider,
+      credentials,
+      message_ids: messageIds,
+      garage,
+      query: options.query ?? '',
+      workspace_id: options.workspaceId,
+      expires_at: options.expiresAt ?? null,
+    });
+  }
+
+  async archiveVerify(bucket: string, key: string): Promise<EngineArchiveVerifyResult | null> {
+    return this.postJson<EngineArchiveVerifyResult>('/archive/verify', { bucket, key });
+  }
+
+  async archiveRestore(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    bucket: string,
+    key: string,
+  ): Promise<EngineArchiveRestoreResult | null> {
+    return this.postJson<EngineArchiveRestoreResult>('/archive/restore', {
+      provider,
+      credentials,
+      bucket,
+      key,
     });
   }
 

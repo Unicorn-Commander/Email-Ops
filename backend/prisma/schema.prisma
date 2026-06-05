@@ -433,6 +433,13 @@ model CleanupBatch {
   result           Json?
   backupRef        String?
   backupVerified   Boolean           @default(false)
+  archiveBucket    String?
+  archiveKey       String?
+  archiveBytes     BigInt?
+  archiveSha256    String?
+  archiveExpiresAt DateTime?
+  archiveRetained  Boolean           @default(false)
+  restoredAt       DateTime?
   requestedByUcUid String?
   approvedByUcUid  String?
   agentInboxItemId String? @unique

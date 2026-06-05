@@ -13,10 +13,11 @@ import {
 } from '@/components/ui';
 import {
   cleanupActivity,
+  archiveDownloadUrl,
   executeCleanup,
   organizeMessages,
   planCleanup,
-  undoBatch,
+  restoreCleanupBatch,
   unsubscribeSender,
   type CleanupBatchView,
   type CleanupPlanMessageView,
@@ -37,9 +38,9 @@ export default function CleanupPage() {
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [selectedSafeIds, setSelectedSafeIds] = useState<string[]>([]);
-  const [backupVerified, setBackupVerified] = useState(false);
   const [typedDelete, setTypedDelete] = useState('');
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [archiveUrl, setArchiveUrl] = useState<string | null>(null);
   const [undoToast, setUndoToast] = useState<CleanupBatchView | null>(null);
   const [activity, setActivity] = useState<CleanupBatchView[]>([]);
   const [message, setMessage] = useState<string | null>(null);
@@ -69,8 +70,8 @@ export default function CleanupPage() {
       });
       setPlan(res);
       setSelectedSafeIds(res.safe.map((row) => row.id));
-      setBackupVerified(false);
       setTypedDelete('');
+      setArchiveUrl(null);
       await refreshActivity();
     } catch (err) {
       setPlan(null);
@@ -145,7 +146,7 @@ export default function CleanupPage() {
   }, [activeProvider, plan, refreshActivity, selectedSafe]);
 
   const runDelete = useCallback(async () => {
-    if (!plan || selectedSafe.length === 0 || !backupVerified) return;
+    if (!plan || selectedSafe.length === 0) return;
     setBusy('delete');
     try {
       const result = await executeCleanup(
@@ -153,6 +154,8 @@ export default function CleanupPage() {
         { ...plan, safe: selectedSafe, counts: { ...plan.counts, safe: selectedSafe.length } },
         'delete',
       );
+      const download = await archiveDownloadUrl(activeProvider, result.batch_id).catch(() => null);
+      setArchiveUrl(download?.url ?? null);
       setUndoToast({
         id: result.batch_id,
         provider: activeProvider,
@@ -163,7 +166,9 @@ export default function CleanupPage() {
         params: JSON.stringify(plan.criteria),
         result: JSON.stringify(result.result),
         backup_ref: result.backup_ref?.path ?? null,
-        undoable: true,
+        archive_expires_at: result.backup_ref?.expires_at ?? null,
+        archive_retained: result.backup_ref?.retained ?? false,
+        undoable: Boolean(result.backup_ref),
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       });
@@ -173,7 +178,7 @@ export default function CleanupPage() {
     } finally {
       setBusy(null);
     }
-  }, [activeProvider, backupVerified, plan, refreshActivity, selectedSafe]);
+  }, [activeProvider, plan, refreshActivity, selectedSafe]);
 
   const runOrganize = useCallback(async () => {
     setBusy('organize');
@@ -204,7 +209,7 @@ export default function CleanupPage() {
     async (batchId: string) => {
       setBusy(`undo:${batchId}`);
       try {
-        await undoBatch(activeProvider, batchId);
+        await restoreCleanupBatch(activeProvider, batchId);
         await refreshActivity();
       } catch (err) {
         setMessage(err instanceof Error ? err.message : 'Undo failed.');
@@ -233,9 +238,8 @@ export default function CleanupPage() {
           </h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-tertiary">
             The safety workbench splits protected mail from safe mail before anything executes.
-            <span className="text-primary"> Trash is reversible</span> and is the available action
-            today. Archive-and-purge — export to a downloadable archive, then free the space — is
-            coming with the archive release.
+            <span className="text-primary"> Trash is reversible.</span> Archive &amp; purge exports
+            a restorable archive first, verifies it, then permanently frees quota.
           </p>
           {message && <p className="mt-3 text-sm text-warning">{message}</p>}
         </div>
@@ -349,14 +353,6 @@ export default function CleanupPage() {
               eligible to run.
             </p>
           </div>
-          <label className="inline-flex items-center gap-2 text-xs text-tertiary">
-            <input
-              type="checkbox"
-              checked={backupVerified}
-              onChange={(event) => setBackupVerified(event.target.checked)}
-            />
-            Backup verified
-          </label>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
           <Button
@@ -368,10 +364,9 @@ export default function CleanupPage() {
           <Button
             variant="secondary"
             onClick={() => void runOrganize()}
-            disabled
-            title="Coming with the archive release"
+            disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
           >
-            Organize · soon
+            Organize
           </Button>
           <Button
             variant="secondary"
@@ -383,13 +378,25 @@ export default function CleanupPage() {
           </Button>
           <Button
             variant="secondary"
-            disabled
-            title="Permanent purge returns as archive-and-purge: export a downloadable backup first, then free the space."
+            disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
+            title="Exports a verified restorable archive, then permanently purges to free mailbox quota."
             onClick={() => setDeleteDialogOpen(true)}
           >
-            Archive &amp; purge · coming
+            Archive &amp; purge
           </Button>
         </div>
+        {archiveUrl && (
+          <div className="rounded-token border border-subtle bg-surface-base p-3 text-sm">
+            <p className="font-medium text-primary">Archive ready</p>
+            <p className="mt-1 text-xs text-tertiary">
+              Download this file now. Free-tier cloud restore expires after about 7 days unless
+              the workspace has Vault retention.
+            </p>
+            <a className="mt-2 inline-flex text-info underline" href={archiveUrl}>
+              Download archive
+            </a>
+          </div>
+        )}
       </section>
 
       <section className="space-y-3">
@@ -415,15 +422,24 @@ export default function CleanupPage() {
                   <p className="mt-2 font-mono text-[11px] text-muted">
                     {row.provider} · {row.state} · {row.created_at}
                   </p>
+                  {row.archive_key && (
+                    <p className="mt-1 text-xs text-tertiary">
+                      {row.archive_retained
+                        ? 'Archive retained in Vault.'
+                        : row.archive_expires_at
+                          ? `Restorable until ${new Date(row.archive_expires_at).toLocaleString()}. Keep it in the vault for longer retention.`
+                          : 'Archive expired. Use your downloaded file to re-import manually.'}
+                    </p>
+                  )}
                 </div>
                 <Button
                   variant="ghost"
                   size="sm"
                   disabled={!row.undoable || busy === `undo:${row.id}`}
-                  title="One-click restore arrives with the archive release; trashed mail is recoverable in your provider Trash meanwhile."
+                  title={row.undoable ? 'Restore from the verified archive.' : 'No live cloud archive is available.'}
                   onClick={() => void runUndo(row.id)}
                 >
-                  Undo
+                  Restore
                 </Button>
               </Card>
             ))
@@ -435,7 +451,7 @@ export default function CleanupPage() {
         open={deleteDialogOpen}
         onOpenChange={setDeleteDialogOpen}
         title="Permanently delete selected messages?"
-        description="Type DELETE to confirm. The server will still require a verified backup before it runs."
+        description="Type ARCHIVE to confirm. The server exports and verifies a restorable archive before purging. Purge is permanent and frees mailbox quota now."
         footer={
           <>
             <Button variant="secondary" size="sm" onClick={() => setDeleteDialogOpen(false)}>
@@ -444,13 +460,13 @@ export default function CleanupPage() {
             <Button
               variant="danger"
               size="sm"
-              disabled={typedDelete !== 'DELETE'}
+              disabled={typedDelete !== 'ARCHIVE'}
               onClick={async () => {
                 setDeleteDialogOpen(false);
                 await runDelete();
               }}
             >
-              Delete
+              Archive & purge
             </Button>
           </>
         }
@@ -459,7 +475,7 @@ export default function CleanupPage() {
           autoFocus
           value={typedDelete}
           onChange={(event) => setTypedDelete(event.target.value)}
-          placeholder="DELETE"
+          placeholder="ARCHIVE"
         />
       </Dialog>
 
@@ -467,10 +483,10 @@ export default function CleanupPage() {
         <div className="fixed bottom-4 right-4 z-40 w-[min(92vw,420px)] rounded-token-lg border border-subtle bg-surface-elevated p-4 shadow-token-lg">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="text-sm font-medium text-primary">Trashed — recoverable</p>
+              <p className="text-sm font-medium text-primary">Cleanup completed</p>
               <p className="mt-1 text-xs text-tertiary">
-                In your {meta.label} Trash for ~30 days. One-click restore arrives with the archive
-                release.
+                Trash is recoverable in {meta.label}. Archive-and-purge batches can be restored
+                while their cloud archive is live.
               </p>
             </div>
             <Button variant="ghost" size="sm" onClick={() => setUndoToast(null)}>

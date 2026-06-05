@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AuthModule } from '../auth/auth.module';
 import { WorkspaceModule } from '../common/workspace/workspace.module';
 import { PrismaModule } from '../prisma/prisma.module';
@@ -6,12 +7,16 @@ import { ConnectedAccountsEnginePort } from './connected-accounts.port';
 import { CleanerEngineClient } from './connected-accounts.client';
 import { ConnectedAccountsController } from './connected-accounts.controller';
 import { ConnectedAccountsService } from './connected-accounts.service';
+import { ArchiveStorageService } from './archive-storage.service';
+import { ArchiveRetentionService } from './archive-retention.service';
 
 @Module({
-  imports: [AuthModule, WorkspaceModule, PrismaModule],
+  imports: [AuthModule, WorkspaceModule, PrismaModule, ScheduleModule.forRoot()],
   controllers: [ConnectedAccountsController],
   providers: [
     ConnectedAccountsService,
+    ArchiveStorageService,
+    ArchiveRetentionService,
     { provide: ConnectedAccountsEnginePort, useClass: CleanerEngineClient },
   ],
   exports: [ConnectedAccountsService, ConnectedAccountsEnginePort],

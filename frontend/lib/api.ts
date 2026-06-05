@@ -291,7 +291,7 @@ export interface CleanupPlanResponse {
 export interface CleanupExecutionResponse {
   ok: boolean;
   provider: ConnectedProvider;
-  mode: 'trash' | 'delete' | 'archive' | 'unsubscribe' | 'undo';
+  mode: 'trash' | 'delete' | 'archive_purge' | 'archive' | 'unsubscribe' | 'undo';
   batch_id: string;
   action: string;
   plan: CleanupPlanResponse;
@@ -306,6 +306,13 @@ export interface CleanupExecutionResponse {
     verified: boolean;
     created_at: string | null;
     total_messages: number;
+    bucket?: string;
+    key?: string;
+    bytes?: number;
+    sha256?: string;
+    expires_at?: string | null;
+    retained?: boolean;
+    download_url?: string | null;
   } | null;
   status: 'completed' | 'pending' | 'rejected' | 'failed' | 'undone';
   staged?: boolean;
@@ -323,6 +330,13 @@ export interface CleanupBatchView {
   params: string;
   result: string;
   backup_ref: string | null;
+  archive_bucket?: string | null;
+  archive_key?: string | null;
+  archive_bytes?: number | null;
+  archive_sha256?: string | null;
+  archive_expires_at?: string | null;
+  archive_retained?: boolean;
+  restored_at?: string | null;
   undoable: boolean;
   created_at: string;
   updated_at: string;
@@ -370,7 +384,7 @@ export async function planCleanup(
 export async function executeCleanup(
   provider: ConnectedProvider,
   plan: CleanupPlanResponse,
-  mode: 'trash' | 'delete',
+  mode: 'trash' | 'delete' | 'archive_purge',
   token?: string,
 ): Promise<CleanupExecutionResponse> {
   return apiPost<CleanupExecutionResponse>(
@@ -412,6 +426,29 @@ export async function undoBatch(
   return apiPost<CleanupExecutionResponse>(
     `/connected-accounts/${encodeURIComponent(provider)}/undo`,
     { batchId },
+    token,
+  );
+}
+
+export async function restoreCleanupBatch(
+  provider: ConnectedProvider,
+  batchId: string,
+  token?: string,
+): Promise<CleanupExecutionResponse> {
+  return apiPost<CleanupExecutionResponse>(
+    `/connected-accounts/${encodeURIComponent(provider)}/cleanup/${encodeURIComponent(batchId)}/restore`,
+    {},
+    token,
+  );
+}
+
+export async function archiveDownloadUrl(
+  provider: ConnectedProvider,
+  batchId: string,
+  token?: string,
+): Promise<{ url: string; expires_in_seconds: number }> {
+  return apiGet<{ url: string; expires_in_seconds: number }>(
+    `/connected-accounts/${encodeURIComponent(provider)}/cleanup/${encodeURIComponent(batchId)}/archive-download`,
     token,
   );
 }

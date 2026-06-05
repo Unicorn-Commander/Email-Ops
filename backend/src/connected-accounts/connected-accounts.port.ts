@@ -11,6 +11,9 @@ import {
   CleanupExecutionBackupRef,
   CleanupExecutionResult,
   CleanupPlanResult,
+  EngineArchiveRef,
+  EngineArchiveRestoreResult,
+  EngineArchiveVerifyResult,
   EngineBackupManifest,
   EngineInboxStats,
   EngineListMessagesResult,
@@ -56,6 +59,30 @@ export abstract class ConnectedAccountsEnginePort {
     credentials: Record<string, unknown>,
     messageIds: string[],
   ): Promise<{ count: number } | null>;
+
+  abstract batchArchive(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageIds: string[],
+    label?: string | null,
+  ): Promise<{ count: number } | null>;
+
+  abstract archiveCreate(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageIds: string[],
+    garage: { bucket: string; key_prefix: string },
+    options?: { query?: string; workspaceId?: string; expiresAt?: string | null },
+  ): Promise<EngineArchiveRef | null>;
+
+  abstract archiveVerify(bucket: string, key: string): Promise<EngineArchiveVerifyResult | null>;
+
+  abstract archiveRestore(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    bucket: string,
+    key: string,
+  ): Promise<EngineArchiveRestoreResult | null>;
 
   abstract backupCreate(
     provider: 'gmail' | 'microsoft',

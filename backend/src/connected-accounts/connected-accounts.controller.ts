@@ -39,7 +39,7 @@ class CleanupPlanBodyDto {
 }
 
 class CleanupExecuteBodyDto {
-  @IsIn(['trash', 'delete'])
+  @IsIn(['trash', 'delete', 'archive_purge'])
   mode!: CleanupMode;
 
   @IsObject()
@@ -196,6 +196,36 @@ export class ConnectedAccountsController {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
     return this.connectedAccounts.undoBatch(user, provider, body.batchId);
+  }
+
+  @Post(':provider/cleanup/:batchId/restore')
+  @ApiOperation({
+    summary: 'Restore a cleanup batch from a live cloud archive.',
+  })
+  async restore(
+    @CurrentUser() user: User,
+    @Param('provider') providerParam: string,
+    @Param('batchId') batchId: string,
+  ) {
+    const provider = this.provider(providerParam);
+    const workspaceId = await this.resolveWorkspace(user);
+    this.requireCleanerEntitlement(user, workspaceId);
+    return this.connectedAccounts.undoBatch(user, provider, batchId);
+  }
+
+  @Get(':provider/cleanup/:batchId/archive-download')
+  @ApiOperation({
+    summary: 'Create a short-lived presigned archive download URL.',
+  })
+  async archiveDownload(
+    @CurrentUser() user: User,
+    @Param('provider') providerParam: string,
+    @Param('batchId') batchId: string,
+  ) {
+    const provider = this.provider(providerParam);
+    const workspaceId = await this.resolveWorkspace(user);
+    this.requireCleanerEntitlement(user, workspaceId);
+    return this.connectedAccounts.getArchiveDownloadUrl(user, provider, batchId);
   }
 
   @Get(':provider/cleanup/activity')
