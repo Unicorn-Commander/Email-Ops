@@ -112,6 +112,10 @@ export interface EmailOpsUser {
   lastName: string;
 }
 
+export async function fetchProfile(token?: string): Promise<EmailOpsUser> {
+  return apiGet<EmailOpsUser>('/auth/profile', token);
+}
+
 export interface MyWorkspace {
   workspace_id: string;
   slug: string;
@@ -204,6 +208,81 @@ export async function rejectAgentInboxItem(
   return apiPost<ReviewResult>(
     `${inboxBase(workspaceId)}/${encodeURIComponent(itemId)}/reject`,
     note ? { note } : {},
+    token,
+  );
+}
+
+// -- Connected accounts cleaner cockpit ------------------------------------
+
+export type ConnectedProvider = 'gmail' | 'microsoft';
+
+export interface LinkedAccountView {
+  provider: ConnectedProvider;
+  linked: boolean;
+}
+
+export interface ConnectedAccountsListResponse {
+  accounts: LinkedAccountView[];
+}
+
+export interface EngineInboxStats {
+  total_messages: number;
+  total_threads: number;
+  unread_count: number;
+  promotional_count: number;
+  social_count: number;
+  storage_used_bytes: number;
+  storage_limit_bytes?: number;
+  [key: string]: unknown;
+}
+
+export type ConnectedAccountsStatsResponse =
+  | {
+      available: false;
+      provider: ConnectedProvider;
+      reason: string;
+    }
+  | {
+      available: true;
+      provider: ConnectedProvider;
+      stats: EngineInboxStats;
+    };
+
+export type ConnectedAccountsAnalysisResponse =
+  | {
+      available: false;
+      provider: ConnectedProvider;
+      reason: string;
+    }
+  | {
+      available: true;
+      provider: ConnectedProvider;
+      analysis: Record<string, unknown>;
+    };
+
+export async function listConnectedAccounts(
+  token?: string,
+): Promise<ConnectedAccountsListResponse> {
+  return apiGet<ConnectedAccountsListResponse>('/connected-accounts', token);
+}
+
+export async function getInboxStats(
+  provider: ConnectedProvider,
+  token?: string,
+): Promise<ConnectedAccountsStatsResponse> {
+  return apiGet<ConnectedAccountsStatsResponse>(
+    `/connected-accounts/${encodeURIComponent(provider)}/stats`,
+    token,
+  );
+}
+
+export async function analyzeInbox(
+  provider: ConnectedProvider,
+  token?: string,
+): Promise<ConnectedAccountsAnalysisResponse> {
+  return apiPost<ConnectedAccountsAnalysisResponse>(
+    `/connected-accounts/${encodeURIComponent(provider)}/analyze`,
+    {},
     token,
   );
 }

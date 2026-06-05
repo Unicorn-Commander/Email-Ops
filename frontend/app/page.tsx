@@ -3,21 +3,21 @@
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { getToken } from '@/lib/api';
+import { Skeleton } from '@/components/ui';
 
-/**
- * Entry: bounce to the agent inbox when a session exists, else to login. Phase 2
- * replaces this with the full mailbox / thread cockpit. The agent inbox is the
- * load-bearing Email-Ops-owned surface (the human-in-the-loop approval queue).
- */
 export default function Home() {
   const router = useRouter();
   useEffect(() => {
-    router.replace(getToken() ? '/agent-inbox' : '/auth/login');
+    router.replace(getToken() ? '/dashboard' : '/auth/login');
   }, [router]);
 
   return (
-    <div className="eo-center">
-      <div className="eo-spinner" />
+    <div className="grid min-h-screen place-items-center bg-surface-base">
+      <div className="w-full max-w-sm space-y-4 rounded-token-lg border border-subtle bg-surface-raised p-5">
+        <Skeleton w={48} h={48} circle />
+        <Skeleton w="70%" h={18} />
+        <Skeleton w="92%" h={12} />
+      </div>
     </div>
   );
 }
