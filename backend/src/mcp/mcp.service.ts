@@ -69,8 +69,11 @@ export class McpService {
           '(approve sends it). The connected-accounts tools reflect the caller’s ' +
           'brokered Gmail/Microsoft account links in Keycloak and use the linked ' +
           'provider token to read inbox stats or run inbox analysis through the ' +
-          'stateless Cleaner Engine. Email-Ops owns the mailboxes, threads, and ' +
-          'agent inbox; it federates the Stalwart and Cleaner engines and never ' +
+          'stateless Cleaner Engine. The cleaner tools are agent-first: plan_cleanup ' +
+          'is read-only preview, while clean_trash / clean_delete / organize_messages / ' +
+          'unsubscribe_sender stage a pending agent-inbox request instead of executing ' +
+          'immediately; a human approval runs the batch. Email-Ops owns the mailboxes, ' +
+          'threads, and agent inbox; it federates the Stalwart and Cleaner engines and never ' +
           'reinvents either service.',
       },
     );
@@ -213,6 +216,96 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await connectedTools.analyzeInbox(user, args)),
+    );
+
+    server.registerTool(
+      'plan_cleanup',
+      {
+        title: 'Plan cleanup',
+        description:
+          'Build a dry-run cleanup plan with protected and safe rows separated. Read-only preview; does not mutate the mailbox.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          provider: z.enum(['gmail', 'microsoft']),
+          criteria: z.record(z.unknown()).optional(),
+        },
+      },
+      async (args: any) => wrap(await connectedTools.planCleanup(user, args)),
+    );
+
+    server.registerTool(
+      'clean_trash',
+      {
+        title: 'Trash cleanup batch',
+        description:
+          'Stage a trash cleanup batch into the agent inbox. The caller is an agent, so this does not execute immediately.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          provider: z.enum(['gmail', 'microsoft']),
+          criteria: z.record(z.unknown()).optional(),
+        },
+      },
+      async (args: any) => wrap(await connectedTools.cleanTrash(user, args)),
+    );
+
+    server.registerTool(
+      'clean_delete',
+      {
+        title: 'Delete cleanup batch',
+        description:
+          'Stage a permanent-delete cleanup batch into the agent inbox. Human approval later enforces the verified-backup gate.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          provider: z.enum(['gmail', 'microsoft']),
+          criteria: z.record(z.unknown()).optional(),
+        },
+      },
+      async (args: any) => wrap(await connectedTools.cleanDelete(user, args)),
+    );
+
+    server.registerTool(
+      'organize_messages',
+      {
+        title: 'Organize messages',
+        description:
+          'Stage an organize/archive batch into the agent inbox. This is a pending approval request for an agent caller.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          provider: z.enum(['gmail', 'microsoft']),
+          criteria: z.record(z.unknown()).optional(),
+        },
+      },
+      async (args: any) => wrap(await connectedTools.organizeMessages(user, args)),
+    );
+
+    server.registerTool(
+      'unsubscribe_sender',
+      {
+        title: 'Unsubscribe sender group',
+        description:
+          'Stage an unsubscribe batch into the agent inbox for a sender group. Approval later decides whether it executes.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          provider: z.enum(['gmail', 'microsoft']),
+          sender_group: z.array(z.string()),
+        },
+      },
+      async (args: any) => wrap(await connectedTools.unsubscribeSender(user, args)),
+    );
+
+    server.registerTool(
+      'undo_batch',
+      {
+        title: 'Undo cleanup batch',
+        description:
+          'Undo a cleanup batch record. This is a best-effort audit reversal and does not invent a restore path the engine does not expose.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          provider: z.enum(['gmail', 'microsoft']),
+          batch_id: z.string(),
+        },
+      },
+      async (args: any) => wrap(await connectedTools.undoBatch(user, args)),
     );
 
     // ── Agent-inbox approval tools ──

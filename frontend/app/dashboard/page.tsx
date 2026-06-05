@@ -223,7 +223,7 @@ function NeedsYouQueue({
           title: 'Unread pile needs a look',
           subtitle: `${formatCount(stats.unread_count)} unread messages are visible in stats.`,
           count: formatCount(stats.unread_count),
-          href: '/insights',
+          href: '/cleanup',
           rows: ['Analyze metadata first.', 'Forward action: Review these.'],
         }
       : null,
@@ -233,7 +233,7 @@ function NeedsYouQueue({
           title: 'Low-value categories found',
           subtitle: 'Promotional and social clusters may reclaim storage.',
           count: formatCount(stats.promotional_count + stats.social_count),
-          href: '/insights',
+          href: '/cleanup',
           rows: ['No delete action here.', 'Safety Workbench comes later.'],
         }
       : null,

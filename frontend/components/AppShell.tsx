@@ -2,14 +2,30 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ThemeToggle } from '@/components/ThemeToggle';
 import { Badge, Button, Card, Select, Skeleton, cn } from '@/components/ui';
 import { ConnectedAccountsProvider, useConnectedAccounts } from './ConnectedAccountsProvider';
-import { clearSession, getStoredUser, getToken, type EmailOpsUser } from '@/lib/api';
+import {
+  clearSession,
+  cleanupActivity,
+  getStoredUser,
+  getToken,
+  undoBatch,
+  type CleanupBatchView,
+  type EmailOpsUser,
+} from '@/lib/api';
 import { providerMeta } from '@/lib/cleaner-model';
 
-type IconName = 'dashboard' | 'accounts' | 'insights' | 'shield' | 'activity' | 'menu' | 'mail';
+type IconName =
+  | 'dashboard'
+  | 'accounts'
+  | 'insights'
+  | 'cleanup'
+  | 'shield'
+  | 'activity'
+  | 'menu'
+  | 'mail';
 
 const NAV = [
   {
@@ -29,6 +45,12 @@ const NAV = [
     label: 'Insights',
     eyebrow: 'Read-only scan',
     icon: 'insights' as const,
+  },
+  {
+    href: '/cleanup',
+    label: 'Cleanup',
+    eyebrow: 'Safety workbench',
+    icon: 'cleanup' as const,
   },
 ];
 
@@ -328,6 +350,31 @@ function Topbar({
 function AgentRail({ paused, onPause }: { paused: boolean; onPause: () => void }) {
   const { activeProvider, activeAccount } = useConnectedAccounts();
   const meta = providerMeta(activeProvider);
+  const [items, setItems] = useState<CleanupBatchView[]>([]);
+  const [filter, setFilter] = useState<'all' | 'trash' | 'delete' | 'pending' | 'undone'>('all');
+  const [undoingId, setUndoingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    void cleanupActivity(activeProvider)
+      .then((res) => {
+        if (mounted) setItems(res.items ?? []);
+      })
+      .catch(() => {
+        if (mounted) setItems([]);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [activeProvider, paused]);
+
+  const filtered = useMemo(
+    () =>
+      items.filter((item) =>
+        filter === 'all' ? true : item.mode === filter || item.state === filter,
+      ),
+    [filter, items],
+  );
   const rows = useMemo(
     () => [
       {
@@ -353,6 +400,20 @@ function AgentRail({ paused, onPause }: { paused: boolean; onPause: () => void }
     [activeAccount.linked, meta.label, paused],
   );
 
+  const handleUndo = useCallback(
+    async (item: CleanupBatchView) => {
+      setUndoingId(item.id);
+      try {
+        await undoBatch(activeProvider, item.id);
+        const res = await cleanupActivity(activeProvider);
+        setItems(res.items ?? []);
+      } finally {
+        setUndoingId(null);
+      }
+    },
+    [activeProvider],
+  );
+
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-subtle p-4">
@@ -364,6 +425,20 @@ function AgentRail({ paused, onPause }: { paused: boolean; onPause: () => void }
           <Badge variant={paused ? 'warning' : 'success'} dot>
             {paused ? 'paused' : 'observing'}
           </Badge>
+        </div>
+        <div className="mt-3">
+          <Select
+            aria-label="Activity filter"
+            value={filter}
+            onChange={(event) => setFilter(event.target.value as typeof filter)}
+            className="bg-surface-raised text-xs"
+          >
+            <option value="all">All</option>
+            <option value="trash">Trash</option>
+            <option value="delete">Delete</option>
+            <option value="pending">Pending</option>
+            <option value="undone">Undone</option>
+          </Select>
         </div>
         <Button
           variant={paused ? 'secondary' : 'ghost'}
@@ -377,6 +452,36 @@ function AgentRail({ paused, onPause }: { paused: boolean; onPause: () => void }
       </div>
 
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
+        {filtered.length > 0 && (
+          <div className="space-y-2">
+            {filtered.map((item) => (
+              <div key={item.id} className="rounded-token-lg border border-subtle bg-surface-raised p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-xs font-medium text-primary">
+                      {item.action} · {item.mode}
+                    </p>
+                    <p className="mt-1 max-h-10 overflow-hidden text-[11px] leading-5 text-tertiary">
+                      {item.summary}
+                    </p>
+                    <p className="mt-1 font-mono text-[10px] text-muted">
+                      {item.provider} · {item.state}
+                    </p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0 px-2 text-[11px]"
+                    disabled={!item.undoable || undoingId === item.id}
+                    onClick={() => void handleUndo(item)}
+                  >
+                    Undo
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         {rows.map((row) => (
           <div key={row.title} className="rounded-token-lg border border-subtle bg-surface-raised p-3">
             <div className="flex items-start gap-3">
@@ -453,6 +558,15 @@ function Icon({ name }: { name: IconName }) {
         <path d="M12 19V7" />
         <path d="M16 19v-5" />
         <path d="M20 19V3" />
+      </>
+    ),
+    cleanup: (
+      <>
+        <path d="M4 6h16" />
+        <path d="M9 6V4h6v2" />
+        <path d="M6 6l1 13h10l1-13" />
+        <path d="M10 10v6" />
+        <path d="M14 10v6" />
       </>
     ),
     shield: (

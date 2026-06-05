@@ -34,6 +34,11 @@ import { EmailService } from '../email/email.service';
 import { checkComposeEntitlement } from '../email/entitlement';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { checkCleanerEntitlement } from '../connected-accounts/entitlement';
+import {
+  CleanupExecutionResult,
+  CleanupPlanResult,
+  ConnectedProvider,
+} from '../connected-accounts/connected-accounts.types';
 
 export class EmailOpsTools {
   constructor(
@@ -235,6 +240,122 @@ export class ConnectedAccountsTools {
       throw new ForbiddenException(gate.reason);
     }
     return this.connectedAccounts.analyzeInbox(user, args.provider);
+  }
+
+  async planCleanup(
+    user: User,
+    args: {
+      workspace_id?: string;
+      provider: ConnectedProvider;
+      criteria?: Record<string, unknown>;
+    },
+  ): Promise<CleanupPlanResult> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    if (!gate.allowed) {
+      throw new ForbiddenException(gate.reason);
+    }
+    return this.connectedAccounts.planCleanup(user, args.provider, args.criteria ?? {});
+  }
+
+  async cleanTrash(
+    user: User,
+    args: {
+      workspace_id?: string;
+      provider: ConnectedProvider;
+      criteria?: Record<string, unknown>;
+    },
+  ): Promise<CleanupExecutionResult> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    if (!gate.allowed) {
+      throw new ForbiddenException(gate.reason);
+    }
+    return this.connectedAccounts.stageCleanupRequest(
+      user,
+      args.provider,
+      'trash',
+      'TRASH',
+      args.criteria ?? {},
+    );
+  }
+
+  async cleanDelete(
+    user: User,
+    args: {
+      workspace_id?: string;
+      provider: ConnectedProvider;
+      criteria?: Record<string, unknown>;
+    },
+  ): Promise<CleanupExecutionResult> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    if (!gate.allowed) {
+      throw new ForbiddenException(gate.reason);
+    }
+    return this.connectedAccounts.stageCleanupRequest(
+      user,
+      args.provider,
+      'delete',
+      'DELETE',
+      args.criteria ?? {},
+    );
+  }
+
+  async organizeMessages(
+    user: User,
+    args: {
+      workspace_id?: string;
+      provider: ConnectedProvider;
+      criteria?: Record<string, unknown>;
+    },
+  ): Promise<CleanupExecutionResult> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    if (!gate.allowed) {
+      throw new ForbiddenException(gate.reason);
+    }
+    return this.connectedAccounts.stageCleanupRequest(
+      user,
+      args.provider,
+      'archive',
+      'ORGANIZE',
+      args.criteria ?? {},
+    );
+  }
+
+  async unsubscribeSender(
+    user: User,
+    args: {
+      workspace_id?: string;
+      provider: ConnectedProvider;
+      sender_group: string[];
+    },
+  ): Promise<CleanupExecutionResult> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    if (!gate.allowed) {
+      throw new ForbiddenException(gate.reason);
+    }
+    return this.connectedAccounts.stageCleanupRequest(
+      user,
+      args.provider,
+      'unsubscribe',
+      'UNSUBSCRIBE',
+      { senderGroup: args.sender_group },
+    );
+  }
+
+  async undoBatch(
+    user: User,
+    args: { workspace_id?: string; provider: ConnectedProvider; batch_id: string },
+  ): Promise<CleanupExecutionResult> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    if (!gate.allowed) {
+      throw new ForbiddenException(gate.reason);
+    }
+    return this.connectedAccounts.undoBatch(user, args.provider, args.batch_id);
   }
 
   private async resolve(user: User, requested?: string): Promise<string> {

@@ -26,6 +26,53 @@ describe('ConnectedAccountsTools', () => {
     analyzeInbox: jest
       .fn()
       .mockResolvedValue({ available: true, provider: 'microsoft', analysis: {} }),
+    planCleanup: jest.fn().mockResolvedValue({
+      provider: 'gmail',
+      criteria: {},
+      counts: { reviewed: 1, safe: 1, protected: 0 },
+      freesBytes: 10,
+      protected: [],
+      safe: [],
+      backup_query: '',
+    }),
+    stageCleanupRequest: jest.fn().mockResolvedValue({
+      ok: true,
+      provider: 'gmail',
+      mode: 'trash',
+      batch_id: 'batch-1',
+      action: 'trash',
+      plan: {
+        provider: 'gmail',
+        criteria: {},
+        counts: { reviewed: 1, safe: 1, protected: 0 },
+        freesBytes: 10,
+        protected: [],
+        safe: [],
+        backup_query: '',
+      },
+      result: { completed: 0, failed: 0, bytes_freed: 0, total_attempted: 1 },
+      status: 'pending',
+      staged: true,
+      staged_item_id: 'item-1',
+    }),
+    undoBatch: jest.fn().mockResolvedValue({
+      ok: true,
+      provider: 'gmail',
+      mode: 'undo',
+      batch_id: 'batch-1',
+      action: 'undo',
+      plan: {
+        provider: 'gmail',
+        criteria: {},
+        counts: { reviewed: 1, safe: 1, protected: 0 },
+        freesBytes: 10,
+        protected: [],
+        safe: [],
+        backup_query: '',
+      },
+      result: { completed: 0, failed: 0, bytes_freed: 0, total_attempted: 0 },
+      status: 'undone',
+    }),
   } as unknown as ConnectedAccountsService;
 
   const prevMode = process.env.UC_ENTITLEMENT_MODE;
@@ -75,5 +122,19 @@ describe('ConnectedAccountsTools', () => {
       tools().analyzeInbox(user, { provider: 'microsoft' }),
     ).resolves.toEqual({ available: true, provider: 'microsoft', analysis: {} });
     expect(connectedAccounts.analyzeInbox).toHaveBeenCalledWith(user, 'microsoft');
+  });
+
+  it('stages agent trash calls into the approval queue', async () => {
+    const entitled = { ...user, __entitlements: ['email-ops'] } as User;
+    await expect(
+      tools().cleanTrash(entitled, { provider: 'gmail', criteria: {} }),
+    ).resolves.toEqual(expect.objectContaining({ status: 'pending', staged: true }));
+    expect(connectedAccounts.stageCleanupRequest).toHaveBeenCalledWith(
+      entitled,
+      'gmail',
+      'trash',
+      'TRASH',
+      {},
+    );
   });
 });

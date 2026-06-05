@@ -1,19 +1,60 @@
-import { User } from '@prisma/client';
+import { ForbiddenException } from '@nestjs/common';
+import { CleanupActionKind, CleanupBatchState, User } from '@prisma/client';
 import { KeycloakBrokerService } from '../auth/keycloak-broker.service';
+import { MembershipService } from '../common/workspace/membership.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { ConnectedAccountsEnginePort } from './connected-accounts.port';
 import { ConnectedAccountsService } from './connected-accounts.service';
 
 describe('ConnectedAccountsService', () => {
-  const user = { id: 'u1', email: 'user@example.test' } as User;
+  const user = {
+    id: 'u1',
+    email: 'user@example.test',
+    username: 'user',
+    keycloakId: 'kc-sub-user',
+    kcRefreshTokenEnc: 'enc',
+    __entitlements: ['email-ops'],
+  } as unknown as User;
 
   const broker = {
-    getProviderAccessToken: jest.fn(),
+    getProviderAccessToken: jest.fn().mockResolvedValue('broker-token'),
   } as unknown as KeycloakBrokerService;
+
+  const membership = {
+    resolveAndAuthorize: jest.fn().mockResolvedValue('ws-1'),
+  } as unknown as MembershipService;
+
+  const tx = {
+    cleanupBatch: {
+      create: jest.fn().mockImplementation(async ({ data }) => ({ id: 'batch-1', ...data })),
+      update: jest.fn().mockImplementation(async ({ data }) => ({ id: 'batch-1', ...data })),
+      findFirst: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]),
+    },
+    agentInboxItem: {
+      create: jest.fn().mockImplementation(async ({ data }) => ({ id: 'item-1', ...data })),
+      update: jest.fn().mockResolvedValue({ id: 'item-1' }),
+    },
+    user: {
+      findFirst: jest.fn().mockResolvedValue(user),
+    },
+  } as any;
+
+  const prisma = {
+    withWorkspace: jest.fn(async (_ws: string, _uc: string | null, fn: any) => fn(tx)),
+    cleanupBatch: tx.cleanupBatch,
+  } as unknown as PrismaService;
 
   const engine = {
     isConfigured: jest.fn().mockReturnValue(true),
     getInboxStats: jest.fn(),
     analyzeInbox: jest.fn(),
+    listMessages: jest.fn(),
+    getMessage: jest.fn(),
+    batchTrash: jest.fn(),
+    batchDelete: jest.fn(),
+    backupCreate: jest.fn(),
+    backupVerify: jest.fn(),
   } as unknown as ConnectedAccountsEnginePort;
 
   beforeEach(() => {
@@ -21,66 +62,124 @@ describe('ConnectedAccountsService', () => {
   });
 
   function service() {
-    return new ConnectedAccountsService(broker, engine);
+    return new ConnectedAccountsService(broker, membership, engine, prisma);
   }
 
   it('lists linked providers without leaking credentials', async () => {
-    (broker.getProviderAccessToken as jest.Mock)
-      .mockResolvedValueOnce('google-token')
-      .mockResolvedValueOnce(null);
-
     const res = await service().listConnectedAccounts(user);
-    expect(res).toEqual({
-      accounts: [
-        { provider: 'gmail', linked: true },
-        { provider: 'microsoft', linked: false },
+    expect(res.accounts).toEqual([
+      { provider: 'gmail', linked: true },
+      { provider: 'microsoft', linked: true },
+    ]);
+  });
+
+  it('plans cleanup without mutating provider state', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        {
+          id: 'm-1',
+          sender: 'Promo <promo@example.com>',
+          subject: 'Offer',
+          size_bytes: 100,
+          labels: ['CATEGORY_PROMOTIONS'],
+          is_starred: false,
+        },
+        {
+          id: 'm-2',
+          sender: 'Gov <person@agency.gov>',
+          subject: 'Notice',
+          size_bytes: 200,
+          labels: [],
+          is_starred: false,
+        },
       ],
+      next_token: null,
     });
+
+    const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
+    expect(plan.counts.reviewed).toBe(2);
+    expect(plan.counts.safe).toBe(1);
+    expect(plan.counts.protected).toBe(1);
+    expect(plan.protected[0]?.reason).toContain('protected suffix');
+    expect(plan.freesBytes).toBe(100);
+    expect(engine.batchTrash).not.toHaveBeenCalled();
+    expect(engine.batchDelete).not.toHaveBeenCalled();
   });
 
-  it('passes gmail tokens to the engine as { token }', async () => {
-    (broker.getProviderAccessToken as jest.Mock).mockResolvedValue('gmail-access-token');
-    (engine.getInboxStats as jest.Mock).mockResolvedValue({
+  it('trashes only the server-approved safe selection', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false },
+        { id: 'm-2', sender: 'Gov <person@agency.gov>', size_bytes: 200, is_starred: false },
+      ],
+      next_token: null,
+    });
+    (engine.batchTrash as jest.Mock).mockResolvedValue({ count: 1 });
+
+    const plan = await service().planCleanup(user, 'gmail', { query: '' });
+    const result = await service().executeCleanup(user, 'gmail', plan, 'trash');
+
+    expect(engine.batchTrash).toHaveBeenCalledWith('gmail', { token: 'broker-token' }, ['m-1']);
+    expect(result.status).toBe('completed');
+  });
+
+  it('refuses permanent delete until backup verification succeeds', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      next_token: null,
+    });
+    (engine.backupCreate as jest.Mock).mockResolvedValue({
+      version: '1.0',
+      created_at: '2026-06-05T00:00:00Z',
+      query: '',
       total_messages: 1,
-      total_threads: 1,
-      unread_count: 0,
-      promotional_count: 0,
-      social_count: 0,
-      storage_used_bytes: 12,
-    });
-
-    const res = await service().getInboxStats(user, 'gmail');
-    expect(engine.getInboxStats).toHaveBeenCalledWith('gmail', { token: 'gmail-access-token' });
-    expect(res).toEqual({
-      available: true,
+      errors: 0,
+      path: '/tmp/backup',
       provider: 'gmail',
-      stats: expect.objectContaining({ total_messages: 1 }),
     });
+    (engine.backupVerify as jest.Mock).mockResolvedValue({ success: false });
+
+    const plan = await service().planCleanup(user, 'gmail', { query: '' });
+    await expect(service().executeCleanup(user, 'gmail', plan, 'delete')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(engine.batchDelete).not.toHaveBeenCalled();
   });
 
-  it('passes microsoft tokens to the engine as { access_token }', async () => {
-    (broker.getProviderAccessToken as jest.Mock).mockResolvedValue('ms-access-token');
-    (engine.analyzeInbox as jest.Mock).mockResolvedValue({ summary: 'ok' });
+  it('stages agent destructive calls into the approval queue instead of executing them', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      next_token: null,
+    });
 
-    const res = await service().analyzeInbox(user, 'microsoft');
-    expect(engine.analyzeInbox).toHaveBeenCalledWith('microsoft', {
-      access_token: 'ms-access-token',
+    const staged = await service().stageCleanupRequest(user, 'gmail', 'trash', CleanupActionKind.TRASH, {
+      query: '',
     });
-    expect(res).toEqual({
-      available: true,
-      provider: 'microsoft',
-      analysis: { summary: 'ok' },
-    });
+    expect(staged.status).toBe('pending');
+    expect(tx.agentInboxItem.create).toHaveBeenCalled();
+    expect(engine.batchTrash).not.toHaveBeenCalled();
   });
 
-  it('returns a structured unavailable result when no broker token exists', async () => {
-    (broker.getProviderAccessToken as jest.Mock).mockResolvedValue(null);
-
-    await expect(service().getInboxStats(user, 'gmail')).resolves.toEqual({
-      available: false,
+  it('marks cleanup batches undone', async () => {
+    (prisma.cleanupBatch.findFirst as jest.Mock).mockResolvedValue({
+      id: 'batch-1',
       provider: 'gmail',
-      reason: 'no linked gmail account — sign in via gmail first',
+      mode: 'trash',
+      action: 'TRASH',
+      plan: { safe: [] },
+      result: { completed: 1 },
+      backupRef: null,
+      backupVerified: false,
+      state: CleanupBatchState.COMPLETED,
     });
-    expect(engine.getInboxStats).not.toHaveBeenCalled();
+
+    const res = await service().undoBatch(user, 'gmail', 'batch-1');
+    expect(prisma.cleanupBatch.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'batch-1' },
+        data: expect.objectContaining({ state: CleanupBatchState.UNDONE }),
+      }),
+    );
+    expect(res.status).toBe('undone');
   });
 });

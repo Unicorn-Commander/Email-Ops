@@ -1,4 +1,5 @@
 import { PrismaService } from '../prisma/prisma.service';
+import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import {
   StalwartMessage,
@@ -30,13 +31,13 @@ import { EmailService } from './email.service';
  *     (id/thread_id/status/mode/external_source/external_ref/created_at).
  *
  * The verify DB is the same po-verify-pg the task provisions
- * (postgresql://postgres:REMOVED@localhost:55444/emailops). Tests connect as the
+ * (postgresql://postgres:REMOVED@127.0.0.1:55444/emailops). Tests connect as the
  * superuser owner (RLS inert under FORCE+BYPASS for owner), which is the Phase-1
  * runtime posture; the SEPARATE prisma/rls-acceptance.sql proves the fence under
  * the NOBYPASSRLS email_ops_app role.
  */
 
-const DB_URL = 'postgresql://postgres:REMOVED@localhost:55444/emailops?schema=public';
+const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
 
 // A configurable fake mail engine.
 class FakeStalwart extends StalwartPort {
@@ -76,6 +77,7 @@ class FakeStalwart extends StalwartPort {
 describe('EmailService (verify DB; Stalwart MOCKED)', () => {
   let prisma: PrismaService;
   let stalwart: FakeStalwart;
+  let connectedAccounts: ConnectedAccountsService;
   let service: EmailService;
 
   // A dedicated workspace per run so reruns don't collide.
@@ -119,7 +121,11 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
 
   beforeEach(() => {
     stalwart = new FakeStalwart();
-    service = new EmailService(prisma, stalwart);
+    connectedAccounts = {
+      approveCleanupBatch: jest.fn().mockResolvedValue(null),
+      undoBatch: jest.fn().mockResolvedValue(null),
+    } as unknown as ConnectedAccountsService;
+    service = new EmailService(prisma, stalwart, connectedAccounts);
   });
 
   describe('compose_email — send', () => {
@@ -247,7 +253,8 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       expect(res).toBeTruthy();
       expect(res!.inbox.state).toBe('approved');
       expect(res!.inbox.reviewed_by_uc_uid).toBe('uc-approver');
-      expect(res!.message.status).toBe('sent');
+      expect(res!.message).toBeTruthy();
+      expect(res!.message?.status).toBe('sent');
       // NOW the engine was called exactly once (the approval send).
       expect(stalwart.sendCalls).toHaveLength(1);
 
@@ -273,7 +280,8 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
 
       const res = await service.rejectAgentInboxItem(WS, 'uc-approver', item.id, 'off-message');
       expect(res!.inbox.state).toBe('rejected');
-      expect(res!.message.status).toBe('rejected');
+      expect(res!.message).toBeTruthy();
+      expect(res!.message?.status).toBe('rejected');
       // The engine was never called.
       expect(stalwart.sendCalls).toHaveLength(0);
       const msg = await prisma.emailMessage.findUnique({ where: { id: draft.id } });

@@ -7,7 +7,15 @@
  * OAuth dance or an encrypted provider-token vault.
  */
 
-import { EngineInboxStats } from './connected-accounts.types';
+import {
+  CleanupExecutionBackupRef,
+  CleanupExecutionResult,
+  CleanupPlanResult,
+  EngineBackupManifest,
+  EngineInboxStats,
+  EngineListMessagesResult,
+  EngineMessageSummary,
+} from './connected-accounts.types';
 
 export abstract class ConnectedAccountsEnginePort {
   abstract isConfigured(): boolean;
@@ -21,4 +29,40 @@ export abstract class ConnectedAccountsEnginePort {
     provider: 'gmail' | 'microsoft',
     credentials: Record<string, unknown>,
   ): Promise<Record<string, unknown> | null>;
+
+  abstract listMessages(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    query?: string,
+    maxResults?: number,
+    pageToken?: string | null,
+  ): Promise<EngineListMessagesResult | null>;
+
+  abstract getMessage(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageId: string,
+    format?: 'metadata' | 'full' | 'minimal',
+  ): Promise<EngineMessageSummary | null>;
+
+  abstract batchTrash(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageIds: string[],
+  ): Promise<{ count: number } | null>;
+
+  abstract batchDelete(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageIds: string[],
+  ): Promise<{ count: number } | null>;
+
+  abstract backupCreate(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    query: string,
+    path: string,
+  ): Promise<EngineBackupManifest | null>;
+
+  abstract backupVerify(path: string): Promise<Record<string, unknown> | null>;
 }

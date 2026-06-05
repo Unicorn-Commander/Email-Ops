@@ -34,12 +34,14 @@
 
 import { Injectable, Logger } from '@nestjs/common';
 import {
+  AgentInboxKind,
   AgentInboxState,
   EmailDirection,
   EmailMessageStatus,
   EmailMode,
   Prisma,
 } from '@prisma/client';
+import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { StalwartThread } from '../stalwart/stalwart.types';
@@ -61,6 +63,7 @@ export class EmailService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stalwart: StalwartPort,
+    private readonly connectedAccounts: ConnectedAccountsService,
   ) {}
 
   // ── status mapping ─────────────────────────────────────────────────────
@@ -324,7 +327,7 @@ export class EmailService {
     ucUid: string | null,
     itemId: string,
     note?: string | null,
-  ): Promise<{ inbox: AgentInboxView; message: MessageComposeView } | null> {
+  ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const item = await tx.agentInboxItem.findUnique({
         where: { id: itemId },
@@ -334,9 +337,37 @@ export class EmailService {
       if (item.state !== AgentInboxState.PENDING) {
         return {
           inbox: this.inboxView(item, item.message),
-          message: this.composeView(item.message),
+          message: item.kind === AgentInboxKind.EMAIL && item.message ? this.composeView(item.message) : null,
         };
       }
+
+      if (item.kind === AgentInboxKind.CLEANUP) {
+        const payload = this.cleanupPayload(item.payload);
+        const owner = await this.resolveUserByUcUid(tx, ucUid);
+        if (!owner) return null;
+        const batchId = payload.batch_id;
+        if (!batchId || typeof batchId !== 'string') return null;
+
+        const executed = await this.connectedAccounts.approveCleanupBatch(workspaceId, owner, batchId);
+        if (!executed) return null;
+
+        const updated = await tx.agentInboxItem.update({
+          where: { id: itemId },
+          data: {
+            state: AgentInboxState.APPROVED,
+            reviewedByUcUid: ucUid,
+            reviewedAt: new Date(),
+            reviewNote: note ?? null,
+          },
+          include: { message: true },
+        });
+        this.logger.log(
+          `agent-inbox cleanup item ${itemId} APPROVED by ${ucUid ?? '(unknown)'} — cleanup batch ${batchId} executed`,
+        );
+        return { inbox: this.inboxView(updated, null), message: null };
+      }
+
+      if (!item.message) return null;
 
       const mailbox = item.message.mailboxAccountId
         ? await tx.mailboxAccount.findUnique({ where: { id: item.message.mailboxAccountId } })
@@ -379,7 +410,7 @@ export class EmailService {
     ucUid: string | null,
     itemId: string,
     note?: string | null,
-  ): Promise<{ inbox: AgentInboxView; message: MessageComposeView } | null> {
+  ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const item = await tx.agentInboxItem.findUnique({
         where: { id: itemId },
@@ -389,11 +420,26 @@ export class EmailService {
       if (item.state !== AgentInboxState.PENDING) {
         return {
           inbox: this.inboxView(item, item.message),
-          message: this.composeView(item.message),
+          message: item.kind === AgentInboxKind.EMAIL && item.message ? this.composeView(item.message) : null,
         };
       }
+      if (item.kind === AgentInboxKind.CLEANUP) {
+        const payload = this.cleanupPayload(item.payload);
+        const updated = await tx.agentInboxItem.update({
+          where: { id: itemId },
+          data: {
+            state: AgentInboxState.REJECTED,
+            reviewedByUcUid: ucUid,
+            reviewedAt: new Date(),
+            reviewNote: note ?? null,
+          },
+          include: { message: true },
+        });
+        return { inbox: this.inboxView(updated, null), message: null };
+      }
+      if (!item.message) return null;
       const msg = await tx.emailMessage.update({
-        where: { id: item.messageId },
+        where: { id: item.message.id },
         data: { status: EmailMessageStatus.REJECTED },
       });
       const updated = await tx.agentInboxItem.update({
@@ -633,6 +679,15 @@ export class EmailService {
     return tx.mailboxAccount.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
   }
 
+  private async resolveUserByUcUid(tx: WorkspaceTxClient, ucUid: string | null) {
+    if (!ucUid) return null;
+    return tx.user.findFirst({
+      where: {
+        OR: [{ keycloakId: ucUid }, { id: ucUid }],
+      },
+    });
+  }
+
   /**
    * Resolve a contact's deliverable address. Contact-Ops is the canonical
    * phonebook (federated), but Email-Ops doesn't store contacts; for the read
@@ -672,7 +727,9 @@ export class EmailService {
   private inboxView(
     it: {
       id: string;
-      messageId: string;
+      messageId: string | null;
+      kind?: AgentInboxKind;
+      payload?: unknown;
       state: AgentInboxState;
       draftedBy: string | null;
       summary: string | null;
@@ -688,21 +745,27 @@ export class EmailService {
       preview?: string | null;
     } | null,
   ): AgentInboxView {
+    const payload = this.cleanupPayload(it.payload);
+    const isCleanup = it.kind === AgentInboxKind.CLEANUP;
     return {
       id: it.id,
       message_id: it.messageId,
+      kind: it.kind ?? 'EMAIL',
       state: it.state.toLowerCase(),
       drafted_by: it.draftedBy ?? null,
-      summary: it.summary ?? null,
-      to_address: msg?.toAddress ?? null,
-      subject: msg?.subject ?? null,
-      // Prefer a stored preview; else snippet the body. Either way it's a short,
-      // safe preview of what the agent drafted (the full body is on the message).
-      body_preview: msg ? (msg.preview ?? this.snippet(msg.body)) : null,
+      summary: it.summary ?? (isCleanup ? this.cleanupSummary(payload) : null),
+      to_address: isCleanup ? null : msg?.toAddress ?? null,
+      subject: isCleanup ? this.cleanupSubject(payload) : msg?.subject ?? null,
+      body_preview: isCleanup
+        ? this.cleanupBodyPreview(payload)
+        : msg
+          ? msg.preview ?? this.snippet(msg.body)
+          : null,
       reviewed_by_uc_uid: it.reviewedByUcUid ?? null,
       reviewed_at: it.reviewedAt ? it.reviewedAt.toISOString() : null,
       review_note: it.reviewNote ?? null,
       created_at: it.createdAt ? it.createdAt.toISOString() : null,
+      payload: isCleanup ? payload : null,
     };
   }
 
@@ -715,6 +778,33 @@ export class EmailService {
   private summary(subject: string | null | undefined, to: string | null | undefined): string {
     const s = subject?.trim() || '(no subject)';
     return to ? `${s} → ${to}` : s;
+  }
+
+  private cleanupPayload(value: unknown): Record<string, unknown> {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  }
+
+  private cleanupSummary(payload: Record<string, unknown>): string | null {
+    const action = typeof payload.action === 'string' ? payload.action : 'cleanup';
+    const provider = typeof payload.provider === 'string' ? payload.provider : '';
+    const count = Array.isArray((payload.plan as Record<string, unknown> | undefined)?.safe)
+      ? ((payload.plan as Record<string, unknown>).safe as unknown[]).length
+      : 0;
+    return `${action}${provider ? ` on ${provider}` : ''}${count ? ` (${count} safe)` : ''}`;
+  }
+
+  private cleanupSubject(payload: Record<string, unknown>): string | null {
+    const action = typeof payload.action === 'string' ? payload.action : 'Cleanup';
+    return `${action[0]?.toUpperCase() ?? 'C'}${action.slice(1)} request`;
+  }
+
+  private cleanupBodyPreview(payload: Record<string, unknown>): string | null {
+    const plan = payload.plan && typeof payload.plan === 'object' ? (payload.plan as Record<string, unknown>) : null;
+    const safe = Array.isArray(plan?.safe) ? (plan?.safe as Array<Record<string, unknown>>) : [];
+    const protectedCount = Array.isArray(plan?.protected) ? (plan?.protected as unknown[]).length : 0;
+    return `${safe.length} safe · ${protectedCount} protected`;
   }
 
   /** Surfaced for a future REST seam / tests that want a Prisma type alias. */

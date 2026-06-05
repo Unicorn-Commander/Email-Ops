@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Controller,
+  Body,
   ForbiddenException,
   Get,
   Param,
@@ -8,14 +9,66 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  IsArray,
+  IsBoolean,
+  IsIn,
+  IsObject,
+  IsOptional,
+  IsString,
+} from 'class-validator';
 import { User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { MembershipService } from '../common/workspace/membership.service';
 import { entitlementsOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { ConnectedAccountsService } from './connected-accounts.service';
-import { ConnectedProvider } from './connected-accounts.types';
+import {
+  CleanupExecutionResult,
+  CleanupMode,
+  CleanupPlanResult,
+  CleanupWriteMode,
+  ConnectedProvider,
+} from './connected-accounts.types';
 import { checkCleanerEntitlement } from './entitlement';
+
+class CleanupPlanBodyDto {
+  @IsOptional()
+  @IsObject()
+  criteria?: Record<string, unknown>;
+}
+
+class CleanupExecuteBodyDto {
+  @IsIn(['trash', 'delete'])
+  mode!: CleanupMode;
+
+  @IsObject()
+  plan!: CleanupPlanResult;
+}
+
+class CleanupOrganizeBodyDto {
+  @IsOptional()
+  @IsString()
+  label?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  archive?: boolean;
+
+  @IsOptional()
+  @IsObject()
+  criteria?: Record<string, unknown>;
+}
+
+class CleanupUnsubscribeBodyDto {
+  @IsArray()
+  senderGroup!: string[];
+}
+
+class CleanupUndoBodyDto {
+  @IsString()
+  batchId!: string;
+}
 
 @ApiTags('connected-accounts')
 @ApiBearerAuth()
@@ -61,6 +114,99 @@ export class ConnectedAccountsController {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
     return this.connectedAccounts.analyzeInbox(user, provider);
+  }
+
+  @Post(':provider/cleanup/plan')
+  @ApiOperation({
+    summary: 'Build a dry-run cleanup plan with protected and safe rows separated.',
+  })
+  @ApiResponse({ status: 200, description: 'The cleanup plan.' })
+  @ApiResponse({ status: 403, description: 'Caller lacks the email-ops cleaner SKU.' })
+  async plan(
+    @CurrentUser() user: User,
+    @Param('provider') providerParam: string,
+    @Body() body: CleanupPlanBodyDto,
+  ) {
+    const provider = this.provider(providerParam);
+    const workspaceId = await this.resolveWorkspace(user);
+    this.requireCleanerEntitlement(user, workspaceId);
+    return this.connectedAccounts.planCleanup(user, provider, body.criteria ?? {});
+  }
+
+  @Post(':provider/cleanup/execute')
+  @ApiOperation({
+    summary: 'Execute a cleanup plan as trash or delete, with backup verification for delete.',
+  })
+  @ApiResponse({ status: 200, description: 'The cleanup execution result.' })
+  @ApiResponse({ status: 403, description: 'Caller lacks the email-ops cleaner SKU.' })
+  async execute(
+    @CurrentUser() user: User,
+    @Param('provider') providerParam: string,
+    @Body() body: CleanupExecuteBodyDto,
+  ): Promise<CleanupExecutionResult> {
+    const provider = this.provider(providerParam);
+    const workspaceId = await this.resolveWorkspace(user);
+    this.requireCleanerEntitlement(user, workspaceId);
+    return this.connectedAccounts.executeCleanup(user, provider, body.plan, body.mode);
+  }
+
+  @Post(':provider/organize')
+  @ApiOperation({
+    summary: 'Organize messages by label/archive semantics (degrade-clean audit batch).',
+  })
+  async organize(
+    @CurrentUser() user: User,
+    @Param('provider') providerParam: string,
+    @Body() body: CleanupOrganizeBodyDto,
+  ) {
+    const provider = this.provider(providerParam);
+    const workspaceId = await this.resolveWorkspace(user);
+    this.requireCleanerEntitlement(user, workspaceId);
+    return this.connectedAccounts.organize(user, provider, body.criteria ?? {
+      label: body.label ?? '',
+      archive: body.archive ?? true,
+    });
+  }
+
+  @Post(':provider/unsubscribe')
+  @ApiOperation({
+    summary: 'Unsubscribe from a sender group (audit batch; degrade-clean if no engine write).',
+  })
+  async unsubscribe(
+    @CurrentUser() user: User,
+    @Param('provider') providerParam: string,
+    @Body() body: CleanupUnsubscribeBodyDto,
+  ) {
+    const provider = this.provider(providerParam);
+    const workspaceId = await this.resolveWorkspace(user);
+    this.requireCleanerEntitlement(user, workspaceId);
+    return this.connectedAccounts.unsubscribe(user, provider, body.senderGroup);
+  }
+
+  @Post(':provider/undo')
+  @ApiOperation({
+    summary: 'Undo a cleanup batch (audit state update; best-effort revert semantics).',
+  })
+  async undo(
+    @CurrentUser() user: User,
+    @Param('provider') providerParam: string,
+    @Body() body: CleanupUndoBodyDto,
+  ) {
+    const provider = this.provider(providerParam);
+    const workspaceId = await this.resolveWorkspace(user);
+    this.requireCleanerEntitlement(user, workspaceId);
+    return this.connectedAccounts.undoBatch(user, provider, body.batchId);
+  }
+
+  @Get(':provider/cleanup/activity')
+  @ApiOperation({
+    summary: 'List recent cleanup activity batches for the provider.',
+  })
+  async activity(@CurrentUser() user: User, @Param('provider') providerParam: string) {
+    const provider = this.provider(providerParam);
+    const workspaceId = await this.resolveWorkspace(user);
+    this.requireCleanerEntitlement(user, workspaceId);
+    return { items: await this.connectedAccounts.listCleanupActivity(user, provider) };
   }
 
   private resolveWorkspace(user: User): Promise<string> {

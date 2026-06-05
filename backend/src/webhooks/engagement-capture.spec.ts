@@ -25,13 +25,13 @@ import { mapPostmarkRecord, PostmarkWebhookBody } from './postmark.types';
  *   - an unmatched provider id is a clean no-op (nothing persisted).
  *
  * The verify DB is the same po-verify-pg the task provisions
- * (postgresql://postgres:REMOVED@localhost:55444/emailops). Tests connect as the
+ * (postgresql://postgres:REMOVED@127.0.0.1:55444/emailops). Tests connect as the
  * superuser owner (RLS inert under FORCE+BYPASS for owner) = the Phase-1 runtime
  * posture; the SEPARATE prisma/rls-acceptance.sql proves the fence under the
  * NOBYPASSRLS email_ops_app role (incl. the new email_engagement_events table).
  */
 
-const DB_URL = 'postgresql://postgres:REMOVED@localhost:55444/emailops?schema=public';
+const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
 
 class FakeStalwart extends StalwartPort {
   public acceptSend = true;
@@ -124,7 +124,14 @@ describe('Engagement capture (verify DB; Stalwart MOCKED)', () => {
       });
     }
     stalwart = new FakeStalwart();
-    service = new EmailService(prisma, stalwart);
+    service = new EmailService(
+      prisma,
+      stalwart,
+      {
+        approveCleanupBatch: jest.fn(),
+        undoBatch: jest.fn(),
+      } as any,
+    );
   });
 
   afterAll(async () => {

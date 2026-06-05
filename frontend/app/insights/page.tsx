@@ -14,6 +14,7 @@ import {
   type Recommendation,
 } from '@/lib/cleaner-model';
 import { analyzeInbox, ApiError, clearSession } from '@/lib/api';
+import Link from 'next/link';
 
 type ScanStage = 'fetch' | 'metadata' | 'analyze' | 'ai' | 'done';
 type ScanState = 'idle' | 'running' | 'done' | 'error';
@@ -317,7 +318,10 @@ function UnreadPile({ loading, unread, total }: { loading: boolean; unread: numb
           <p className="mt-2 text-sm text-tertiary">{ratio}% of visible messages are unread.</p>
           <div className="mt-5 rounded-token border border-subtle bg-surface-base p-3">
             <p className="text-xs text-secondary">
-              Forward action: <span className="font-medium text-accent">Review these -&gt;</span>
+              Forward action:{' '}
+              <Link href="/cleanup" className="font-medium text-accent hover:underline">
+                Review these -&gt;
+              </Link>
             </p>
           </div>
         </div>
@@ -353,12 +357,12 @@ function FrequencyTable({
                 <p className="mt-1 text-[11px] text-tertiary">{label}</p>
               </div>
               <span className="font-mono text-sm text-secondary">{formatCount(row.count)}</span>
-              <button
-                type="button"
+              <Link
+                href="/cleanup"
                 className="rounded-token px-2 py-1 text-xs font-medium text-accent transition hover:bg-surface-overlay"
               >
                 Review these -&gt;
-              </button>
+              </Link>
             </div>
           ))}
         </div>

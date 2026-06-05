@@ -137,7 +137,8 @@ export type AgentInboxState = 'pending' | 'approved' | 'rejected';
 /** One agent-inbox item (mirrors the backend AgentInboxView wire shape). */
 export interface AgentInboxItemView {
   id: string;
-  message_id: string;
+  message_id: string | null;
+  kind?: string;
   state: AgentInboxState;
   drafted_by: string | null;
   summary: string | null;
@@ -148,6 +149,7 @@ export interface AgentInboxItemView {
   reviewed_at: string | null;
   review_note: string | null;
   created_at: string | null;
+  payload?: Record<string, unknown> | null;
 }
 
 /** The compose/message projection echoed back on approve/reject. */
@@ -168,7 +170,7 @@ export interface AgentInboxListResponse {
 
 export interface ReviewResult {
   inbox: AgentInboxItemView;
-  message: MessageView;
+  message: MessageView | null;
 }
 
 const inboxBase = (workspaceId: string) =>
@@ -260,6 +262,72 @@ export type ConnectedAccountsAnalysisResponse =
       analysis: Record<string, unknown>;
     };
 
+export interface CleanupPlanMessageView {
+  id: string;
+  sender: string | null;
+  subject: string | null;
+  date: string | null;
+  size_bytes: number;
+  starred: boolean;
+  labels: string[];
+  protected: boolean;
+  reason: string | null;
+}
+
+export interface CleanupPlanResponse {
+  provider: ConnectedProvider;
+  criteria: Record<string, unknown>;
+  counts: {
+    reviewed: number;
+    safe: number;
+    protected: number;
+  };
+  freesBytes: number;
+  protected: CleanupPlanMessageView[];
+  safe: CleanupPlanMessageView[];
+  backup_query: string;
+}
+
+export interface CleanupExecutionResponse {
+  ok: boolean;
+  provider: ConnectedProvider;
+  mode: 'trash' | 'delete' | 'archive' | 'unsubscribe' | 'undo';
+  batch_id: string;
+  action: string;
+  plan: CleanupPlanResponse;
+  result: {
+    completed: number;
+    failed: number;
+    bytes_freed: number;
+    total_attempted: number;
+  };
+  backup_ref?: {
+    path: string;
+    verified: boolean;
+    created_at: string | null;
+    total_messages: number;
+  } | null;
+  status: 'completed' | 'pending' | 'rejected' | 'failed' | 'undone';
+  staged?: boolean;
+  staged_item_id?: string | null;
+  reason?: string | null;
+}
+
+export interface CleanupBatchView {
+  id: string;
+  provider: ConnectedProvider;
+  action: string;
+  mode: string;
+  state: string;
+  summary: string;
+  params: string;
+  result: string;
+  backup_ref: string | null;
+  undoable: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export async function listConnectedAccounts(
   token?: string,
 ): Promise<ConnectedAccountsListResponse> {
@@ -283,6 +351,77 @@ export async function analyzeInbox(
   return apiPost<ConnectedAccountsAnalysisResponse>(
     `/connected-accounts/${encodeURIComponent(provider)}/analyze`,
     {},
+    token,
+  );
+}
+
+export async function planCleanup(
+  provider: ConnectedProvider,
+  criteria: Record<string, unknown>,
+  token?: string,
+): Promise<CleanupPlanResponse> {
+  return apiPost<CleanupPlanResponse>(
+    `/connected-accounts/${encodeURIComponent(provider)}/cleanup/plan`,
+    { criteria },
+    token,
+  );
+}
+
+export async function executeCleanup(
+  provider: ConnectedProvider,
+  plan: CleanupPlanResponse,
+  mode: 'trash' | 'delete',
+  token?: string,
+): Promise<CleanupExecutionResponse> {
+  return apiPost<CleanupExecutionResponse>(
+    `/connected-accounts/${encodeURIComponent(provider)}/cleanup/execute`,
+    { plan, mode },
+    token,
+  );
+}
+
+export async function organizeMessages(
+  provider: ConnectedProvider,
+  criteria: Record<string, unknown>,
+  token?: string,
+): Promise<CleanupExecutionResponse> {
+  return apiPost<CleanupExecutionResponse>(
+    `/connected-accounts/${encodeURIComponent(provider)}/organize`,
+    { criteria },
+    token,
+  );
+}
+
+export async function unsubscribeSender(
+  provider: ConnectedProvider,
+  senderGroup: string[],
+  token?: string,
+): Promise<CleanupExecutionResponse> {
+  return apiPost<CleanupExecutionResponse>(
+    `/connected-accounts/${encodeURIComponent(provider)}/unsubscribe`,
+    { senderGroup },
+    token,
+  );
+}
+
+export async function undoBatch(
+  provider: ConnectedProvider,
+  batchId: string,
+  token?: string,
+): Promise<CleanupExecutionResponse> {
+  return apiPost<CleanupExecutionResponse>(
+    `/connected-accounts/${encodeURIComponent(provider)}/undo`,
+    { batchId },
+    token,
+  );
+}
+
+export async function cleanupActivity(
+  provider: ConnectedProvider,
+  token?: string,
+): Promise<{ items: CleanupBatchView[] }> {
+  return apiGet<{ items: CleanupBatchView[] }>(
+    `/connected-accounts/${encodeURIComponent(provider)}/cleanup/activity`,
     token,
   );
 }

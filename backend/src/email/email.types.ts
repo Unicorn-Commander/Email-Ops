@@ -73,7 +73,8 @@ export interface ComposeInput {
 /** An agent-inbox item view (the approval queue surface). */
 export interface AgentInboxView {
   id: string;
-  message_id: string;
+  message_id: string | null;
+  kind?: string;
   state: string; // pending | approved | rejected
   drafted_by: string | null;
   summary: string | null;
@@ -87,6 +88,7 @@ export interface AgentInboxView {
   reviewed_at: string | null;
   review_note: string | null;
   created_at: string | null;
+  payload?: Record<string, unknown> | null;
 }
 
 /**

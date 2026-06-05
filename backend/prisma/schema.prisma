@@ -113,6 +113,28 @@ enum AgentInboxState {
   REJECTED
 }
 
+enum AgentInboxKind {
+  EMAIL
+  CLEANUP
+}
+
+enum CleanupActionKind {
+  TRASH
+  DELETE
+  ORGANIZE
+  UNSUBSCRIBE
+  UNDO
+}
+
+enum CleanupBatchState {
+  PENDING
+  COMPLETED
+  REJECTED
+  FAILED
+  UNDONE
+  CANCELED
+}
+
 // ── Normalized engagement vocabulary (Email-Ops OWNS the capture) ──
 //
 // The suite's normalized engagement vocabulary (SUITE contract / Customer-Ops'
@@ -161,6 +183,7 @@ model Workspace {
   mailboxAccounts   MailboxAccount[]
   emailMessages     EmailMessage[]
   agentInboxItems   AgentInboxItem[]
+  cleanupBatches    CleanupBatch[]
   engagementEvents  EmailEngagementEvent[]
 
   @@index([slug])
@@ -365,7 +388,9 @@ model AgentInboxItem {
   id              String          @id @default(uuid())
   workspaceId     String
   // The staged outbound message awaiting approval (1:1).
-  messageId       String          @unique
+  messageId       String?         @unique
+  kind            AgentInboxKind  @default(EMAIL)
+  payload         Json?
   state           AgentInboxState @default(PENDING)
   // Which agent/source drafted this (provenance; 'customer-ops' for a cockpit
   // agent draft).
@@ -380,12 +405,50 @@ model AgentInboxItem {
   updatedAt       DateTime        @updatedAt
 
   workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  message   EmailMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  message   EmailMessage? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  cleanupBatch CleanupBatch?
 
   @@index([workspaceId])
   // The queue reads pending items newest-first.
   @@index([workspaceId, state, createdAt])
   @@map("agent_inbox_items")
+}
+
+// ============================================================
+// CLEANUP BATCH (Email-Ops OWNS this — tenant-scoped; the cleanup audit log)
+// ============================================================
+//
+// One audit row per cleanup/organize/unsubscribe/undo action. The agent inbox
+// stages approval requests; this table persists the approved/executed batch and
+// carries the plan/result payload the UI renders in the review rail.
+model CleanupBatch {
+  id               String            @id @default(uuid())
+  workspaceId      String
+  provider         String
+  action           CleanupActionKind
+  mode             String
+  state            CleanupBatchState @default(PENDING)
+  criteria         Json?
+  plan             Json
+  result           Json?
+  backupRef        String?
+  backupVerified   Boolean           @default(false)
+  requestedByUcUid String?
+  approvedByUcUid  String?
+  agentInboxItemId String? @unique
+  summary          String?
+  params           String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  completedAt      DateTime?
+  undoneAt         DateTime?
+
+  workspace      Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agentInboxItem AgentInboxItem? @relation(fields: [agentInboxItemId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@index([workspaceId, state, createdAt])
+  @@map("cleanup_batches")
 }
 
 // ============================================================

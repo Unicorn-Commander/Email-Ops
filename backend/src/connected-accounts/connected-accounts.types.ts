@@ -1,5 +1,112 @@
 export type ConnectedProvider = 'gmail' | 'microsoft';
 
+export type CleanupMode = 'trash' | 'delete';
+export type CleanupWriteMode = CleanupMode | 'archive' | 'label' | 'unsubscribe' | 'undo';
+
+export interface EngineMessageSummary {
+  id: string;
+  thread_id?: string | null;
+  subject?: string | null;
+  sender?: string | null;
+  recipient?: string | null;
+  date?: string | null;
+  snippet?: string | null;
+  labels?: string[];
+  is_read?: boolean;
+  is_starred?: boolean;
+  has_attachments?: boolean;
+  size_bytes?: number;
+  internal_date?: number | null;
+  headers?: Record<string, string>;
+  raw_data?: unknown;
+  [key: string]: unknown;
+}
+
+export interface EngineListMessagesResult {
+  messages: EngineMessageSummary[];
+  next_token?: string | null;
+}
+
+export interface EngineBackupManifest {
+  version: string;
+  created_at: string;
+  query: string;
+  total_messages: number;
+  errors: number;
+  path: string;
+  provider: string;
+}
+
+export interface CleanupPlanMessageView {
+  id: string;
+  sender: string | null;
+  subject: string | null;
+  date: string | null;
+  size_bytes: number;
+  starred: boolean;
+  labels: string[];
+  protected: boolean;
+  reason: string | null;
+}
+
+export interface CleanupPlanCounts {
+  reviewed: number;
+  safe: number;
+  protected: number;
+}
+
+export interface CleanupPlanResult {
+  provider: ConnectedProvider;
+  criteria: Record<string, unknown>;
+  counts: CleanupPlanCounts;
+  freesBytes: number;
+  protected: CleanupPlanMessageView[];
+  safe: CleanupPlanMessageView[];
+  backup_query: string;
+}
+
+export interface CleanupExecutionBackupRef {
+  path: string;
+  verified: boolean;
+  created_at: string | null;
+  total_messages: number;
+}
+
+export interface CleanupExecutionResult {
+  ok: boolean;
+  provider: ConnectedProvider;
+  mode: CleanupWriteMode;
+  batch_id: string;
+  action: string;
+  plan: CleanupPlanResult;
+  result: {
+    completed: number;
+    failed: number;
+    bytes_freed: number;
+    total_attempted: number;
+  };
+  backup_ref?: CleanupExecutionBackupRef | null;
+  status: 'completed' | 'pending' | 'rejected' | 'failed' | 'undone';
+  staged?: boolean;
+  staged_item_id?: string | null;
+  reason?: string | null;
+}
+
+export interface CleanupBatchView {
+  id: string;
+  provider: ConnectedProvider;
+  action: string;
+  mode: CleanupWriteMode;
+  state: string;
+  summary: string;
+  params: string;
+  result: string;
+  backup_ref: string | null;
+  undoable: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface EngineInboxStats {
   total_messages: number;
   total_threads: number;

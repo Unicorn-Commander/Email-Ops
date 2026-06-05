@@ -1,7 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConnectedAccountsEnginePort } from './connected-accounts.port';
-import { EngineInboxStats } from './connected-accounts.types';
+import {
+  EngineBackupManifest,
+  EngineInboxStats,
+  EngineListMessagesResult,
+  EngineMessageSummary,
+} from './connected-accounts.types';
 
 @Injectable()
 export class CleanerEngineClient extends ConnectedAccountsEnginePort {
@@ -169,5 +174,77 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
 
     this.logger.warn('Cleaner Engine analyze response could not be parsed');
     return null;
+  }
+
+  async listMessages(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    query = '',
+    maxResults = 100,
+    pageToken: string | null = null,
+  ): Promise<EngineListMessagesResult | null> {
+    return this.postJson<EngineListMessagesResult>('/messages/list', {
+      provider,
+      credentials,
+      query,
+      max_results: maxResults,
+      page_token: pageToken,
+    });
+  }
+
+  async getMessage(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageId: string,
+    format: 'metadata' | 'full' | 'minimal' = 'metadata',
+  ): Promise<EngineMessageSummary | null> {
+    return this.postJson<EngineMessageSummary>('/messages/get', {
+      provider,
+      credentials,
+      message_id: messageId,
+      format,
+    });
+  }
+
+  async batchTrash(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageIds: string[],
+  ): Promise<{ count: number } | null> {
+    return this.postJson<{ count: number }>('/cleanup/trash', {
+      provider,
+      credentials,
+      message_ids: messageIds,
+    });
+  }
+
+  async batchDelete(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageIds: string[],
+  ): Promise<{ count: number } | null> {
+    return this.postJson<{ count: number }>('/cleanup/delete', {
+      provider,
+      credentials,
+      message_ids: messageIds,
+    });
+  }
+
+  async backupCreate(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    query: string,
+    path: string,
+  ): Promise<EngineBackupManifest | null> {
+    return this.postJson<EngineBackupManifest>('/backup/create', {
+      provider,
+      credentials,
+      query,
+      path,
+    });
+  }
+
+  async backupVerify(path: string): Promise<Record<string, unknown> | null> {
+    return this.postJson<Record<string, unknown>>('/backup/verify', { path });
   }
 }
