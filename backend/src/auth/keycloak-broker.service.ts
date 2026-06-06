@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { User } from '@prisma/client';
+import { createHash, randomUUID } from 'crypto';
 import { AuthService } from './auth.service';
 import { decrypt } from '../connected-accounts/crypto';
 
@@ -31,6 +32,65 @@ export class KeycloakBrokerService {
     }
 
     return this.fetchBrokerToken(refreshResult.accessToken, alias);
+  }
+
+  /**
+   * Build a Keycloak "client-initiated account linking" URL so a logged-in user
+   * can link an additional IdP (google/microsoft) to their EXISTING uchub
+   * identity from inside the app — the on-model alternative to a per-app OAuth
+   * client. The browser must carry the user's active KC SSO session cookie; the
+   * signed hash binds the request to that session
+   * (hash = Base64Url(SHA256(nonce + session_state + clientId + provider))).
+   * Returns null if it can't be minted (no stored token / refresh failed /
+   * no session_state) — the caller surfaces a re-auth hint.
+   */
+  async buildAccountLinkUrl(
+    user: User,
+    alias: IdpAlias,
+    redirectUri: string,
+  ): Promise<string | null> {
+    const refreshToken = this.loadRefreshToken(user.kcRefreshTokenEnc);
+    if (!refreshToken) return null;
+
+    const refreshed = await this.refreshKeycloakAccessToken(refreshToken);
+    if (!refreshed) return null;
+    if (refreshed.refreshToken) {
+      await this.authService.storeKcRefreshToken(user, refreshed.refreshToken);
+    }
+
+    const sessionState = this.sessionStateOf(refreshed.accessToken);
+    const issuer = this.issuer;
+    const clientId = this.clientId;
+    if (!sessionState || !issuer || !clientId) return null;
+
+    const nonce = randomUUID();
+    const hash = createHash('sha256')
+      .update(`${nonce}${sessionState}${clientId}${alias}`, 'utf8')
+      .digest('base64url');
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      nonce,
+      hash,
+    });
+    return `${issuer}/broker/${alias}/link?${params.toString()}`;
+  }
+
+  /** Read the SSO session id from a KC access token (no signature check needed —
+   *  it came straight from KC over TLS, and a wrong value just fails the link). */
+  private sessionStateOf(accessToken: string): string | null {
+    try {
+      const part = accessToken.split('.')[1];
+      if (!part) return null;
+      const payload = JSON.parse(Buffer.from(part, 'base64').toString('utf8')) as Record<
+        string,
+        unknown
+      >;
+      const ss = payload['session_state'] ?? payload['sid'];
+      return typeof ss === 'string' && ss ? ss : null;
+    } catch {
+      return null;
+    }
   }
 
   private loadRefreshToken(encrypted?: string | null): string | null {

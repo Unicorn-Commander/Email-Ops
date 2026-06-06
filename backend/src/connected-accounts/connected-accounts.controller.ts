@@ -90,6 +90,17 @@ export class ConnectedAccountsController {
     return this.connectedAccounts.listConnectedAccounts(user);
   }
 
+  @Get(':provider/link-url')
+  @ApiOperation({
+    summary: 'Mint an in-app Keycloak account-link URL to connect this provider to the caller.',
+  })
+  @ApiResponse({ status: 200, description: 'A one-time Keycloak account-linking URL.' })
+  async linkUrl(@CurrentUser() user: User, @Param('provider') providerParam: string) {
+    const provider = this.provider(providerParam);
+    await this.resolveWorkspace(user);
+    return this.connectedAccounts.getProviderLinkUrl(user, provider);
+  }
+
   @Get(':provider/stats')
   @ApiOperation({
     summary: 'Read aggregate inbox stats for a linked provider account.',

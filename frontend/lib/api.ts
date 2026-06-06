@@ -348,6 +348,21 @@ export async function listConnectedAccounts(
   return apiGet<ConnectedAccountsListResponse>('/connected-accounts', token);
 }
 
+/**
+ * Mint an in-app Keycloak account-link URL for a provider. The browser then
+ * navigates there (carrying its KC SSO session) to link Google/Microsoft to the
+ * signed-in identity, returning to /accounts?linked=<provider>.
+ */
+export async function getProviderLinkUrl(
+  provider: ConnectedProvider,
+  token?: string,
+): Promise<{ url: string }> {
+  return apiGet<{ url: string }>(
+    `/connected-accounts/${encodeURIComponent(provider)}/link-url`,
+    token,
+  );
+}
+
 export async function getInboxStats(
   provider: ConnectedProvider,
   token?: string,

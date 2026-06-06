@@ -82,6 +82,25 @@ export class ConnectedAccountsService {
     return { accounts };
   }
 
+  /**
+   * Mint an in-app Keycloak account-link URL so the user can connect a provider
+   * (gmail->google / microsoft) to their existing uchub identity. The return URL
+   * is derived server-side from FRONTEND_URL (no user-supplied redirect, so no
+   * open-redirect surface). Available to any authenticated user — linking
+   * necessarily precedes having a usable mailbox, so it is NOT entitlement-gated.
+   */
+  async getProviderLinkUrl(user: User, provider: ConnectedProvider): Promise<{ url: string }> {
+    const base = (process.env.FRONTEND_URL ?? '').replace(/\/$/, '');
+    const redirectUri = `${base}/accounts?linked=${provider}`;
+    const url = await this.broker.buildAccountLinkUrl(user, this.aliasFor(provider), redirectUri);
+    if (!url) {
+      throw new ForbiddenException(
+        'Could not start account linking — your SSO session may have expired. Sign out and back in, then try again.',
+      );
+    }
+    return { url };
+  }
+
   async getInboxStats(
     user: User,
     provider: ConnectedProvider,

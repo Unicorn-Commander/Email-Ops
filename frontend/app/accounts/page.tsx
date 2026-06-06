@@ -1,13 +1,26 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { Button, Badge, Card, Skeleton, cn } from '@/components/ui';
 import { useConnectedAccounts } from '@/components/ConnectedAccountsProvider';
 import { useInboxStats } from '@/components/useInboxStats';
 import { formatBytes, providerMeta, storagePercent } from '@/lib/cleaner-model';
-import { ssoLoginUrl, type LinkedAccountView } from '@/lib/api';
+import { getProviderLinkUrl, type ConnectedProvider, type LinkedAccountView } from '@/lib/api';
 
 export default function AccountsPage() {
   const { accounts, loading, error, refreshAccounts } = useConnectedAccounts();
+
+  // Returning from a Keycloak account-link round-trip (/accounts?linked=google):
+  // refresh link status and clean the URL.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (new URLSearchParams(window.location.search).get('linked')) {
+      void refreshAccounts();
+      window.history.replaceState({}, '', '/accounts');
+    }
+  }, [refreshAccounts]);
+
+  const firstUnlinked = accounts.find((a) => !a.linked)?.provider;
 
   return (
     <div className="space-y-7">
@@ -27,7 +40,13 @@ export default function AccountsPage() {
           <Button variant="secondary" onClick={() => void refreshAccounts()} disabled={loading}>
             Refresh accounts
           </Button>
-          <Button onClick={() => startBrokerLogin()}>Add account</Button>
+          <Button
+            onClick={() => firstUnlinked && void linkProvider(firstUnlinked)}
+            disabled={!firstUnlinked}
+            title={firstUnlinked ? undefined : 'All providers are connected'}
+          >
+            {firstUnlinked ? `Connect ${providerMeta(firstUnlinked).shortLabel}` : 'All connected'}
+          </Button>
         </div>
       </header>
 
@@ -61,6 +80,19 @@ function AccountCard({ account }: { account: LinkedAccountView }) {
   const meta = providerMeta(account.provider);
   const { load, stats, unavailableReason, error } = useInboxStats(account.provider, account.linked);
   const percent = storagePercent(stats);
+  const [linking, setLinking] = useState(false);
+  const [linkErr, setLinkErr] = useState<string | null>(null);
+
+  const connect = async () => {
+    setLinkErr(null);
+    setLinking(true);
+    try {
+      await linkProvider(account.provider);
+    } catch (e) {
+      setLinkErr(e instanceof Error ? e.message : 'Could not start linking.');
+      setLinking(false);
+    }
+  };
 
   return (
     <Card className="overflow-hidden">
@@ -124,20 +156,27 @@ function AccountCard({ account }: { account: LinkedAccountView }) {
         </section>
 
         <div className="flex flex-col gap-2 sm:flex-row">
-          <Button variant={account.linked ? 'secondary' : 'primary'} onClick={() => startBrokerLogin()}>
-            {account.linked ? 'Reconnect' : 'Connect'}
-          </Button>
-          <Button variant="secondary" onClick={() => startBrokerLogin()}>
-            Provider sign-in
+          <Button
+            variant={account.linked ? 'secondary' : 'primary'}
+            onClick={() => void connect()}
+            disabled={linking}
+          >
+            {linking
+              ? 'Opening…'
+              : account.linked
+                ? `Reconnect ${meta.shortLabel}`
+                : `Connect ${meta.shortLabel}`}
           </Button>
           <Button variant="ghost" disabled title="Disconnect endpoint is not part of Phase 1.">
             Disconnect
           </Button>
         </div>
 
+        {linkErr && <p className="text-xs leading-5 text-danger">{linkErr}</p>}
+
         <p className="text-xs leading-5 text-tertiary">
-          Disconnecting only removes access. It deletes no mail. The cleanup engine is read-only from
-          this screen.
+          Connecting links {meta.label} to your account via Magic Unicorn SSO. Disconnecting only
+          removes access — it deletes no mail. The cleanup engine is read-only from this screen.
         </p>
       </div>
     </Card>
@@ -163,6 +202,10 @@ function ScopeChip({ label, state }: { label: string; state: 'on' | 'off' | 'loc
   );
 }
 
-function startBrokerLogin() {
-  window.location.href = ssoLoginUrl();
+/** Fetch a Keycloak account-link URL for the provider and send the browser there.
+ *  The browser carries its KC SSO session cookie, links the IdP (granting the
+ *  gmail.modify / Mail.ReadWrite consent), and returns to /accounts?linked=<provider>. */
+async function linkProvider(provider: ConnectedProvider): Promise<void> {
+  const { url } = await getProviderLinkUrl(provider);
+  window.location.href = url;
 }
