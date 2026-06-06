@@ -31,6 +31,11 @@ export class KeycloakStrategy extends PassportStrategy(Strategy, 'keycloak') {
       clientID: configService.get('KEYCLOAK_CLIENT_ID', 'email-ops'),
       clientSecret: configService.get('KEYCLOAK_CLIENT_SECRET', ''),
       callbackURL,
+      // Behind Traefik, TLS terminates at the proxy and the app sees plain http.
+      // `proxy: true` makes passport-oauth2 build the (relative) callbackURL from
+      // X-Forwarded-Proto/Host, so the redirect_uri is https — matching the
+      // value registered on the Keycloak client. (Requires `trust proxy` set.)
+      proxy: true,
       scope: ['openid', 'profile', 'email'],
     });
 

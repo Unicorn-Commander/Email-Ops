@@ -1,5 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import compression from 'compression';
@@ -7,9 +8,14 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { bodyParser: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: true });
   const configService = app.get(ConfigService);
   const logger = new Logger('Bootstrap');
+
+  // Behind the suite Traefik (TLS terminated at the proxy): trust the first
+  // proxy hop so req.protocol/host reflect X-Forwarded-* (https), which the
+  // Keycloak OAuth callback URL is built from.
+  app.set('trust proxy', 1);
 
   // Security
   app.use(helmet());
