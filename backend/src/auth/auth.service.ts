@@ -160,6 +160,26 @@ export class AuthService {
       // Keycloak realm tokens (which DO emit email) and for the long-term
       // opaque-sub Brigade model (Brigade emits email separately then).
       const subLooksLikeEmail = typeof payload.sub === 'string' && payload.sub.includes('@');
+
+      // Federation-actor branch: a cross-app SERVICE caller carries an RFC-8693
+      // `act.client_id` and no human identity → resolve to a synthetic, allow-listed
+      // federation principal instead of running it through the human access-list gate
+      // (which would reject it). Mirrors the Project-Ops federation pattern.
+      const actorClientId =
+        payload?.act && typeof payload.act.client_id === 'string'
+          ? payload.act.client_id.trim()
+          : null;
+      const hasHumanIdentity = !!payload?.email || subLooksLikeEmail;
+      if (actorClientId && !hasHumanIdentity) {
+        if (AuthService.federationActors().includes(actorClientId)) {
+          this.logger.log(`Federation actor authorized: ${actorClientId}`);
+          return AuthService.buildFederationPrincipal(actorClientId);
+        }
+        this.logger.warn(
+          `Rejected federation actor '${actorClientId}' — not in EMAIL_OPS_FEDERATION_ACTORS`,
+        );
+      }
+
       const profile = {
         email: payload.email ?? (subLooksLikeEmail ? payload.sub : undefined),
         preferred_username: payload.preferred_username,
@@ -187,6 +207,45 @@ export class AuthService {
     if (raw === undefined || raw === null) {
       return ['https://brigade.unicorncommander.ai'];
     }
+    return raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  /**
+   * A synthetic, non-DB principal for a cross-app federation actor. Mirrors the
+   * suite pattern (Project-Ops): a service caller authenticates as
+   * `federation:<actor>` and is authorized downstream by the Brigade-vouched
+   * workspace claim, never the human access-list. `email`/`role` are absent — the
+   * cast satisfies the read type (Email-Ops `User` has no role column).
+   */
+  static buildFederationPrincipal(actorClientId: string): User {
+    const now = new Date();
+    return {
+      id: `federation:${actorClientId}`,
+      email: null,
+      username: `federation:${actorClientId}`,
+      firstName: '',
+      lastName: '',
+      keycloakId: null,
+      isActive: true,
+      lastLoginAt: null,
+      createdAt: now,
+      updatedAt: now,
+      __isFederationActor: true,
+      __federationActor: actorClientId,
+    } as unknown as User;
+  }
+
+  /**
+   * Parse EMAIL_OPS_FEDERATION_ACTORS (comma-separated allow-list of actor
+   * client-ids permitted to federate, e.g. `customer-ops`). Unset/empty ⇒ no
+   * federation actors (safe default). Read each call (like brigadeTrustedIssuers).
+   */
+  private static federationActors(): readonly string[] {
+    const raw = process.env.EMAIL_OPS_FEDERATION_ACTORS;
+    if (!raw) return [];
     return raw
       .split(',')
       .map((s) => s.trim())
