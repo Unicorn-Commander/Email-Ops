@@ -107,6 +107,20 @@ export class EngineMailProvider extends MailProviderPort {
     };
   }
 
+  /**
+   * The AUTHORITATIVE linked address for (provider, owning user) — resolved from
+   * the provider itself via the broker token, so a Gmail/M365 whose address
+   * differs from the user's login identity registers correctly. null when the
+   * account isn't connected / the engine is dormant (the caller falls back).
+   */
+  async resolveOwnAddress(provider: ExternalProvider, ucUid: string): Promise<string | null> {
+    const credentials = await this.credentialsForUser(provider, ucUid);
+    if (!credentials) return null;
+    const profile = await this.engine.getAccountProfile(provider, credentials);
+    const email = profile?.email?.trim().toLowerCase();
+    return email || null;
+  }
+
   // ── helpers ──
 
   private providerOf(mailbox: Pick<MailboxAccount, 'provider'>): ExternalProvider | null {
@@ -123,23 +137,32 @@ export class EngineMailProvider extends MailProviderPort {
     return provider === 'gmail' ? { token } : { access_token: token };
   }
 
-  /** Resolve {provider, credentials} via the KC broker, or null (degrade-clean). */
+  /** {credentials} for (provider, owning user keycloakId) via the KC broker, or null. */
+  private async credentialsForUser(
+    provider: ExternalProvider,
+    ucUid: string | null,
+  ): Promise<Record<string, unknown> | null> {
+    if (!ucUid) return null;
+    try {
+      const user = await this.prisma.user.findUnique({ where: { keycloakId: ucUid } });
+      if (!user) return null;
+      const token = await this.broker.getProviderAccessToken(user, this.aliasFor(provider));
+      return token ? this.credentialsFor(provider, token) : null;
+    } catch (err) {
+      this.logger.warn(
+        `credentialsForUser(${provider}, ${ucUid}) failed: ${(err as Error).message} — treating as not connected`,
+      );
+      return null;
+    }
+  }
+
+  /** Resolve {provider, credentials} for a mailbox via the KC broker, or null. */
   private async authFor(
     mailbox: MailboxAccount,
   ): Promise<{ provider: ExternalProvider; credentials: Record<string, unknown> } | null> {
     const provider = this.providerOf(mailbox);
-    if (!provider || !mailbox.ownerKey) return null;
-    try {
-      const user = await this.prisma.user.findUnique({ where: { keycloakId: mailbox.ownerKey } });
-      if (!user) return null;
-      const token = await this.broker.getProviderAccessToken(user, this.aliasFor(provider));
-      if (!token) return null;
-      return { provider, credentials: this.credentialsFor(provider, token) };
-    } catch (err) {
-      this.logger.warn(
-        `authFor(${mailbox.emailAddress}) failed: ${(err as Error).message} — treating as not connected`,
-      );
-      return null;
-    }
+    if (!provider) return null;
+    const credentials = await this.credentialsForUser(provider, mailbox.ownerKey);
+    return credentials ? { provider, credentials } : null;
   }
 }

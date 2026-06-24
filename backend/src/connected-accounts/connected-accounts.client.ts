@@ -6,6 +6,7 @@ import {
   EngineArchiveRef,
   EngineArchiveRestoreResult,
   EngineArchiveVerifyResult,
+  EngineAccountProfile,
   EngineInboxStats,
   EngineListMessagesResult,
   EngineMailFolder,
@@ -306,6 +307,13 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
   }
 
   // ── Unified-inbox verbs (degrade-clean: null on dormant/transport/HTTP error) ──
+
+  async getAccountProfile(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+  ): Promise<EngineAccountProfile | null> {
+    return this.postJson<EngineAccountProfile>('/accounts/profile', { provider, credentials });
+  }
 
   async listMailThreads(
     provider: 'gmail' | 'microsoft',

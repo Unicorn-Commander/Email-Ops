@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { WorkspaceModule } from '../common/workspace/workspace.module';
 import { ProvisioningModule } from '../provisioning/provisioning.module';
+import { MailProviderModule } from '../mail-provider/mail-provider.module';
 import { MailboxAccountsController } from './mailbox-accounts.controller';
 import { MailboxAccountsService } from './mailbox-accounts.service';
 
@@ -12,7 +13,7 @@ import { MailboxAccountsService } from './mailbox-accounts.service';
  * call it. PrismaService is global.
  */
 @Module({
-  imports: [AuthModule, WorkspaceModule, ProvisioningModule],
+  imports: [AuthModule, WorkspaceModule, ProvisioningModule, MailProviderModule],
   controllers: [MailboxAccountsController],
   providers: [MailboxAccountsService],
   exports: [MailboxAccountsService],

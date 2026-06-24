@@ -15,6 +15,7 @@ import {
   EngineArchiveRestoreResult,
   EngineArchiveVerifyResult,
   EngineBackupManifest,
+  EngineAccountProfile,
   EngineInboxStats,
   EngineListMessagesResult,
   EngineMailFolder,
@@ -98,6 +99,12 @@ export abstract class ConnectedAccountsEnginePort {
   abstract backupVerify(path: string): Promise<Record<string, unknown> | null>;
 
   // ── Unified-inbox verbs (read inbox threads, read a thread, send/reply) ──
+
+  /** The authenticated account's own profile (the authoritative linked address). */
+  abstract getAccountProfile(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+  ): Promise<EngineAccountProfile | null>;
 
   abstract listMailThreads(
     provider: 'gmail' | 'microsoft',

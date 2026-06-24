@@ -13,6 +13,7 @@
  */
 
 import {
+  BadRequestException,
   Body,
   ConflictException,
   Controller,
@@ -35,6 +36,7 @@ import { WorkspaceRoleParam } from '../common/workspace/workspace-role.decorator
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
 import { ProvisionDecision } from '../provisioning/provisioning-policy';
+import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { MailboxAccountsService } from './mailbox-accounts.service';
 import { CreateMailboxInput, UpdateMailboxInput } from './mailbox-accounts.types';
 
@@ -48,7 +50,9 @@ class CreateMailboxDto {
 
 class ConnectMailboxDto {
   @IsIn(['gmail', 'microsoft']) provider!: 'gmail' | 'microsoft';
-  @IsString() @MaxLength(320) email_address!: string;
+  // Optional hint; the backend resolves the AUTHORITATIVE address from the
+  // provider via the broker token and only falls back to this if that fails.
+  @IsOptional() @IsString() @MaxLength(320) email_address?: string;
   @IsOptional() @IsString() @MaxLength(200) display_name?: string;
 }
 
@@ -68,6 +72,7 @@ export class MailboxAccountsController {
   constructor(
     private readonly mailboxes: MailboxAccountsService,
     private readonly policy: ProvisioningPolicyService,
+    private readonly mailProvider: MailProviderPort,
   ) {}
 
   private blockIfApprovalGated(decision: ProvisionDecision, action: string): void {
@@ -155,10 +160,20 @@ export class MailboxAccountsController {
     // isn't minting a shared/agent send identity, just surfacing the user's own
     // connected mailbox. The OAuth token stays in the Keycloak broker.
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
-    this.mailboxes.assertValidAddress(body.email_address);
+    if (!ucUid) throw new BadRequestException('No identity on the request.');
+    // Resolve the AUTHORITATIVE provider address (so a Gmail/M365 that differs
+    // from the login identity registers correctly); fall back to the client hint.
+    const resolved = await this.mailProvider.resolveOwnAddress(body.provider, ucUid);
+    const emailAddress = resolved ?? body.email_address;
+    if (!emailAddress) {
+      throw new BadRequestException(
+        'Could not determine the account address — re-link the account, then try again.',
+      );
+    }
+    this.mailboxes.assertValidAddress(emailAddress);
     return this.mailboxes.connectExternalMailbox(workspaceId, ucUid, {
       provider: body.provider,
-      emailAddress: body.email_address,
+      emailAddress,
       displayName: body.display_name ?? null,
     });
   }

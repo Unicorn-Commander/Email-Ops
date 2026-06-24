@@ -53,4 +53,14 @@ export abstract class MailProviderPort {
     mailbox: MailboxAccount,
     req: MailProviderSendRequest,
   ): Promise<MailProviderSendResult>;
+
+  /**
+   * The authoritative linked address for (provider, owning user) — fetched from
+   * the provider, so connecting registers the real Gmail/M365 address even when
+   * it differs from the user's login identity. null when not connected.
+   */
+  abstract resolveOwnAddress(
+    provider: 'gmail' | 'microsoft',
+    ucUid: string,
+  ): Promise<string | null>;
 }

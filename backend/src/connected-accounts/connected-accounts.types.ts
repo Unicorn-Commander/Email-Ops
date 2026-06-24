@@ -234,3 +234,9 @@ export interface EngineMailSendResult {
 
 /** The client mail folders the unified inbox can request from a provider. */
 export type EngineMailFolder = 'inbox' | 'archive' | 'spam' | 'trash' | 'sent' | 'drafts';
+
+/** The authenticated account's own profile (the AUTHORITATIVE linked address). */
+export interface EngineAccountProfile {
+  email: string;
+  [key: string]: unknown;
+}

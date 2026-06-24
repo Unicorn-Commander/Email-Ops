@@ -30,11 +30,13 @@ function make(opts: {
   threads?: unknown;
   thread?: unknown;
   send?: unknown;
+  profile?: unknown;
 }) {
   const broker = {
     getProviderAccessToken: jest.fn().mockResolvedValue(opts.token ?? null),
   } as unknown as KeycloakBrokerService;
   const engine = {
+    getAccountProfile: jest.fn().mockResolvedValue(opts.profile ?? null),
     listMailThreads: jest.fn().mockResolvedValue(opts.threads ?? null),
     getMailThread: jest.fn().mockResolvedValue(opts.thread ?? null),
     sendMail: jest.fn().mockResolvedValue(opts.send ?? null),
@@ -130,5 +132,28 @@ describe('EngineMailProvider', () => {
     const res = await notConnected.provider.send(gmailbox(), { from: 'person84@example.com', to: 'x@y.test', subject: 's', body: 'b' });
     expect(res).toEqual({ accepted: false, providerMessageId: null, threadId: null, reason: 'account_not_connected' });
     expect(notConnected.engine.sendMail).not.toHaveBeenCalled();
+  });
+
+  it('resolveOwnAddress returns the provider-authoritative address, lowercased', async () => {
+    const { provider, engine } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      profile: { email: 'Real.person84@example.com' },
+    });
+    expect(await provider.resolveOwnAddress('gmail', 'kc-sub-1')).toBe('real.person84@example.com');
+    expect(engine.getAccountProfile).toHaveBeenCalledWith('gmail', { token: 'gtok' });
+  });
+
+  it('resolveOwnAddress degrades clean: no token / no profile / blank email → null', async () => {
+    expect(await make({ user: { keycloakId: 'k' }, token: null }).provider.resolveOwnAddress('gmail', 'k')).toBeNull();
+    expect(
+      await make({ user: { keycloakId: 'k' }, token: 'gtok', profile: null }).provider.resolveOwnAddress('gmail', 'k'),
+    ).toBeNull();
+    expect(
+      await make({ user: { keycloakId: 'k' }, token: 'gtok', profile: { email: '  ' } }).provider.resolveOwnAddress(
+        'gmail',
+        'k',
+      ),
+    ).toBeNull();
   });
 });
