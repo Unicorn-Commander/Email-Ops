@@ -16,6 +16,7 @@ import { AgentsModule } from './agents/agents.module';
 import { EmailHealthModule } from './email-health/email-health.module';
 import { AgentControlsModule } from './agent-controls/agent-controls.module';
 import { ProvisioningModule } from './provisioning/provisioning.module';
+import { ProvisioningRequestsModule } from './provisioning/provisioning-requests.module';
 import { MailboxAccountsModule } from './mailbox-accounts/mailbox-accounts.module';
 import { MailModule } from './mail/mail.module';
 
@@ -63,6 +64,9 @@ import { MailModule } from './mail/mail.module';
     ProvisioningModule,
     // Mailbox management (human/agent/shared CRUD; policy-gated).
     MailboxAccountsModule,
+    // The provisioning approval queue (list/approve/reject; replays an approved
+    // request through the canonical apply path). Imported after its dependencies.
+    ProvisioningRequestsModule,
     // The human email-client BFF (read your inboxes + compose; degrade-clean).
     MailModule,
     // MCP last so it can consume the contract + agent-inbox tools.

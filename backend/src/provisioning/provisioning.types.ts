@@ -2,7 +2,12 @@
  * Provisioning-policy wire shapes (the per-workspace RBAC control surface).
  */
 
-import { ProvisioningMode, WorkspaceRole } from '@prisma/client';
+import {
+  ProvisionableKind,
+  ProvisioningMode,
+  ProvisioningRequestState,
+  WorkspaceRole,
+} from '@prisma/client';
 
 export interface ProvisioningPolicyView {
   human_mailbox_create_mode: ProvisioningMode;
@@ -31,6 +36,43 @@ export interface UpdatePolicyInput {
   allowSelfServiceOwnMailbox?: boolean;
   maxMailboxesPerWorkspace?: number | null;
   maxAgentsPerWorkspace?: number | null;
+}
+
+/** Input to file a PENDING provisioning request (payload = the canonical service input). */
+export interface FileRequestInput {
+  kind: ProvisionableKind | string;
+  action: string;
+  payload: unknown;
+  summary: string;
+  requestedByAgentKey?: string | null;
+}
+
+/** The thin view returned when a request is filed (a 202-style ack). */
+export interface FiledRequestView {
+  id: string;
+  state: ProvisioningRequestState;
+  summary: string | null;
+  kind: ProvisionableKind;
+  action: string;
+}
+
+/** The full provisioning-request view (the approval queue surface). */
+export interface ProvisioningRequestView {
+  id: string;
+  kind: ProvisionableKind;
+  action: string;
+  state: ProvisioningRequestState;
+  summary: string | null;
+  target_id: string | null;
+  requested_by_uc_uid: string | null;
+  requested_by_agent_key: string | null;
+  reviewed_by_uc_uid: string | null;
+  reviewed_at: string | null;
+  review_note: string | null;
+  applied_ref_id: string | null;
+  applied_at: string | null;
+  failure_reason: string | null;
+  created_at: string | null;
 }
 
 /** The provisioning actions the policy gates. */

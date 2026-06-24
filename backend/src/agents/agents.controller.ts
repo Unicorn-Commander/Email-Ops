@@ -184,10 +184,6 @@ export class AgentsController {
     @Body() body: CreateAgentDto,
   ) {
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
-    this.blockIfApprovalGated(
-      await this.policy.authorize(workspaceId, ucUid, role, 'agent.create'),
-      'agent.create',
-    );
     const input: CreateAgentInput = {
       key: body.key,
       displayName: body.display_name,
@@ -198,6 +194,17 @@ export class AgentsController {
       tier: body.tier,
       managerAgentKey: body.manager_agent_key ?? null,
     };
+    const decision = await this.policy.authorize(workspaceId, ucUid, role, 'agent.create');
+    if (decision === 'requires_approval') {
+      // APPROVAL mode: file a request instead of creating; an approver replays it.
+      const filed = await this.policy.fileRequest(workspaceId, ucUid, {
+        kind: 'AGENT',
+        action: 'create',
+        payload: input,
+        summary: `Create agent ${body.key}`,
+      });
+      return { provisioning_request: filed };
+    }
     return this.agents.createAgent(workspaceId, ucUid, input);
   }
 

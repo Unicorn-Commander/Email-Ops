@@ -9,14 +9,27 @@
  */
 
 import { ForbiddenException, Injectable } from '@nestjs/common';
-import { Prisma, ProvisioningMode, WorkspaceRole } from '@prisma/client';
+import {
+  AgentActionKind,
+  Prisma,
+  ProvisionableKind,
+  ProvisioningMode,
+  ProvisioningRequestState,
+  WorkspaceRole,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   DEFAULT_PROVISIONING_POLICY,
   decideProvision,
   ProvisionDecision,
 } from './provisioning-policy';
-import { ProvisionAction, ProvisioningPolicyView, UpdatePolicyInput } from './provisioning.types';
+import {
+  FileRequestInput,
+  FiledRequestView,
+  ProvisionAction,
+  ProvisioningPolicyView,
+  UpdatePolicyInput,
+} from './provisioning.types';
 
 /** The effective policy = the 6 dials + approver + self-service + caps + origin. */
 interface EffectivePolicy {
@@ -144,6 +157,44 @@ export class ProvisioningPolicyService {
       );
     }
     return decision;
+  }
+
+  /**
+   * File a PENDING provisioning request (what a write surface does when authorize
+   * returns 'requires_approval'). The payload is the canonical service input, so
+   * the approval flow replays it verbatim. Lives here (not on the requests
+   * service) so the agent/mailbox controllers can file without importing the
+   * requests module — keeping the module graph acyclic.
+   */
+  async fileRequest(
+    workspaceId: string,
+    ucUid: string | null,
+    input: FileRequestInput,
+  ): Promise<FiledRequestView> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const req = await tx.mailboxProvisioningRequest.create({
+        data: {
+          workspaceId,
+          kind: input.kind as ProvisionableKind,
+          action: input.action,
+          state: ProvisioningRequestState.PENDING,
+          payload: input.payload as Prisma.InputJsonValue,
+          summary: input.summary,
+          requestedByUcUid: ucUid,
+          requestedByAgentKey: input.requestedByAgentKey ?? null,
+        },
+      });
+      await tx.agentActionEvent.create({
+        data: {
+          workspaceId,
+          kind: AgentActionKind.PROVISION_REQUESTED,
+          actorUcUid: ucUid,
+          agentKey: input.requestedByAgentKey ?? null,
+          detail: input.summary,
+        },
+      });
+      return { id: req.id, state: req.state, summary: req.summary, kind: req.kind, action: req.action };
+    });
   }
 
   private modeFor(policy: EffectivePolicy, action: ProvisionAction): ProvisioningMode {

@@ -102,10 +102,6 @@ export class MailboxAccountsController {
     const ownerKind = body.owner_kind ?? MailboxOwnerKind.SHARED;
     const action = ownerKind === MailboxOwnerKind.AGENT ? 'agentMailbox.create' : 'humanMailbox.create';
     const isSelfOwnMailbox = ownerKind === MailboxOwnerKind.HUMAN && !!ucUid && body.owner_key === ucUid;
-    this.blockIfApprovalGated(
-      await this.policy.authorize(workspaceId, ucUid, role, action, { isSelfOwnMailbox }),
-      action,
-    );
     const input: CreateMailboxInput = {
       emailAddress: body.email_address,
       displayName: body.display_name ?? null,
@@ -113,6 +109,17 @@ export class MailboxAccountsController {
       ownerKey: body.owner_key ?? null,
       postmarkLane: body.postmark_lane,
     };
+    const decision = await this.policy.authorize(workspaceId, ucUid, role, action, { isSelfOwnMailbox });
+    if (decision === 'requires_approval') {
+      // APPROVAL mode: file a request instead of applying; an approver replays it.
+      const filed = await this.policy.fileRequest(workspaceId, ucUid, {
+        kind: ownerKind === MailboxOwnerKind.AGENT ? 'AGENT_MAILBOX' : 'HUMAN_MAILBOX',
+        action: 'create',
+        payload: input,
+        summary: `Create ${ownerKind.toLowerCase()} mailbox ${body.email_address}`,
+      });
+      return { provisioning_request: filed };
+    }
     return this.mailboxes.createMailbox(workspaceId, ucUid, input);
   }
 
