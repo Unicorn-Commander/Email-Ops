@@ -115,13 +115,87 @@ class FakeProvider:
         self.calls.append(("translate_query", (canonical_query,), {}))
         return canonical_query
 
+    def list_threads(self, folder: str = "inbox", limit: int = 50):
+        from providers.mail_client import Address, ThreadSummary
+
+        self.calls.append(("list_threads", (), {"folder": folder, "limit": limit}))
+        return [
+            ThreadSummary(
+                id="thread-1",
+                subject="Thread 1",
+                participants=[Address(address="a@example.com", name="A")],
+                last_message_at="2024-01-01T00:00:00+00:00",
+                last_snippet="Snippet 1",
+                message_count=2,
+                unread=True,
+            )
+        ]
+
+    def get_thread(self, thread_id: str):
+        from providers.mail_client import Address, ThreadMessage
+
+        self.calls.append(("get_thread", (thread_id,), {}))
+        return [
+            ThreadMessage(
+                id="msg-1",
+                thread_id=thread_id,
+                sender=Address(address="a@example.com", name="A"),
+                to=[Address(address="me@example.com", name=None)],
+                subject="Thread subject",
+                sent_at="2024-01-01T00:00:00+00:00",
+                preview="Preview",
+                direction="received",
+            )
+        ]
+
+    def send_message(self, from_addr, to_addr, subject, body, in_reply_to_thread_id=None):
+        from providers.mail_client import SendResult
+
+        self.calls.append((
+            "send_message",
+            (),
+            {
+                "from_addr": from_addr,
+                "to_addr": to_addr,
+                "subject": subject,
+                "body": body,
+                "in_reply_to_thread_id": in_reply_to_thread_id,
+            },
+        ))
+        return SendResult(
+            accepted=True,
+            provider_message_id="sent-1",
+            thread_id=in_reply_to_thread_id or "thread-new",
+        )
+
+
+class FailingProvider(FakeProvider):
+    """A provider that authenticates but whose mail methods raise (degrade-clean)."""
+
+    def list_threads(self, folder: str = "inbox", limit: int = 50):
+        raise RuntimeError("401 auth error")
+
+    def get_thread(self, thread_id: str):
+        raise RuntimeError("403 forbidden")
+
+    def send_message(self, from_addr, to_addr, subject, body, in_reply_to_thread_id=None):
+        raise RuntimeError("token expired")
+
+
+class UnauthenticatableProvider(FakeProvider):
+    """A provider whose authenticate() raises (e.g. expired token, missing msal)."""
+
+    def authenticate(self, credentials):
+        raise RuntimeError("invalid_grant: token expired")
+
 
 class FakeProviderFactory:
-    def __init__(self):
+    def __init__(self, provider_cls=FakeProvider):
+        self.provider_cls = provider_cls
         self.instances: list[FakeProvider] = []
 
     def create_provider(self, provider_type: str, **kwargs):
-        provider = FakeProvider(provider_type)
+        provider = self.provider_cls(provider_type)
         self.instances.append(provider)
         return provider
 
@@ -468,6 +542,150 @@ def test_ai_analyze_degrades_clean_when_ai_unavailable(client, monkeypatch):
     assert response.status_code == 200
     assert "ai_unavailable" in response.text
     assert '"ai_categories": []' in response.text
+
+
+@pytest.mark.parametrize("provider", ["gmail", "microsoft"])
+def test_mail_threads_happy_path(client, fake_provider_factory, provider):
+    response = client.post(
+        "/mail/threads",
+        headers=_auth_headers(),
+        json={"provider": provider, "credentials": {"token": "abc"}, "folder": "inbox", "limit": 25},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["threads"]) == 1
+    thread = body["threads"][0]
+    assert thread["id"] == "thread-1"
+    assert thread["unread"] is True
+    assert thread["message_count"] == 2
+    assert thread["participants"][0] == {"address": "a@example.com", "name": "A"}
+    assert fake_provider_factory.instances[-1].calls[-1] == (
+        "list_threads",
+        (),
+        {"folder": "inbox", "limit": 25},
+    )
+
+
+@pytest.mark.parametrize("provider", ["gmail", "microsoft"])
+def test_mail_thread_happy_path(client, fake_provider_factory, provider):
+    response = client.post(
+        "/mail/thread",
+        headers=_auth_headers(),
+        json={"provider": provider, "credentials": {"token": "abc"}, "thread_id": "thread-1"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["messages"]) == 1
+    msg = body["messages"][0]
+    # Contract: the sender field is serialised as "from".
+    assert "from" in msg and "sender" not in msg
+    assert msg["from"] == {"address": "a@example.com", "name": "A"}
+    assert msg["thread_id"] == "thread-1"
+    assert msg["direction"] == "received"
+
+
+@pytest.mark.parametrize("provider", ["gmail", "microsoft"])
+def test_mail_send_happy_path(client, fake_provider_factory, provider):
+    response = client.post(
+        "/mail/send",
+        headers=_auth_headers(),
+        json={
+            "provider": provider,
+            "credentials": {"token": "abc"},
+            "from": "me@example.com",
+            "to": "you@example.com",
+            "subject": "Hi",
+            "body": "Hello there",
+            "in_reply_to_thread_id": "thread-1",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["provider_message_id"] == "sent-1"
+    assert body["thread_id"] == "thread-1"
+    sent_call = fake_provider_factory.instances[-1].calls[-1]
+    assert sent_call[0] == "send_message"
+    assert sent_call[2]["from_addr"] == "me@example.com"
+    assert sent_call[2]["to_addr"] == "you@example.com"
+    assert sent_call[2]["in_reply_to_thread_id"] == "thread-1"
+
+
+def test_mail_routes_require_auth(client):
+    for path, payload in [
+        ("/mail/threads", {"provider": "gmail", "credentials": {"token": "abc"}}),
+        ("/mail/thread", {"provider": "gmail", "credentials": {"token": "abc"}, "thread_id": "t"}),
+        ("/mail/send", {"provider": "gmail", "credentials": {"token": "abc"}, "to": "x@example.com"}),
+    ]:
+        response = client.post(path, json=payload)
+        assert response.status_code == 401, path
+
+
+def _client_with_factory(monkeypatch, provider_cls):
+    monkeypatch.setenv("ENGINE_SHARED_SECRET", "test-secret")
+    factory = FakeProviderFactory(provider_cls)
+    monkeypatch.setattr(app.provider_factory, "create_provider", factory.create_provider)
+    return TestClient(app.app), factory
+
+
+def test_mail_threads_degrades_clean_on_provider_error(monkeypatch):
+    cli, _ = _client_with_factory(monkeypatch, FailingProvider)
+    response = cli.post(
+        "/mail/threads",
+        headers=_auth_headers(),
+        json={"provider": "gmail", "credentials": {"token": "abc"}, "folder": "inbox"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"threads": []}
+
+
+def test_mail_thread_degrades_clean_on_provider_error(monkeypatch):
+    cli, _ = _client_with_factory(monkeypatch, FailingProvider)
+    response = cli.post(
+        "/mail/thread",
+        headers=_auth_headers(),
+        json={"provider": "microsoft", "credentials": {"access_token": "abc"}, "thread_id": "t"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"messages": []}
+
+
+def test_mail_send_degrades_clean_on_provider_error(monkeypatch):
+    cli, _ = _client_with_factory(monkeypatch, FailingProvider)
+    response = cli.post(
+        "/mail/send",
+        headers=_auth_headers(),
+        json={"provider": "gmail", "credentials": {"token": "abc"}, "to": "x@example.com", "body": "hi"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is False
+    assert body["reason"] == "send_failed"
+
+
+def test_mail_threads_degrades_clean_on_auth_failure(monkeypatch):
+    """A provider whose authenticate() raises (expired token) must yield empty + 200."""
+    cli, _ = _client_with_factory(monkeypatch, UnauthenticatableProvider)
+    response = cli.post(
+        "/mail/threads",
+        headers=_auth_headers(),
+        json={"provider": "microsoft", "credentials": {"access_token": "expired"}},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"threads": []}
+
+
+def test_mail_send_degrades_clean_on_auth_failure(monkeypatch):
+    cli, _ = _client_with_factory(monkeypatch, UnauthenticatableProvider)
+    response = cli.post(
+        "/mail/send",
+        headers=_auth_headers(),
+        json={"provider": "gmail", "credentials": {"token": "expired"}, "to": "x@example.com"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accepted"] is False
+    assert body["reason"] == "provider_unavailable"
 
 
 def test_ai_generate_falls_back_to_frontier(monkeypatch, ai_enabled):

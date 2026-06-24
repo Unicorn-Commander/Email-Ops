@@ -1,0 +1,398 @@
+"""
+Provider-level tests for the unified mail client (threads / thread / send).
+
+These exercise the REAL provider mapping logic (folder->query, conversation
+grouping, MIME/JSON build, direction inference) by faking the Gmail API
+``service`` object and the Microsoft Graph ``requests`` layer.
+"""
+from __future__ import annotations
+
+import base64
+import email
+from email import policy
+
+import pytest
+
+from providers.gmail_provider import GmailProvider, _FOLDER_QUERY
+from providers.microsoft_provider import MicrosoftGraphProvider, _FOLDER_ID
+
+
+# ---------------------------------------------------------------------------
+# Gmail fakes
+# ---------------------------------------------------------------------------
+
+class _GmailExec:
+    def __init__(self, value):
+        self._value = value
+
+    def execute(self):
+        return self._value
+
+
+class _FakeThreads:
+    def __init__(self, list_result, get_results, sink):
+        self._list_result = list_result
+        self._get_results = get_results
+        self._sink = sink
+
+    def list(self, **kwargs):
+        self._sink.append(("threads.list", kwargs))
+        return _GmailExec(self._list_result)
+
+    def get(self, **kwargs):
+        self._sink.append(("threads.get", kwargs))
+        return _GmailExec(self._get_results[kwargs["id"]])
+
+
+class _FakeMessages:
+    def __init__(self, send_result, sink):
+        self._send_result = send_result
+        self._sink = sink
+
+    def send(self, **kwargs):
+        self._sink.append(("messages.send", kwargs))
+        return _GmailExec(self._send_result)
+
+
+class _FakeUsers:
+    def __init__(self, threads, messages):
+        self._threads = threads
+        self._messages = messages
+
+    def threads(self):
+        return self._threads
+
+    def messages(self):
+        return self._messages
+
+
+class _FakeGmailService:
+    def __init__(self, threads, messages):
+        self._users = _FakeUsers(threads, messages)
+
+    def users(self):
+        return self._users
+
+
+def _headers(**kv):
+    return [{"name": k, "value": v} for k, v in kv.items()]
+
+
+def _make_gmail(list_result=None, get_results=None, send_result=None):
+    sink: list = []
+    threads = _FakeThreads(list_result or {}, get_results or {}, sink)
+    messages = _FakeMessages(send_result or {}, sink)
+    provider = GmailProvider()
+    provider.service = _FakeGmailService(threads, messages)
+    return provider, sink
+
+
+def test_gmail_list_threads_maps_folder_and_shapes():
+    list_result = {"threads": [{"id": "t1"}]}
+    get_results = {
+        "t1": {
+            "id": "t1",
+            "messages": [
+                {
+                    "id": "m1",
+                    "threadId": "t1",
+                    "labelIds": ["INBOX", "UNREAD"],
+                    "internalDate": "1704067200000",
+                    "snippet": "first",
+                    "payload": {"headers": _headers(Subject="Hello", **{"From": "Alice <a@example.com>", "To": "me@example.com"})},
+                },
+                {
+                    "id": "m2",
+                    "threadId": "t1",
+                    "labelIds": ["INBOX"],
+                    "internalDate": "1704153600000",
+                    "snippet": "second",
+                    "payload": {"headers": _headers(**{"From": "Bob <b@example.com>", "To": "me@example.com"})},
+                },
+            ],
+        }
+    }
+    provider, sink = _make_gmail(list_result=list_result, get_results=get_results)
+
+    threads = provider.list_threads(folder="archive", limit=10)
+
+    # Folder mapping was applied as the Gmail query.
+    list_call = next(c for c in sink if c[0] == "threads.list")
+    assert list_call[1]["q"] == _FOLDER_QUERY["archive"]
+
+    assert len(threads) == 1
+    t = threads[0]
+    assert t.id == "t1"
+    assert t.subject == "Hello"
+    assert t.message_count == 2
+    assert t.unread is True
+    assert t.last_snippet == "second"
+    assert t.last_message_at.startswith("2024-01-02")
+    addrs = {p.address for p in t.participants}
+    assert addrs == {"a@example.com", "b@example.com", "me@example.com"}
+
+
+def test_gmail_get_thread_infers_direction():
+    get_results = {
+        "t1": {
+            "id": "t1",
+            "messages": [
+                {
+                    "id": "m1",
+                    "threadId": "t1",
+                    "labelIds": ["INBOX"],
+                    "internalDate": "1704067200000",
+                    "snippet": "incoming",
+                    "payload": {"headers": _headers(Subject="Hi", **{"From": "a@example.com", "To": "me@example.com", "Date": "Mon, 01 Jan 2024 00:00:00 +0000"})},
+                },
+                {
+                    "id": "m2",
+                    "threadId": "t1",
+                    "labelIds": ["SENT"],
+                    "snippet": "reply",
+                    "payload": {"headers": _headers(**{"From": "me@example.com", "To": "a@example.com"})},
+                },
+                {
+                    "id": "m3",
+                    "threadId": "t1",
+                    "labelIds": ["DRAFT"],
+                    "snippet": "draft",
+                    "payload": {"headers": _headers(**{"From": "me@example.com"})},
+                },
+            ],
+        }
+    }
+    provider, _ = _make_gmail(get_results=get_results)
+
+    messages = provider.get_thread("t1")
+    assert [m.direction for m in messages] == ["received", "sent", "draft"]
+    assert messages[0].sender.address == "a@example.com"
+    assert messages[0].to[0].address == "me@example.com"
+    assert messages[0].sent_at.startswith("2024-01-01")
+
+
+def test_gmail_send_builds_mime_and_threads_reply():
+    # threads.get is consulted for the In-Reply-To reference on replies.
+    get_results = {
+        "t1": {
+            "id": "t1",
+            "messages": [
+                {"id": "m1", "payload": {"headers": _headers(**{"Message-Id": "<orig@example.com>"})}},
+            ],
+        }
+    }
+    provider, sink = _make_gmail(get_results=get_results, send_result={"id": "sent-99", "threadId": "t1"})
+
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Re: Hi",
+        body="hello body",
+        in_reply_to_thread_id="t1",
+    )
+
+    assert result.accepted is True
+    assert result.provider_message_id == "sent-99"
+    assert result.thread_id == "t1"
+
+    send_call = next(c for c in sink if c[0] == "messages.send")
+    body = send_call[1]["body"]
+    assert body["threadId"] == "t1"
+    decoded = base64.urlsafe_b64decode(body["raw"].encode("ascii"))
+    parsed = email.message_from_bytes(decoded, policy=policy.default)
+    assert parsed["To"] == "you@example.com"
+    assert parsed["From"] == "me@example.com"
+    assert parsed["Subject"] == "Re: Hi"
+    assert parsed["In-Reply-To"] == "<orig@example.com>"
+    assert "hello body" in parsed.get_content()
+
+
+# ---------------------------------------------------------------------------
+# Microsoft Graph fakes (mock the `requests` layer the provider uses)
+# ---------------------------------------------------------------------------
+
+class _FakeResp:
+    def __init__(self, status_code=200, json_data=None):
+        self.status_code = status_code
+        self._json = json_data or {}
+        self.headers = {}
+
+    def json(self):
+        return self._json
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"http {self.status_code}")
+
+
+def _make_ms(monkeypatch, get_router=None, post_router=None):
+    provider = MicrosoftGraphProvider.__new__(MicrosoftGraphProvider)
+    provider.client_id = ""
+    provider.client_secret = ""
+    provider.tenant_id = "common"
+    provider._access_token = "token"
+    sink: list = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        sink.append(("GET", url, params))
+        return (get_router or (lambda u, p: _FakeResp()))(url, params)
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sink.append(("POST", url, json))
+        return (post_router or (lambda u, b: _FakeResp(status_code=202)))(url, json)
+
+    monkeypatch.setattr("providers.microsoft_provider.requests.get", fake_get)
+    monkeypatch.setattr("providers.microsoft_provider.requests.post", fake_post)
+    return provider, sink
+
+
+def test_ms_list_threads_groups_by_conversation(monkeypatch):
+    messages_page = {
+        "value": [
+            {
+                "id": "m1",
+                "conversationId": "c1",
+                "subject": "Topic A",
+                "from": {"emailAddress": {"address": "a@example.com", "name": "A"}},
+                "toRecipients": [{"emailAddress": {"address": "me@example.com"}}],
+                "receivedDateTime": "2024-01-02T10:00:00Z",
+                "isRead": False,
+                "bodyPreview": "newer",
+            },
+            {
+                "id": "m2",
+                "conversationId": "c1",
+                "subject": "Topic A",
+                "from": {"emailAddress": {"address": "b@example.com", "name": "B"}},
+                "toRecipients": [{"emailAddress": {"address": "me@example.com"}}],
+                "receivedDateTime": "2024-01-01T10:00:00Z",
+                "isRead": True,
+                "bodyPreview": "older",
+            },
+            {
+                "id": "m3",
+                "conversationId": "c2",
+                "subject": "Topic B",
+                "from": {"emailAddress": {"address": "c@example.com"}},
+                "toRecipients": [],
+                "receivedDateTime": "2024-01-03T10:00:00Z",
+                "isRead": True,
+                "bodyPreview": "other",
+            },
+        ]
+    }
+
+    def get_router(url, params):
+        assert _FOLDER_ID["spam"] in url  # folder mapping applied
+        return _FakeResp(json_data=messages_page)
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    threads = provider.list_threads(folder="spam", limit=10)
+
+    assert len(threads) == 2
+    by_id = {t.id: t for t in threads}
+    assert by_id["c1"].message_count == 2
+    assert by_id["c1"].unread is True  # one unread message in the conversation
+    assert by_id["c1"].last_snippet == "newer"
+    assert {p.address for p in by_id["c1"].participants} == {"a@example.com", "b@example.com", "me@example.com"}
+    assert by_id["c2"].unread is False
+
+
+def test_ms_get_thread_infers_direction(monkeypatch):
+    thread_page = {
+        "value": [
+            {
+                "id": "m1",
+                "conversationId": "c1",
+                "subject": "Hi",
+                "from": {"emailAddress": {"address": "a@example.com"}},
+                "toRecipients": [{"emailAddress": {"address": "me@example.com"}}],
+                "sentDateTime": "2024-01-01T10:00:00Z",
+                "isDraft": False,
+            },
+            {
+                "id": "m2",
+                "conversationId": "c1",
+                "subject": "Re: Hi",
+                "from": {"emailAddress": {"address": "me@example.com"}},
+                "toRecipients": [{"emailAddress": {"address": "a@example.com"}}],
+                "sentDateTime": "2024-01-02T10:00:00Z",
+                "isDraft": False,
+            },
+            {
+                "id": "m3",
+                "conversationId": "c1",
+                "from": {"emailAddress": {"address": "me@example.com"}},
+                "isDraft": True,
+            },
+        ]
+    }
+
+    def get_router(url, params):
+        if url.endswith("/me"):
+            return _FakeResp(json_data={"mail": "me@example.com"})
+        return _FakeResp(json_data=thread_page)
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    messages = provider.get_thread("c1")
+    assert [m.direction for m in messages] == ["received", "sent", "draft"]
+    assert messages[0].sent_at.startswith("2024-01-01")
+
+
+def test_ms_send_posts_sendmail(monkeypatch):
+    captured = {}
+
+    def post_router(url, body):
+        captured["url"] = url
+        captured["body"] = body
+        return _FakeResp(status_code=202)
+
+    provider, _ = _make_ms(monkeypatch, post_router=post_router)
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Hello",
+        body="body text",
+        in_reply_to_thread_id="c1",
+    )
+
+    assert result.accepted is True
+    assert result.thread_id == "c1"
+    assert captured["url"].endswith("/me/sendMail")
+    msg = captured["body"]["message"]
+    assert msg["subject"] == "Hello"
+    assert msg["toRecipients"][0]["emailAddress"]["address"] == "you@example.com"
+    assert msg["body"]["content"] == "body text"
+
+
+def test_ms_send_returns_accepted_false_on_error_status(monkeypatch):
+    provider, _ = _make_ms(monkeypatch, post_router=lambda u, b: _FakeResp(status_code=403))
+    result = provider.send_message("me@example.com", "you@example.com", "s", "b")
+    assert result.accepted is False
+    assert result.reason == "graph_status_403"
+
+
+def test_ms_get_thread_degrades_when_account_lookup_fails(monkeypatch):
+    """If /me fails, account lookup degrades to '' and direction falls back to received."""
+    thread_page = {
+        "value": [
+            {
+                "id": "m1",
+                "conversationId": "c1",
+                "from": {"emailAddress": {"address": "me@example.com"}},
+                "toRecipients": [],
+                "sentDateTime": "2024-01-01T10:00:00Z",
+                "isDraft": False,
+            }
+        ]
+    }
+
+    def get_router(url, params):
+        if url.endswith("/me"):
+            return _FakeResp(status_code=500)
+        return _FakeResp(json_data=thread_page)
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    messages = provider.get_thread("c1")
+    # account == '' so even a self-sent message is reported as received (safe default)
+    assert messages[0].direction == "received"

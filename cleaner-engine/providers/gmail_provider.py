@@ -3,6 +3,7 @@ Gmail provider - wraps Google Gmail API.
 """
 
 import base64
+from email.message import EmailMessage as MimeMessage
 from typing import List, Optional, Tuple
 
 from google.auth.transport.requests import Request
@@ -18,11 +19,34 @@ from providers.base import (
     InboxStats,
     ProviderType,
 )
+from providers.mail_client import (
+    Address,
+    SendResult,
+    ThreadMessage,
+    ThreadSummary,
+    clamp_limit,
+    epoch_ms_to_iso8601,
+    parse_address,
+    parse_address_list,
+    to_iso8601,
+)
 
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.modify',
     'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/gmail.send',
 ]
+
+# Canonical folder -> Gmail list query. ``archive`` = mail no longer in INBOX
+# and not in trash/spam.
+_FOLDER_QUERY = {
+    'inbox': 'in:inbox',
+    'sent': 'in:sent',
+    'drafts': 'in:drafts',
+    'trash': 'in:trash',
+    'spam': 'in:spam',
+    'archive': '-in:inbox -in:trash -in:spam -in:drafts',
+}
 
 
 class GmailProvider(EmailProvider):
@@ -216,6 +240,155 @@ class GmailProvider(EmailProvider):
                 yield from self._iter_parts(part)
         else:
             yield payload
+
+    # ------------------------------------------------------------------
+    # Unified mail client (threads / thread / send)
+    # ------------------------------------------------------------------
+
+    def list_threads(self, folder: str = 'inbox', limit: int = 50) -> List[ThreadSummary]:
+        """List inbox threads for a folder, newest first."""
+        limit = clamp_limit(limit)
+        query = _FOLDER_QUERY.get(folder, _FOLDER_QUERY['inbox'])
+        result = self.service.users().threads().list(
+            userId='me',
+            q=query,
+            maxResults=limit,
+        ).execute()
+
+        summaries: List[ThreadSummary] = []
+        for stub in result.get('threads', [])[:limit]:
+            thread = self.service.users().threads().get(
+                userId='me',
+                id=stub['id'],
+                format='metadata',
+                metadataHeaders=['From', 'To', 'Subject', 'Date'],
+            ).execute()
+            summaries.append(self._thread_summary(thread))
+        return summaries
+
+    def _thread_summary(self, thread: dict) -> ThreadSummary:
+        messages = thread.get('messages', [])
+        participants: List[Address] = []
+        seen: set = set()
+        subject: Optional[str] = None
+        unread = False
+
+        for msg in messages:
+            headers = {
+                h['name']: h['value']
+                for h in msg.get('payload', {}).get('headers', [])
+            }
+            if subject is None and headers.get('Subject'):
+                subject = headers['Subject']
+            if 'UNREAD' in msg.get('labelIds', []):
+                unread = True
+            for raw in (headers.get('From'), headers.get('To')):
+                for addr in parse_address_list(raw):
+                    key = addr.address.lower()
+                    if key not in seen:
+                        seen.add(key)
+                        participants.append(addr)
+
+        last = messages[-1] if messages else {}
+        return ThreadSummary(
+            id=thread.get('id', ''),
+            subject=subject,
+            participants=participants,
+            last_message_at=epoch_ms_to_iso8601(int(last['internalDate'])) if last.get('internalDate') else None,
+            last_snippet=last.get('snippet') or None,
+            message_count=len(messages),
+            unread=unread,
+        )
+
+    def get_thread(self, thread_id: str) -> List[ThreadMessage]:
+        """Return the messages of a single thread in chronological order."""
+        thread = self.service.users().threads().get(
+            userId='me',
+            id=thread_id,
+            format='metadata',
+            metadataHeaders=['From', 'To', 'Subject', 'Date'],
+        ).execute()
+
+        out: List[ThreadMessage] = []
+        for msg in thread.get('messages', []):
+            headers = {
+                h['name']: h['value']
+                for h in msg.get('payload', {}).get('headers', [])
+            }
+            labels = msg.get('labelIds', [])
+            if 'DRAFT' in labels:
+                direction = 'draft'
+            elif 'SENT' in labels:
+                direction = 'sent'
+            else:
+                direction = 'received'
+            out.append(ThreadMessage(
+                id=msg.get('id', ''),
+                thread_id=msg.get('threadId', thread_id),
+                sender=parse_address(headers.get('From')),
+                to=parse_address_list(headers.get('To')),
+                subject=headers.get('Subject') or None,
+                sent_at=to_iso8601(headers.get('Date')) or epoch_ms_to_iso8601(
+                    int(msg['internalDate']) if msg.get('internalDate') else None
+                ),
+                preview=msg.get('snippet') or None,
+                direction=direction,
+            ))
+        return out
+
+    def send_message(
+        self,
+        from_addr: str,
+        to_addr: str,
+        subject: str,
+        body: str,
+        in_reply_to_thread_id: Optional[str] = None,
+    ) -> SendResult:
+        """Send a new message or reply within a thread."""
+        mime = MimeMessage()
+        if from_addr:
+            mime['From'] = from_addr
+        mime['To'] = to_addr
+        mime['Subject'] = subject or ''
+        mime.set_content(body or '')
+
+        send_body: dict = {}
+        if in_reply_to_thread_id:
+            send_body['threadId'] = in_reply_to_thread_id
+            ref = self._thread_reply_reference(in_reply_to_thread_id)
+            if ref:
+                mime['In-Reply-To'] = ref
+                mime['References'] = ref
+
+        raw = base64.urlsafe_b64encode(mime.as_bytes()).decode('ascii')
+        send_body['raw'] = raw
+
+        sent = self.service.users().messages().send(userId='me', body=send_body).execute()
+        return SendResult(
+            accepted=True,
+            provider_message_id=sent.get('id'),
+            thread_id=sent.get('threadId', in_reply_to_thread_id),
+        )
+
+    def _thread_reply_reference(self, thread_id: str) -> Optional[str]:
+        """Best-effort Message-Id of the last message in a thread for In-Reply-To."""
+        try:
+            thread = self.service.users().threads().get(
+                userId='me',
+                id=thread_id,
+                format='metadata',
+                metadataHeaders=['Message-Id'],
+            ).execute()
+            messages = thread.get('messages', [])
+            if not messages:
+                return None
+            headers = {
+                h['name'].lower(): h['value']
+                for h in messages[-1].get('payload', {}).get('headers', [])
+            }
+            return headers.get('message-id')
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Batch operations

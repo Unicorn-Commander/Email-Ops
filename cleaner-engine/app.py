@@ -95,6 +95,25 @@ class OrganizeRequest(MessageIdsRequest):
     label: Optional[str] = None
 
 
+class MailThreadsRequest(ProfileRequest):
+    folder: str = "inbox"
+    limit: int = 50
+
+
+class MailThreadRequest(ProfileRequest):
+    thread_id: str
+
+
+class MailSendRequest(ProfileRequest):
+    from_: str = Field(default="", alias="from")
+    to: str
+    subject: str = ""
+    body: str = ""
+    in_reply_to_thread_id: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
+
+
 class AiAnalyzeRequest(ProfileRequest):
     pass
 
@@ -149,6 +168,19 @@ def _create_authenticated_provider(provider_name: str, credentials: dict[str, An
     return provider
 
 
+def _try_authenticated_provider(provider_name: str, credentials: dict[str, Any]) -> Optional[Any]:
+    """Build + authenticate a provider, returning None (not raising) on any failure.
+
+    Used by the unified mail-client routes which must DEGRADE CLEAN: an
+    unconfigured or failed provider is treated as "empty", never an error.
+    """
+    try:
+        return _create_authenticated_provider(provider_name, credentials)
+    except Exception as exc:  # noqa: BLE001 - degrade clean on any auth/config error
+        logger.warning("mail provider %s unavailable: %s", provider_name, exc)
+        return None
+
+
 def _garage_s3_config() -> dict[str, str]:
     cfg = _get_config()
     return {
@@ -165,6 +197,13 @@ def _dataclass_to_dict(obj: Any) -> Any:
     if isinstance(obj, list):
         return [_dataclass_to_dict(item) for item in obj]
     return obj
+
+
+def _mail_message_to_dict(message: Any) -> dict[str, Any]:
+    """Serialise a ThreadMessage, renaming ``sender`` -> ``from`` per the contract."""
+    data = asdict(message)
+    data["from"] = data.pop("sender", None)
+    return data
 
 
 def _sse_event(event: str, data: Any) -> str:
@@ -346,6 +385,51 @@ def cleanup_organize(request: OrganizeRequest) -> CountResponse:
     provider = _create_authenticated_provider(request.provider, request.credentials.model_dump())
     count = provider.batch_archive(request.message_ids, label=request.label)
     return CountResponse(count=count)
+
+
+@app.post("/mail/threads", dependencies=[Depends(_require_engine_token)])
+def mail_threads(request: MailThreadsRequest) -> dict[str, Any]:
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return {"threads": []}
+    try:
+        threads = provider.list_threads(folder=request.folder, limit=request.limit)
+        return {"threads": [_dataclass_to_dict(t) for t in threads]}
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/threads failed for %s: %s", request.provider, exc)
+        return {"threads": []}
+
+
+@app.post("/mail/thread", dependencies=[Depends(_require_engine_token)])
+def mail_thread(request: MailThreadRequest) -> dict[str, Any]:
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return {"messages": []}
+    try:
+        messages = provider.get_thread(request.thread_id)
+        return {"messages": [_mail_message_to_dict(m) for m in messages]}
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/thread failed for %s: %s", request.provider, exc)
+        return {"messages": []}
+
+
+@app.post("/mail/send", dependencies=[Depends(_require_engine_token)])
+def mail_send(request: MailSendRequest) -> dict[str, Any]:
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return {"accepted": False, "provider_message_id": None, "thread_id": None, "reason": "provider_unavailable"}
+    try:
+        result = provider.send_message(
+            from_addr=request.from_,
+            to_addr=request.to,
+            subject=request.subject,
+            body=request.body,
+            in_reply_to_thread_id=request.in_reply_to_thread_id,
+        )
+        return _dataclass_to_dict(result)
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/send failed for %s: %s", request.provider, exc)
+        return {"accepted": False, "provider_message_id": None, "thread_id": None, "reason": "send_failed"}
 
 
 @app.post("/archive/create", dependencies=[Depends(_require_engine_token)])

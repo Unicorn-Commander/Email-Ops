@@ -21,9 +21,27 @@ from providers.base import (
     InboxStats,
     ProviderType,
 )
+from providers.mail_client import (
+    Address,
+    SendResult,
+    ThreadMessage,
+    ThreadSummary,
+    clamp_limit,
+    to_iso8601,
+)
 
 GRAPH_BASE = 'https://graph.microsoft.com/v1.0'
-SCOPES = ['Mail.ReadWrite', 'User.Read']
+SCOPES = ['Mail.ReadWrite', 'Mail.Send', 'User.Read']
+
+# Canonical folder -> Graph well-known mailFolder id.
+_FOLDER_ID = {
+    'inbox': 'inbox',
+    'sent': 'sentitems',
+    'drafts': 'drafts',
+    'trash': 'deleteditems',
+    'spam': 'junkemail',
+    'archive': 'archive',
+}
 
 
 class MicrosoftGraphProvider(EmailProvider):
@@ -251,6 +269,133 @@ class MicrosoftGraphProvider(EmailProvider):
                 email.body_text = content
 
         return email
+
+    # ------------------------------------------------------------------
+    # Unified mail client (threads / thread / send)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _address(email_address: Optional[dict]) -> Optional[Address]:
+        if not email_address:
+            return None
+        addr = email_address.get('address', '')
+        if not addr:
+            return None
+        return Address(address=addr, name=email_address.get('name') or None)
+
+    def _account_address(self) -> str:
+        """The signed-in user's primary SMTP address (best effort)."""
+        try:
+            me = self._graph_get('/me', params={'$select': 'mail,userPrincipalName'})
+            return (me.get('mail') or me.get('userPrincipalName') or '').lower()
+        except Exception:
+            return ''
+
+    def list_threads(self, folder: str = 'inbox', limit: int = 50) -> List[ThreadSummary]:
+        """List threads (conversations) for a folder, newest first."""
+        limit = clamp_limit(limit)
+        folder_id = _FOLDER_ID.get(folder, 'inbox')
+        # Over-fetch a little so grouping by conversation still yields ~limit threads.
+        params = {
+            '$top': min(limit * 2, 200),
+            '$select': 'id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview',
+            '$orderby': 'receivedDateTime desc',
+        }
+        data = self._graph_get(f'/me/mailFolders/{folder_id}/messages', params=params)
+
+        threads: Dict[str, ThreadSummary] = {}
+        order: List[str] = []
+        seen_participants: Dict[str, set] = {}
+
+        for msg in data.get('value', []):
+            conv = msg.get('conversationId') or msg.get('id', '')
+            if conv not in threads:
+                if len(order) >= limit:
+                    continue
+                order.append(conv)
+                threads[conv] = ThreadSummary(
+                    id=conv,
+                    subject=msg.get('subject') or None,
+                    last_message_at=to_iso8601(msg.get('receivedDateTime')),
+                    last_snippet=msg.get('bodyPreview') or None,
+                    message_count=0,
+                    unread=False,
+                )
+                seen_participants[conv] = set()
+
+            summary = threads[conv]
+            summary.message_count += 1
+            if not msg.get('isRead', True):
+                summary.unread = True
+
+            for candidate in [msg.get('from', {}).get('emailAddress')] + [
+                r.get('emailAddress') for r in msg.get('toRecipients', [])
+            ]:
+                addr = self._address(candidate)
+                if addr and addr.address.lower() not in seen_participants[conv]:
+                    seen_participants[conv].add(addr.address.lower())
+                    summary.participants.append(addr)
+
+        return [threads[c] for c in order]
+
+    def get_thread(self, thread_id: str) -> List[ThreadMessage]:
+        """Return the messages of one conversation in chronological order."""
+        account = self._account_address()
+        params = {
+            '$filter': f"conversationId eq '{thread_id}'",
+            '$select': 'id,conversationId,subject,from,toRecipients,sentDateTime,receivedDateTime,isDraft,bodyPreview',
+            '$orderby': 'receivedDateTime asc',
+            '$top': 100,
+        }
+        data = self._graph_get('/me/messages', params=params)
+
+        out: List[ThreadMessage] = []
+        for msg in data.get('value', []):
+            sender = self._address(msg.get('from', {}).get('emailAddress'))
+            if msg.get('isDraft'):
+                direction = 'draft'
+            elif account and sender and sender.address.lower() == account:
+                direction = 'sent'
+            else:
+                direction = 'received'
+            out.append(ThreadMessage(
+                id=msg.get('id', ''),
+                thread_id=msg.get('conversationId', thread_id),
+                sender=sender,
+                to=[a for a in (self._address(r.get('emailAddress')) for r in msg.get('toRecipients', [])) if a],
+                subject=msg.get('subject') or None,
+                sent_at=to_iso8601(msg.get('sentDateTime') or msg.get('receivedDateTime')),
+                preview=msg.get('bodyPreview') or None,
+                direction=direction,
+            ))
+        return out
+
+    def send_message(
+        self,
+        from_addr: str,
+        to_addr: str,
+        subject: str,
+        body: str,
+        in_reply_to_thread_id: Optional[str] = None,
+    ) -> SendResult:
+        """Send a new message or reply (via /me/sendMail)."""
+        message = {
+            'subject': subject or '',
+            'body': {'contentType': 'Text', 'content': body or ''},
+            'toRecipients': [{'emailAddress': {'address': to_addr}}],
+        }
+        if from_addr:
+            message['from'] = {'emailAddress': {'address': from_addr}}
+
+        resp = self._graph_post('/me/sendMail', json_body={'message': message, 'saveToSentItems': True})
+        if resp.status_code in (200, 202):
+            # sendMail returns 202 Accepted with no body / no id.
+            return SendResult(
+                accepted=True,
+                provider_message_id=None,
+                thread_id=in_reply_to_thread_id,
+            )
+        return SendResult(accepted=False, reason=f'graph_status_{resp.status_code}')
 
     # ------------------------------------------------------------------
     # Batch operations
