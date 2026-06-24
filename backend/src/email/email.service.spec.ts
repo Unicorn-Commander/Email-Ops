@@ -303,6 +303,65 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       expect(events).toHaveLength(1);
       expect(events[0].messageId).toBeTruthy();
     });
+
+    it('a registered agent sends FROM its own mailbox, not the workspace default', async () => {
+      const ownMb = await prisma.mailboxAccount.create({
+        data: {
+          workspaceId: WS,
+          emailAddress: 'sales-bot@magicunicorn.tech',
+          displayName: 'Sales Bot',
+          isDefault: false,
+          postmarkLane: true,
+        },
+      });
+      const key = `own-mb-${Date.now()}`;
+      await prisma.agent.create({
+        data: {
+          workspaceId: WS,
+          key,
+          displayName: 'Own Mailbox Agent',
+          autonomyLevel: AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT,
+          mailboxAccountId: ownMb.id,
+        },
+      });
+      const result = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'lead@acme.test',
+        subject: 'From my own box',
+        body: '.',
+        mode: 'send',
+        externalSource: key,
+        externalRef: `ownmb-${Date.now()}`,
+      });
+      const row = await prisma.emailMessage.findUnique({ where: { id: result.id } });
+      expect(row?.fromAddress).toBe('sales-bot@magicunicorn.tech'); // its OWN, not desk@
+      expect(row?.mailboxAccountId).toBe(ownMb.id);
+      expect(stalwart.sendCalls.at(-1)?.req.fromAddress).toBe('sales-bot@magicunicorn.tech');
+    });
+
+    it('blocks a PAUSED agent (the per-agent kill switch)', async () => {
+      const key = `paused-agent-${Date.now()}`;
+      await prisma.agent.create({
+        data: {
+          workspaceId: WS,
+          key,
+          displayName: 'Paused Agent',
+          autonomyLevel: AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT,
+          paused: true,
+        },
+      });
+      await expect(
+        service.composeEmail(WS, UC_UID, {
+          contactId: null,
+          toAddress: 'x@acme.test',
+          subject: 'should be blocked',
+          body: '.',
+          mode: 'send',
+          externalSource: key,
+          externalRef: `pa-${Date.now()}`,
+        }),
+      ).rejects.toThrow(/paused/i);
+    });
   });
 
   describe('compose_email — draft (stages the agent inbox; NO send)', () => {

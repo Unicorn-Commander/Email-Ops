@@ -236,20 +236,38 @@ export class EmailService {
         throw new ForbiddenException('Agents are paused for this workspace.');
       }
 
-      const mailbox = await this.defaultMailbox(tx);
-      const fromAddress = mailbox?.emailAddress ?? null;
-
-      // Enforce the autonomy dial: resolve the registered agent that drafted this
-      // (by its provenance key) and gate send-vs-draft by its level + recipient
-      // policy. Opt-in + conservative — an UNREGISTERED agent keeps legacy
-      // behavior, and the decision only ever makes a send MORE gated (never less).
+      // Resolve the registered agent that drafted this (by its provenance key).
       const agentKey = input.draftedBy ?? input.externalSource;
       const agent = agentKey
         ? await tx.agent.findFirst({
             where: { workspaceId, key: agentKey, active: true },
-            select: { key: true, autonomyLevel: true, recipientPolicy: true },
+            select: {
+              key: true,
+              autonomyLevel: true,
+              recipientPolicy: true,
+              mailboxAccountId: true,
+              paused: true,
+            },
           })
         : null;
+
+      // Per-agent kill switch: this ONE agent is paused (distinct from the
+      // workspace-wide pause above, which freezes the whole fleet).
+      if (agent?.paused) {
+        this.logger.log(`compose_email blocked: agent '${agentKey}' is paused (workspace ${workspaceId})`);
+        throw new ForbiddenException(`Agent '${agentKey}' is paused.`);
+      }
+
+      // Send identity: a registered agent sends from its OWN primary mailbox
+      // (cached on Agent.mailboxAccountId = the isPrimary binding); an unregistered
+      // agent falls back to the workspace default (legacy, unchanged). Fixes the
+      // latent bug where an agent with a mailbox still sent from the ws default.
+      const mailbox = await this.resolveSendMailbox(tx, workspaceId, agent);
+      const fromAddress = mailbox?.emailAddress ?? null;
+
+      // Enforce the autonomy dial — gate send-vs-draft by the agent's level +
+      // recipient policy. Opt-in + conservative: an UNREGISTERED agent keeps the
+      // legacy behavior, and the decision only ever makes a send MORE gated.
       const decision = decideComposeMode({
         requestedMode: input.mode === 'draft' ? 'draft' : 'send',
         agent,
@@ -531,6 +549,26 @@ export class EmailService {
       });
       return { inbox: this.inboxView(updated, msg), message: this.composeView(msg) };
     });
+  }
+
+  /**
+   * The mailbox an agent sends FROM. A registered agent uses its OWN primary
+   * mailbox (the isPrimary AgentMailbox binding, cached on Agent.mailboxAccountId);
+   * an unregistered agent / one with no mailbox falls back to the workspace
+   * default — so the legacy + federation path is unchanged.
+   */
+  private async resolveSendMailbox(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    agent: { mailboxAccountId: string | null } | null,
+  ) {
+    if (agent?.mailboxAccountId) {
+      const mb = await tx.mailboxAccount.findFirst({
+        where: { id: agent.mailboxAccountId, workspaceId },
+      });
+      if (mb) return mb;
+    }
+    return this.defaultMailbox(tx);
   }
 
   /**
