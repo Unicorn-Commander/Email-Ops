@@ -30,6 +30,7 @@ import {
 } from '@/components/ui';
 import { useAgents } from '@/components/useAgents';
 import { EmailHealthPanel } from '@/components/EmailHealthPanel';
+import { AgentActivityFeed } from '@/components/AgentActivityFeed';
 import { agentLabel } from '@/lib/agents';
 import type { AgentView, AutonomyLevel } from '@/lib/api';
 
@@ -110,6 +111,8 @@ export default function AgentsPage() {
       )}
 
       <CreateAgentDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreate={create} />
+
+      <AgentActivityFeed />
     </div>
   );
 }

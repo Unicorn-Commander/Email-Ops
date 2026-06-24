@@ -7,6 +7,7 @@ import { ThemeToggle } from '@/components/ThemeToggle';
 import { Badge, Button, Card, Select, Skeleton, cn } from '@/components/ui';
 import { ConnectedAccountsProvider, useConnectedAccounts } from './ConnectedAccountsProvider';
 import { useAgentInboxPendingCount } from './useAgentInbox';
+import { useAgentControls } from './useAgentControls';
 import {
   clearSession,
   cleanupActivity,
@@ -99,7 +100,7 @@ function ProductChrome({ children }: { children: ReactNode }) {
   const [sidebarExpanded, setSidebarExpanded] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(true);
-  const [agentsPaused, setAgentsPaused] = useState(false);
+  const { agentsPaused, setPaused } = useAgentControls();
   const agentPending = useAgentInboxPendingCount();
 
   useEffect(() => {
@@ -143,7 +144,7 @@ function ProductChrome({ children }: { children: ReactNode }) {
             onToggleRail={() => setRailOpen((value) => !value)}
             railOpen={railOpen}
             agentsPaused={agentsPaused}
-            onTogglePause={() => setAgentsPaused((value) => !value)}
+            onTogglePause={() => setPaused(!agentsPaused)}
             onSignOut={() => {
               clearSession();
               router.replace('/auth/login');
@@ -157,7 +158,7 @@ function ProductChrome({ children }: { children: ReactNode }) {
 
         {railOpen && (
           <aside className="hidden w-[320px] shrink-0 border-l border-subtle bg-surface-base/88 backdrop-blur xl:block">
-            <AgentRail paused={agentsPaused} onPause={() => setAgentsPaused(true)} />
+            <AgentRail paused={agentsPaused} onPause={() => setPaused(true)} />
           </aside>
         )}
       </div>

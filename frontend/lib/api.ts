@@ -127,6 +127,24 @@ export async function apiPatch<T = unknown>(
   return (text ? JSON.parse(text) : {}) as T;
 }
 
+/** Authenticated PUT against the backend. Throws ApiError on non-2xx. */
+export async function apiPut<T = unknown>(path: string, body?: unknown, token?: string): Promise<T> {
+  const bearer = token ?? getToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, await errorMessage(res, `PUT ${path} failed: ${res.status}`));
+  }
+  const text = await res.text();
+  return (text ? JSON.parse(text) : {}) as T;
+}
+
 export interface EmailOpsUser {
   id: string;
   email: string;
@@ -624,6 +642,70 @@ export async function cleanupActivity(
 ): Promise<{ items: CleanupBatchView[] }> {
   return apiGet<{ items: CleanupBatchView[] }>(
     `/connected-accounts/${encodeURIComponent(provider)}/cleanup/activity`,
+    token,
+  );
+}
+
+// ── Agent controls (kill switch) + activity feed ──────────────────────────
+
+export interface AgentControls {
+  agents_paused: boolean;
+}
+
+/** Read the workspace kill switch (are agents paused?). */
+export async function getAgentControls(workspaceId: string, token?: string): Promise<AgentControls> {
+  return apiGet<AgentControls>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/agent-controls`,
+    token,
+  );
+}
+
+/** Set the workspace kill switch — pause/resume all agents. */
+export async function setAgentControls(
+  workspaceId: string,
+  agentsPaused: boolean,
+  token?: string,
+): Promise<AgentControls> {
+  return apiPut<AgentControls>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/agent-controls`,
+    { agents_paused: agentsPaused },
+    token,
+  );
+}
+
+export type AgentActionKind =
+  | 'AUTONOMOUS_SEND'
+  | 'STAGED_FOR_APPROVAL'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'PAUSED'
+  | 'RESUMED';
+
+/** One agent-mail activity/audit row (mirrors the backend AgentActivityView). */
+export interface AgentActivityView {
+  id: string;
+  kind: AgentActionKind;
+  agent_key: string | null;
+  message_id: string | null;
+  actor_uc_uid: string | null;
+  detail: string | null;
+  created_at: string | null;
+}
+
+export interface AgentActivityResponse {
+  items: AgentActivityView[];
+  count: number;
+}
+
+/** Recent agent-mail activity (the audit feed), newest-first. */
+export async function getAgentActivity(
+  workspaceId: string,
+  limit?: number,
+  token?: string,
+): Promise<AgentActivityResponse> {
+  const qs = limit ? `?limit=${encodeURIComponent(String(limit))}` : '';
+  return apiGet<AgentActivityResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/agent-activity${qs}`,
     token,
   );
 }

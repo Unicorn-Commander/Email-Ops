@@ -136,6 +136,23 @@ enum AgentAutonomyLevel {
   L2_AUTONOMOUS_AUDIT
 }
 
+// ── Agent-mail action/audit event (Email-Ops OWNS this) ──
+//
+// The audit substrate behind the activity feed + the "autonomous-with-audit"
+// guarantee. One row per governance-relevant agent-mail action:
+//   AUTONOMOUS_SEND     — an L2 agent sent without human approval.
+//   STAGED_FOR_APPROVAL — an agent draft staged (incl. a send coerced by the dial).
+//   APPROVED / REJECTED — a human decided a staged draft.
+//   PAUSED / RESUMED    — the workspace kill switch was toggled.
+enum AgentActionKind {
+  AUTONOMOUS_SEND
+  STAGED_FOR_APPROVAL
+  APPROVED
+  REJECTED
+  PAUSED
+  RESUMED
+}
+
 enum CleanupActionKind {
   TRASH
   DELETE
@@ -193,6 +210,9 @@ model Workspace {
   gdprMode          Boolean                @default(false)
   dataResidency     String?                @default("us-east")
   status            String                 @default("active") // active|suspended|archived|deleting
+  // Kill switch: when true, agents cannot compose/send mail in this workspace
+  // (a human approving an already-staged draft still works).
+  agentsPaused      Boolean                @default(false)
   entitlementCache  Json? // offline/dedicated only; null on shared SaaS
   syncedAt          DateTime               @default(now())
   createdAt         DateTime               @default(now())
@@ -202,6 +222,7 @@ model Workspace {
   emailMessages     EmailMessage[]
   agentInboxItems   AgentInboxItem[]
   agents            Agent[]
+  agentActionEvents AgentActionEvent[]
   cleanupBatches    CleanupBatch[]
   engagementEvents  EmailEngagementEvent[]
 
@@ -473,6 +494,37 @@ model Agent {
   @@index([workspaceId])
   @@index([workspaceId, active])
   @@map("agents")
+}
+
+// ============================================================
+// AGENT ACTION EVENT (Email-Ops OWNS this — tenant-scoped; the activity/audit log)
+// ============================================================
+//
+// The append-only audit substrate behind the agent-mail ACTIVITY FEED and the
+// "autonomous-with-audit" guarantee: one row per governance-relevant action (an
+// L2 autonomous send, a staged draft, a human approve/reject, a kill-switch
+// toggle). `agentKey` is the acting agent's provenance slug (the autonomous
+// actor); `actorUcUid` is the acting human (approve/reject/pause). `messageId`
+// links the email when applicable. Read newest-first for the feed.
+//
+// RLS-fenced on workspaceId exactly like the other scoped tables. ENABLE + FORCE,
+// identical workspace_isolation policy. A no-GUC read returns zero rows.
+model AgentActionEvent {
+  id          String          @id @default(uuid())
+  workspaceId String
+  kind        AgentActionKind
+  agentKey    String?
+  messageId   String?
+  actorUcUid  String?
+  detail      String?
+  createdAt   DateTime        @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  // The feed reads events newest-first.
+  @@index([workspaceId, createdAt])
+  @@map("agent_action_events")
 }
 
 // ============================================================

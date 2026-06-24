@@ -32,8 +32,9 @@
  *     and never leaves.
  */
 
-import { Injectable, Logger } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import {
+  AgentActionKind,
   AgentInboxKind,
   AgentInboxState,
   EmailDirection,
@@ -223,6 +224,18 @@ export class EmailService {
         return this.composeView(existing);
       }
 
+      // Kill switch: when the workspace is paused, agents cannot compose/send.
+      // (An idempotent repeat above still returns; a human approving an already-
+      // staged draft is a separate path and stays unaffected.)
+      const ws = await tx.workspace.findUnique({
+        where: { id: workspaceId },
+        select: { agentsPaused: true },
+      });
+      if (ws?.agentsPaused) {
+        this.logger.log(`compose_email blocked: agents paused for workspace ${workspaceId}`);
+        throw new ForbiddenException('Agents are paused for this workspace.');
+      }
+
       const mailbox = await this.defaultMailbox(tx);
       const fromAddress = mailbox?.emailAddress ?? null;
 
@@ -287,6 +300,13 @@ export class EmailService {
         this.logger.log(
           `compose_email DRAFT staged into agent-inbox: message ${msg.id} (workspace ${workspaceId}) pending human approval`,
         );
+        await this.recordAction(tx, workspaceId, {
+          kind: AgentActionKind.STAGED_FOR_APPROVAL,
+          agentKey: input.draftedBy ?? input.externalSource,
+          messageId: msg.id,
+          actorUcUid: ucUid,
+          detail: decision.coerced ? `staged by dial (${decision.reason})` : (input.subject ?? null),
+        });
         return this.composeView(msg);
       }
 
@@ -321,6 +341,17 @@ export class EmailService {
         inReplyToThreadId: input.inReplyToThreadId ?? null,
         transactional: mailbox?.postmarkLane ?? true,
       });
+      if (agent) {
+        // A registered agent reaching the send lane is an L2 autonomous send
+        // (the gate coerces L0/L1 sends to drafts) — audit it.
+        await this.recordAction(tx, workspaceId, {
+          kind: AgentActionKind.AUTONOMOUS_SEND,
+          agentKey: agent.key,
+          messageId: msg.id,
+          actorUcUid: ucUid,
+          detail: `${decision.reason}${input.subject ? `: ${input.subject}` : ''}`,
+        });
+      }
       return this.composeView(sent);
     });
   }
@@ -424,6 +455,13 @@ export class EmailService {
       this.logger.log(
         `agent-inbox item ${itemId} APPROVED by ${ucUid ?? '(unknown)'} — draft handed to send lane (message ${item.message.id})`,
       );
+      await this.recordAction(tx, workspaceId, {
+        kind: AgentActionKind.APPROVED,
+        agentKey: item.draftedBy,
+        messageId: item.message.id,
+        actorUcUid: ucUid,
+        detail: item.message.subject ?? null,
+      });
       return { inbox: this.inboxView(updated, sent), message: this.composeView(sent) };
     });
   }
@@ -481,7 +519,42 @@ export class EmailService {
       this.logger.log(
         `agent-inbox item ${itemId} REJECTED by ${ucUid ?? '(unknown)'} — message ${item.messageId} will not be sent`,
       );
+      await this.recordAction(tx, workspaceId, {
+        kind: AgentActionKind.REJECTED,
+        agentKey: item.draftedBy,
+        messageId: item.message.id,
+        actorUcUid: ucUid,
+        detail: item.message.subject ?? null,
+      });
       return { inbox: this.inboxView(updated, msg), message: this.composeView(msg) };
+    });
+  }
+
+  /**
+   * Append a row to the agent-mail action/audit log (the activity-feed source).
+   * Best-effort within the caller's tx — it shares the transaction so an event is
+   * never recorded for an action that rolled back.
+   */
+  private async recordAction(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    data: {
+      kind: AgentActionKind;
+      agentKey?: string | null;
+      messageId?: string | null;
+      actorUcUid?: string | null;
+      detail?: string | null;
+    },
+  ): Promise<void> {
+    await tx.agentActionEvent.create({
+      data: {
+        workspaceId,
+        kind: data.kind,
+        agentKey: data.agentKey ?? null,
+        messageId: data.messageId ?? null,
+        actorUcUid: data.actorUcUid ?? null,
+        detail: data.detail ?? null,
+      },
     });
   }
 

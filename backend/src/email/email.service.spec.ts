@@ -114,6 +114,7 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
     if (prisma) {
       await prisma.agentInboxItem.deleteMany({ where: { workspaceId: WS } });
       await prisma.agent.deleteMany({ where: { workspaceId: WS } });
+      await prisma.agentActionEvent.deleteMany({ where: { workspaceId: WS } });
       await prisma.emailMessage.deleteMany({ where: { workspaceId: WS } });
       await prisma.mailboxAccount.deleteMany({ where: { workspaceId: WS } });
       await prisma.workspace.deleteMany({ where: { id: WS } });
@@ -254,6 +255,53 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       });
       expect(result.status).toBe('pending_approval');
       expect(stalwart.sendCalls).toHaveLength(0);
+    });
+  });
+
+  describe('compose_email — kill switch + audit', () => {
+    it('blocks agent compose when the workspace is paused', async () => {
+      await prisma.workspace.update({ where: { id: WS }, data: { agentsPaused: true } });
+      try {
+        await expect(
+          service.composeEmail(WS, UC_UID, {
+            contactId: null,
+            toAddress: 'x@acme.test',
+            subject: 'Should be blocked',
+            body: 'nope',
+            mode: 'send',
+            externalSource: 'customer-ops',
+            externalRef: `paused-${Date.now()}`,
+          }),
+        ).rejects.toThrow(/paused/i);
+      } finally {
+        await prisma.workspace.update({ where: { id: WS }, data: { agentsPaused: false } });
+      }
+    });
+
+    it('records an AUTONOMOUS_SEND audit event for an L2 agent send', async () => {
+      const key = `l2-audit-${Date.now()}`;
+      await prisma.agent.create({
+        data: {
+          workspaceId: WS,
+          key,
+          displayName: 'L2 Audit',
+          autonomyLevel: AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT,
+        },
+      });
+      await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'lead@acme.test',
+        subject: 'Audited send',
+        body: 'L2.',
+        mode: 'send',
+        externalSource: key,
+        externalRef: `l2a-${Date.now()}`,
+      });
+      const events = await prisma.agentActionEvent.findMany({
+        where: { workspaceId: WS, kind: 'AUTONOMOUS_SEND', agentKey: key },
+      });
+      expect(events).toHaveLength(1);
+      expect(events[0].messageId).toBeTruthy();
     });
   });
 

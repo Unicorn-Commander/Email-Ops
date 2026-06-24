@@ -14,6 +14,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
 import { AgentInboxModule } from './agent-inbox/agent-inbox.module';
 import { AgentsModule } from './agents/agents.module';
 import { EmailHealthModule } from './email-health/email-health.module';
+import { AgentControlsModule } from './agent-controls/agent-controls.module';
 
 @Module({
   imports: [
@@ -51,6 +52,9 @@ import { EmailHealthModule } from './email-health/email-health.module';
     // The email-steward health surface (engine/mailboxes/queue/agents): a
     // workspace-scoped "how's email?" report, REST + an MCP tool.
     EmailHealthModule,
+    // The agent kill switch (Workspace.agentsPaused, enforced in composeEmail) +
+    // the agent-mail activity/audit feed.
+    AgentControlsModule,
     // MCP last so it can consume the contract + agent-inbox tools.
     McpModule,
   ],
