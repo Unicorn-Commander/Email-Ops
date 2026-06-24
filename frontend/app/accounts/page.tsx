@@ -1,14 +1,48 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { Button, Badge, Card, Skeleton, cn } from '@/components/ui';
 import { useConnectedAccounts } from '@/components/ConnectedAccountsProvider';
 import { useInboxStats } from '@/components/useInboxStats';
 import { formatBytes, providerMeta, storagePercent } from '@/lib/cleaner-model';
-import { getProviderLinkUrl, type ConnectedProvider, type LinkedAccountView } from '@/lib/api';
+import {
+  fetchMyWorkspaces,
+  fetchProfile,
+  getProviderLinkUrl,
+  type ConnectedProvider,
+  type LinkedAccountView,
+} from '@/lib/api';
+import { connectMailbox } from '@/lib/mailApi';
+import { pickActiveWorkspace } from '@/lib/workspace';
 
 export default function AccountsPage() {
   const { accounts, loading, error, refreshAccounts } = useConnectedAccounts();
+  // The active workspace + the caller's identity email — what "Add to Mail"
+  // needs to register a connected account as a mailbox. The connected-account
+  // record carries no address, but the linked account IS the caller's own
+  // identity (the broker links the IdP to the signed-in user), so the profile
+  // email is the right address to register — no need to prompt for it.
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
+  const [selfEmail, setSelfEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const [workspaces, profile] = await Promise.all([fetchMyWorkspaces(), fetchProfile()]);
+        if (!alive) return;
+        setWorkspaceId(pickActiveWorkspace(workspaces)?.workspace_id ?? null);
+        setSelfEmail(profile.email?.trim() || null);
+      } catch {
+        // Non-fatal: "Add to Mail" simply stays disabled if we can't resolve
+        // the workspace/identity. The cleaner cockpit below is unaffected.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Returning from a Keycloak account-link round-trip (/accounts?linked=google):
   // refresh link status and clean the URL.
@@ -68,7 +102,12 @@ export default function AccountsPage() {
       ) : (
         <div className="grid gap-4 xl:grid-cols-2">
           {accounts.map((account) => (
-            <AccountCard key={account.provider} account={account} />
+            <AccountCard
+              key={account.provider}
+              account={account}
+              workspaceId={workspaceId}
+              selfEmail={selfEmail}
+            />
           ))}
         </div>
       )}
@@ -76,12 +115,28 @@ export default function AccountsPage() {
   );
 }
 
-function AccountCard({ account }: { account: LinkedAccountView }) {
+/** Outcome of adding a connected account to the `/mail` client. */
+type AddState =
+  | { kind: 'idle' }
+  | { kind: 'adding' }
+  | { kind: 'added'; address: string }
+  | { kind: 'error'; message: string };
+
+function AccountCard({
+  account,
+  workspaceId,
+  selfEmail,
+}: {
+  account: LinkedAccountView;
+  workspaceId: string | null;
+  selfEmail: string | null;
+}) {
   const meta = providerMeta(account.provider);
   const { load, stats, unavailableReason, error } = useInboxStats(account.provider, account.linked);
   const percent = storagePercent(stats);
   const [linking, setLinking] = useState(false);
   const [linkErr, setLinkErr] = useState<string | null>(null);
+  const [add, setAdd] = useState<AddState>({ kind: 'idle' });
 
   const connect = async () => {
     setLinkErr(null);
@@ -91,6 +146,26 @@ function AccountCard({ account }: { account: LinkedAccountView }) {
     } catch (e) {
       setLinkErr(e instanceof Error ? e.message : 'Could not start linking.');
       setLinking(false);
+    }
+  };
+
+  // Register this connected account as a workspace mailbox so it shows in /mail.
+  // Idempotent server-side, so a re-click just re-confirms the same address.
+  const canAdd = account.linked && !!workspaceId && !!selfEmail;
+  const addToMail = async () => {
+    if (!workspaceId || !selfEmail) return;
+    setAdd({ kind: 'adding' });
+    try {
+      const mailbox = await connectMailbox(workspaceId, {
+        provider: account.provider,
+        email_address: selfEmail,
+      });
+      setAdd({ kind: 'added', address: mailbox.email_address || selfEmail });
+    } catch (e) {
+      setAdd({
+        kind: 'error',
+        message: e instanceof Error ? e.message : 'Could not add this account to Mail.',
+      });
     }
   };
 
@@ -171,6 +246,56 @@ function AccountCard({ account }: { account: LinkedAccountView }) {
             Disconnect
           </Button>
         </div>
+
+        {/* Unified inbox: register this connected account as a /mail mailbox. */}
+        {account.linked && (
+          <div className="rounded-token border border-subtle bg-surface-base p-3">
+            {add.kind === 'added' ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="success" dot>
+                  Added to Mail
+                </Badge>
+                <span className="min-w-0 flex-1 truncate text-xs text-tertiary">
+                  <span className="font-mono text-secondary">{add.address}</span> is ready in your
+                  mail client.
+                </span>
+                <Link
+                  href="/mail"
+                  className="shrink-0 rounded-token px-2 py-1 text-xs font-medium text-accent transition-colors duration-fast ease-token hover:bg-surface-overlay/60"
+                >
+                  Open /mail
+                </Link>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-medium text-primary">Use this account in Mail</p>
+                  <p className="mt-0.5 text-[11px] leading-5 text-tertiary">
+                    Read and send {meta.label} from the unified <span className="font-mono">/mail</span>{' '}
+                    client.
+                  </p>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => void addToMail()}
+                  disabled={!canAdd || add.kind === 'adding'}
+                  title={
+                    canAdd
+                      ? undefined
+                      : 'Resolving your workspace and identity — one moment.'
+                  }
+                >
+                  {add.kind === 'adding' ? 'Adding…' : 'Add to Mail'}
+                </Button>
+              </div>
+            )}
+            {add.kind === 'error' && (
+              <p className="mt-2 text-[11px] leading-5 text-danger">{add.message}</p>
+            )}
+          </div>
+        )}
 
         {linkErr && <p className="text-xs leading-5 text-danger">{linkErr}</p>}
 

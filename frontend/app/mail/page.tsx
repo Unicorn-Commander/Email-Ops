@@ -19,6 +19,7 @@
  * list drills into the open thread, with a Back control to return.
  */
 
+import Link from 'next/link';
 import { useMemo, useState } from 'react';
 import {
   Badge,
@@ -39,7 +40,13 @@ import {
 import { ReplyComposer } from '@/components/mail/ReplyComposer';
 import { ComposeDialog } from '@/components/mail/ComposeDialog';
 import { SendersDialog } from '@/components/mail/SendersDialog';
-import type { MailboxPick, MailFolder, MessageView, ThreadView } from '@/lib/mailApi';
+import type {
+  MailboxPick,
+  MailboxProvider,
+  MailFolder,
+  MessageView,
+  ThreadView,
+} from '@/lib/mailApi';
 
 /** The folder tabs, in display order. */
 const FOLDERS: { id: MailFolder; label: string }[] = [
@@ -203,6 +210,13 @@ const OWNER_TONE: Record<string, BadgeVariant> = {
   SHARED: 'protected',
 };
 
+/** Subtle per-mailbox provider tag (the backend it reads/sends through). */
+const PROVIDER_TAG: Record<MailboxProvider, { label: string; tone: BadgeVariant }> = {
+  stalwart: { label: 'Sovereign', tone: 'protected' },
+  gmail: { label: 'Gmail', tone: 'neutral' },
+  microsoft: { label: 'Outlook', tone: 'neutral' },
+};
+
 function MailboxList({
   mailboxes,
   selectedId,
@@ -214,14 +228,22 @@ function MailboxList({
 }) {
   return (
     <Card className="overflow-hidden">
-      <div className="border-b border-subtle px-3 py-2.5">
+      <div className="flex items-center gap-2 border-b border-subtle px-3 py-2.5">
         <span className="text-[11px] font-medium uppercase tracking-wide text-tertiary">
           Mailboxes
         </span>
+        <Link
+          href="/accounts"
+          className="ml-auto shrink-0 rounded-token px-2 py-0.5 text-[11px] font-medium text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary"
+          title="Connect a Gmail or Microsoft 365 account"
+        >
+          Connect an account
+        </Link>
       </div>
       <ul className="max-h-[70vh] overflow-y-auto p-1.5">
         {mailboxes.map((mb) => {
           const active = mb.id === selectedId;
+          const tag = mb.provider ? PROVIDER_TAG[mb.provider] : null;
           return (
             <li key={mb.id}>
               <button
@@ -243,8 +265,15 @@ function MailboxList({
                     {mb.owner_kind.toLowerCase()}
                   </Badge>
                 </span>
-                <span className="w-full truncate font-mono text-[11px] text-muted">
-                  {mb.email_address}
+                <span className="flex w-full items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted">
+                    {mb.email_address}
+                  </span>
+                  {tag && (
+                    <Badge variant={tag.tone} className="shrink-0">
+                      {tag.label}
+                    </Badge>
+                  )}
                 </span>
               </button>
             </li>

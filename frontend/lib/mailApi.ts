@@ -32,6 +32,9 @@ export interface MailParticipant {
   name: string | null;
 }
 
+/** The mail backend each mailbox reads/sends through. */
+export type MailboxProvider = 'stalwart' | 'gmail' | 'microsoft';
+
 /** One mailbox the signed-in caller can open in the mail client (the picker). */
 export interface MailboxPick {
   id: string;
@@ -39,6 +42,12 @@ export interface MailboxPick {
   display_name: string | null;
   owner_kind: 'HUMAN' | 'AGENT' | 'SHARED';
   kind: string;
+  /**
+   * Which backend this mailbox reads/sends through: 'stalwart' is the sovereign
+   * mailbox, 'gmail'/'microsoft' are connected external accounts. Optional on the
+   * wire for backward compatibility (older rows may omit it).
+   */
+  provider?: MailboxProvider;
 }
 
 /** A row in the thread list for a mailbox (mirrors the backend ThreadView). */
@@ -180,6 +189,28 @@ export async function listMailMailboxes(
   token?: string,
 ): Promise<MailMailboxesResponse> {
   return apiGet<MailMailboxesResponse>(`/workspaces/${seg(workspaceId)}/mailboxes`, token);
+}
+
+/** Body for registering the caller's own connected (external) account as a mailbox. */
+export interface ConnectMailboxBody {
+  provider: 'gmail' | 'microsoft';
+  email_address: string;
+  display_name?: string;
+}
+
+/**
+ * Register the caller's OWN linked Gmail/M365 account as a workspace mailbox so
+ * it appears in `/mail` and reads/sends through that provider. The OAuth token
+ * stays in the Keycloak broker — this just creates the mailbox row pointing at
+ * the connected account. Idempotent on `email_address`; returns the created (or
+ * existing) mailbox in the same `MailboxPick` shape the picker renders.
+ */
+export async function connectMailbox(
+  workspaceId: string,
+  body: ConnectMailboxBody,
+  token?: string,
+): Promise<MailboxPick> {
+  return apiPost<MailboxPick>(`/workspaces/${seg(workspaceId)}/mailboxes/connected`, body, token);
 }
 
 /**
