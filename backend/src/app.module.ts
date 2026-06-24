@@ -16,6 +16,7 @@ import { AgentsModule } from './agents/agents.module';
 import { EmailHealthModule } from './email-health/email-health.module';
 import { AgentControlsModule } from './agent-controls/agent-controls.module';
 import { ProvisioningModule } from './provisioning/provisioning.module';
+import { MailboxAccountsModule } from './mailbox-accounts/mailbox-accounts.module';
 
 @Module({
   imports: [
@@ -59,6 +60,8 @@ import { ProvisioningModule } from './provisioning/provisioning.module';
     // The provisioning RBAC control surface (per-workspace policy + the gate the
     // agent/mailbox write surfaces authorize against).
     ProvisioningModule,
+    // Mailbox management (human/agent/shared CRUD; policy-gated).
+    MailboxAccountsModule,
     // MCP last so it can consume the contract + agent-inbox tools.
     McpModule,
   ],
