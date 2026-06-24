@@ -44,9 +44,11 @@ export function useAgentControls(): UseAgentControls {
 
   const setPaused = useCallback(
     (next: boolean) => {
+      // Ignore a toggle fired before the workspace resolves — flipping the UI
+      // without a PUT would leave it out of sync with the backend.
+      if (!workspaceId) return;
       const prev = agentsPaused;
       setAgentsPaused(next); // optimistic
-      if (!workspaceId) return;
       setBusy(true);
       void (async () => {
         try {

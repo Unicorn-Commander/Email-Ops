@@ -343,13 +343,16 @@ export class EmailService {
       });
       if (agent) {
         // A registered agent reaching the send lane is an L2 autonomous send
-        // (the gate coerces L0/L1 sends to drafts) — audit it.
+        // (the gate coerces L0/L1 sends to drafts) — audit it WITH its outcome.
+        // handToEngine is degrade-clean (a rejected send returns FAILED rather
+        // than throwing), so stamp the result so the feed never reads a failed
+        // autonomous send as a delivered one.
         await this.recordAction(tx, workspaceId, {
           kind: AgentActionKind.AUTONOMOUS_SEND,
           agentKey: agent.key,
           messageId: msg.id,
           actorUcUid: ucUid,
-          detail: `${decision.reason}${input.subject ? `: ${input.subject}` : ''}`,
+          detail: `${input.subject ?? '(no subject)'} (${this.statusWire(sent.status)})`,
         });
       }
       return this.composeView(sent);
@@ -532,8 +535,13 @@ export class EmailService {
 
   /**
    * Append a row to the agent-mail action/audit log (the activity-feed source).
-   * Best-effort within the caller's tx — it shares the transaction so an event is
-   * never recorded for an action that rolled back.
+   * TRANSACTIONAL (not best-effort): it shares the caller's tx, so an event is
+   * never recorded for an action that rolled back — and, conversely, an audit
+   * INSERT failure rolls the action back (fail-closed; no un-audited action).
+   * CAVEAT (compose mode=send): the external handToEngine() runs before this, so
+   * a (negligible, single-row-insert) audit failure after a successful external
+   * send would roll back the SoR row while the mail already left. Recording the
+   * AUTONOMOUS_SEND intent before the engine hand-off is a possible hardening.
    */
   private async recordAction(
     tx: WorkspaceTxClient,
