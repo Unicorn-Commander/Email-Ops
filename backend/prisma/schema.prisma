@@ -122,6 +122,20 @@ enum AgentInboxKind {
   CLEANUP
 }
 
+// ── Agent autonomy dial (Email-Ops OWNS this) ──
+//
+// The per-agent send-autonomy level the registry carries (the "autonomy dial"):
+//   L0_DRAFT_ONLY       — stage drafts only; never sends, even autonomously.
+//   L1_APPROVE_TO_SEND  — drafts; a human approves each send (today's default flow).
+//   L2_AUTONOMOUS_AUDIT — may send without per-message approval; every send audited.
+// This layer RECORDS + manages the dial; enforcement in the compose/approve path
+// is a follow-up that reads this value (so L2 is not auto-sending yet).
+enum AgentAutonomyLevel {
+  L0_DRAFT_ONLY
+  L1_APPROVE_TO_SEND
+  L2_AUTONOMOUS_AUDIT
+}
+
 enum CleanupActionKind {
   TRASH
   DELETE
@@ -187,6 +201,7 @@ model Workspace {
   mailboxAccounts   MailboxAccount[]
   emailMessages     EmailMessage[]
   agentInboxItems   AgentInboxItem[]
+  agents            Agent[]
   cleanupBatches    CleanupBatch[]
   engagementEvents  EmailEngagementEvent[]
 
@@ -416,6 +431,48 @@ model AgentInboxItem {
   // The queue reads pending items newest-first.
   @@index([workspaceId, state, createdAt])
   @@map("agent_inbox_items")
+}
+
+// ============================================================
+// AGENT (Email-Ops OWNS this — tenant-scoped; the agent registry)
+// ============================================================
+//
+// A first-class, workspace-scoped identity for each agent that drafts/sends mail
+// (Customer-Ops, Email-Ops Agent, a per-platform persona, ...). This is the
+// registry behind the "Agents" view + the autonomy dial — the second pillar of
+// the Agent Email Command Center, alongside the agent-inbox approval queue.
+//
+// `key` is the STABLE provenance slug that supersedes the free-text
+// AgentInboxItem.draftedBy ('customer-ops', 'email-ops-agent', ...): unique per
+// workspace, it's how a queue item is attributed back to a registered agent.
+// `mailboxAccountId` is a SOFT reference to the MailboxAccount the agent sends
+// from (no DB FK, matching EmailMessage.mailboxAccountId — the RLS-fenced mailbox
+// table is resolved in app code, not cross-referenced). `autonomyLevel` is the
+// dial; `recipientPolicy` is an optional per-recipient-class scoping (JSON-on-row,
+// matching the payload/criteria convention).
+//
+// RLS-fenced on workspaceId exactly like the other scoped tables. ENABLE + FORCE,
+// identical workspace_isolation policy. A no-GUC read returns zero rows.
+model Agent {
+  id               String             @id @default(uuid())
+  workspaceId      String
+  key              String
+  displayName      String
+  description      String?
+  mailboxAccountId String?
+  autonomyLevel    AgentAutonomyLevel @default(L1_APPROVE_TO_SEND)
+  recipientPolicy  Json?
+  active           Boolean            @default(true)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  // One agent identity per key per workspace (the stable provenance slug).
+  @@unique([workspaceId, key])
+  @@index([workspaceId])
+  @@index([workspaceId, active])
+  @@map("agents")
 }
 
 // ============================================================

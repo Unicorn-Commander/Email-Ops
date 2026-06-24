@@ -12,6 +12,7 @@ import { EmailModule } from './email/email.module';
 import { McpModule } from './mcp/mcp.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { AgentInboxModule } from './agent-inbox/agent-inbox.module';
+import { AgentsModule } from './agents/agents.module';
 
 @Module({
   imports: [
@@ -43,6 +44,9 @@ import { AgentInboxModule } from './agent-inbox/agent-inbox.module';
     // Phase 2, Part B: the agent-inbox REST surface (JWT + membership guarded),
     // delegating to the same EmailService approval flow the MCP tools use.
     AgentInboxModule,
+    // The agent registry surface (the "Agents" view + the autonomy dial): the
+    // identity layer behind the approval queue. JWT + membership guarded.
+    AgentsModule,
     // MCP last so it can consume the contract + agent-inbox tools.
     McpModule,
   ],

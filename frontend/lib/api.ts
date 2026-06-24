@@ -104,6 +104,29 @@ export async function apiPost<T = unknown>(
   return (text ? JSON.parse(text) : {}) as T;
 }
 
+/** Authenticated PATCH against the backend. Throws ApiError on non-2xx. */
+export async function apiPatch<T = unknown>(
+  path: string,
+  body?: unknown,
+  token?: string,
+): Promise<T> {
+  const bearer = token ?? getToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, await errorMessage(res, `PATCH ${path} failed: ${res.status}`));
+  }
+  // Tolerate an empty 200/204 body.
+  const text = await res.text();
+  return (text ? JSON.parse(text) : {}) as T;
+}
+
 export interface EmailOpsUser {
   id: string;
   email: string;
@@ -212,6 +235,89 @@ export async function rejectAgentInboxItem(
     note ? { note } : {},
     token,
   );
+}
+
+// ── Agent registry (Phase 6) ──────────────────────────────────────────────
+
+/** How much an agent is trusted to act on its own in the send path. */
+export type AutonomyLevel = 'L0_DRAFT_ONLY' | 'L1_APPROVE_TO_SEND' | 'L2_AUTONOMOUS_AUDIT';
+
+/** One fleet agent (mirrors the backend AgentView wire shape; snake_case). */
+export interface AgentView {
+  id: string;
+  key: string; // stable slug, unique per workspace, e.g. "customer-ops"
+  display_name: string;
+  description: string | null;
+  mailbox_account_id: string | null;
+  mailbox_address: string | null; // resolved email address of the mailbox, for display
+  autonomy_level: AutonomyLevel;
+  recipient_policy: Record<string, unknown> | null;
+  active: boolean;
+  pending_count: number; // how many of this agent's drafts await approval
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CreateAgentBody {
+  key: string;
+  display_name: string;
+  description?: string;
+  mailbox_account_id?: string;
+  autonomy_level?: AutonomyLevel;
+  recipient_policy?: Record<string, unknown>;
+}
+
+export interface UpdateAgentBody {
+  display_name?: string;
+  description?: string | null;
+  mailbox_account_id?: string | null;
+  autonomy_level?: AutonomyLevel;
+  recipient_policy?: Record<string, unknown> | null;
+  active?: boolean;
+}
+
+export interface AgentListResponse {
+  items: AgentView[];
+  count: number;
+}
+
+const agentsBase = (workspaceId: string) =>
+  `/workspaces/${encodeURIComponent(workspaceId)}/agents`;
+
+/** List the agent fleet for a workspace. */
+export async function listAgents(
+  workspaceId: string,
+  token?: string,
+): Promise<AgentListResponse> {
+  return apiGet<AgentListResponse>(agentsBase(workspaceId), token);
+}
+
+/** Create a new agent (409 on duplicate key, 400 if mailbox not in workspace). */
+export async function createAgent(
+  workspaceId: string,
+  body: CreateAgentBody,
+  token?: string,
+): Promise<AgentView> {
+  return apiPost<AgentView>(agentsBase(workspaceId), body, token);
+}
+
+/** Fetch a single agent by id (404 if missing). */
+export async function getAgent(
+  workspaceId: string,
+  id: string,
+  token?: string,
+): Promise<AgentView> {
+  return apiGet<AgentView>(`${agentsBase(workspaceId)}/${encodeURIComponent(id)}`, token);
+}
+
+/** Update an agent's mailbox / autonomy / active flag (404 if missing). */
+export async function updateAgent(
+  workspaceId: string,
+  id: string,
+  body: UpdateAgentBody,
+  token?: string,
+): Promise<AgentView> {
+  return apiPatch<AgentView>(`${agentsBase(workspaceId)}/${encodeURIComponent(id)}`, body, token);
 }
 
 // -- Connected accounts cleaner cockpit ------------------------------------
