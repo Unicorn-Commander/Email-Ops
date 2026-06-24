@@ -47,6 +47,13 @@ export class AgentsService {
     });
   }
 
+  /** How many agents the workspace has (for the policy cap). */
+  async countAgents(workspaceId: string, ucUid: string | null): Promise<number> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      tx.agent.count({ where: { workspaceId } }),
+    );
+  }
+
   /** One agent by id (scoped to the workspace). Null → 404 at the controller. */
   async getAgent(workspaceId: string, ucUid: string | null, id: string): Promise<AgentView | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
@@ -175,6 +182,10 @@ export class AgentsService {
       } else {
         await this.upsertBinding(tx, workspaceId, agentId, input.mailboxAccountId, requested, false);
       }
+      // Safety net: enforce the one-primary + cache invariant from ANY state
+      // (e.g. re-binding the current primary as non-primary must not orphan the
+      // send identity). Idempotent.
+      await this.reconcilePrimary(tx, workspaceId, agentId);
 
       await this.recordAgentAction(
         tx,
@@ -204,26 +215,10 @@ export class AgentsService {
       });
       if (binding) {
         await tx.agentMailbox.delete({ where: { id: binding.id } });
-        if (binding.isPrimary) {
-          // Promote another sendable binding to primary, else clear the cache.
-          const next = await tx.agentMailbox.findFirst({
-            where: {
-              workspaceId,
-              agentId,
-              access: { in: [MailboxAccessLevel.SEND, MailboxAccessLevel.BOTH] },
-            },
-            orderBy: { createdAt: 'asc' },
-          });
-          if (next) {
-            await tx.agentMailbox.update({ where: { id: next.id }, data: { isPrimary: true } });
-            await tx.agent.update({
-              where: { id: agentId },
-              data: { mailboxAccountId: next.mailboxAccountId },
-            });
-          } else {
-            await tx.agent.update({ where: { id: agentId }, data: { mailboxAccountId: null } });
-          }
-        }
+        // Re-establish the primary + cache invariant. Handles removing the primary
+        // AND a desynced cache that pointed at this now-removed binding regardless
+        // of its isPrimary flag.
+        await this.reconcilePrimary(tx, workspaceId, agentId);
         await this.recordAgentAction(
           tx,
           workspaceId,
@@ -284,6 +279,49 @@ export class AgentsService {
       await this.upsertBinding(tx, workspaceId, agentId, mailboxAccountId, access, true);
     }
     await tx.agent.update({ where: { id: agentId }, data: { mailboxAccountId } });
+  }
+
+  /**
+   * Enforce the binding invariant from ANY state: at most one primary binding,
+   * and Agent.mailboxAccountId (the send-identity cache resolveSendMailbox reads)
+   * === that primary's mailbox, or null when no sendable binding exists. Collapses
+   * stray extra primaries and promotes the oldest sendable binding when none is
+   * primary. Idempotent — the safety net every bind/unbind ends with.
+   */
+  private async reconcilePrimary(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    agentId: string,
+  ): Promise<void> {
+    const bindings = await tx.agentMailbox.findMany({
+      where: { workspaceId, agentId },
+      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+    });
+    const isSendable = (a: MailboxAccessLevel) =>
+      a === MailboxAccessLevel.SEND || a === MailboxAccessLevel.BOTH;
+    const primaries = bindings.filter((b) => b.isPrimary);
+    // Collapse any extra primaries down to the first.
+    for (const extra of primaries.slice(1)) {
+      await tx.agentMailbox.update({ where: { id: extra.id }, data: { isPrimary: false } });
+    }
+    let primary: AgentMailbox | null = primaries[0] ?? null;
+    // No primary (or a non-sendable one) → promote the oldest sendable binding.
+    if (!primary || !isSendable(primary.access)) {
+      if (primary && !isSendable(primary.access)) {
+        await tx.agentMailbox.update({ where: { id: primary.id }, data: { isPrimary: false } });
+      }
+      const next = bindings.find((b) => isSendable(b.access));
+      if (next) {
+        await tx.agentMailbox.update({ where: { id: next.id }, data: { isPrimary: true } });
+        primary = { ...next, isPrimary: true };
+      } else {
+        primary = null;
+      }
+    }
+    await tx.agent.update({
+      where: { id: agentId },
+      data: { mailboxAccountId: primary ? primary.mailboxAccountId : null },
+    });
   }
 
   // ── view mapping ────────────────────────────────────────────────────────

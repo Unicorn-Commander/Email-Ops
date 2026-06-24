@@ -14,6 +14,7 @@
 
 import {
   Body,
+  ConflictException,
   Controller,
   ForbiddenException,
   Get,
@@ -120,6 +121,16 @@ export class MailboxAccountsController {
       });
       return { provisioning_request: filed };
     }
+    // Enforce the per-workspace cap (soft quota; the policy persists it).
+    const policy = await this.policy.getEffectivePolicy(workspaceId, ucUid);
+    if (
+      policy.maxMailboxesPerWorkspace != null &&
+      (await this.mailboxes.countMailboxes(workspaceId, ucUid)) >= policy.maxMailboxesPerWorkspace
+    ) {
+      throw new ConflictException(
+        `This workspace has reached its mailbox limit (${policy.maxMailboxesPerWorkspace}).`,
+      );
+    }
     return this.mailboxes.createMailbox(workspaceId, ucUid, input);
   }
 
@@ -138,7 +149,6 @@ export class MailboxAccountsController {
     if (!existing) throw new NotFoundException('Mailbox not found in this workspace.');
     const action =
       existing.owner_kind === MailboxOwnerKind.AGENT ? 'agentMailbox.edit' : 'humanMailbox.edit';
-    this.blockIfApprovalGated(await this.policy.authorize(workspaceId, ucUid, role, action), action);
 
     const patch: UpdateMailboxInput = {};
     if (body.display_name !== undefined) patch.displayName = body.display_name;
@@ -146,6 +156,17 @@ export class MailboxAccountsController {
     if (body.owner_key !== undefined) patch.ownerKey = body.owner_key;
     if (body.postmark_lane !== undefined) patch.postmarkLane = body.postmark_lane;
     if (body.active !== undefined) patch.active = body.active;
+
+    const decision = await this.policy.authorize(workspaceId, ucUid, role, action);
+    if (decision === 'requires_approval') {
+      const filed = await this.policy.fileRequest(workspaceId, ucUid, {
+        kind: existing.owner_kind === MailboxOwnerKind.AGENT ? 'AGENT_MAILBOX' : 'HUMAN_MAILBOX',
+        action: 'update',
+        payload: { id, patch },
+        summary: `Update mailbox ${existing.email_address}`,
+      });
+      return { provisioning_request: filed };
+    }
     const updated = await this.mailboxes.updateMailbox(workspaceId, ucUid, id, patch);
     if (!updated) throw new NotFoundException('Mailbox not found in this workspace.');
     return updated;

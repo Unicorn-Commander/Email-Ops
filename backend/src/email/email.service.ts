@@ -92,8 +92,8 @@ export class EmailService {
   ): Promise<ThreadView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       // The deliverable address + default mailbox for the workspace (if any).
-      const mailbox = await this.defaultMailbox(tx);
-      const address = await this.contactAddress(tx, contactId);
+      const mailbox = await this.defaultMailbox(tx, workspaceId);
+      const address = await this.contactAddress(tx, workspaceId, contactId);
 
       // Live Stalwart threads (degrade-clean: [] when unconfigured).
       let live: StalwartThread[] = [];
@@ -105,7 +105,9 @@ export class EmailService {
       // thin threads (so a brand-new outbound the cockpit just composed shows in
       // the 360 even before the engine surfaces it).
       const own = await tx.emailMessage.findMany({
-        where: { contactId, threadId: { not: null } },
+        // Explicit tenant fence (correct now while RLS is inert under the owner
+        // role, and after the role flip): never read another workspace's rows.
+        where: { workspaceId, contactId, threadId: { not: null } },
         orderBy: { createdAt: 'desc' },
       });
 
@@ -153,7 +155,7 @@ export class EmailService {
     threadId: string,
   ): Promise<MessageView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const mailbox = await this.defaultMailbox(tx);
+      const mailbox = await this.defaultMailbox(tx, workspaceId);
 
       let live: MessageView[] = [];
       if (mailbox) {
@@ -171,7 +173,7 @@ export class EmailService {
       }
 
       const own = await tx.emailMessage.findMany({
-        where: { threadId },
+        where: { workspaceId, threadId },
         orderBy: { createdAt: 'asc' },
       });
 
@@ -211,7 +213,7 @@ export class EmailService {
       if (!mailbox) return [];
 
       const msgs = await tx.emailMessage.findMany({
-        where: { fromAddress: mailbox.emailAddress, threadId: { not: null } },
+        where: { workspaceId, fromAddress: mailbox.emailAddress, threadId: { not: null } },
         orderBy: { createdAt: 'desc' },
         take: 300,
       });
@@ -341,6 +343,18 @@ export class EmailService {
             where: { id: input.fromMailboxAccountId, workspaceId },
           })
         : null;
+      // Send-as authorization: a human client may send AS a SHARED mailbox or one
+      // they personally own — never spoof another person's (or an agent's) identity.
+      // (The agent path doesn't set fromMailboxAccountId; it uses resolveSendMailbox.)
+      if (explicitFrom) {
+        const kind = explicitFrom.ownerKind as string;
+        const ownsIt =
+          kind === 'SHARED' ||
+          (kind === 'HUMAN' && !!explicitFrom.ownerKey && explicitFrom.ownerKey === ucUid);
+        if (!ownsIt) {
+          throw new ForbiddenException('You are not allowed to send as that mailbox.');
+        }
+      }
       const mailbox = explicitFrom ?? (await this.resolveSendMailbox(tx, workspaceId, agent));
       const fromAddress = mailbox?.emailAddress ?? null;
 
@@ -487,8 +501,11 @@ export class EmailService {
     note?: string | null,
   ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const item = await tx.agentInboxItem.findUnique({
-        where: { id: itemId },
+      // Tenant fence: scope by workspaceId so a foreign item id resolves to null
+      // (→ 404) and can NEVER be acted on across tenants. RLS is inert under the
+      // owner role today, so this explicit predicate is the real guard.
+      const item = await tx.agentInboxItem.findFirst({
+        where: { id: itemId, workspaceId },
         include: { message: true },
       });
       if (!item) return null;
@@ -528,8 +545,10 @@ export class EmailService {
       if (!item.message) return null;
 
       const mailbox = item.message.mailboxAccountId
-        ? await tx.mailboxAccount.findUnique({ where: { id: item.message.mailboxAccountId } })
-        : await this.defaultMailbox(tx);
+        ? await tx.mailboxAccount.findFirst({
+            where: { id: item.message.mailboxAccountId, workspaceId },
+          })
+        : await this.defaultMailbox(tx, workspaceId);
 
       // Hand the approved draft to the mail engine.
       const sent = await this.handToEngine(tx, item.message.id, {
@@ -577,8 +596,11 @@ export class EmailService {
     note?: string | null,
   ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const item = await tx.agentInboxItem.findUnique({
-        where: { id: itemId },
+      // Tenant fence: scope by workspaceId so a foreign item id resolves to null
+      // (→ 404) and can NEVER be acted on across tenants. RLS is inert under the
+      // owner role today, so this explicit predicate is the real guard.
+      const item = await tx.agentInboxItem.findFirst({
+        where: { id: itemId, workspaceId },
         include: { message: true },
       });
       if (!item) return null;
@@ -647,7 +669,7 @@ export class EmailService {
       });
       if (mb) return mb;
     }
-    return this.defaultMailbox(tx);
+    return this.defaultMailbox(tx, workspaceId);
   }
 
   /**
@@ -894,14 +916,19 @@ export class EmailService {
     });
   }
 
-  /** The workspace's default mailbox account (RLS-scoped), or null. */
-  private async defaultMailbox(tx: WorkspaceTxClient) {
+  /** The workspace's default mailbox account, or null. Explicitly tenant-scoped
+   * (RLS is inert under the owner role) so a mailbox-less workspace can NEVER fall
+   * back to another tenant's mailbox as its send identity. */
+  private async defaultMailbox(tx: WorkspaceTxClient, workspaceId: string) {
     const def = await tx.mailboxAccount.findFirst({
-      where: { isDefault: true, active: true },
+      where: { workspaceId, isDefault: true, active: true },
       orderBy: { createdAt: 'asc' },
     });
     if (def) return def;
-    return tx.mailboxAccount.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+    return tx.mailboxAccount.findFirst({
+      where: { workspaceId, active: true },
+      orderBy: { createdAt: 'asc' },
+    });
   }
 
   private async resolveUserByUcUid(tx: WorkspaceTxClient, ucUid: string | null) {
@@ -920,9 +947,13 @@ export class EmailService {
    * contact as the address hint (a brand-new contact with no history yields null
    * and the live-thread lookup is skipped — degrade-clean).
    */
-  private async contactAddress(tx: WorkspaceTxClient, contactId: string): Promise<string | null> {
+  private async contactAddress(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    contactId: string,
+  ): Promise<string | null> {
     const last = await tx.emailMessage.findFirst({
-      where: { contactId, toAddress: { not: null } },
+      where: { workspaceId, contactId, toAddress: { not: null } },
       orderBy: { createdAt: 'desc' },
       select: { toAddress: true },
     });

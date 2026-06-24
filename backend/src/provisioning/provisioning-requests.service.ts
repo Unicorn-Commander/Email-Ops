@@ -11,6 +11,7 @@
 
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -62,13 +63,29 @@ export class ProvisioningRequestsService {
   ): Promise<ProvisioningRequestView> {
     await this.assertApprover(workspaceId, ucUid, role);
 
-    const req = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
-      tx.mailboxProvisioningRequest.findFirst({ where: { id, workspaceId } }),
+    // Atomic claim: flip PENDING→APPROVED in ONE conditional write so two
+    // concurrent approvers can't both replay (double-apply). Only the winner gets
+    // count===1; the loser sees the row is no longer PENDING.
+    const claim = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      tx.mailboxProvisioningRequest.updateMany({
+        where: { id, workspaceId, state: ProvisioningRequestState.PENDING },
+        data: {
+          state: ProvisioningRequestState.APPROVED,
+          reviewedByUcUid: ucUid,
+          reviewedAt: new Date(),
+        },
+      }),
     );
-    if (!req) throw new NotFoundException('Provisioning request not found in this workspace.');
-    if (req.state !== ProvisioningRequestState.PENDING) {
-      throw new BadRequestException(`Request is ${req.state}, not PENDING.`);
+    if (claim.count === 0) {
+      const existing = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+        tx.mailboxProvisioningRequest.findFirst({ where: { id, workspaceId } }),
+      );
+      if (!existing) throw new NotFoundException('Provisioning request not found in this workspace.');
+      throw new ConflictException(`Request is ${existing.state}, not PENDING.`);
     }
+    const req = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      tx.mailboxProvisioningRequest.findFirstOrThrow({ where: { id, workspaceId } }),
+    );
 
     // Replay via the canonical service (its OWN tx — not nested under ours).
     let appliedRefId = '';
@@ -120,13 +137,10 @@ export class ProvisioningRequestsService {
   ): Promise<ProvisioningRequestView> {
     await this.assertApprover(workspaceId, ucUid, role);
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const req = await tx.mailboxProvisioningRequest.findFirst({ where: { id, workspaceId } });
-      if (!req) throw new NotFoundException('Provisioning request not found in this workspace.');
-      if (req.state !== ProvisioningRequestState.PENDING) {
-        throw new BadRequestException(`Request is ${req.state}, not PENDING.`);
-      }
-      const updated = await tx.mailboxProvisioningRequest.update({
-        where: { id: req.id },
+      // Atomic claim (conditional on PENDING) so a reject can't clobber a request
+      // a concurrent approve already moved to APPROVED/APPLIED.
+      const claim = await tx.mailboxProvisioningRequest.updateMany({
+        where: { id, workspaceId, state: ProvisioningRequestState.PENDING },
         data: {
           state: ProvisioningRequestState.REJECTED,
           reviewedByUcUid: ucUid,
@@ -134,13 +148,21 @@ export class ProvisioningRequestsService {
           reviewNote: note ?? null,
         },
       });
+      if (claim.count === 0) {
+        const existing = await tx.mailboxProvisioningRequest.findFirst({ where: { id, workspaceId } });
+        if (!existing) throw new NotFoundException('Provisioning request not found in this workspace.');
+        throw new ConflictException(`Request is ${existing.state}, not PENDING.`);
+      }
+      const updated = await tx.mailboxProvisioningRequest.findFirstOrThrow({
+        where: { id, workspaceId },
+      });
       await tx.agentActionEvent.create({
         data: {
           workspaceId,
           kind: AgentActionKind.PROVISION_REJECTED,
           actorUcUid: ucUid,
-          agentKey: req.requestedByAgentKey,
-          detail: req.summary,
+          agentKey: updated.requestedByAgentKey,
+          detail: updated.summary,
         },
       });
       return this.toView(updated);

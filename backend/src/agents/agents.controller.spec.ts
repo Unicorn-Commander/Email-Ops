@@ -42,6 +42,10 @@ describe('AgentsController (delegation + RBAC gate)', () => {
         if (decision === 'deny') throw new ForbiddenException('policy denied');
         return decision;
       }),
+      getEffectivePolicy: jest.fn(async () => ({
+        maxAgentsPerWorkspace: null,
+        maxMailboxesPerWorkspace: null,
+      })),
     } as unknown as ProvisioningPolicyService;
     return new AgentsController(agentsMock as unknown as AgentsService, policy);
   }

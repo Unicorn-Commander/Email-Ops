@@ -33,6 +33,13 @@ export class MailboxAccountsService {
     });
   }
 
+  /** How many mailboxes the workspace has (for the policy cap). */
+  async countMailboxes(workspaceId: string, ucUid: string | null): Promise<number> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      tx.mailboxAccount.count({ where: { workspaceId } }),
+    );
+  }
+
   async getMailbox(workspaceId: string, ucUid: string | null, id: string): Promise<MailboxView | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const mb = await tx.mailboxAccount.findFirst({ where: { id, workspaceId } });
@@ -120,7 +127,9 @@ export class MailboxAccountsService {
   }
 
   private async toViewOne(tx: WorkspaceTxClient, mailbox: MailboxAccount): Promise<MailboxView> {
-    const agentCount = await tx.agentMailbox.count({ where: { mailboxAccountId: mailbox.id } });
+    const agentCount = await tx.agentMailbox.count({
+      where: { workspaceId: mailbox.workspaceId, mailboxAccountId: mailbox.id },
+    });
     return this.toView(mailbox, agentCount);
   }
 

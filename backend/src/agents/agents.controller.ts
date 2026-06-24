@@ -15,6 +15,7 @@
 
 import {
   Body,
+  ConflictException,
   Controller,
   Delete,
   ForbiddenException,
@@ -194,9 +195,15 @@ export class AgentsController {
       tier: body.tier,
       managerAgentKey: body.manager_agent_key ?? null,
     };
-    const decision = await this.policy.authorize(workspaceId, ucUid, role, 'agent.create');
-    if (decision === 'requires_approval') {
-      // APPROVAL mode: file a request instead of creating; an approver replays it.
+    // Standing up an agent already wired to a send identity is the higher-trust
+    // agentMailbox gate (ADMIN_ONLY by default) IN ADDITION to agent.create — so a
+    // MANAGER can't bypass it by binding the mailbox at create time. authorize()
+    // throws 403 on a hard deny; either gate requiring approval queues the create.
+    const d1 = await this.policy.authorize(workspaceId, ucUid, role, 'agent.create');
+    const d2 = input.mailboxAccountId
+      ? await this.policy.authorize(workspaceId, ucUid, role, 'agentMailbox.edit')
+      : 'allow';
+    if (d1 === 'requires_approval' || d2 === 'requires_approval') {
       const filed = await this.policy.fileRequest(workspaceId, ucUid, {
         kind: 'AGENT',
         action: 'create',
@@ -204,6 +211,16 @@ export class AgentsController {
         summary: `Create agent ${body.key}`,
       });
       return { provisioning_request: filed };
+    }
+    // Enforce the per-workspace cap (soft quota; the policy persists it).
+    const policy = await this.policy.getEffectivePolicy(workspaceId, ucUid);
+    if (
+      policy.maxAgentsPerWorkspace != null &&
+      (await this.agents.countAgents(workspaceId, ucUid)) >= policy.maxAgentsPerWorkspace
+    ) {
+      throw new ConflictException(
+        `This workspace has reached its agent limit (${policy.maxAgentsPerWorkspace}).`,
+      );
     }
     return this.agents.createAgent(workspaceId, ucUid, input);
   }
@@ -236,10 +253,6 @@ export class AgentsController {
     @Body() body: UpdateAgentDto,
   ) {
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
-    this.blockIfApprovalGated(
-      await this.policy.authorize(workspaceId, ucUid, role, 'agent.edit'),
-      'agent.edit',
-    );
     const patch: UpdateAgentInput = {};
     if (body.display_name !== undefined) patch.displayName = body.display_name;
     if (body.description !== undefined) patch.description = body.description;
@@ -250,6 +263,24 @@ export class AgentsController {
     if (body.manager_agent_key !== undefined) patch.managerAgentKey = body.manager_agent_key;
     if (body.paused !== undefined) patch.paused = body.paused;
     if (body.active !== undefined) patch.active = body.active;
+
+    // agent.edit, plus the ADMIN_ONLY agentMailbox gate when the send identity is
+    // being re-pointed (so PATCH can't bypass it). Either requiring approval queues
+    // the edit (replayed via updateAgent on approve); a hard deny 403s here.
+    const d1 = await this.policy.authorize(workspaceId, ucUid, role, 'agent.edit');
+    const d2 =
+      body.mailbox_account_id !== undefined
+        ? await this.policy.authorize(workspaceId, ucUid, role, 'agentMailbox.edit')
+        : 'allow';
+    if (d1 === 'requires_approval' || d2 === 'requires_approval') {
+      const filed = await this.policy.fileRequest(workspaceId, ucUid, {
+        kind: 'AGENT',
+        action: 'update',
+        payload: { id, patch },
+        summary: `Update agent ${id}`,
+      });
+      return { provisioning_request: filed };
+    }
 
     const updated = await this.agents.updateAgent(workspaceId, ucUid, id, patch);
     if (!updated) {
