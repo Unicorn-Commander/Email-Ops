@@ -13,6 +13,7 @@
 import { useMemo, useState } from 'react';
 import { Badge, Button, Card, Skeleton, SkeletonText, cn, useConfirm } from '@/components/ui';
 import { useAgentInbox } from '@/components/useAgentInbox';
+import { agentLabel } from '@/lib/agents';
 import type { AgentInboxItemView, AgentInboxState } from '@/lib/api';
 
 const TABS: Array<{ value: AgentInboxState; label: string }> = [
@@ -171,15 +172,6 @@ function kindMeta(kind?: string) {
     approveVerb: 'Approve & send',
     approveTitle: 'Send this email?',
   };
-}
-
-/** Humanize an agent provenance slug ('customer-ops' → 'Customer-Ops'). */
-function agentLabel(key: string | null): string {
-  if (!key) return 'Unknown agent';
-  return key
-    .split(/[-_]/)
-    .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))
-    .join('-');
 }
 
 function ReviewCard({

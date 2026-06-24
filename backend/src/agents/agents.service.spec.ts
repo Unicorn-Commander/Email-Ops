@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
-import { AgentAutonomyLevel, Prisma } from '@prisma/client';
+import { AgentAutonomyLevel, AgentInboxState, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AgentsService } from './agents.service';
 
@@ -77,6 +77,10 @@ describe('AgentsService', () => {
         autonomyLevel: AgentAutonomyLevel.L1_APPROVE_TO_SEND,
       }),
     });
+    // pending_count must be scoped to THIS workspace (shared draftedBy slugs).
+    expect(tx.agentInboxItem.count).toHaveBeenCalledWith({
+      where: { workspaceId: WS, state: AgentInboxState.PENDING, draftedBy: 'customer-ops' },
+    });
     expect(view).toMatchObject({
       id: 'agent-1',
       key: 'customer-ops',
@@ -148,6 +152,12 @@ describe('AgentsService', () => {
 
     const views = await svc.listAgents(WS, UID);
 
+    // The pending-count groupBy must be workspace-scoped (no cross-tenant sum).
+    expect(tx.agentInboxItem.groupBy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ workspaceId: WS, state: AgentInboxState.PENDING }),
+      }),
+    );
     expect(views).toHaveLength(2);
     expect(views[0]).toMatchObject({ key: 'a', mailbox_address: 'a@x.dev', pending_count: 3 });
     expect(views[1]).toMatchObject({ key: 'b', mailbox_address: null, pending_count: 0 });

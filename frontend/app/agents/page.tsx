@@ -29,6 +29,7 @@ import {
   type BadgeVariant,
 } from '@/components/ui';
 import { useAgents } from '@/components/useAgents';
+import { agentLabel } from '@/lib/agents';
 import type { AgentView, AutonomyLevel } from '@/lib/api';
 
 /** Human copy + badge tone for each autonomy level (single source of truth). */
@@ -170,14 +171,6 @@ function PolicyNote() {
       a follow-up — for now every send still flows through the approval queue.
     </p>
   );
-}
-
-/** Humanize a provenance slug ('customer-ops' → 'Customer-Ops') for a fallback. */
-function agentLabel(key: string): string {
-  return key
-    .split(/[-_]/)
-    .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))
-    .join('-');
 }
 
 function AgentCard({

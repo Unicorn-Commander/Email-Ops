@@ -163,6 +163,10 @@ export function useAgentInbox(): UseAgentInbox {
         }
         // Silent refresh so the decided item slides out without a skeleton flash.
         await fetchFor(workspace, state, true);
+        // Nudge ambient surfaces (the sidebar pending badge) to re-probe.
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new Event('agent-inbox:changed'));
+        }
         return { ok: true };
       } catch (err) {
         if (guard401(err)) return { ok: false, error: 'Session expired.' };
@@ -205,18 +209,26 @@ export function useAgentInboxPendingCount(): number {
 
   useEffect(() => {
     let alive = true;
-    void (async () => {
+    const probe = async () => {
       try {
         const ws = pickActiveWorkspace(await fetchMyWorkspaces());
         if (!ws) return;
         const res = await listAgentInbox(ws.workspace_id, 'pending');
         if (alive) setCount(res.count);
       } catch {
-        /* ambient — stay at 0 */
+        /* ambient — keep the last known count */
       }
-    })();
+    };
+    void probe();
+    // Re-probe when a decision changes the queue (approve/reject dispatches this)
+    // or when the tab regains focus — so the sidebar badge never goes stale.
+    const onChanged = () => void probe();
+    window.addEventListener('agent-inbox:changed', onChanged);
+    window.addEventListener('focus', onChanged);
     return () => {
       alive = false;
+      window.removeEventListener('agent-inbox:changed', onChanged);
+      window.removeEventListener('focus', onChanged);
     };
   }, []);
 

@@ -138,7 +138,11 @@ export class AgentsService {
     const keys = agents.map((a) => a.key);
     const grouped = await tx.agentInboxItem.groupBy({
       by: ['draftedBy'],
-      where: { state: AgentInboxState.PENDING, draftedBy: { in: keys } },
+      // Scope by workspaceId: draftedBy slugs are shared global constants
+      // ('email-ops-agent', a caller-supplied external_source, ...), so without
+      // this an agent keyed to a shared slug would sum PENDING counts across
+      // workspaces while RLS is inert (the Phase-1 owner connection bypasses it).
+      where: { workspaceId, state: AgentInboxState.PENDING, draftedBy: { in: keys } },
       _count: { _all: true },
     });
     const pendingByKey = new Map(grouped.map((g) => [g.draftedBy ?? '', g._count._all]));
@@ -167,7 +171,9 @@ export class AgentsService {
         )?.emailAddress ?? null)
       : null;
     const pending = await tx.agentInboxItem.count({
-      where: { state: AgentInboxState.PENDING, draftedBy: agent.key },
+      // Scope by workspaceId (shared draftedBy slugs would otherwise leak counts
+      // across workspaces while RLS is inert — see toViews()).
+      where: { workspaceId, state: AgentInboxState.PENDING, draftedBy: agent.key },
     });
     return this.toView(agent, mailboxAddress, pending);
   }
