@@ -23,10 +23,13 @@ import {
   getMailThread,
   listMailMailboxes,
   listMailThreads,
+  setThreadDisposition,
   type ComposeBody,
   type MailboxPick,
+  type MailFolder,
   type MessageComposeView,
   type MessageView,
+  type ThreadDisposition,
   type ThreadView,
 } from '@/lib/mailApi';
 
@@ -41,6 +44,19 @@ export interface ComposeOutcome {
   error?: string;
 }
 
+/** Result of a triage (move-to-folder) action. */
+export interface TriageOutcome {
+  ok: boolean;
+  error?: string;
+}
+
+/** Optional sender side-effects to apply atomically with a triage. */
+export interface TriageOpts {
+  blockSender?: boolean;
+  trustSender?: boolean;
+  senderAddress?: string;
+}
+
 export interface UseMailClient {
   /** The workspace the client is scoped to (null = caller has no membership). */
   workspace: MyWorkspace | null;
@@ -53,6 +69,11 @@ export interface UseMailClient {
   /** The currently selected mailbox (null until the list resolves). */
   selectedMailbox: MailboxPick | null;
   selectMailbox: (mailboxId: string) => void;
+
+  /** The folder the thread list is scoped to (defaults to inbox). */
+  folder: MailFolder;
+  /** Switch folders — closes any open thread and refetches the list. */
+  selectFolder: (folder: MailFolder) => void;
 
   /** Thread list for the selected mailbox + its own load state. */
   threads: ThreadView[];
@@ -72,6 +93,16 @@ export interface UseMailClient {
   compose: (body: ComposeBody) => Promise<ComposeOutcome>;
   /** Reply within the open thread (prefills handled by the caller). */
   reply: (body: Omit<ComposeBody, 'in_reply_to_thread_id'>) => Promise<ComposeOutcome>;
+
+  /**
+   * Move a thread to a folder (optionally block/trust the sender in the same
+   * call). Refreshes the list and closes the thread if it was open.
+   */
+  triage: (
+    threadId: string,
+    disposition: ThreadDisposition,
+    opts?: TriageOpts,
+  ) => Promise<TriageOutcome>;
 }
 
 function messageOf(err: unknown, fallback: string): string {
@@ -89,6 +120,7 @@ export function useMailClient(): UseMailClient {
 
   const [mailboxes, setMailboxes] = useState<MailboxPick[]>([]);
   const [selectedMailboxId, setSelectedMailboxId] = useState<string | null>(null);
+  const [folder, setFolder] = useState<MailFolder>('inbox');
 
   const [threads, setThreads] = useState<ThreadView[]>([]);
   const [threadsLoad, setThreadsLoad] = useState<Load>('loading');
@@ -146,13 +178,13 @@ export function useMailClient(): UseMailClient {
     };
   }, [guard401]);
 
-  // Load the thread list whenever the selected mailbox changes.
+  // Load the thread list whenever the selected mailbox or folder changes.
   const fetchThreads = useCallback(
-    async (ws: MyWorkspace, mailboxId: string) => {
+    async (ws: MyWorkspace, mailboxId: string, f: MailFolder) => {
       const req = ++threadReqRef.current;
       setThreadsLoad('loading');
       try {
-        const res = await listMailThreads(ws.workspace_id, mailboxId);
+        const res = await listMailThreads(ws.workspace_id, mailboxId, 50, f);
         if (req !== threadReqRef.current) return; // superseded
         setThreads(res.threads);
         setThreadsError(null);
@@ -173,11 +205,11 @@ export function useMailClient(): UseMailClient {
       setThreadsLoad(workspace && !selectedMailboxId ? 'ready' : 'loading');
       return;
     }
-    // Changing mailbox closes any open thread.
+    // Changing mailbox or folder closes any open thread.
     setSelectedThreadId(null);
     setMessages([]);
-    void fetchThreads(workspace, selectedMailboxId);
-  }, [workspace, selectedMailboxId, fetchThreads]);
+    void fetchThreads(workspace, selectedMailboxId, folder);
+  }, [workspace, selectedMailboxId, folder, fetchThreads]);
 
   // Load messages whenever a thread is opened.
   useEffect(() => {
@@ -214,9 +246,14 @@ export function useMailClient(): UseMailClient {
     setSelectedThreadId(threadId);
   }, []);
 
+  // Switching folders (the effect above closes the open thread + refetches).
+  const selectFolder = useCallback((next: MailFolder) => {
+    setFolder(next);
+  }, []);
+
   const refreshThreads = useCallback(() => {
-    if (workspace && selectedMailboxId) void fetchThreads(workspace, selectedMailboxId);
-  }, [workspace, selectedMailboxId, fetchThreads]);
+    if (workspace && selectedMailboxId) void fetchThreads(workspace, selectedMailboxId, folder);
+  }, [workspace, selectedMailboxId, folder, fetchThreads]);
 
   // Re-fetch the open thread's messages (after a reply lands a new row).
   const refreshOpenThread = useCallback(async () => {
@@ -243,7 +280,7 @@ export function useMailClient(): UseMailClient {
       try {
         const message = await composeMail(workspace.workspace_id, selectedMailboxId, body);
         // Refresh the thread list so a brand-new thread/draft shows up.
-        void fetchThreads(workspace, selectedMailboxId);
+        void fetchThreads(workspace, selectedMailboxId, folder);
         // If this was a reply into the open thread, pull its new message in too.
         if (body.in_reply_to_thread_id && body.in_reply_to_thread_id === selectedThreadId) {
           void refreshOpenThread();
@@ -254,7 +291,7 @@ export function useMailClient(): UseMailClient {
         return { ok: false, error: messageOf(err, 'Could not record the message.') };
       }
     },
-    [workspace, selectedMailboxId, selectedThreadId, fetchThreads, refreshOpenThread, guard401],
+    [workspace, selectedMailboxId, folder, selectedThreadId, fetchThreads, refreshOpenThread, guard401],
   );
 
   const reply = useCallback(
@@ -265,6 +302,33 @@ export function useMailClient(): UseMailClient {
     [compose, selectedThreadId],
   );
 
+  const triage = useCallback(
+    async (
+      threadId: string,
+      disposition: ThreadDisposition,
+      opts?: TriageOpts,
+    ): Promise<TriageOutcome> => {
+      if (!workspace) return { ok: false, error: 'No workspace.' };
+      try {
+        await setThreadDisposition(workspace.workspace_id, threadId, {
+          disposition,
+          ...(opts?.blockSender ? { block_sender: true } : {}),
+          ...(opts?.trustSender ? { trust_sender: true } : {}),
+          ...(opts?.senderAddress ? { sender_address: opts.senderAddress } : {}),
+        });
+        // The thread likely left this folder — refresh the list.
+        if (selectedMailboxId) void fetchThreads(workspace, selectedMailboxId, folder);
+        // If the triaged thread was open, close it (it moved away from this folder).
+        if (threadId === selectedThreadId) setSelectedThreadId(null);
+        return { ok: true };
+      } catch (err) {
+        if (guard401(err)) return { ok: false, error: 'Session expired.' };
+        return { ok: false, error: messageOf(err, 'Could not move this conversation.') };
+      }
+    },
+    [workspace, selectedMailboxId, folder, selectedThreadId, fetchThreads, guard401],
+  );
+
   return {
     workspace,
     load,
@@ -272,6 +336,8 @@ export function useMailClient(): UseMailClient {
     mailboxes,
     selectedMailbox,
     selectMailbox,
+    folder,
+    selectFolder,
     threads,
     threadsLoad,
     threadsError,
@@ -283,6 +349,7 @@ export function useMailClient(): UseMailClient {
     messagesError,
     compose,
     reply,
+    triage,
   };
 }
 

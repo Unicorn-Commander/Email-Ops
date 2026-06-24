@@ -34,14 +34,27 @@ import {
   participantLabel,
   useMailClient,
   type Load,
+  type TriageOutcome,
 } from '@/components/mail/useMailClient';
 import { ReplyComposer } from '@/components/mail/ReplyComposer';
 import { ComposeDialog } from '@/components/mail/ComposeDialog';
-import type { MailboxPick, MessageView, ThreadView } from '@/lib/mailApi';
+import { SendersDialog } from '@/components/mail/SendersDialog';
+import type { MailboxPick, MailFolder, MessageView, ThreadView } from '@/lib/mailApi';
+
+/** The folder tabs, in display order. */
+const FOLDERS: { id: MailFolder; label: string }[] = [
+  { id: 'inbox', label: 'Inbox' },
+  { id: 'archive', label: 'Archive' },
+  { id: 'spam', label: 'Spam' },
+  { id: 'trash', label: 'Trash' },
+  { id: 'sent', label: 'Sent' },
+  { id: 'drafts', label: 'Drafts' },
+];
 
 export default function MailPage() {
   const mail = useMailClient();
   const [composeOpen, setComposeOpen] = useState(false);
+  const [sendersOpen, setSendersOpen] = useState(false);
 
   const threadOpen = mail.selectedThreadId !== null;
 
@@ -83,7 +96,9 @@ export default function MailPage() {
               selectedThreadId={mail.selectedThreadId}
               onSelect={mail.selectThread}
               onRetry={mail.refreshThreads}
-              mailbox={mail.selectedMailbox}
+              folder={mail.folder}
+              onSelectFolder={mail.selectFolder}
+              onManageSenders={() => setSendersOpen(true)}
             />
           </section>
 
@@ -96,8 +111,10 @@ export default function MailPage() {
               load={mail.messagesLoad}
               error={mail.messagesError}
               messages={mail.messages}
+              folder={mail.folder}
               onBack={() => mail.selectThread(null)}
               onReply={mail.reply}
+              onTriage={mail.triage}
             />
           </section>
         </div>
@@ -108,6 +125,12 @@ export default function MailPage() {
         onClose={() => setComposeOpen(false)}
         fromAddress={mail.selectedMailbox?.email_address ?? null}
         onCompose={mail.compose}
+      />
+
+      <SendersDialog
+        open={sendersOpen}
+        onClose={() => setSendersOpen(false)}
+        workspaceId={mail.workspace?.workspace_id ?? null}
       />
     </div>
   );
@@ -241,7 +264,9 @@ function ThreadList({
   selectedThreadId,
   onSelect,
   onRetry,
-  mailbox,
+  folder,
+  onSelectFolder,
+  onManageSenders,
 }: {
   load: Load;
   error: string | null;
@@ -249,19 +274,23 @@ function ThreadList({
   selectedThreadId: string | null;
   onSelect: (id: string) => void;
   onRetry: () => void;
-  mailbox: MailboxPick | null;
+  folder: MailFolder;
+  onSelectFolder: (folder: MailFolder) => void;
+  onManageSenders: () => void;
 }) {
   return (
     <Card className="flex h-full flex-col overflow-hidden">
-      <div className="flex items-center justify-between gap-2 border-b border-subtle px-3 py-2.5">
-        <span className="min-w-0 truncate text-[11px] font-medium uppercase tracking-wide text-tertiary">
-          {mailbox ? mailbox.email_address : 'Inbox'}
-        </span>
-        {load === 'ready' && threads.length > 0 && (
-          <span className="font-mono text-[11px] text-muted">
-            {threads.length} {threads.length === 1 ? 'thread' : 'threads'}
-          </span>
-        )}
+      <div className="flex items-center gap-2 border-b border-subtle px-3 py-2.5">
+        <FolderTabs folder={folder} onSelect={onSelectFolder} />
+        <Button
+          variant="ghost"
+          size="sm"
+          className="ml-auto shrink-0"
+          onClick={onManageSenders}
+          title="Blocked & trusted senders"
+        >
+          Manage senders
+        </Button>
       </div>
 
       {load === 'loading' ? (
@@ -272,14 +301,14 @@ function ThreadList({
         </div>
       ) : load === 'error' ? (
         <div className="p-4">
-          <p className="text-sm font-medium text-primary">Could not load this mailbox.</p>
+          <p className="text-sm font-medium text-primary">Could not load this folder.</p>
           <p className="mt-1 text-xs text-danger">{error ?? 'Unknown error.'}</p>
           <Button variant="secondary" size="sm" className="mt-3" onClick={onRetry}>
             Try again
           </Button>
         </div>
       ) : threads.length === 0 ? (
-        <EmptyThreads />
+        <EmptyThreads folder={folder} />
       ) : (
         <ul className="min-h-0 flex-1 overflow-y-auto p-1.5">
           {threads.map((t) => (
@@ -293,6 +322,44 @@ function ThreadList({
         </ul>
       )}
     </Card>
+  );
+}
+
+/** The folder segmented control — a compact, horizontally-scrollable pill row. */
+function FolderTabs({
+  folder,
+  onSelect,
+}: {
+  folder: MailFolder;
+  onSelect: (folder: MailFolder) => void;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Folders"
+      className="-mx-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+    >
+      {FOLDERS.map((f) => {
+        const active = f.id === folder;
+        return (
+          <button
+            key={f.id}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => onSelect(f.id)}
+            className={cn(
+              'shrink-0 rounded-token px-2.5 py-1 text-xs font-medium transition-colors duration-fast ease-token',
+              active
+                ? 'bg-surface-overlay text-primary shadow-token'
+                : 'text-tertiary hover:bg-surface-overlay/60 hover:text-primary',
+            )}
+          >
+            {f.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -377,7 +444,35 @@ function ThreadRowSkeleton() {
   );
 }
 
-function EmptyThreads() {
+const EMPTY_COPY: Record<MailFolder, { title: string; detail: string }> = {
+  inbox: {
+    title: 'Inbox zero',
+    detail: 'Nothing in your inbox. New mail appears here once the engine is connected.',
+  },
+  archive: {
+    title: 'Archive is empty',
+    detail: 'Threads you archive land here, out of your inbox but kept.',
+  },
+  spam: {
+    title: 'No spam — nice',
+    detail: 'Mail you mark as spam shows up here, and its sender gets blocked.',
+  },
+  trash: {
+    title: 'Trash is empty',
+    detail: 'Threads you delete rest here until they’re cleared.',
+  },
+  sent: {
+    title: 'Nothing sent yet',
+    detail: 'Messages you send appear here once the mail engine is connected.',
+  },
+  drafts: {
+    title: 'No drafts',
+    detail: 'Messages you start but don’t send are saved here.',
+  },
+};
+
+function EmptyThreads({ folder }: { folder: MailFolder }) {
+  const copy = EMPTY_COPY[folder];
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
       <div className="grid h-12 w-12 place-items-center rounded-full bg-surface-overlay text-tertiary">
@@ -391,10 +486,8 @@ function EmptyThreads() {
           />
         </svg>
       </div>
-      <p className="text-sm font-medium text-primary">No messages yet</p>
-      <p className="max-w-xs text-xs leading-5 text-tertiary">
-        Your mail appears here once the mail engine is connected.
-      </p>
+      <p className="text-sm font-medium text-primary">{copy.title}</p>
+      <p className="max-w-xs text-xs leading-5 text-tertiary">{copy.detail}</p>
     </div>
   );
 }
@@ -408,8 +501,10 @@ function ThreadPane({
   load,
   error,
   messages,
+  folder,
   onBack,
   onReply,
+  onTriage,
 }: {
   mailbox: MailboxPick | null;
   /** The thread row (for subject/participants); may be null if not in the list. */
@@ -418,8 +513,14 @@ function ThreadPane({
   load: Load;
   error: string | null;
   messages: MessageView[];
+  folder: MailFolder;
   onBack: () => void;
   onReply: React.ComponentProps<typeof ReplyComposer>['onSend'];
+  onTriage: (
+    threadId: string,
+    disposition: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM',
+    opts?: { blockSender?: boolean; trustSender?: boolean; senderAddress?: string },
+  ) => Promise<TriageOutcome>;
 }) {
   // Prefill the reply: the other party + "Re: <subject>".
   const replyDefaults = useMemo(
@@ -453,6 +554,12 @@ function ThreadPane({
             </p>
           )}
         </div>
+        <TriageActions
+          threadId={threadId}
+          folder={folder}
+          otherParty={replyDefaults.to || null}
+          onTriage={onTriage}
+        />
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
@@ -490,6 +597,105 @@ function ThreadPane({
         />
       )}
     </Card>
+  );
+}
+
+/**
+ * Triage buttons in the thread header. The set adapts to the current folder:
+ * Inbox shows Archive / Spam / Trash; other folders add "Move to Inbox", and in
+ * Spam that action becomes "Not spam" (which trusts the sender). Marking Spam
+ * blocks the other party. All actions disable while a call is in flight, and a
+ * failure surfaces a small inline note.
+ */
+function TriageActions({
+  threadId,
+  folder,
+  otherParty,
+  onTriage,
+}: {
+  threadId: string;
+  folder: MailFolder;
+  otherParty: string | null;
+  onTriage: (
+    threadId: string,
+    disposition: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM',
+    opts?: { blockSender?: boolean; trustSender?: boolean; senderAddress?: string },
+  ) => Promise<TriageOutcome>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run(
+    disposition: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM',
+    opts?: { blockSender?: boolean; trustSender?: boolean; senderAddress?: string },
+  ) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    const res = await onTriage(threadId, disposition, opts);
+    // On success the thread closes (it left this folder); only need to surface
+    // an error, in which case the pane is still mounted to show it.
+    if (!res.ok) {
+      setError(res.error ?? 'Could not move this conversation.');
+      setBusy(false);
+    }
+  }
+
+  const inSpam = folder === 'spam';
+  const showInbox = folder !== 'inbox';
+
+  return (
+    <div className="flex shrink-0 flex-col items-end gap-1">
+      <div className="flex items-center gap-1">
+        {showInbox && (
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={busy}
+            onClick={() =>
+              void run('INBOX', inSpam ? { trustSender: true, senderAddress: otherParty ?? undefined } : undefined)
+            }
+            title={inSpam ? 'Not spam — move to inbox and trust the sender' : 'Move to inbox'}
+          >
+            {inSpam ? 'Not spam' : 'Move to inbox'}
+          </Button>
+        )}
+        {folder !== 'archive' && (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={busy}
+            onClick={() => void run('ARCHIVE')}
+            title="Archive"
+          >
+            Archive
+          </Button>
+        )}
+        {!inSpam && (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={busy}
+            onClick={() => void run('SPAM', { blockSender: true, senderAddress: otherParty ?? undefined })}
+            title="Mark as spam and block the sender"
+          >
+            Spam
+          </Button>
+        )}
+        {folder !== 'trash' && (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={busy}
+            onClick={() => void run('TRASH')}
+            title="Move to trash"
+          >
+            Trash
+          </Button>
+        )}
+      </div>
+      {error && <p className="max-w-[14rem] text-right text-[11px] text-danger">{error}</p>}
+    </div>
   );
 }
 

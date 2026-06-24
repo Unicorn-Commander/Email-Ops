@@ -18,7 +18,13 @@
  * wire so the page can render the truth.
  */
 
-import { apiGet, apiPost } from '@/lib/api';
+import { apiDelete, apiGet, apiPost, apiPut } from '@/lib/api';
+
+/** The folders a thread list can be scoped to (the segmented control). */
+export type MailFolder = 'inbox' | 'archive' | 'spam' | 'trash' | 'sent' | 'drafts';
+
+/** Where a thread currently sits (the triage overlay disposition). */
+export type ThreadDisposition = 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM';
 
 /** A participant on a thread / message (sender or recipient). */
 export interface MailParticipant {
@@ -44,6 +50,8 @@ export interface ThreadView {
   last_message_at: string | null;
   last_snippet: string | null;
   participants: MailParticipant[];
+  /** Where the thread currently sits (the triage overlay). Optional on the wire. */
+  disposition?: ThreadDisposition;
 }
 
 /** One message inside a thread (mirrors the backend MessageView). */
@@ -82,6 +90,65 @@ export interface ComposeBody {
   in_reply_to_thread_id?: string;
 }
 
+/** A sender-policy rule targets a single ADDRESS or a whole DOMAIN. */
+export type SenderScope = 'ADDRESS' | 'DOMAIN';
+
+/** A sender-policy rule either BLOCKs or ALLOWs (trusts) the matched sender. */
+export type SenderKind = 'BLOCK' | 'ALLOW';
+
+/** One sender block/allow rule (mirrors the backend SenderPolicyView). */
+export interface SenderPolicyView {
+  id: string;
+  scope: SenderScope;
+  pattern: string;
+  kind: SenderKind;
+  reason: string | null;
+  set_by_uc_uid: string | null;
+  set_by_agent_key: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Body for the triage call. `block_sender` / `trust_sender` (+ the matching
+ * `sender_address`) let a triage also write a sender policy in the same request
+ * — e.g. marking SPAM blocks the sender; "Not spam" trusts them.
+ */
+export interface SetDispositionBody {
+  disposition: ThreadDisposition;
+  block_sender?: boolean;
+  trust_sender?: boolean;
+  sender_address?: string;
+}
+
+/** The disposition projection echoed back by the triage call. */
+export interface ThreadDispositionView {
+  thread_id: string;
+  disposition: ThreadDisposition;
+  set_by_uc_uid: string | null;
+  set_by_agent_key: string | null;
+  updated_at: string;
+}
+
+/** Result of a triage: the new disposition + any sender policy it wrote. */
+export interface SetDispositionResponse {
+  disposition: ThreadDispositionView;
+  sender_policy: SenderPolicyView | null;
+}
+
+/** Body for creating a sender block/allow rule. */
+export interface SenderPolicyBody {
+  scope: SenderScope;
+  pattern: string;
+  kind: SenderKind;
+  reason?: string;
+}
+
+export interface SenderPoliciesResponse {
+  items: SenderPolicyView[];
+  count: number;
+}
+
 export interface MailMailboxesResponse {
   items: MailboxPick[];
   count: number;
@@ -90,6 +157,8 @@ export interface MailMailboxesResponse {
 export interface MailThreadsResponse {
   threads: ThreadView[];
   count: number;
+  /** Echoes the folder the list was scoped to (defaults to inbox server-side). */
+  folder?: string;
 }
 
 export interface MailThreadResponse {
@@ -113,14 +182,21 @@ export async function listMailMailboxes(
   return apiGet<MailMailboxesResponse>(`/workspaces/${seg(workspaceId)}/mailboxes`, token);
 }
 
-/** List the threads in a mailbox, newest-first (defaults to 50). */
+/**
+ * List the threads in a mailbox folder, newest-first (defaults to 50, inbox).
+ * `folder` ∈ inbox | archive | spam | trash | sent | drafts.
+ */
 export async function listMailThreads(
   workspaceId: string,
   mailboxId: string,
   limit = 50,
+  folder: MailFolder = 'inbox',
   token?: string,
 ): Promise<MailThreadsResponse> {
-  const qs = limit ? `?limit=${seg(String(limit))}` : '';
+  const params = new URLSearchParams();
+  if (folder) params.set('folder', folder);
+  if (limit) params.set('limit', String(limit));
+  const qs = params.toString() ? `?${params.toString()}` : '';
   return apiGet<MailThreadsResponse>(`${mailBase(workspaceId, mailboxId)}/threads${qs}`, token);
 }
 
@@ -149,4 +225,53 @@ export async function composeMail(
   token?: string,
 ): Promise<MessageComposeView> {
   return apiPost<MessageComposeView>(`${mailBase(workspaceId, mailboxId)}/compose`, body, token);
+}
+
+const mailScope = (workspaceId: string) => `/workspaces/${seg(workspaceId)}/mail`;
+
+/**
+ * Triage a thread — move it to a folder (the disposition overlay), optionally
+ * blocking or trusting the other party in the same call. Note the route is
+ * workspace-scoped, NOT under a mailbox. Writes even when the engine is dormant.
+ */
+export async function setThreadDisposition(
+  workspaceId: string,
+  threadId: string,
+  body: SetDispositionBody,
+  token?: string,
+): Promise<SetDispositionResponse> {
+  return apiPut<SetDispositionResponse>(
+    `${mailScope(workspaceId)}/threads/${seg(threadId)}/disposition`,
+    body,
+    token,
+  );
+}
+
+/** List the workspace's sender block/allow rules. */
+export async function listSenderPolicies(
+  workspaceId: string,
+  token?: string,
+): Promise<SenderPoliciesResponse> {
+  return apiGet<SenderPoliciesResponse>(`${mailScope(workspaceId)}/sender-policies`, token);
+}
+
+/** Create a sender block/allow rule. Returns the created rule. */
+export async function setSenderPolicy(
+  workspaceId: string,
+  body: SenderPolicyBody,
+  token?: string,
+): Promise<SenderPolicyView> {
+  return apiPost<SenderPolicyView>(`${mailScope(workspaceId)}/sender-policies`, body, token);
+}
+
+/** Remove a sender block/allow rule by id (404 if it is already gone). */
+export async function removeSenderPolicy(
+  workspaceId: string,
+  id: string,
+  token?: string,
+): Promise<{ removed: boolean }> {
+  return apiDelete<{ removed: boolean }>(
+    `${mailScope(workspaceId)}/sender-policies/${seg(id)}`,
+    token,
+  );
 }
