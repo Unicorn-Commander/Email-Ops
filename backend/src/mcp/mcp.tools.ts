@@ -25,7 +25,7 @@
  */
 
 import { ForbiddenException } from '@nestjs/common';
-import { AgentInboxState, User } from '@prisma/client';
+import { AgentInboxState, MailboxOwnerKind, User } from '@prisma/client';
 import { MembershipService } from '../common/workspace/membership.service';
 import { listMyWorkspaces, MyWorkspace } from '../common/workspace/list-my-workspaces';
 import { tenancyEnabled } from '../common/workspace/feature-flags';
@@ -34,6 +34,8 @@ import { EmailService } from '../email/email.service';
 import { checkComposeEntitlement } from '../email/entitlement';
 import { AgentsService } from '../agents/agents.service';
 import { EmailHealthService } from '../email-health/email-health.service';
+import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
+import { MailboxAccountsService } from '../mailbox-accounts/mailbox-accounts.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { checkCleanerEntitlement } from '../connected-accounts/entitlement';
 import {
@@ -48,6 +50,8 @@ export class EmailOpsTools {
     private readonly email: EmailService,
     private readonly agents: AgentsService,
     private readonly emailHealthService: EmailHealthService,
+    private readonly policy: ProvisioningPolicyService,
+    private readonly mailboxes: MailboxAccountsService,
   ) {}
 
   /** Health/info — safe for any authenticated caller. */
@@ -69,6 +73,94 @@ export class EmailOpsTools {
   async listMyWorkspaces(user: User): Promise<{ workspaces: MyWorkspace[]; count: number }> {
     const workspaces = await listMyWorkspaces(this.membership, user);
     return { workspaces, count: workspaces.length };
+  }
+
+  // ── Conversational provisioning (write) ────────────────────────────────
+  // These run AS the calling user: the role is re-derived server-side and the
+  // workspace provisioning policy is enforced exactly as on the REST path — so an
+  // agent acting for the user can provision only up to that user's permission
+  // (allow → apply; approval-gated → file a request a human approves; else 403).
+
+  /** Provision a mailbox by talking to an agent (policy-gated; may queue for approval). */
+  async provisionMailbox(
+    user: User,
+    args: {
+      workspace_id?: string;
+      email_address: string;
+      display_name?: string;
+      owner_kind?: string;
+      owner_key?: string;
+    },
+  ): Promise<{ status: string; mailbox?: unknown; request?: unknown }> {
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    const { workspaceId, role } = await this.membership.resolveWithRole(
+      user,
+      args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
+    );
+    this.mailboxes.assertValidAddress(args.email_address);
+    const ownerKind = (args.owner_kind ?? 'SHARED') as MailboxOwnerKind;
+    const action = ownerKind === MailboxOwnerKind.AGENT ? 'agentMailbox.create' : 'humanMailbox.create';
+    const isSelfOwnMailbox = ownerKind === MailboxOwnerKind.HUMAN && !!ucUid && args.owner_key === ucUid;
+    const input = {
+      emailAddress: args.email_address,
+      displayName: args.display_name ?? null,
+      ownerKind,
+      ownerKey: args.owner_key ?? null,
+    };
+    const decision = await this.policy.authorize(workspaceId, ucUid, role, action, { isSelfOwnMailbox });
+    if (decision === 'requires_approval') {
+      const request = await this.policy.fileRequest(workspaceId, ucUid, {
+        kind: ownerKind === MailboxOwnerKind.AGENT ? 'AGENT_MAILBOX' : 'HUMAN_MAILBOX',
+        action: 'create',
+        payload: input,
+        summary: `Create ${ownerKind.toLowerCase()} mailbox ${args.email_address}`,
+      });
+      return { status: 'pending_approval', request };
+    }
+    const mailbox = await this.mailboxes.createMailbox(workspaceId, ucUid, input);
+    return { status: 'created', mailbox };
+  }
+
+  /** Provision an agent by talking to an agent (policy-gated; may queue for approval). */
+  async provisionAgent(
+    user: User,
+    args: {
+      workspace_id?: string;
+      key: string;
+      display_name: string;
+      description?: string;
+      autonomy_level?: string;
+      tier?: string;
+      manager_agent_key?: string;
+      mailbox_account_id?: string;
+    },
+  ): Promise<{ status: string; agent?: unknown; request?: unknown }> {
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    const { workspaceId, role } = await this.membership.resolveWithRole(
+      user,
+      args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
+    );
+    const input = {
+      key: args.key,
+      displayName: args.display_name,
+      description: args.description ?? null,
+      mailboxAccountId: args.mailbox_account_id ?? null,
+      autonomyLevel: args.autonomy_level as never,
+      tier: args.tier as never,
+      managerAgentKey: args.manager_agent_key ?? null,
+    };
+    const decision = await this.policy.authorize(workspaceId, ucUid, role, 'agent.create');
+    if (decision === 'requires_approval') {
+      const request = await this.policy.fileRequest(workspaceId, ucUid, {
+        kind: 'AGENT',
+        action: 'create',
+        payload: input,
+        summary: `Create agent ${args.key}`,
+      });
+      return { status: 'pending_approval', request };
+    }
+    const agent = await this.agents.createAgent(workspaceId, ucUid, input);
+    return { status: 'created', agent };
   }
 
   // ── Email-steward tools (observability for a Mail-Ops agent) ───────────

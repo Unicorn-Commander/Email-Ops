@@ -25,6 +25,8 @@ import { ConnectedAccountsService } from '../connected-accounts/connected-accoun
 import { ConnectedAccountsTools, EmailOpsTools } from './mcp.tools';
 import { AgentsService } from '../agents/agents.service';
 import { EmailHealthService } from '../email-health/email-health.service';
+import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
+import { MailboxAccountsService } from '../mailbox-accounts/mailbox-accounts.service';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
@@ -39,6 +41,8 @@ export class McpService {
     private readonly connectedAccounts: ConnectedAccountsService,
     private readonly agents: AgentsService,
     private readonly health: EmailHealthService,
+    private readonly policy: ProvisioningPolicyService,
+    private readonly mailboxes: MailboxAccountsService,
   ) {}
 
   /**
@@ -82,7 +86,14 @@ export class McpService {
       },
     );
 
-    const tools = new EmailOpsTools(this.membership, this.email, this.agents, this.health);
+    const tools = new EmailOpsTools(
+      this.membership,
+      this.email,
+      this.agents,
+      this.health,
+      this.policy,
+      this.mailboxes,
+    );
     const connectedTools = new ConnectedAccountsTools(this.membership, this.connectedAccounts);
 
     // ── Foundation tools ──
@@ -146,6 +157,58 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await tools.listAgents(user, args)),
+    );
+
+    // ── Conversational provisioning (write; runs AS the user, policy-gated) ──
+
+    server.registerTool(
+      'provision_mailbox',
+      {
+        title: 'Provision a mailbox',
+        description:
+          'Create a mailbox (human / agent / shared) by talking to an agent. Runs AS the ' +
+          'calling user: the workspace provisioning policy is enforced with the user’s own ' +
+          'role — so this only does what that user is allowed to. Returns {status:"created", ' +
+          'mailbox} when applied, or {status:"pending_approval", request} when the policy ' +
+          'requires an approver (a human approves it in the Mailboxes view). owner_kind ' +
+          'AGENT is the higher-trust send-identity path (admin by default).',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          email_address: z.string(),
+          display_name: z.string().optional(),
+          owner_kind: z.enum(['HUMAN', 'AGENT', 'SHARED']).optional(),
+          owner_key: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.provisionMailbox(user, args)),
+    );
+
+    server.registerTool(
+      'provision_agent',
+      {
+        title: 'Provision an agent',
+        description:
+          'Register a new agent (key + display name + autonomy + tier + manager) by talking ' +
+          'to an agent. Runs AS the calling user with their role enforced against the ' +
+          'provisioning policy. Returns {status:"created", agent} or {status:"pending_approval", ' +
+          'request}. autonomy_level ∈ L0_DRAFT_ONLY|L1_APPROVE_TO_SEND|L2_AUTONOMOUS_AUDIT; tier ' +
+          '∈ EXECUTIVE|DOMAIN_LEAD|MANAGER|SPECIALIST|UNSPECIFIED.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          key: z.string(),
+          display_name: z.string(),
+          description: z.string().optional(),
+          autonomy_level: z
+            .enum(['L0_DRAFT_ONLY', 'L1_APPROVE_TO_SEND', 'L2_AUTONOMOUS_AUDIT'])
+            .optional(),
+          tier: z
+            .enum(['EXECUTIVE', 'DOMAIN_LEAD', 'MANAGER', 'SPECIALIST', 'UNSPECIFIED'])
+            .optional(),
+          manager_agent_key: z.string().optional(),
+          mailbox_account_id: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.provisionAgent(user, args)),
     );
 
     // ── EmailOpsPort contract tools ──

@@ -7,14 +7,26 @@ import { EmailModule } from '../email/email.module';
 import { ConnectedAccountsModule } from '../connected-accounts/connected-accounts.module';
 import { AgentsModule } from '../agents/agents.module';
 import { EmailHealthModule } from '../email-health/email-health.module';
+import { ProvisioningModule } from '../provisioning/provisioning.module';
+import { MailboxAccountsModule } from '../mailbox-accounts/mailbox-accounts.module';
 
 @Module({
   // EmailModule exports EmailService so the contract MCP tools run the SAME SoR
   // + agent-inbox logic a future REST surface would (one implementation, one RLS
   // path). ConnectedAccountsModule exports the connected-account service + the
-  // Cleaner Engine port. WorkspaceModule provides the membership gate; AuthModule
-  // the JWT guard.
-  imports: [AuthModule, WorkspaceModule, EmailModule, ConnectedAccountsModule, AgentsModule, EmailHealthModule],
+  // Cleaner Engine port. ProvisioningModule + MailboxAccountsModule back the
+  // conversational-provisioning write tools (policy gate + the canonical apply
+  // path). WorkspaceModule provides the membership gate; AuthModule the JWT guard.
+  imports: [
+    AuthModule,
+    WorkspaceModule,
+    EmailModule,
+    ConnectedAccountsModule,
+    AgentsModule,
+    EmailHealthModule,
+    ProvisioningModule,
+    MailboxAccountsModule,
+  ],
   controllers: [McpController],
   providers: [McpService],
 })
