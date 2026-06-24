@@ -9,6 +9,7 @@ import { AuthModule } from './auth/auth.module';
 import { HealthModule } from './health/health.module';
 import { StalwartModule } from './stalwart/stalwart.module';
 import { EmailModule } from './email/email.module';
+import { SmsModule } from './sms/sms.module';
 import { McpModule } from './mcp/mcp.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { AgentInboxModule } from './agent-inbox/agent-inbox.module';
@@ -44,6 +45,10 @@ import { MailModule } from './mail/mail.module';
     // The Email-Ops core domain: the SoR + the EmailOpsPort contract + the
     // agent-inbox approval flow.
     EmailModule,
+    // The SMS channel (enterprise/shared-line scope; Twilio + in-house roadmap).
+    // Additive + dormant without TWILIO_* env; an SMS send reuses the EXACT email
+    // governance — autonomy dial, kill switch, agent-inbox queue, audit log.
+    SmsModule,
     // Phase 2, Part A: the provider-webhook receiver (Postmark engagement
     // capture). Provider-authed; inert by default (flag + secret gated).
     WebhooksModule,

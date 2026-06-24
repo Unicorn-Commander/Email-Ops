@@ -105,6 +105,26 @@ enum EmailDirection {
   DRAFT
 }
 
+// ── SMS channel (the enterprise/shared-line scope; Email-Ops OWNS this) ──
+//
+// The SMS send/draft analogue of EmailMode/EmailMessageStatus. Dedicated (not the
+// Email* enums) so the SMS channel is self-contained. The agent-inbox approval
+// queue, the autonomy dial, the kill switch, and the audit log are SHARED — an SMS
+// send flows through the exact same governance as email.
+enum SmsMode {
+  SEND
+  DRAFT
+}
+
+enum SmsDeliveryStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  PENDING_APPROVAL
+  REJECTED
+  FAILED
+}
+
 // ── Agent-inbox approval state (Email-Ops OWNS this) ──
 //
 // The lifecycle of an agent-drafted message awaiting human approval before
@@ -295,6 +315,8 @@ model Workspace {
   memberships       Membership[]
   mailboxAccounts   MailboxAccount[]
   emailMessages     EmailMessage[]
+  smsAccounts       SmsAccount[]
+  smsMessages       SmsMessage[]
   agentInboxItems   AgentInboxItem[]
   agents            Agent[]
   agentMailboxes    AgentMailbox[]
@@ -518,8 +540,12 @@ model EmailMessage {
 model AgentInboxItem {
   id              String          @id @default(uuid())
   workspaceId     String
-  // The staged outbound message awaiting approval (1:1).
+  // The staged outbound EMAIL message awaiting approval (1:1; null for SMS items).
   messageId       String?         @unique
+  // The staged outbound SMS message awaiting approval (1:1; null for email items).
+  // Additive: an SMS draft sets this and leaves messageId null. The existing email
+  // path is untouched.
+  smsMessageId    String?         @unique
   kind            AgentInboxKind  @default(EMAIL)
   payload         Json?
   state           AgentInboxState @default(PENDING)
@@ -537,12 +563,97 @@ model AgentInboxItem {
 
   workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   message   EmailMessage? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  smsMessage SmsMessage?  @relation(fields: [smsMessageId], references: [id], onDelete: Cascade)
   cleanupBatch CleanupBatch?
 
   @@index([workspaceId])
   // The queue reads pending items newest-first.
   @@index([workspaceId, state, createdAt])
   @@map("agent_inbox_items")
+}
+
+// ============================================================
+// SMS ACCOUNT (Email-Ops OWNS this — tenant-scoped; the shared-line identity)
+// ============================================================
+//
+// The SMS analogue of MailboxAccount: a workspace's outbound SMS identity (a
+// Twilio number for the enterprise/shared-line scope). RLS-fenced on workspaceId
+// exactly like mailbox_accounts. `secretRef` points at the provider credential in
+// the secret store (never the secret itself). ownerKind/ownerKey mirror the
+// mailbox ownership model so an agent or a human can "own" a line.
+model SmsAccount {
+  id             String                @id @default(uuid())
+  workspaceId    String
+  phoneNumber    String // E.164, e.g. +15551234567
+  displayName    String?
+  secretRef      String?
+  isDefault      Boolean               @default(false)
+  active         Boolean               @default(true)
+  ownerKind      MailboxOwnerKind      @default(SHARED)
+  ownerKey       String?
+  provisionState MailboxProvisionState @default(REGISTERED)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messages  SmsMessage[]
+
+  @@unique([workspaceId, phoneNumber])
+  @@index([workspaceId])
+  @@index([workspaceId, isDefault])
+  @@index([workspaceId, ownerKind, ownerKey])
+  @@map("sms_accounts")
+}
+
+// ============================================================
+// SMS MESSAGE (Email-Ops OWNS this — tenant-scoped; the SoR)
+// ============================================================
+//
+// The system-of-record row for every SMS Email-Ops created (a send or an
+// approved agent-inbox draft) AND for inbound SMS recorded by the Twilio webhook.
+// The SMS analogue of EmailMessage — same idempotency tuple, same provider-id
+// resolve key, same RLS fence. SMS has no server-side thread store, so the body
+// is the SoR (there is no federate-from-engine read like Stalwart for email).
+model SmsMessage {
+  id                String            @id @default(uuid())
+  workspaceId       String
+  smsAccountId      String?
+  // The federated Contact-Ops contact id this message is to/from (thin reference).
+  contactId         String?
+  threadId          String?
+  // Idempotency tuple (workspaceId, externalSource, externalRef) — the compose
+  // path is idempotent on it, and the inbound webhook is idempotent on the
+  // provider id (providerMessageId).
+  externalSource    String?
+  externalRef       String?
+  mode              SmsMode           @default(SEND)
+  status            SmsDeliveryStatus @default(QUEUED)
+  // 'SENT' | 'RECEIVED' | 'DRAFT' (TEXT, like the rest of the channel-direction).
+  direction         String            @default("SENT")
+  fromPhoneNumber   String?
+  toPhoneNumber     String?
+  body              String?
+  preview           String?
+  // The provider message id (Twilio MessageSid) — the inbound/status webhook
+  // resolves provider→row by this, exactly like email's providerMessageId.
+  providerMessageId String?
+  actorUcUid        String?
+  sentAt            DateTime?
+  receivedAt        DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  workspace  Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  smsAccount SmsAccount?     @relation(fields: [smsAccountId], references: [id], onDelete: SetNull)
+  agentInbox AgentInboxItem?
+
+  @@unique([workspaceId, externalSource, externalRef])
+  @@index([providerMessageId])
+  @@index([workspaceId])
+  @@index([workspaceId, contactId, createdAt])
+  @@index([workspaceId, threadId])
+  @@index([workspaceId, status])
+  @@map("sms_messages")
 }
 
 // ============================================================
