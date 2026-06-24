@@ -31,23 +31,34 @@ describe('AgentsService', () => {
     };
   }
 
-  // A fake transaction client with just the methods the service touches.
+  // A fake transaction client with the methods the service touches (sensible
+  // defaults so existing assertions hold; per-test mocks override).
   function makeTx() {
     return {
       agent: {
         create: jest.fn(),
         findFirst: jest.fn(),
+        findFirstOrThrow: jest.fn().mockResolvedValue(agentRow()),
         findMany: jest.fn(),
         update: jest.fn(),
         count: jest.fn(),
       },
+      agentMailbox: {
+        findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn(),
+        update: jest.fn(),
+        updateMany: jest.fn(),
+        delete: jest.fn(),
+      },
+      agentActionEvent: { create: jest.fn() },
       mailboxAccount: {
         findFirst: jest.fn(),
-        findMany: jest.fn(),
+        findMany: jest.fn().mockResolvedValue([]),
       },
       agentInboxItem: {
-        groupBy: jest.fn(),
-        count: jest.fn(),
+        groupBy: jest.fn().mockResolvedValue([]),
+        count: jest.fn().mockResolvedValue(0),
       },
     };
   }

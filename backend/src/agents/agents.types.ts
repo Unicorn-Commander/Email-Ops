@@ -1,14 +1,20 @@
 /**
- * Agent-registry types (the "Agents" view + autonomy dial).
+ * Agent-registry types (the "Agents" view + autonomy dial + multi-mailbox + hierarchy).
  *
- * `AgentView` is the snake_case wire projection the cockpit reads (mirroring the
- * AgentInboxView style). The *Input shapes are the service-level (camelCase)
- * inputs the controller maps the validated DTOs onto. The autonomy level is the
- * Prisma enum value verbatim ('L0_DRAFT_ONLY' | 'L1_APPROVE_TO_SEND' |
- * 'L2_AUTONOMOUS_AUDIT').
+ * `AgentView` is the snake_case wire projection the cockpit reads. The *Input
+ * shapes are the service-level (camelCase) inputs the controller maps the
+ * validated DTOs onto.
  */
 
-import { AgentAutonomyLevel } from '@prisma/client';
+import { AgentAutonomyLevel, AgentTier, MailboxAccessLevel } from '@prisma/client';
+
+/** One mailbox an agent may act through (an AgentMailbox binding). */
+export interface AgentMailboxView {
+  mailbox_account_id: string;
+  mailbox_address: string | null;
+  access: MailboxAccessLevel;
+  is_primary: boolean;
+}
 
 /** The agent registry wire projection (snake_case). */
 export interface AgentView {
@@ -17,12 +23,18 @@ export interface AgentView {
   key: string;
   display_name: string;
   description: string | null;
-  /** Soft reference to the mailbox the agent sends from. */
+  /** The PRIMARY send mailbox (the isPrimary binding's mailbox; a cache). */
   mailbox_account_id: string | null;
-  /** Resolved address of that mailbox (for display); null when unset/unknown. */
   mailbox_address: string | null;
+  /** Every mailbox this agent may act through (multi-mailbox). */
+  mailboxes: AgentMailboxView[];
   autonomy_level: AgentAutonomyLevel;
   recipient_policy: Record<string, unknown> | null;
+  /** Org-chart hierarchy (Brigade-federated identity). */
+  tier: AgentTier;
+  manager_agent_key: string | null;
+  /** Per-agent kill switch (distinct from the workspace-wide pause). */
+  paused: boolean;
   active: boolean;
   /** How many of this agent's drafts are awaiting approval (by `key`). */
   pending_count: number;
@@ -38,6 +50,8 @@ export interface CreateAgentInput {
   mailboxAccountId?: string | null;
   autonomyLevel?: AgentAutonomyLevel;
   recipientPolicy?: Record<string, unknown> | null;
+  tier?: AgentTier;
+  managerAgentKey?: string | null;
 }
 
 /**
@@ -50,5 +64,15 @@ export interface UpdateAgentInput {
   mailboxAccountId?: string | null;
   autonomyLevel?: AgentAutonomyLevel;
   recipientPolicy?: Record<string, unknown> | null;
+  tier?: AgentTier;
+  managerAgentKey?: string | null;
+  paused?: boolean;
   active?: boolean;
+}
+
+/** Bind a mailbox to an agent (grant act-through access). */
+export interface BindMailboxInput {
+  mailboxAccountId: string;
+  access?: MailboxAccessLevel;
+  isPrimary?: boolean;
 }

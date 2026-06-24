@@ -1,23 +1,36 @@
 /**
- * AgentsService — the agent registry + autonomy dial.
+ * AgentsService — the agent registry (autonomy dial + multi-mailbox + hierarchy).
  *
- * The system-of-record for each workspace's registered agents (Customer-Ops,
- * Email-Ops Agent, per-platform personas, ...): the identity behind the "Agents"
- * view, carrying the sending mailbox (a soft reference to MailboxAccount) and the
- * autonomy dial (L0/L1/L2). Like EmailService, every method runs inside
- * `withWorkspace(workspaceId, ucUid, …)` so Postgres RLS scopes every row to the
- * workspace the moment the runtime flips to the NOBYPASSRLS role; we additionally
- * scope reads by `workspaceId` explicitly so a single-row lookup is correct even
- * under the current (pre-flip) owner connection.
+ * The system-of-record for each workspace's registered agents: identity, the
+ * autonomy dial (L0/L1/L2), the mailboxes the agent may act through (the
+ * AgentMailbox join — multi-mailbox), and the org-chart hierarchy. Every method
+ * runs inside `withWorkspace(workspaceId, ucUid, …)` (RLS chokepoint) and scopes
+ * reads by workspaceId explicitly (correct even under the pre-flip owner role).
  *
- * This layer manages the dial; it does NOT yet enforce it in the compose/approve
- * send path (a deliberate follow-up — so L2 does not auto-send today).
+ * Invariant maintained here: an agent has at most ONE primary binding, and
+ * Agent.mailboxAccountId is the denormalized cache of that primary mailbox (the
+ * send-identity resolver in EmailService reads the cache). Governance actions are
+ * audited into the shared AgentActionEvent log.
  */
 
+import {
+  Agent,
+  AgentActionKind,
+  AgentAutonomyLevel,
+  AgentInboxState,
+  AgentMailbox,
+  MailboxAccessLevel,
+  Prisma,
+} from '@prisma/client';
 import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
-import { Agent, AgentAutonomyLevel, AgentInboxState, Prisma } from '@prisma/client';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
-import { AgentView, CreateAgentInput, UpdateAgentInput } from './agents.types';
+import {
+  AgentMailboxView,
+  AgentView,
+  BindMailboxInput,
+  CreateAgentInput,
+  UpdateAgentInput,
+} from './agents.types';
 
 @Injectable()
 export class AgentsService {
@@ -58,16 +71,17 @@ export class AgentsService {
         key: input.key,
         displayName: input.displayName,
         description: input.description ?? null,
-        mailboxAccountId: input.mailboxAccountId ?? null,
         autonomyLevel: input.autonomyLevel ?? AgentAutonomyLevel.L1_APPROVE_TO_SEND,
+        managerAgentKey: input.managerAgentKey ?? null,
       };
+      if (input.tier) data.tier = input.tier;
       if (input.recipientPolicy != null) {
         data.recipientPolicy = input.recipientPolicy as Prisma.InputJsonValue;
       }
 
+      let created: Agent;
       try {
-        const created = await tx.agent.create({ data });
-        return this.toViewOne(tx, workspaceId, created);
+        created = await tx.agent.create({ data });
       } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
           throw new ConflictException(
@@ -76,6 +90,16 @@ export class AgentsService {
         }
         throw err;
       }
+
+      // The primary mailbox (if any) goes through the canonical binding path so
+      // the AgentMailbox row + the mailboxAccountId cache stay in sync.
+      if (input.mailboxAccountId) {
+        await this.setPrimaryMailbox(tx, workspaceId, created.id, input.mailboxAccountId);
+      }
+      await this.recordAgentAction(tx, workspaceId, AgentActionKind.AGENT_CREATED, created.key, ucUid, null);
+
+      const fresh = await tx.agent.findFirstOrThrow({ where: { id: created.id } });
+      return this.toViewOne(tx, workspaceId, fresh);
     });
   }
 
@@ -97,8 +121,10 @@ export class AgentsService {
       const data: Prisma.AgentUncheckedUpdateInput = {};
       if (patch.displayName !== undefined) data.displayName = patch.displayName;
       if (patch.description !== undefined) data.description = patch.description;
-      if (patch.mailboxAccountId !== undefined) data.mailboxAccountId = patch.mailboxAccountId;
       if (patch.autonomyLevel !== undefined) data.autonomyLevel = patch.autonomyLevel;
+      if (patch.tier !== undefined) data.tier = patch.tier;
+      if (patch.managerAgentKey !== undefined) data.managerAgentKey = patch.managerAgentKey;
+      if (patch.paused !== undefined) data.paused = patch.paused;
       if (patch.active !== undefined) data.active = patch.active;
       if (patch.recipientPolicy !== undefined) {
         data.recipientPolicy =
@@ -106,25 +132,180 @@ export class AgentsService {
             ? Prisma.DbNull
             : (patch.recipientPolicy as Prisma.InputJsonValue);
       }
+      if (Object.keys(data).length > 0) {
+        await tx.agent.update({ where: { id: existing.id }, data });
+      }
 
-      const updated = await tx.agent.update({ where: { id: existing.id }, data });
+      // Re-point the primary mailbox through the canonical binding path.
+      if (patch.mailboxAccountId !== undefined) {
+        await this.setPrimaryMailbox(tx, workspaceId, existing.id, patch.mailboxAccountId);
+      }
+
+      const auditKind =
+        patch.autonomyLevel !== undefined
+          ? AgentActionKind.AUTONOMY_CHANGED
+          : AgentActionKind.AGENT_UPDATED;
+      await this.recordAgentAction(tx, workspaceId, auditKind, existing.key, ucUid, null);
+
+      const updated = await tx.agent.findFirstOrThrow({ where: { id: existing.id } });
       return this.toViewOne(tx, workspaceId, updated);
     });
   }
 
+  // ── multi-mailbox bindings ──────────────────────────────────────────────
+
+  /** Grant/raise an agent's access to a mailbox (optionally as its primary From). */
+  async bindMailbox(
+    workspaceId: string,
+    ucUid: string | null,
+    agentId: string,
+    input: BindMailboxInput,
+  ): Promise<AgentView | null> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const agent = await tx.agent.findFirst({ where: { id: agentId, workspaceId } });
+      if (!agent) return null;
+      await this.assertMailboxInWorkspace(tx, workspaceId, input.mailboxAccountId);
+
+      const requested = input.access ?? MailboxAccessLevel.SEND;
+      if (input.isPrimary) {
+        // A primary mailbox must be sendable — upgrade READ → BOTH.
+        const access = requested === MailboxAccessLevel.READ ? MailboxAccessLevel.BOTH : requested;
+        await this.upsertBinding(tx, workspaceId, agentId, input.mailboxAccountId, access, false);
+        await this.setPrimaryMailbox(tx, workspaceId, agentId, input.mailboxAccountId);
+      } else {
+        await this.upsertBinding(tx, workspaceId, agentId, input.mailboxAccountId, requested, false);
+      }
+
+      await this.recordAgentAction(
+        tx,
+        workspaceId,
+        AgentActionKind.MAILBOX_ACCESS_GRANTED,
+        agent.key,
+        ucUid,
+        `${input.mailboxAccountId}${input.isPrimary ? ' (primary)' : ''}`,
+      );
+      const fresh = await tx.agent.findFirstOrThrow({ where: { id: agentId } });
+      return this.toViewOne(tx, workspaceId, fresh);
+    });
+  }
+
+  /** Revoke an agent's access to a mailbox. If it was primary, repoint the cache. */
+  async unbindMailbox(
+    workspaceId: string,
+    ucUid: string | null,
+    agentId: string,
+    mailboxAccountId: string,
+  ): Promise<AgentView | null> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const agent = await tx.agent.findFirst({ where: { id: agentId, workspaceId } });
+      if (!agent) return null;
+      const binding = await tx.agentMailbox.findFirst({
+        where: { workspaceId, agentId, mailboxAccountId },
+      });
+      if (binding) {
+        await tx.agentMailbox.delete({ where: { id: binding.id } });
+        if (binding.isPrimary) {
+          // Promote another sendable binding to primary, else clear the cache.
+          const next = await tx.agentMailbox.findFirst({
+            where: {
+              workspaceId,
+              agentId,
+              access: { in: [MailboxAccessLevel.SEND, MailboxAccessLevel.BOTH] },
+            },
+            orderBy: { createdAt: 'asc' },
+          });
+          if (next) {
+            await tx.agentMailbox.update({ where: { id: next.id }, data: { isPrimary: true } });
+            await tx.agent.update({
+              where: { id: agentId },
+              data: { mailboxAccountId: next.mailboxAccountId },
+            });
+          } else {
+            await tx.agent.update({ where: { id: agentId }, data: { mailboxAccountId: null } });
+          }
+        }
+        await this.recordAgentAction(
+          tx,
+          workspaceId,
+          AgentActionKind.MAILBOX_ACCESS_REVOKED,
+          agent.key,
+          ucUid,
+          mailboxAccountId,
+        );
+      }
+      const fresh = await tx.agent.findFirstOrThrow({ where: { id: agentId } });
+      return this.toViewOne(tx, workspaceId, fresh);
+    });
+  }
+
+  /** Upsert a binding's access (idempotent on (agent, mailbox)). */
+  private async upsertBinding(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    agentId: string,
+    mailboxAccountId: string,
+    access: MailboxAccessLevel,
+    isPrimary: boolean,
+  ): Promise<void> {
+    const existing = await tx.agentMailbox.findFirst({
+      where: { workspaceId, agentId, mailboxAccountId },
+    });
+    if (existing) {
+      await tx.agentMailbox.update({ where: { id: existing.id }, data: { access, isPrimary } });
+    } else {
+      await tx.agentMailbox.create({
+        data: { workspaceId, agentId, mailboxAccountId, access, isPrimary },
+      });
+    }
+  }
+
+  /**
+   * Make `mailboxAccountId` the agent's primary (unset other primaries, upsert a
+   * sendable binding, write the cache). Null → clear all primaries + the cache.
+   */
+  private async setPrimaryMailbox(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    agentId: string,
+    mailboxAccountId: string | null,
+  ): Promise<void> {
+    await tx.agentMailbox.updateMany({
+      where: { workspaceId, agentId, isPrimary: true },
+      data: { isPrimary: false },
+    });
+    if (mailboxAccountId) {
+      const existing = await tx.agentMailbox.findFirst({
+        where: { workspaceId, agentId, mailboxAccountId },
+      });
+      const access =
+        existing && existing.access === MailboxAccessLevel.READ
+          ? MailboxAccessLevel.BOTH
+          : (existing?.access ?? MailboxAccessLevel.BOTH);
+      await this.upsertBinding(tx, workspaceId, agentId, mailboxAccountId, access, true);
+    }
+    await tx.agent.update({ where: { id: agentId }, data: { mailboxAccountId } });
+  }
+
   // ── view mapping ────────────────────────────────────────────────────────
 
-  /** Map a batch of agents → views, resolving mailbox addresses + pending counts
-   *  in two queries (no N+1). */
   private async toViews(
     tx: WorkspaceTxClient,
     workspaceId: string,
     agents: Agent[],
   ): Promise<AgentView[]> {
     if (agents.length === 0) return [];
+    const agentIds = agents.map((a) => a.id);
+
+    const bindings = await tx.agentMailbox.findMany({
+      where: { workspaceId, agentId: { in: agentIds } },
+      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+    });
 
     const mailboxIds = [
-      ...new Set(agents.map((a) => a.mailboxAccountId).filter((v): v is string => !!v)),
+      ...new Set([
+        ...bindings.map((b) => b.mailboxAccountId),
+        ...agents.map((a) => a.mailboxAccountId).filter((v): v is string => !!v),
+      ]),
     ];
     const mailboxes = mailboxIds.length
       ? await tx.mailboxAccount.findMany({
@@ -134,65 +315,98 @@ export class AgentsService {
       : [];
     const addrById = new Map(mailboxes.map((m) => [m.id, m.emailAddress]));
 
-    // Pending drafts per agent, attributed via the legacy free-text draftedBy slug.
     const keys = agents.map((a) => a.key);
     const grouped = await tx.agentInboxItem.groupBy({
       by: ['draftedBy'],
-      // Scope by workspaceId: draftedBy slugs are shared global constants
-      // ('email-ops-agent', a caller-supplied external_source, ...), so without
-      // this an agent keyed to a shared slug would sum PENDING counts across
-      // workspaces while RLS is inert (the Phase-1 owner connection bypasses it).
       where: { workspaceId, state: AgentInboxState.PENDING, draftedBy: { in: keys } },
       _count: { _all: true },
     });
     const pendingByKey = new Map(grouped.map((g) => [g.draftedBy ?? '', g._count._all]));
 
+    const bindingsByAgent = new Map<string, AgentMailbox[]>();
+    for (const b of bindings) {
+      const list = bindingsByAgent.get(b.agentId);
+      if (list) list.push(b);
+      else bindingsByAgent.set(b.agentId, [b]);
+    }
+
     return agents.map((a) =>
-      this.toView(
-        a,
-        a.mailboxAccountId ? (addrById.get(a.mailboxAccountId) ?? null) : null,
-        pendingByKey.get(a.key) ?? 0,
-      ),
+      this.toView(a, addrById, bindingsByAgent.get(a.id) ?? [], pendingByKey.get(a.key) ?? 0),
     );
   }
 
-  /** Map a single agent → view (resolves its mailbox + pending count). */
   private async toViewOne(
     tx: WorkspaceTxClient,
     workspaceId: string,
     agent: Agent,
   ): Promise<AgentView> {
-    const mailboxAddress = agent.mailboxAccountId
-      ? ((
-          await tx.mailboxAccount.findFirst({
-            where: { id: agent.mailboxAccountId, workspaceId },
-            select: { emailAddress: true },
-          })
-        )?.emailAddress ?? null)
-      : null;
+    const bindings = await tx.agentMailbox.findMany({
+      where: { workspaceId, agentId: agent.id },
+      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+    });
+    const mailboxIds = [
+      ...new Set([
+        ...bindings.map((b) => b.mailboxAccountId),
+        ...(agent.mailboxAccountId ? [agent.mailboxAccountId] : []),
+      ]),
+    ];
+    const mailboxes = mailboxIds.length
+      ? await tx.mailboxAccount.findMany({
+          where: { id: { in: mailboxIds }, workspaceId },
+          select: { id: true, emailAddress: true },
+        })
+      : [];
+    const addrById = new Map(mailboxes.map((m) => [m.id, m.emailAddress]));
     const pending = await tx.agentInboxItem.count({
-      // Scope by workspaceId (shared draftedBy slugs would otherwise leak counts
-      // across workspaces while RLS is inert — see toViews()).
       where: { workspaceId, state: AgentInboxState.PENDING, draftedBy: agent.key },
     });
-    return this.toView(agent, mailboxAddress, pending);
+    return this.toView(agent, addrById, bindings, pending);
   }
 
-  private toView(agent: Agent, mailboxAddress: string | null, pendingCount: number): AgentView {
+  private toView(
+    agent: Agent,
+    addrById: Map<string, string>,
+    bindings: AgentMailbox[],
+    pendingCount: number,
+  ): AgentView {
+    const mailboxes: AgentMailboxView[] = bindings.map((b) => ({
+      mailbox_account_id: b.mailboxAccountId,
+      mailbox_address: addrById.get(b.mailboxAccountId) ?? null,
+      access: b.access,
+      is_primary: b.isPrimary,
+    }));
     return {
       id: agent.id,
       key: agent.key,
       display_name: agent.displayName,
       description: agent.description,
       mailbox_account_id: agent.mailboxAccountId,
-      mailbox_address: mailboxAddress,
+      mailbox_address: agent.mailboxAccountId ? (addrById.get(agent.mailboxAccountId) ?? null) : null,
+      mailboxes,
       autonomy_level: agent.autonomyLevel,
       recipient_policy: (agent.recipientPolicy as Record<string, unknown> | null) ?? null,
+      tier: agent.tier,
+      manager_agent_key: agent.managerAgentKey,
+      paused: agent.paused,
       active: agent.active,
       pending_count: pendingCount,
       created_at: agent.createdAt?.toISOString() ?? null,
       updated_at: agent.updatedAt?.toISOString() ?? null,
     };
+  }
+
+  /** Append a governance row to the shared agent-mail action/audit log. */
+  private async recordAgentAction(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    kind: AgentActionKind,
+    agentKey: string | null,
+    actorUcUid: string | null,
+    detail: string | null,
+  ): Promise<void> {
+    await tx.agentActionEvent.create({
+      data: { workspaceId, kind, agentKey, actorUcUid, detail },
+    });
   }
 
   /** A clear 400 (beats a silent dangling soft-ref) when a mailbox isn't ours. */
