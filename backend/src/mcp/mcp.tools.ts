@@ -32,6 +32,8 @@ import { tenancyEnabled } from '../common/workspace/feature-flags';
 import { entitlementsOf, ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { EmailService } from '../email/email.service';
 import { checkComposeEntitlement } from '../email/entitlement';
+import { AgentsService } from '../agents/agents.service';
+import { EmailHealthService } from '../email-health/email-health.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { checkCleanerEntitlement } from '../connected-accounts/entitlement';
 import {
@@ -44,6 +46,8 @@ export class EmailOpsTools {
   constructor(
     private readonly membership: MembershipService,
     private readonly email: EmailService,
+    private readonly agents: AgentsService,
+    private readonly emailHealthService: EmailHealthService,
   ) {}
 
   /** Health/info — safe for any authenticated caller. */
@@ -65,6 +69,24 @@ export class EmailOpsTools {
   async listMyWorkspaces(user: User): Promise<{ workspaces: MyWorkspace[]; count: number }> {
     const workspaces = await listMyWorkspaces(this.membership, user);
     return { workspaces, count: workspaces.length };
+  }
+
+  // ── Email-steward tools (observability for a Mail-Ops agent) ───────────
+
+  /** The email-ops health + setup report (engine, mailboxes, queue, agents). */
+  async emailHealth(user: User, args: { workspace_id?: string }): Promise<unknown> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.emailHealthService.getReport(workspaceId, ucUidOf(user as WithWorkspaceClaim));
+  }
+
+  /** The registered agent fleet (the registry: keys, autonomy, mailboxes). */
+  async listAgents(
+    user: User,
+    args: { workspace_id?: string },
+  ): Promise<{ agents: unknown[]; count: number }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const items = await this.agents.listAgents(workspaceId, ucUidOf(user as WithWorkspaceClaim));
+    return { agents: items, count: items.length };
   }
 
   // ── EmailOpsPort contract tools ────────────────────────────────────────

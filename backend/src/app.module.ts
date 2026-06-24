@@ -13,6 +13,7 @@ import { McpModule } from './mcp/mcp.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { AgentInboxModule } from './agent-inbox/agent-inbox.module';
 import { AgentsModule } from './agents/agents.module';
+import { EmailHealthModule } from './email-health/email-health.module';
 
 @Module({
   imports: [
@@ -47,6 +48,9 @@ import { AgentsModule } from './agents/agents.module';
     // The agent registry surface (the "Agents" view + the autonomy dial): the
     // identity layer behind the approval queue. JWT + membership guarded.
     AgentsModule,
+    // The email-steward health surface (engine/mailboxes/queue/agents): a
+    // workspace-scoped "how's email?" report, REST + an MCP tool.
+    EmailHealthModule,
     // MCP last so it can consume the contract + agent-inbox tools.
     McpModule,
   ],

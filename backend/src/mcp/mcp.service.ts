@@ -23,6 +23,8 @@ import { MembershipService } from '../common/workspace/membership.service';
 import { EmailService } from '../email/email.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { ConnectedAccountsTools, EmailOpsTools } from './mcp.tools';
+import { AgentsService } from '../agents/agents.service';
+import { EmailHealthService } from '../email-health/email-health.service';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
@@ -35,6 +37,8 @@ export class McpService {
     private readonly membership: MembershipService,
     private readonly email: EmailService,
     private readonly connectedAccounts: ConnectedAccountsService,
+    private readonly agents: AgentsService,
+    private readonly health: EmailHealthService,
   ) {}
 
   /**
@@ -78,7 +82,7 @@ export class McpService {
       },
     );
 
-    const tools = new EmailOpsTools(this.membership, this.email);
+    const tools = new EmailOpsTools(this.membership, this.email, this.agents, this.health);
     const connectedTools = new ConnectedAccountsTools(this.membership, this.connectedAccounts);
 
     // ── Foundation tools ──
@@ -108,6 +112,40 @@ export class McpService {
         },
       },
       async () => wrap(await tools.listMyWorkspaces(user)),
+    );
+
+    // ── Email-steward tools (a Mail-Ops agent's observability) ──
+
+    server.registerTool(
+      'email_ops_health',
+      {
+        title: 'Email-Ops health',
+        description:
+          'The email operations health + setup report for a workspace: is the mail ' +
+          'engine configured, the default mailbox + mailbox count, the approval-queue ' +
+          'backlog (pending count + oldest age), failed sends in the last 7 days, and the ' +
+          'registered agent fleet (count + how many can send autonomously). Read-only — a ' +
+          'Mail-Ops steward calls this to know the setup and run health checks.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.emailHealth(user, args)),
+    );
+
+    server.registerTool(
+      'list_agents',
+      {
+        title: 'List the agent fleet',
+        description:
+          'List the workspace’s registered agents (the registry): each agent’s stable ' +
+          'key, display name, sending mailbox, autonomy level (L0/L1/L2), and how many of ' +
+          'its drafts await approval. Read-only — the fleet roster a Mail-Ops steward reads.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.listAgents(user, args)),
     );
 
     // ── EmailOpsPort contract tools ──

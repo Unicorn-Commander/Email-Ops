@@ -29,6 +29,7 @@ import {
   type BadgeVariant,
 } from '@/components/ui';
 import { useAgents } from '@/components/useAgents';
+import { EmailHealthPanel } from '@/components/EmailHealthPanel';
 import { agentLabel } from '@/lib/agents';
 import type { AgentView, AutonomyLevel } from '@/lib/api';
 
@@ -77,6 +78,8 @@ export default function AgentsPage() {
         onNew={() => setCreateOpen(true)}
         disableNew={load !== 'ready' || !workspace}
       />
+
+      <EmailHealthPanel />
 
       {!workspace && load === 'ready' ? (
         <NoWorkspace />

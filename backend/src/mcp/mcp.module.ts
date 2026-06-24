@@ -5,6 +5,8 @@ import { AuthModule } from '../auth/auth.module';
 import { WorkspaceModule } from '../common/workspace/workspace.module';
 import { EmailModule } from '../email/email.module';
 import { ConnectedAccountsModule } from '../connected-accounts/connected-accounts.module';
+import { AgentsModule } from '../agents/agents.module';
+import { EmailHealthModule } from '../email-health/email-health.module';
 
 @Module({
   // EmailModule exports EmailService so the contract MCP tools run the SAME SoR
@@ -12,7 +14,7 @@ import { ConnectedAccountsModule } from '../connected-accounts/connected-account
   // path). ConnectedAccountsModule exports the connected-account service + the
   // Cleaner Engine port. WorkspaceModule provides the membership gate; AuthModule
   // the JWT guard.
-  imports: [AuthModule, WorkspaceModule, EmailModule, ConnectedAccountsModule],
+  imports: [AuthModule, WorkspaceModule, EmailModule, ConnectedAccountsModule, AgentsModule, EmailHealthModule],
   controllers: [McpController],
   providers: [McpService],
 })

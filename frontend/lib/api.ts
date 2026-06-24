@@ -320,6 +320,50 @@ export async function updateAgent(
   return apiPatch<AgentView>(`${agentsBase(workspaceId)}/${encodeURIComponent(id)}`, body, token);
 }
 
+// ── Email health (Phase 6) ────────────────────────────────────────────────
+
+/** Severity of a single health signal (and the rollup it feeds). */
+export type HealthLevel = 'ok' | 'warn' | 'fail';
+
+/** One health signal (mirrors the backend EmailHealthCheck wire shape). */
+export interface EmailHealthCheck {
+  key: string;
+  label: string;
+  status: HealthLevel;
+  detail: string;
+}
+
+/** The "is email healthy?" snapshot for a workspace (mirrors EmailHealthReport). */
+export interface EmailHealthReport {
+  /** Rollup: degraded if any check fails, attention if any warns, else ok. */
+  status: 'ok' | 'attention' | 'degraded';
+  checks: EmailHealthCheck[];
+  setup: {
+    engine_configured: boolean;
+    default_mailbox: string | null;
+    mailbox_count: number;
+    agent_count: number; // active registered agents
+    autonomous_agents: number; // active L2 agents (can send without approval)
+  };
+  queue: {
+    pending_approvals: number;
+    oldest_pending_age_hours: number | null;
+    failed_sends_7d: number;
+  };
+  generated_at: string; // ISO
+}
+
+/** Fetch the email-health snapshot for a workspace (JWT + membership guarded). */
+export async function getEmailHealth(
+  workspaceId: string,
+  token?: string,
+): Promise<EmailHealthReport> {
+  return apiGet<EmailHealthReport>(
+    '/workspaces/' + encodeURIComponent(workspaceId) + '/email-health',
+    token,
+  );
+}
+
 // -- Connected accounts cleaner cockpit ------------------------------------
 
 export type ConnectedProvider = 'gmail' | 'microsoft';
