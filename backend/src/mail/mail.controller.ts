@@ -73,12 +73,14 @@ export class MailController {
   async thread(
     @ResolvedWorkspace() workspaceId: string,
     @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
     @Param('threadId') threadId: string,
   ) {
     const messages = await this.email.listThreadMessages(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
       threadId,
+      mailboxId,
     );
     return { messages, count: messages.length };
   }

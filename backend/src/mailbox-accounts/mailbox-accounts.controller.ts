@@ -25,7 +25,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
-import { IsBoolean, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import { MailboxOwnerKind, User, WorkspaceRole } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
@@ -44,6 +44,12 @@ class CreateMailboxDto {
   @IsOptional() @IsEnum(MailboxOwnerKind) owner_kind?: MailboxOwnerKind;
   @IsOptional() @IsString() @MaxLength(255) owner_key?: string;
   @IsOptional() @IsBoolean() postmark_lane?: boolean;
+}
+
+class ConnectMailboxDto {
+  @IsIn(['gmail', 'microsoft']) provider!: 'gmail' | 'microsoft';
+  @IsString() @MaxLength(320) email_address!: string;
+  @IsOptional() @IsString() @MaxLength(200) display_name?: string;
 }
 
 class UpdateMailboxDto {
@@ -132,6 +138,29 @@ export class MailboxAccountsController {
       );
     }
     return this.mailboxes.createMailbox(workspaceId, ucUid, input);
+  }
+
+  @Post('connected')
+  @ApiOperation({
+    summary: 'Register a linked external account (gmail/microsoft) as a mailbox (self-service).',
+  })
+  @ApiResponse({ status: 201, description: 'The connected external mailbox.' })
+  async connect(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Body() body: ConnectMailboxDto,
+  ) {
+    // Self-service: the caller registers THEIR OWN linked account (ownerKind HUMAN,
+    // ownerKey = their uchub sub). Member-level — no provisioning gate, since this
+    // isn't minting a shared/agent send identity, just surfacing the user's own
+    // connected mailbox. The OAuth token stays in the Keycloak broker.
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    this.mailboxes.assertValidAddress(body.email_address);
+    return this.mailboxes.connectExternalMailbox(workspaceId, ucUid, {
+      provider: body.provider,
+      emailAddress: body.email_address,
+      displayName: body.display_name ?? null,
+    });
   }
 
   @Patch(':id')

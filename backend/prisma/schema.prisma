@@ -447,7 +447,15 @@ model MailboxAccount {
   // (the high-rep lane) rather than Stalwart SMTP (per the suite comms lanes).
   postmarkLane Boolean  @default(true)
   active       Boolean  @default(true)
-  // The PRINCIPAL behind this mailbox (command-center plane). Pre-existing rows
+  // Which mail backend fronts this mailbox: 'stalwart' (the sovereign engine —
+  // the back-compat default for every pre-existing row) or an EXTERNAL connected
+  // account read/sent through its provider API + the Keycloak broker token:
+  // 'gmail' | 'microsoft'. The unified-inbox dispatch reads this to pick the
+  // MailProviderPort impl. For external rows: ownerKind=HUMAN, ownerKey=the
+  // linking user's keycloakId, emailAddress=the external address; NO secret on
+  // the row (the broker is the vault).
+  provider     String   @default("stalwart")
+  // The Principal behind this mailbox (command-center plane). Pre-existing rows
   // default SHARED (the workspace's deliverable identity, no single owner) =
   // back-compat, no data fixup. ownerKey: HUMAN→User.keycloakId / AGENT→Agent.key
   // / SHARED→null (soft reference). `kind` is a cheap denorm of ownerKind for the

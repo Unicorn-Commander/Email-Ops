@@ -185,3 +185,52 @@ export interface ProviderAnalysisResult {
 
 export type ConnectedAccountsStatsResult = ProviderUnavailableResult | ProviderInboxStatsResult;
 export type ConnectedAccountsAnalysisResult = ProviderUnavailableResult | ProviderAnalysisResult;
+
+// ── Unified-inbox client verbs (the cleaner-engine /mail/* routes) ──
+// Raw engine shapes for listing inbox THREADS, reading a full thread, and
+// SENDING via an external Gmail/M365 account. The MailProviderPort maps these to
+// the federation ThreadView/MessageView wire shapes.
+
+export interface EngineMailParticipant {
+  address: string;
+  name: string | null;
+}
+
+export interface EngineMailThread {
+  id: string;
+  subject: string | null;
+  participants: EngineMailParticipant[];
+  last_message_at: string | null;
+  last_snippet: string | null;
+  message_count: number;
+  unread: boolean;
+}
+
+export interface EngineMailThreadsResult {
+  threads: EngineMailThread[];
+}
+
+export interface EngineMailMessage {
+  id: string;
+  thread_id: string;
+  from: EngineMailParticipant | null;
+  to: EngineMailParticipant[];
+  subject: string | null;
+  sent_at: string | null;
+  preview: string | null;
+  direction: 'received' | 'sent' | 'draft';
+}
+
+export interface EngineMailThreadResult {
+  messages: EngineMailMessage[];
+}
+
+export interface EngineMailSendResult {
+  accepted: boolean;
+  provider_message_id: string | null;
+  thread_id: string | null;
+  reason: string | null;
+}
+
+/** The client mail folders the unified inbox can request from a provider. */
+export type EngineMailFolder = 'inbox' | 'archive' | 'spam' | 'trash' | 'sent' | 'drafts';

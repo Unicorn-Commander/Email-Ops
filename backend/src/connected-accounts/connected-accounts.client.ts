@@ -8,6 +8,10 @@ import {
   EngineArchiveVerifyResult,
   EngineInboxStats,
   EngineListMessagesResult,
+  EngineMailFolder,
+  EngineMailSendResult,
+  EngineMailThreadResult,
+  EngineMailThreadsResult,
   EngineMessageSummary,
 } from './connected-accounts.types';
 
@@ -299,5 +303,55 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
 
   async backupVerify(path: string): Promise<Record<string, unknown> | null> {
     return this.postJson<Record<string, unknown>>('/backup/verify', { path });
+  }
+
+  // ── Unified-inbox verbs (degrade-clean: null on dormant/transport/HTTP error) ──
+
+  async listMailThreads(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    folder: EngineMailFolder,
+    limit = 50,
+  ): Promise<EngineMailThreadsResult | null> {
+    return this.postJson<EngineMailThreadsResult>('/mail/threads', {
+      provider,
+      credentials,
+      folder,
+      limit,
+    });
+  }
+
+  async getMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadResult | null> {
+    return this.postJson<EngineMailThreadResult>('/mail/thread', {
+      provider,
+      credentials,
+      thread_id: threadId,
+    });
+  }
+
+  async sendMail(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    message: {
+      from: string;
+      to: string;
+      subject: string;
+      body: string;
+      inReplyToThreadId?: string | null;
+    },
+  ): Promise<EngineMailSendResult | null> {
+    return this.postJson<EngineMailSendResult>('/mail/send', {
+      provider,
+      credentials,
+      from: message.from,
+      to: message.to,
+      subject: message.subject,
+      body: message.body,
+      in_reply_to_thread_id: message.inReplyToThreadId ?? null,
+    });
   }
 }

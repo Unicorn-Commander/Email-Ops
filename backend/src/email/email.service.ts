@@ -40,6 +40,7 @@ import {
   EmailDirection,
   EmailMessageStatus,
   EmailMode,
+  MailboxAccount,
   MessageDisposition,
   Prisma,
 } from '@prisma/client';
@@ -47,6 +48,7 @@ import { ConnectedAccountsService } from '../connected-accounts/connected-accoun
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { StalwartThread } from '../stalwart/stalwart.types';
+import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import {
   AgentInboxView,
   ComposeInput,
@@ -68,6 +70,7 @@ export class EmailService {
     private readonly prisma: PrismaService,
     private readonly stalwart: StalwartPort,
     private readonly connectedAccounts: ConnectedAccountsService,
+    private readonly mailProvider: MailProviderPort,
   ) {}
 
   // ── status mapping ─────────────────────────────────────────────────────
@@ -155,12 +158,20 @@ export class EmailService {
     workspaceId: string,
     ucUid: string | null,
     threadId: string,
+    mailboxId?: string,
   ): Promise<MessageView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const mailbox = await this.defaultMailbox(tx, workspaceId);
+      // When a mailbox is named (the client BFF passes it) use it — so external
+      // (gmail/microsoft) threads read through their provider; otherwise fall
+      // back to the workspace default (the federation/MCP contract path).
+      const mailbox = mailboxId
+        ? await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } })
+        : await this.defaultMailbox(tx, workspaceId);
 
       let live: MessageView[] = [];
-      if (mailbox) {
+      if (mailbox && this.mailProvider.handles(mailbox)) {
+        live = await this.mailProvider.listThreadMessages(mailbox, threadId);
+      } else if (mailbox) {
         const msgs = await this.stalwart.listMessages(mailbox.emailAddress, threadId);
         live = msgs.map((m) => ({
           id: m.id,
@@ -214,6 +225,16 @@ export class EmailService {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
       if (!mailbox) return [];
+
+      // External account (gmail / microsoft): the provider folders are
+      // authoritative — fetch the live folder threads through the provider (the
+      // KC-broker token + the cleaner-engine). Degrade-clean: [] when the account
+      // isn't connected or the engine is dormant. The local disposition overlay
+      // stays a sovereign-mailbox concern (sync-back to the provider is a follow-up).
+      if (this.mailProvider.handles(mailbox)) {
+        return this.mailProvider.listInbox(mailbox, { folder, limit });
+      }
+
       const addr = mailbox.emailAddress;
 
       // The message scope per folder. Disposition folders look at every thread
@@ -485,7 +506,7 @@ export class EmailService {
         },
       });
 
-      const sent = await this.handToEngine(tx, msg.id, {
+      const sent = await this.handToEngine(tx, msg.id, mailbox ?? null, {
         fromAddress: fromAddress ?? input.toAddress, // engine requires a From; degrade-safe
         fromName: mailbox?.displayName ?? null,
         toAddress: input.toAddress,
@@ -592,8 +613,8 @@ export class EmailService {
           })
         : await this.defaultMailbox(tx, workspaceId);
 
-      // Hand the approved draft to the mail engine.
-      const sent = await this.handToEngine(tx, item.message.id, {
+      // Hand the approved draft to the mail engine (or the external provider).
+      const sent = await this.handToEngine(tx, item.message.id, mailbox ?? null, {
         fromAddress: item.message.fromAddress ?? mailbox?.emailAddress ?? item.message.toAddress!,
         fromName: mailbox?.displayName ?? null,
         toAddress: item.message.toAddress!,
@@ -919,6 +940,7 @@ export class EmailService {
   private async handToEngine(
     tx: WorkspaceTxClient,
     messageId: string,
+    mailbox: MailboxAccount | null,
     req: {
       fromAddress: string;
       fromName: string | null;
@@ -929,18 +951,38 @@ export class EmailService {
       transactional: boolean;
     },
   ) {
-    const result = await this.stalwart.send(
-      req.fromAddress,
-      {
-        fromAddress: req.fromAddress,
-        fromName: req.fromName,
-        toAddress: req.toAddress,
-        subject: req.subject,
-        body: req.body,
-        inReplyToThreadId: req.inReplyToThreadId,
-      },
-      req.transactional,
-    );
+    // External account (gmail / microsoft) → send through its provider API; the
+    // sovereign mailbox → Stalwart/Postmark. Both are degrade-clean (a failure
+    // returns accepted:false, never throws → the row is recorded FAILED).
+    const result =
+      mailbox && this.mailProvider.handles(mailbox)
+        ? await this.mailProvider
+            .send(mailbox, {
+              from: req.fromAddress,
+              to: req.toAddress,
+              subject: req.subject,
+              body: req.body,
+              inReplyToThreadId: req.inReplyToThreadId,
+            })
+            .then((r) => ({
+              accepted: r.accepted,
+              providerMessageId: r.providerMessageId,
+              threadId: r.threadId,
+              lane: r.accepted ? mailbox.provider : null,
+              reason: r.reason,
+            }))
+        : await this.stalwart.send(
+            req.fromAddress,
+            {
+              fromAddress: req.fromAddress,
+              fromName: req.fromName,
+              toAddress: req.toAddress,
+              subject: req.subject,
+              body: req.body,
+              inReplyToThreadId: req.inReplyToThreadId,
+            },
+            req.transactional,
+          );
     const status = result.accepted ? EmailMessageStatus.SENT : EmailMessageStatus.FAILED;
     if (!result.accepted) {
       this.logger.warn(

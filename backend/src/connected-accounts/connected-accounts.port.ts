@@ -17,6 +17,10 @@ import {
   EngineBackupManifest,
   EngineInboxStats,
   EngineListMessagesResult,
+  EngineMailFolder,
+  EngineMailSendResult,
+  EngineMailThreadResult,
+  EngineMailThreadsResult,
   EngineMessageSummary,
 } from './connected-accounts.types';
 
@@ -92,4 +96,31 @@ export abstract class ConnectedAccountsEnginePort {
   ): Promise<EngineBackupManifest | null>;
 
   abstract backupVerify(path: string): Promise<Record<string, unknown> | null>;
+
+  // ── Unified-inbox verbs (read inbox threads, read a thread, send/reply) ──
+
+  abstract listMailThreads(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    folder: EngineMailFolder,
+    limit?: number,
+  ): Promise<EngineMailThreadsResult | null>;
+
+  abstract getMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadResult | null>;
+
+  abstract sendMail(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    message: {
+      from: string;
+      to: string;
+      subject: string;
+      body: string;
+      inReplyToThreadId?: string | null;
+    },
+  ): Promise<EngineMailSendResult | null>;
 }

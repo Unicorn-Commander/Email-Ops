@@ -128,7 +128,12 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       approveCleanupBatch: jest.fn().mockResolvedValue(null),
       undoBatch: jest.fn().mockResolvedValue(null),
     } as unknown as ConnectedAccountsService;
-    service = new EmailService(prisma, stalwart, connectedAccounts);
+    service = new EmailService(prisma, stalwart, connectedAccounts, {
+      handles: () => false,
+      listInbox: async () => [],
+      listThreadMessages: async () => [],
+      send: async () => ({ accepted: false, providerMessageId: null, threadId: null, reason: 'test' }),
+    } as any);
   });
 
   describe('compose_email — send', () => {

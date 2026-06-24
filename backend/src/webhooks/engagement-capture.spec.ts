@@ -131,6 +131,12 @@ describe('Engagement capture (verify DB; Stalwart MOCKED)', () => {
         approveCleanupBatch: jest.fn(),
         undoBatch: jest.fn(),
       } as any,
+      {
+        handles: () => false,
+        listInbox: async () => [],
+        listThreadMessages: async () => [],
+        send: async () => ({ accepted: false, providerMessageId: null, threadId: null, reason: 'test' }),
+      } as any,
     );
   });
 

@@ -3,7 +3,16 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { StalwartSendResult } from '../stalwart/stalwart.types';
+import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { EmailService } from './email.service';
+
+/** A sovereign-only fake provider: handles() false → the Stalwart path is used. */
+const fakeMailProvider = {
+  handles: () => false,
+  listInbox: async () => [],
+  listThreadMessages: async () => [],
+  send: async () => ({ accepted: false, providerMessageId: null, threadId: null, reason: 'test' }),
+} as unknown as MailProviderPort;
 
 /**
  * Regression locks for the two most severe findings of the command-center
@@ -56,7 +65,7 @@ describe('EmailService — cross-tenant + send-identity guards (integration)', (
       approveCleanupBatch: jest.fn(),
       undoBatch: jest.fn(),
     } as unknown as ConnectedAccountsService;
-    service = new EmailService(prisma, new FakeStalwart(), connectedAccounts);
+    service = new EmailService(prisma, new FakeStalwart(), connectedAccounts, fakeMailProvider);
   });
 
   afterAll(async () => {

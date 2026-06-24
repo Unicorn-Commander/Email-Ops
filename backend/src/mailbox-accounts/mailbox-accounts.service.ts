@@ -81,6 +81,50 @@ export class MailboxAccountsService {
     });
   }
 
+  /**
+   * Register a user's linked EXTERNAL account (gmail / microsoft) as a mailbox so
+   * it appears in /mail and reads/sends through its provider. Self-service: the
+   * caller owns it (ownerKind HUMAN, ownerKey = their uchub sub). Idempotent on
+   * (workspace, address) — re-connecting just re-points it. No secret stored: the
+   * Keycloak broker holds the token. postmarkLane=false (it sends via its own API).
+   */
+  async connectExternalMailbox(
+    workspaceId: string,
+    ucUid: string | null,
+    input: { provider: 'gmail' | 'microsoft'; emailAddress: string; displayName?: string | null },
+  ): Promise<MailboxView> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const mb = await tx.mailboxAccount.upsert({
+        where: { workspaceId_emailAddress: { workspaceId, emailAddress: input.emailAddress } },
+        create: {
+          workspaceId,
+          emailAddress: input.emailAddress,
+          displayName: input.displayName ?? null,
+          provider: input.provider,
+          ownerKind: MailboxOwnerKind.HUMAN,
+          ownerKey: ucUid,
+          kind: input.provider,
+          postmarkLane: false,
+        },
+        update: {
+          provider: input.provider,
+          ownerKind: MailboxOwnerKind.HUMAN,
+          ownerKey: ucUid,
+          kind: input.provider,
+          active: true,
+        },
+      });
+      await this.recordAction(
+        tx,
+        workspaceId,
+        AgentActionKind.MAILBOX_CREATED,
+        ucUid,
+        `${input.provider}:${mb.emailAddress}`,
+      );
+      return this.toViewOne(tx, mb);
+    });
+  }
+
   /** Patch a mailbox. Null → 404; explicit null clears a nullable field. */
   async updateMailbox(
     workspaceId: string,
@@ -141,6 +185,7 @@ export class MailboxAccountsService {
       owner_kind: m.ownerKind,
       owner_key: m.ownerKey,
       kind: m.kind,
+      provider: m.provider,
       provision_state: m.provisionState,
       is_default: m.isDefault,
       postmark_lane: m.postmarkLane,
