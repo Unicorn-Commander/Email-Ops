@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { ThemeToggle } from '@/components/ThemeToggle';
 import { Badge, Button, Card, Select, Skeleton, cn } from '@/components/ui';
 import { ConnectedAccountsProvider, useConnectedAccounts } from './ConnectedAccountsProvider';
+import { useAgentInboxPendingCount } from './useAgentInbox';
 import {
   clearSession,
   cleanupActivity,
@@ -29,6 +30,7 @@ type IconName =
 
 const NAV = [
   { href: '/dashboard', label: 'Overview', eyebrow: 'Needs-you', icon: 'dashboard' as const, tone: 'accent' as const },
+  { href: '/agent-inbox', label: 'Agent Inbox', eyebrow: 'Approve & send', icon: 'mail' as const, tone: 'review' as const },
   { href: '/accounts', label: 'Accounts', eyebrow: 'Broker access', icon: 'accounts' as const, tone: 'info' as const },
   { href: '/insights', label: 'Insights', eyebrow: 'Read-only scan', icon: 'insights' as const, tone: 'keep' as const },
   { href: '/cleanup', label: 'Cleanup', eyebrow: 'Safety workbench', icon: 'cleanup' as const, tone: 'review' as const },
@@ -97,6 +99,7 @@ function ProductChrome({ children }: { children: ReactNode }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(true);
   const [agentsPaused, setAgentsPaused] = useState(false);
+  const agentPending = useAgentInboxPendingCount();
 
   useEffect(() => {
     setDrawerOpen(false);
@@ -114,6 +117,7 @@ function ProductChrome({ children }: { children: ReactNode }) {
         >
           <Sidebar
             expanded={sidebarExpanded}
+            pendingCount={agentPending}
             onToggle={() => setSidebarExpanded((value) => !value)}
           />
         </aside>
@@ -127,7 +131,7 @@ function ProductChrome({ children }: { children: ReactNode }) {
               onClick={() => setDrawerOpen(false)}
             />
             <div className="relative z-10 h-full w-[280px]">
-              <Sidebar expanded mobile onToggle={() => setDrawerOpen(false)} />
+              <Sidebar expanded mobile pendingCount={agentPending} onToggle={() => setDrawerOpen(false)} />
             </div>
           </div>
         )}
@@ -163,10 +167,12 @@ function ProductChrome({ children }: { children: ReactNode }) {
 function Sidebar({
   expanded,
   mobile,
+  pendingCount = 0,
   onToggle,
 }: {
   expanded: boolean;
   mobile?: boolean;
+  pendingCount?: number;
   onToggle: () => void;
 }) {
   const pathname = usePathname();
@@ -196,6 +202,7 @@ function Sidebar({
       <nav className="flex-1 space-y-1 p-2">
         {NAV.map((item) => {
           const active = pathname === item.href || pathname?.startsWith(`${item.href}/`);
+          const badgeCount = item.href === '/agent-inbox' ? pendingCount : 0;
           return (
             <Link
               key={item.href}
@@ -211,16 +218,26 @@ function Sidebar({
             >
               <span
                 className={cn(
-                  'grid h-8 w-8 shrink-0 place-items-center rounded-token transition-colors duration-fast',
+                  'relative grid h-8 w-8 shrink-0 place-items-center rounded-token transition-colors duration-fast',
                   active ? NAV_TONE[item.tone].chipActive : NAV_TONE[item.tone].chipIdle,
                 )}
               >
                 <Icon name={item.icon} />
+                {!expanded && badgeCount > 0 && (
+                  <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-warning ring-2 ring-surface-base" />
+                )}
               </span>
               {expanded && (
-                <span className="min-w-0">
-                  <span className="block truncate font-medium">{item.label}</span>
-                  <span className="block truncate text-[11px] text-tertiary">{item.eyebrow}</span>
+                <span className="flex min-w-0 flex-1 items-center gap-2">
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">{item.label}</span>
+                    <span className="block truncate text-[11px] text-tertiary">{item.eyebrow}</span>
+                  </span>
+                  {badgeCount > 0 && (
+                    <Badge variant="review" className="shrink-0 font-mono">
+                      {badgeCount}
+                    </Badge>
+                  )}
                 </span>
               )}
             </Link>
