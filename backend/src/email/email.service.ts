@@ -194,6 +194,78 @@ export class EmailService {
     });
   }
 
+  /**
+   * The mailbox's recent threads — the human email client's inbox list. Engine
+   * receives light up when the engine is live; until then this is the SoR view
+   * (threads this mailbox has sent), so the client is honest rather than empty-
+   * by-bug. Workspace-scoped.
+   */
+  async listMailboxInbox(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    limit = 50,
+  ): Promise<ThreadView[]> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
+      if (!mailbox) return [];
+
+      const msgs = await tx.emailMessage.findMany({
+        where: { fromAddress: mailbox.emailAddress, threadId: { not: null } },
+        orderBy: { createdAt: 'desc' },
+        take: 300,
+      });
+
+      const byThread = new Map<
+        string,
+        {
+          id: string;
+          subject: string | null;
+          count: number;
+          last: Date;
+          snippet: string | null;
+          participants: Set<string>;
+        }
+      >();
+      for (const m of msgs) {
+        const tid = m.threadId as string;
+        const when = m.sentAt ?? m.createdAt ?? new Date(0);
+        const cur = byThread.get(tid);
+        if (!cur) {
+          byThread.set(tid, {
+            id: tid,
+            subject: m.subject ?? null,
+            count: 1,
+            last: when,
+            snippet: m.preview ?? this.snippet(m.body),
+            participants: new Set([m.toAddress].filter((a): a is string => !!a)),
+          });
+        } else {
+          cur.count += 1;
+          if (m.toAddress) cur.participants.add(m.toAddress);
+          if (when.getTime() > cur.last.getTime()) {
+            cur.last = when;
+            cur.snippet = m.preview ?? this.snippet(m.body);
+            cur.subject = cur.subject ?? m.subject ?? null;
+          }
+        }
+      }
+
+      return [...byThread.values()]
+        .sort((a, b) => b.last.getTime() - a.last.getTime())
+        .slice(0, limit)
+        .map((t) => ({
+          id: t.id,
+          subject: t.subject,
+          message_count: t.count,
+          unread: false,
+          last_message_at: t.last.toISOString(),
+          last_snippet: t.snippet,
+          participants: [...t.participants].map((address) => ({ address, name: null })),
+        }));
+    });
+  }
+
   // ── 3. compose_email (idempotent; send vs draft) ───────────────────────
 
   /**
@@ -262,7 +334,14 @@ export class EmailService {
       // (cached on Agent.mailboxAccountId = the isPrimary binding); an unregistered
       // agent falls back to the workspace default (legacy, unchanged). Fixes the
       // latent bug where an agent with a mailbox still sent from the ws default.
-      const mailbox = await this.resolveSendMailbox(tx, workspaceId, agent);
+      // An explicit from-mailbox (the human client picks which inbox to send as)
+      // wins when it's in-workspace; otherwise resolve the agent/default identity.
+      const explicitFrom = input.fromMailboxAccountId
+        ? await tx.mailboxAccount.findFirst({
+            where: { id: input.fromMailboxAccountId, workspaceId },
+          })
+        : null;
+      const mailbox = explicitFrom ?? (await this.resolveSendMailbox(tx, workspaceId, agent));
       const fromAddress = mailbox?.emailAddress ?? null;
 
       // Enforce the autonomy dial — gate send-vs-draft by the agent's level +

@@ -17,6 +17,7 @@ import { EmailHealthModule } from './email-health/email-health.module';
 import { AgentControlsModule } from './agent-controls/agent-controls.module';
 import { ProvisioningModule } from './provisioning/provisioning.module';
 import { MailboxAccountsModule } from './mailbox-accounts/mailbox-accounts.module';
+import { MailModule } from './mail/mail.module';
 
 @Module({
   imports: [
@@ -62,6 +63,8 @@ import { MailboxAccountsModule } from './mailbox-accounts/mailbox-accounts.modul
     ProvisioningModule,
     // Mailbox management (human/agent/shared CRUD; policy-gated).
     MailboxAccountsModule,
+    // The human email-client BFF (read your inboxes + compose; degrade-clean).
+    MailModule,
     // MCP last so it can consume the contract + agent-inbox tools.
     McpModule,
   ],

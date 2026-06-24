@@ -68,6 +68,12 @@ export interface ComposeInput {
   externalSource: string;
   externalRef: string;
   draftedBy?: string | null;
+  /**
+   * Explicit send-from mailbox (the human email client picks which inbox to send
+   * as). When set + in-workspace, it overrides the agent/default send-identity
+   * resolution; otherwise the usual resolveSendMailbox path applies.
+   */
+  fromMailboxAccountId?: string | null;
 }
 
 /** An agent-inbox item view (the approval queue surface). */
