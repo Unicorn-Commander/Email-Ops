@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { WorkspaceModule } from '../common/workspace/workspace.module';
+import { ProvisioningModule } from '../provisioning/provisioning.module';
 import { AgentsController } from './agents.controller';
 import { AgentsService } from './agents.service';
 
@@ -17,7 +18,7 @@ import { AgentsService } from './agents.service';
  *   - WorkspaceModule → MembershipService + WorkspaceMembershipGuard (the gate).
  */
 @Module({
-  imports: [AuthModule, WorkspaceModule],
+  imports: [AuthModule, WorkspaceModule, ProvisioningModule],
   controllers: [AgentsController],
   providers: [AgentsService],
   exports: [AgentsService],

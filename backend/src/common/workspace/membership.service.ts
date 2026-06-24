@@ -125,6 +125,28 @@ export class MembershipService {
   }
 
   /**
+   * Like resolveAndAuthorize, but ALSO surfaces the caller's role in the resolved
+   * workspace — the role the bare resolve discards, which the provisioning RBAC
+   * gates need. Flag OFF → role OWNER (the single-tenant operator keeps full
+   * power; nothing tightens until the flag flips). Flag ON → the membership's
+   * role (VIEWER if somehow unmapped — fail-closed).
+   */
+  async resolveWithRole(
+    user: User,
+    requestedWorkspaceId?: string | null,
+  ): Promise<{ workspaceId: string; role: WorkspaceRole }> {
+    const workspaceId = await this.resolveAndAuthorize(user, requestedWorkspaceId);
+    if (!this.enabled) {
+      return { workspaceId, role: WorkspaceRole.OWNER };
+    }
+    const userKey = MembershipService.membershipKey(user);
+    const m = await this.prisma.membership.findUnique({
+      where: { userKey_workspaceId: { userKey, workspaceId } },
+    });
+    return { workspaceId, role: m?.role ?? WorkspaceRole.VIEWER };
+  }
+
+  /**
    * If `user` is on the SSO allow-list but has no membership yet, seed one into
    * the bootstrap workspace at the role mapped from their access-list role.
    * Idempotent. Only runs when tenancy is enabled.

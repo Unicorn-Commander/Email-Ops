@@ -1,16 +1,17 @@
-import { NotFoundException } from '@nestjs/common';
-import { AgentAutonomyLevel, User } from '@prisma/client';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { AgentAutonomyLevel, User, WorkspaceRole } from '@prisma/client';
 import { WithWorkspaceClaim } from '../common/workspace/workspace.util';
+import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
 import { AgentsController } from './agents.controller';
 import { AgentsService } from './agents.service';
 
 /**
- * AgentsController tests: prove the HTTP front door DELEGATES to AgentsService
- * with the resolved workspace + acting sub, maps the snake_case body onto the
- * camelCase service input, forwards only the provided PATCH fields, and turns a
- * null (not-found) result into a 404. The service is mocked.
+ * AgentsController: prove it (1) gates writes through the provisioning policy
+ * (deny → 403, never reaches the service), then (2) delegates to AgentsService
+ * with the resolved workspace + acting sub, mapping snake_case → camelCase. Both
+ * the service + the policy are mocked.
  */
-describe('AgentsController (delegation)', () => {
+describe('AgentsController (delegation + RBAC gate)', () => {
   const WS = '0190a000-7e57-7000-8000-00000000e001';
 
   function user(): User {
@@ -34,8 +35,15 @@ describe('AgentsController (delegation)', () => {
     return u as User;
   }
 
-  function make(mock: Partial<jest.Mocked<AgentsService>>) {
-    return new AgentsController(mock as unknown as AgentsService);
+  type Decision = 'allow' | 'deny' | 'requires_approval';
+  function make(agentsMock: Partial<jest.Mocked<AgentsService>>, decision: Decision = 'allow') {
+    const policy = {
+      authorize: jest.fn(async () => {
+        if (decision === 'deny') throw new ForbiddenException('policy denied');
+        return decision;
+      }),
+    } as unknown as ProvisioningPolicyService;
+    return new AgentsController(agentsMock as unknown as AgentsService, policy);
   }
 
   it('GET list delegates to listAgents and wraps items + count', async () => {
@@ -45,13 +53,11 @@ describe('AgentsController (delegation)', () => {
     expect(out).toEqual({ items: [{ id: 'a1' }, { id: 'a2' }], count: 2 });
   });
 
-  it('POST create maps the snake_case body onto the camelCase service input', async () => {
+  it('POST create maps the body onto the service input (after the gate allows)', async () => {
     const createAgent = jest.fn().mockResolvedValue({ id: 'a1' });
-    await make({ createAgent }).create(WS, user(), {
+    await make({ createAgent }).create(WS, user(), WorkspaceRole.OWNER, {
       key: 'customer-ops',
       display_name: 'Customer-Ops',
-      description: 'Cockpit drafts',
-      mailbox_account_id: 'mb-1',
       autonomy_level: AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT,
     } as never);
     expect(createAgent).toHaveBeenCalledWith(
@@ -60,11 +66,20 @@ describe('AgentsController (delegation)', () => {
       expect.objectContaining({
         key: 'customer-ops',
         displayName: 'Customer-Ops',
-        description: 'Cockpit drafts',
-        mailboxAccountId: 'mb-1',
         autonomyLevel: 'L2_AUTONOMOUS_AUDIT',
       }),
     );
+  });
+
+  it('POST create is BLOCKED (403) when the provisioning policy denies — service never reached', async () => {
+    const createAgent = jest.fn();
+    await expect(
+      make({ createAgent }, 'deny').create(WS, user(), WorkspaceRole.MEMBER, {
+        key: 'x',
+        display_name: 'X',
+      } as never),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(createAgent).not.toHaveBeenCalled();
   });
 
   it('GET :id maps a missing agent to 404', async () => {
@@ -74,9 +89,9 @@ describe('AgentsController (delegation)', () => {
     );
   });
 
-  it('PATCH forwards only the provided fields (undefined keys omitted)', async () => {
+  it('PATCH forwards the provided fields (after the gate)', async () => {
     const updateAgent = jest.fn().mockResolvedValue({ id: 'a1' });
-    await make({ updateAgent }).update(WS, user(), 'a1', {
+    await make({ updateAgent }).update(WS, user(), WorkspaceRole.OWNER, 'a1', {
       autonomy_level: AgentAutonomyLevel.L0_DRAFT_ONLY,
     } as never);
     expect(updateAgent).toHaveBeenCalledWith(WS, 'kc-sub-aaron', 'a1', {
@@ -84,10 +99,21 @@ describe('AgentsController (delegation)', () => {
     });
   });
 
-  it('PATCH maps a missing agent to 404', async () => {
-    const updateAgent = jest.fn().mockResolvedValue(null);
-    await expect(make({ updateAgent }).update(WS, user(), 'nope', {} as never)).rejects.toBeInstanceOf(
-      NotFoundException,
+  it('POST :id/mailboxes binds (after the gate) and DELETE unbinds', async () => {
+    const bindMailbox = jest.fn().mockResolvedValue({ id: 'a1' });
+    await make({ bindMailbox }).bindMailbox(WS, user(), WorkspaceRole.ADMIN, 'a1', {
+      mailbox_account_id: 'mb1',
+      is_primary: true,
+    } as never);
+    expect(bindMailbox).toHaveBeenCalledWith(
+      WS,
+      'kc-sub-aaron',
+      'a1',
+      expect.objectContaining({ mailboxAccountId: 'mb1', isPrimary: true }),
     );
+
+    const unbindMailbox = jest.fn().mockResolvedValue({ id: 'a1' });
+    await make({ unbindMailbox }).unbindMailbox(WS, user(), WorkspaceRole.ADMIN, 'a1', 'mb1');
+    expect(unbindMailbox).toHaveBeenCalledWith(WS, 'kc-sub-aaron', 'a1', 'mb1');
   });
 });

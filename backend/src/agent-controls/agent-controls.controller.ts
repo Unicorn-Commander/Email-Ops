@@ -9,14 +9,16 @@
  * agents / email-health). Delegates to AgentControlsService.
  */
 
-import { Body, Controller, Get, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
 import { IsBoolean } from 'class-validator';
-import { User } from '@prisma/client';
+import { User, WorkspaceRole } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decorator';
+import { WorkspaceRoleParam } from '../common/workspace/workspace-role.decorator';
+import { roleAtLeast } from '../common/workspace/role-rank';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { AgentControlsService } from './agent-controls.service';
 
@@ -49,8 +51,13 @@ export class AgentControlsController {
   async setControls(
     @ResolvedWorkspace() workspaceId: string,
     @CurrentUser() user: User,
+    @WorkspaceRoleParam() role: WorkspaceRole,
     @Body() body: SetControlsDto,
   ) {
+    // A domain-lead (MANAGER+) can stop a misbehaving fleet without an admin.
+    if (!roleAtLeast(role, WorkspaceRole.MANAGER)) {
+      throw new ForbiddenException('Pausing/resuming the agent fleet requires MANAGER or above.');
+    }
     return this.controls.setControls(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),

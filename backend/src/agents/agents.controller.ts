@@ -17,6 +17,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   NotFoundException,
   Param,
@@ -36,12 +37,15 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
-import { AgentAutonomyLevel, AgentTier, MailboxAccessLevel, User } from '@prisma/client';
+import { AgentAutonomyLevel, AgentTier, MailboxAccessLevel, User, WorkspaceRole } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decorator';
+import { WorkspaceRoleParam } from '../common/workspace/workspace-role.decorator';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
+import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
+import { ProvisionDecision } from '../provisioning/provisioning-policy';
 import { AgentsService } from './agents.service';
 import { BindMailboxInput, CreateAgentInput, UpdateAgentInput } from './agents.types';
 
@@ -147,7 +151,19 @@ class BindMailboxDto {
 @Controller('workspaces/:workspaceId/agents')
 @UseGuards(JwtAuthGuard, WorkspaceMembershipGuard)
 export class AgentsController {
-  constructor(private readonly agents: AgentsService) {}
+  constructor(
+    private readonly agents: AgentsService,
+    private readonly policy: ProvisioningPolicyService,
+  ) {}
+
+  /** APPROVAL-mode has no queue yet (Slice 3c wires it) — block clearly for now. */
+  private blockIfApprovalGated(decision: ProvisionDecision, action: string): void {
+    if (decision === 'requires_approval') {
+      throw new ForbiddenException(
+        `"${action}" requires approval under this workspace's policy; the approval workflow is being enabled.`,
+      );
+    }
+  }
 
   @Get()
   @ApiOperation({ summary: 'List the workspace’s registered agents (the fleet).' })
@@ -164,8 +180,14 @@ export class AgentsController {
   async create(
     @ResolvedWorkspace() workspaceId: string,
     @CurrentUser() user: User,
+    @WorkspaceRoleParam() role: WorkspaceRole,
     @Body() body: CreateAgentDto,
   ) {
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    this.blockIfApprovalGated(
+      await this.policy.authorize(workspaceId, ucUid, role, 'agent.create'),
+      'agent.create',
+    );
     const input: CreateAgentInput = {
       key: body.key,
       displayName: body.display_name,
@@ -176,7 +198,7 @@ export class AgentsController {
       tier: body.tier,
       managerAgentKey: body.manager_agent_key ?? null,
     };
-    return this.agents.createAgent(workspaceId, ucUidOf(user as WithWorkspaceClaim), input);
+    return this.agents.createAgent(workspaceId, ucUid, input);
   }
 
   @Get(':id')
@@ -202,9 +224,15 @@ export class AgentsController {
   async update(
     @ResolvedWorkspace() workspaceId: string,
     @CurrentUser() user: User,
+    @WorkspaceRoleParam() role: WorkspaceRole,
     @Param('id') id: string,
     @Body() body: UpdateAgentDto,
   ) {
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    this.blockIfApprovalGated(
+      await this.policy.authorize(workspaceId, ucUid, role, 'agent.edit'),
+      'agent.edit',
+    );
     const patch: UpdateAgentInput = {};
     if (body.display_name !== undefined) patch.displayName = body.display_name;
     if (body.description !== undefined) patch.description = body.description;
@@ -216,12 +244,7 @@ export class AgentsController {
     if (body.paused !== undefined) patch.paused = body.paused;
     if (body.active !== undefined) patch.active = body.active;
 
-    const updated = await this.agents.updateAgent(
-      workspaceId,
-      ucUidOf(user as WithWorkspaceClaim),
-      id,
-      patch,
-    );
+    const updated = await this.agents.updateAgent(workspaceId, ucUid, id, patch);
     if (!updated) {
       throw new NotFoundException('Agent not found in this workspace.');
     }
@@ -238,20 +261,21 @@ export class AgentsController {
   async bindMailbox(
     @ResolvedWorkspace() workspaceId: string,
     @CurrentUser() user: User,
+    @WorkspaceRoleParam() role: WorkspaceRole,
     @Param('id') id: string,
     @Body() body: BindMailboxDto,
   ) {
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    this.blockIfApprovalGated(
+      await this.policy.authorize(workspaceId, ucUid, role, 'agentMailbox.edit'),
+      'agentMailbox.edit',
+    );
     const input: BindMailboxInput = {
       mailboxAccountId: body.mailbox_account_id,
       access: body.access,
       isPrimary: body.is_primary,
     };
-    const updated = await this.agents.bindMailbox(
-      workspaceId,
-      ucUidOf(user as WithWorkspaceClaim),
-      id,
-      input,
-    );
+    const updated = await this.agents.bindMailbox(workspaceId, ucUid, id, input);
     if (!updated) {
       throw new NotFoundException('Agent not found in this workspace.');
     }
@@ -265,15 +289,16 @@ export class AgentsController {
   async unbindMailbox(
     @ResolvedWorkspace() workspaceId: string,
     @CurrentUser() user: User,
+    @WorkspaceRoleParam() role: WorkspaceRole,
     @Param('id') id: string,
     @Param('mailboxId') mailboxId: string,
   ) {
-    const updated = await this.agents.unbindMailbox(
-      workspaceId,
-      ucUidOf(user as WithWorkspaceClaim),
-      id,
-      mailboxId,
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    this.blockIfApprovalGated(
+      await this.policy.authorize(workspaceId, ucUid, role, 'agentMailbox.edit'),
+      'agentMailbox.edit',
     );
+    const updated = await this.agents.unbindMailbox(workspaceId, ucUid, id, mailboxId);
     if (!updated) {
       throw new NotFoundException('Agent not found in this workspace.');
     }
