@@ -55,6 +55,7 @@ import {
   ThreadView,
 } from './email.types';
 import { shouldAdvanceStatus } from './message-status';
+import { decideComposeMode } from './autonomy';
 
 @Injectable()
 export class EmailService {
@@ -224,7 +225,33 @@ export class EmailService {
 
       const mailbox = await this.defaultMailbox(tx);
       const fromAddress = mailbox?.emailAddress ?? null;
-      const mode = input.mode === 'draft' ? EmailMode.DRAFT : EmailMode.SEND;
+
+      // Enforce the autonomy dial: resolve the registered agent that drafted this
+      // (by its provenance key) and gate send-vs-draft by its level + recipient
+      // policy. Opt-in + conservative — an UNREGISTERED agent keeps legacy
+      // behavior, and the decision only ever makes a send MORE gated (never less).
+      const agentKey = input.draftedBy ?? input.externalSource;
+      const agent = agentKey
+        ? await tx.agent.findFirst({
+            where: { workspaceId, key: agentKey, active: true },
+            select: { key: true, autonomyLevel: true, recipientPolicy: true },
+          })
+        : null;
+      const decision = decideComposeMode({
+        requestedMode: input.mode === 'draft' ? 'draft' : 'send',
+        agent,
+        toAddress: input.toAddress,
+      });
+      const mode = decision.mode === 'draft' ? EmailMode.DRAFT : EmailMode.SEND;
+      if (decision.coerced) {
+        this.logger.log(
+          `compose_email autonomy gate: agent '${agentKey}' send→draft (${decision.reason}) — staged for approval (workspace ${workspaceId})`,
+        );
+      } else if (mode === EmailMode.SEND && agent) {
+        this.logger.log(
+          `compose_email autonomy: agent '${agentKey}' autonomous send (${decision.reason}, audited) (workspace ${workspaceId})`,
+        );
+      }
 
       if (mode === EmailMode.DRAFT) {
         // Stage the draft into the agent-inbox approval surface.

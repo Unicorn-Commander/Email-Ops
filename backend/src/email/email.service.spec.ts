@@ -8,6 +8,7 @@ import {
   StalwartThread,
 } from '../stalwart/stalwart.types';
 import { EmailService } from './email.service';
+import { AgentAutonomyLevel } from '@prisma/client';
 
 /**
  * EmailService is the Email-Ops SoR + the EmailOpsPort contract + the agent-inbox
@@ -112,6 +113,7 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
     // Clean up the test workspace + its scoped rows.
     if (prisma) {
       await prisma.agentInboxItem.deleteMany({ where: { workspaceId: WS } });
+      await prisma.agent.deleteMany({ where: { workspaceId: WS } });
       await prisma.emailMessage.deleteMany({ where: { workspaceId: WS } });
       await prisma.mailboxAccount.deleteMany({ where: { workspaceId: WS } });
       await prisma.workspace.deleteMany({ where: { id: WS } });
@@ -175,6 +177,83 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       const row = await prisma.emailMessage.findUnique({ where: { id: result.id } });
       expect(row?.status).toBe('FAILED');
       expect(row?.sentAt).toBeNull();
+    });
+  });
+
+  describe('compose_email — autonomy enforcement (the registry dial bites)', () => {
+    it('coerces a REGISTERED L1 agent send → staged draft (a human approves)', async () => {
+      const key = `l1-agent-${Date.now()}`;
+      await prisma.agent.create({
+        data: {
+          workspaceId: WS,
+          key,
+          displayName: 'L1 Agent',
+          autonomyLevel: AgentAutonomyLevel.L1_APPROVE_TO_SEND,
+        },
+      });
+      const result = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'lead@acme.test',
+        subject: 'Auto follow-up',
+        body: 'From an L1 agent (it requested send).',
+        mode: 'send',
+        externalSource: key,
+        externalRef: `l1-${Date.now()}`,
+      });
+      // It requested send, but the dial staged it for approval instead.
+      expect(result).toMatchObject({ status: 'pending_approval', mode: 'draft' });
+      expect(stalwart.sendCalls).toHaveLength(0);
+      const item = await prisma.agentInboxItem.findUnique({ where: { messageId: result.id } });
+      expect(item?.state).toBe('PENDING');
+      expect(item?.draftedBy).toBe(key);
+    });
+
+    it('lets a REGISTERED L2 agent send autonomously (engine handed the send)', async () => {
+      const key = `l2-agent-${Date.now()}`;
+      await prisma.agent.create({
+        data: {
+          workspaceId: WS,
+          key,
+          displayName: 'L2 Agent',
+          autonomyLevel: AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT,
+        },
+      });
+      const result = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'lead@acme.test',
+        subject: 'Autonomous note',
+        body: 'From an L2 agent.',
+        mode: 'send',
+        externalSource: key,
+        externalRef: `l2-${Date.now()}`,
+      });
+      expect(result.status).toBe('sent');
+      expect(result.mode).toBe('send');
+      expect(stalwart.sendCalls).toHaveLength(1);
+    });
+
+    it('coerces an L2 agent send to an EXTERNAL recipient when its policy requires approval', async () => {
+      const key = `l2-policy-${Date.now()}`;
+      await prisma.agent.create({
+        data: {
+          workspaceId: WS,
+          key,
+          displayName: 'L2 Policy Agent',
+          autonomyLevel: AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT,
+          recipientPolicy: { requireApprovalForExternal: true, internalDomains: ['magicunicorn.tech'] },
+        },
+      });
+      const result = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'person114@example.com', // external → policy requires approval
+        subject: 'To an outsider',
+        body: 'Should be staged, not sent.',
+        mode: 'send',
+        externalSource: key,
+        externalRef: `l2p-${Date.now()}`,
+      });
+      expect(result.status).toBe('pending_approval');
+      expect(stalwart.sendCalls).toHaveLength(0);
     });
   });
 
