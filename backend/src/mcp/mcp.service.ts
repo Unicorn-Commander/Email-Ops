@@ -27,6 +27,8 @@ import { AgentsService } from '../agents/agents.service';
 import { EmailHealthService } from '../email-health/email-health.service';
 import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
 import { MailboxAccountsService } from '../mailbox-accounts/mailbox-accounts.service';
+import { DispositionService } from '../mail-triage/disposition.service';
+import { SenderPolicyService } from '../mail-triage/sender-policy.service';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
@@ -43,6 +45,8 @@ export class McpService {
     private readonly health: EmailHealthService,
     private readonly policy: ProvisioningPolicyService,
     private readonly mailboxes: MailboxAccountsService,
+    private readonly disposition: DispositionService,
+    private readonly senderPolicy: SenderPolicyService,
   ) {}
 
   /**
@@ -93,6 +97,8 @@ export class McpService {
       this.health,
       this.policy,
       this.mailboxes,
+      this.disposition,
+      this.senderPolicy,
     );
     const connectedTools = new ConnectedAccountsTools(this.membership, this.connectedAccounts);
 
@@ -209,6 +215,47 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await tools.provisionAgent(user, args)),
+    );
+
+    // ── Mail triage (write; runs AS the user, member-level) ──
+
+    server.registerTool(
+      'set_disposition',
+      {
+        title: 'Move a thread to a folder',
+        description:
+          'Triage a thread into a folder by talking to an agent: INBOX (un-triage), ' +
+          'ARCHIVE, TRASH, or SPAM (junk). Runs AS the calling user; only works in a ' +
+          'workspace they are a member of. This is the agent analogue of the human ' +
+          'triage UI — an agent on a loop can archive handled threads or route junk to ' +
+          'Spam. Returns the updated disposition overlay row.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          thread_id: z.string(),
+          disposition: z.enum(['INBOX', 'ARCHIVE', 'TRASH', 'SPAM']),
+        },
+      },
+      async (args: any) => wrap(await tools.setDisposition(user, args)),
+    );
+
+    server.registerTool(
+      'set_sender_policy',
+      {
+        title: 'Block or trust a sender',
+        description:
+          'Add/update a sender block (BLOCK) or trust (ALLOW) rule — an exact ADDRESS or ' +
+          'a whole DOMAIN. The app enforces it on triage today and feeds it to the mail ' +
+          'engine’s inbound spam filter once live (BLOCK → Spam; ALLOW → never-spam). ' +
+          'Runs AS the calling user, member-level. Upserts on (scope, pattern).',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          scope: z.enum(['ADDRESS', 'DOMAIN']).optional(),
+          pattern: z.string(),
+          kind: z.enum(['BLOCK', 'ALLOW']),
+          reason: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.setSenderPolicy(user, args)),
     );
 
     // ── EmailOpsPort contract tools ──

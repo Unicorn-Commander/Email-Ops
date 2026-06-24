@@ -25,7 +25,14 @@
  */
 
 import { ForbiddenException } from '@nestjs/common';
-import { AgentInboxState, MailboxOwnerKind, User } from '@prisma/client';
+import {
+  AgentInboxState,
+  MailboxOwnerKind,
+  MessageDisposition,
+  SenderPolicyKind,
+  SenderPolicyScope,
+  User,
+} from '@prisma/client';
 import { MembershipService } from '../common/workspace/membership.service';
 import { listMyWorkspaces, MyWorkspace } from '../common/workspace/list-my-workspaces';
 import { tenancyEnabled } from '../common/workspace/feature-flags';
@@ -36,6 +43,8 @@ import { AgentsService } from '../agents/agents.service';
 import { EmailHealthService } from '../email-health/email-health.service';
 import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
 import { MailboxAccountsService } from '../mailbox-accounts/mailbox-accounts.service';
+import { DispositionService } from '../mail-triage/disposition.service';
+import { SenderPolicyService } from '../mail-triage/sender-policy.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { checkCleanerEntitlement } from '../connected-accounts/entitlement';
 import {
@@ -52,6 +61,8 @@ export class EmailOpsTools {
     private readonly emailHealthService: EmailHealthService,
     private readonly policy: ProvisioningPolicyService,
     private readonly mailboxes: MailboxAccountsService,
+    private readonly disposition: DispositionService,
+    private readonly senderPolicy: SenderPolicyService,
   ) {}
 
   /** Health/info — safe for any authenticated caller. */
@@ -161,6 +172,44 @@ export class EmailOpsTools {
     }
     const agent = await this.agents.createAgent(workspaceId, ucUid, input);
     return { status: 'created', agent };
+  }
+
+  // ── Mail triage (write; runs AS the user, member-level) ─────────────────
+  // The agent-driven analogue of the human triage UI: an agent on a loop can
+  // archive/trash a thread or route junk to Spam, and block/trust senders — only
+  // within a workspace the calling user is a member of.
+
+  /** Move a thread to a folder (INBOX/ARCHIVE/TRASH/SPAM). */
+  async setDisposition(
+    user: User,
+    args: { workspace_id?: string; thread_id: string; disposition: string },
+  ): Promise<{ status: string; disposition: unknown }> {
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const view = await this.disposition.setDisposition(
+      workspaceId,
+      ucUid,
+      args.thread_id,
+      args.disposition as MessageDisposition,
+      { agentKey: null },
+    );
+    return { status: 'ok', disposition: view };
+  }
+
+  /** Block or allow (trust) a sender — exact address or whole domain. */
+  async setSenderPolicy(
+    user: User,
+    args: { workspace_id?: string; scope?: string; pattern: string; kind: string; reason?: string },
+  ): Promise<{ status: string; sender_policy: unknown }> {
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const rule = await this.senderPolicy.set(workspaceId, ucUid, {
+      scope: (args.scope ?? 'ADDRESS') as SenderPolicyScope,
+      pattern: args.pattern,
+      kind: args.kind as SenderPolicyKind,
+      reason: args.reason ?? null,
+    });
+    return { status: 'ok', sender_policy: rule };
   }
 
   // ── Email-steward tools (observability for a Mail-Ops agent) ───────────

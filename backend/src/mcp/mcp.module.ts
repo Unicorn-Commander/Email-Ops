@@ -9,6 +9,7 @@ import { AgentsModule } from '../agents/agents.module';
 import { EmailHealthModule } from '../email-health/email-health.module';
 import { ProvisioningModule } from '../provisioning/provisioning.module';
 import { MailboxAccountsModule } from '../mailbox-accounts/mailbox-accounts.module';
+import { MailTriageModule } from '../mail-triage/mail-triage.module';
 
 @Module({
   // EmailModule exports EmailService so the contract MCP tools run the SAME SoR
@@ -26,6 +27,9 @@ import { MailboxAccountsModule } from '../mailbox-accounts/mailbox-accounts.modu
     EmailHealthModule,
     ProvisioningModule,
     MailboxAccountsModule,
+    // The mail-triage services (folder dispositions + sender block/allow) back
+    // the agent-driven triage tools.
+    MailTriageModule,
   ],
   controllers: [McpController],
   providers: [McpService],

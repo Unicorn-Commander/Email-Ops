@@ -23,7 +23,13 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decorator';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { EmailService } from '../email/email.service';
-import { ComposeInput } from '../email/email.types';
+import { ComposeInput, MailFolder } from '../email/email.types';
+
+const MAIL_FOLDERS: MailFolder[] = ['inbox', 'archive', 'spam', 'trash', 'sent', 'drafts'];
+function normalizeFolder(raw?: string): MailFolder {
+  const f = (raw ?? '').toLowerCase() as MailFolder;
+  return MAIL_FOLDERS.includes(f) ? f : 'inbox';
+}
 
 class ComposeMailDto {
   @IsEmail() to_address!: string;
@@ -40,22 +46,25 @@ export class MailController {
   constructor(private readonly email: EmailService) {}
 
   @Get(':mailboxId/threads')
-  @ApiOperation({ summary: "A mailbox's recent threads (the client inbox list)." })
-  @ApiResponse({ status: 200, description: 'The threads + count.' })
+  @ApiOperation({ summary: "A mailbox's recent threads for a folder (the client inbox list)." })
+  @ApiResponse({ status: 200, description: 'The threads + count + folder.' })
   async threads(
     @ResolvedWorkspace() workspaceId: string,
     @CurrentUser() user: User,
     @Param('mailboxId') mailboxId: string,
     @Query('limit') limitRaw?: string,
+    @Query('folder') folderRaw?: string,
   ) {
     const limit = limitRaw ? Math.min(Number.parseInt(limitRaw, 10) || 50, 200) : 50;
+    const folder = normalizeFolder(folderRaw);
     const threads = await this.email.listMailboxInbox(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
       mailboxId,
       limit,
+      folder,
     );
-    return { threads, count: threads.length };
+    return { threads, count: threads.length, folder };
   }
 
   @Get(':mailboxId/threads/:threadId')

@@ -13,6 +13,14 @@
  * lastMessageAt, etc. — so the field NAMES below are load-bearing.
  */
 
+import { MessageDisposition } from '@prisma/client';
+
+/**
+ * A client mail folder. The disposition folders (inbox/archive/trash/spam) are
+ * the overlay; sent/drafts derive from the SoR direction/status.
+ */
+export type MailFolder = 'inbox' | 'archive' | 'spam' | 'trash' | 'sent' | 'drafts';
+
 /** One participant on a thread/message (a from/to/cc address). */
 export interface ParticipantView {
   address: string;
@@ -28,6 +36,10 @@ export interface ThreadView {
   last_message_at: string | null;
   last_snippet: string | null;
   participants: ParticipantView[];
+  // The app-layer folder placement (the disposition overlay; default INBOX).
+  // Optional on the shared federation contract — populated by the client BFF
+  // (listMailboxInbox); the customer-360 contact-history surface omits it.
+  disposition?: MessageDisposition;
 }
 
 /** One message within a thread (bodies as previews only). */

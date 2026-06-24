@@ -105,6 +105,38 @@ enum EmailDirection {
   DRAFT
 }
 
+// ── Mailbox disposition / folder (Email-Ops OWNS this — the app-layer overlay) ──
+//
+// A thread's folder placement as an OVERLAY over the federated mailbox, NOT a
+// fork of the engine's state. INBOX is the implicit default (no row). ARCHIVE /
+// TRASH / SPAM are explicit user/agent triage. When the mail engine is live this
+// overlay is the source the JMAP-keyword / Junk-mailbox sync reconciles toward;
+// until then it is the whole truth for the SoR rows we hold. SPAM is the app-side
+// Junk verdict — distinct from the engine's inbound spam SCORE (see EmailMessage
+// .spamScore/.spamVerdict, stamped by the SpamPort when the engine produces one).
+enum MessageDisposition {
+  INBOX
+  ARCHIVE
+  TRASH
+  SPAM
+}
+
+// ── Sender allow/block policy (Email-Ops OWNS this) ──
+//
+// A per-workspace block/allow list the app enforces on display + triage and
+// FEEDS the mail engine's inbound filter once live (the engine is the real gate;
+// this is the policy the app teaches it). BLOCK → route to Spam; ALLOW → trusted
+// / never-spam. Scope is an exact ADDRESS or a whole DOMAIN.
+enum SenderPolicyKind {
+  BLOCK
+  ALLOW
+}
+
+enum SenderPolicyScope {
+  ADDRESS
+  DOMAIN
+}
+
 // ── SMS channel (the enterprise/shared-line scope; Email-Ops OWNS this) ──
 //
 // The SMS send/draft analogue of EmailMode/EmailMessageStatus. Dedicated (not the
@@ -325,6 +357,8 @@ model Workspace {
   provisioningRequests MailboxProvisioningRequest[]
   cleanupBatches    CleanupBatch[]
   engagementEvents  EmailEngagementEvent[]
+  threadDispositions ThreadDisposition[]
+  senderPolicies     SenderPolicy[]
 
   @@index([slug])
   @@index([status])
@@ -489,6 +523,13 @@ model EmailMessage {
   // received mail is in `preview`; full received bodies stay in Stalwart.
   body              String?
   preview           String?
+  // Inbound spam classification stamped by the SpamPort once the mail engine
+  // produces a verdict (e.g. an rspamd/SpamAssassin score + a normalized verdict
+  // 'clean'|'spam'|'unsure'). NULL until the engine is live (honest — no fiction
+  // while dormant). The app-side Junk FOLDER is MessageDisposition.SPAM on the
+  // thread; this is the raw engine signal that may drive that triage.
+  spamScore         Float?
+  spamVerdict       String?
   // If this message is a reply, the thread it replied within (for threading).
   inReplyToThreadId String?
   // The provider message id once delivery is handed off (Stalwart/Postmark id).
@@ -519,6 +560,69 @@ model EmailMessage {
   @@index([workspaceId, threadId])
   @@index([workspaceId, status])
   @@map("email_messages")
+}
+
+// ============================================================
+// THREAD DISPOSITION (Email-Ops OWNS this — tenant-scoped; the folder overlay)
+// ============================================================
+//
+// The app-layer folder placement of a thread, kept as a thin OVERLAY (one row
+// per moved thread) merged over the federated mailbox at read time — never a
+// fork of the engine's mailbox state. Absence of a row == INBOX. This is the
+// model behind Inbox / Archive / Spam / Trash navigation + the "mark as spam /
+// not spam / archive / trash" triage actions. RLS-fenced on workspaceId (ENABLE
+// + FORCE, identical workspace_isolation policy). A no-GUC read returns zero
+// rows (fail-closed).
+model ThreadDisposition {
+  id            String             @id @default(uuid())
+  workspaceId   String
+  // The JMAP/Stalwart (or synthesized) thread id this disposition overlays. A
+  // string, NOT a FK to email_messages: received mail has no SoR row, so the
+  // overlay is intentionally decoupled from the message rows it folders.
+  threadId      String
+  disposition   MessageDisposition @default(INBOX)
+  // Light provenance: who/what last filed it (a human ucUid or an agent key).
+  setByUcUid    String?
+  setByAgentKey String?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  // One disposition per thread per workspace (the latest triage wins).
+  @@unique([workspaceId, threadId])
+  @@index([workspaceId, disposition])
+  @@map("thread_dispositions")
+}
+
+// ============================================================
+// SENDER POLICY (Email-Ops OWNS this — tenant-scoped; block/allow list)
+// ============================================================
+//
+// The per-workspace sender block/allow list. The app enforces it on display +
+// triage today and FEEDS it to the mail engine's inbound filter once live (the
+// engine is the real gate; this is the policy the app teaches it). RLS-fenced on
+// workspaceId exactly like the rest.
+model SenderPolicy {
+  id            String            @id @default(uuid())
+  workspaceId   String
+  scope         SenderPolicyScope
+  // The normalized (lowercased) match value: a full address for ADDRESS scope,
+  // a bare domain (no leading '@') for DOMAIN scope.
+  pattern       String
+  kind          SenderPolicyKind
+  reason        String?
+  setByUcUid    String?
+  setByAgentKey String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  // One verdict per (scope,pattern) per workspace; flipping BLOCK↔ALLOW updates it.
+  @@unique([workspaceId, scope, pattern])
+  @@index([workspaceId, kind])
+  @@map("sender_policies")
 }
 
 // ============================================================

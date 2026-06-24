@@ -40,6 +40,7 @@ import {
   EmailDirection,
   EmailMessageStatus,
   EmailMode,
+  MessageDisposition,
   Prisma,
 } from '@prisma/client';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
@@ -51,6 +52,7 @@ import {
   ComposeInput,
   EngagementCaptureInput,
   EngagementCaptureResult,
+  MailFolder,
   MessageComposeView,
   MessageView,
   ThreadView,
@@ -207,13 +209,25 @@ export class EmailService {
     ucUid: string | null,
     mailboxId: string,
     limit = 50,
+    folder: MailFolder = 'inbox',
   ): Promise<ThreadView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
       if (!mailbox) return [];
+      const addr = mailbox.emailAddress;
+
+      // The message scope per folder. Disposition folders look at every thread
+      // the mailbox participates in (received + sent) and are then narrowed by
+      // the overlay; sent/drafts derive purely from the SoR direction/status.
+      const scope: Prisma.EmailMessageWhereInput =
+        folder === 'sent'
+          ? { fromAddress: addr, direction: EmailDirection.SENT }
+          : folder === 'drafts'
+            ? { fromAddress: addr, status: EmailMessageStatus.DRAFT }
+            : { OR: [{ fromAddress: addr }, { toAddress: addr }] };
 
       const msgs = await tx.emailMessage.findMany({
-        where: { workspaceId, fromAddress: mailbox.emailAddress, threadId: { not: null } },
+        where: { workspaceId, threadId: { not: null }, ...scope },
         orderBy: { createdAt: 'desc' },
         take: 300,
       });
@@ -253,18 +267,46 @@ export class EmailService {
         }
       }
 
-      return [...byThread.values()]
-        .sort((a, b) => b.last.getTime() - a.last.getTime())
-        .slice(0, limit)
-        .map((t) => ({
-          id: t.id,
-          subject: t.subject,
-          message_count: t.count,
-          unread: false,
-          last_message_at: t.last.toISOString(),
-          last_snippet: t.snippet,
-          participants: [...t.participants].map((address) => ({ address, name: null })),
-        }));
+      const sorted = [...byThread.values()].sort((a, b) => b.last.getTime() - a.last.getTime());
+
+      // Merge the disposition overlay (default INBOX for any thread with no row),
+      // then narrow to the requested folder. NOTE: the take:300 scan above bounds
+      // how far back triaged threads surface — fine for the thin SoR today; the
+      // engine-backed inbound path will index received mail directly.
+      const dispoRows = await tx.threadDisposition.findMany({
+        where: { workspaceId, threadId: { in: sorted.map((t) => t.id) } },
+      });
+      const dispoBy = new Map(dispoRows.map((d) => [d.threadId, d.disposition]));
+      const effective = (id: string): MessageDisposition =>
+        dispoBy.get(id) ?? MessageDisposition.INBOX;
+
+      const visible = sorted.filter((t) => {
+        const d = effective(t.id);
+        switch (folder) {
+          case 'archive':
+            return d === MessageDisposition.ARCHIVE;
+          case 'spam':
+            return d === MessageDisposition.SPAM;
+          case 'trash':
+            return d === MessageDisposition.TRASH;
+          case 'inbox':
+            // Inbox hides anything triaged out (archive / trash / spam).
+            return d === MessageDisposition.INBOX;
+          default:
+            return true; // sent / drafts: not disposition-filtered.
+        }
+      });
+
+      return visible.slice(0, limit).map((t) => ({
+        id: t.id,
+        subject: t.subject,
+        message_count: t.count,
+        unread: false,
+        last_message_at: t.last.toISOString(),
+        last_snippet: t.snippet,
+        participants: [...t.participants].map((address) => ({ address, name: null })),
+        disposition: effective(t.id),
+      }));
     });
   }
 

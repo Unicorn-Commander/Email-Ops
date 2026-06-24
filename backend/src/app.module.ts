@@ -20,6 +20,7 @@ import { ProvisioningModule } from './provisioning/provisioning.module';
 import { ProvisioningRequestsModule } from './provisioning/provisioning-requests.module';
 import { MailboxAccountsModule } from './mailbox-accounts/mailbox-accounts.module';
 import { MailModule } from './mail/mail.module';
+import { MailTriageModule } from './mail-triage/mail-triage.module';
 
 @Module({
   imports: [
@@ -74,6 +75,10 @@ import { MailModule } from './mail/mail.module';
     ProvisioningRequestsModule,
     // The human email-client BFF (read your inboxes + compose; degrade-clean).
     MailModule,
+    // Mail triage: the app-layer spam/junk seams — folder dispositions
+    // (Inbox/Archive/Trash/Spam overlay), the sender block/allow list, and the
+    // dormant SpamPort engine seam. Pairs with the mail-engine/migration project.
+    MailTriageModule,
     // MCP last so it can consume the contract + agent-inbox tools.
     McpModule,
   ],
