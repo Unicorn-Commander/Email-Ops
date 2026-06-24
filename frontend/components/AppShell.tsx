@@ -31,8 +31,10 @@ type IconName =
 
 const NAV = [
   { href: '/dashboard', label: 'Overview', eyebrow: 'Needs-you', icon: 'dashboard' as const, tone: 'accent' as const },
+  { href: '/mail', label: 'Mail', eyebrow: 'Your inboxes', icon: 'mail' as const, tone: 'accent' as const },
   { href: '/agent-inbox', label: 'Agent Inbox', eyebrow: 'Approve & send', icon: 'mail' as const, tone: 'review' as const },
   { href: '/agents', label: 'Agents', eyebrow: 'Fleet & autonomy', icon: 'activity' as const, tone: 'info' as const },
+  { href: '/mailboxes', label: 'Mailboxes', eyebrow: 'Identities', icon: 'accounts' as const, tone: 'info' as const },
   { href: '/accounts', label: 'Accounts', eyebrow: 'Broker access', icon: 'accounts' as const, tone: 'info' as const },
   { href: '/insights', label: 'Insights', eyebrow: 'Read-only scan', icon: 'insights' as const, tone: 'keep' as const },
   { href: '/cleanup', label: 'Cleanup', eyebrow: 'Safety workbench', icon: 'cleanup' as const, tone: 'review' as const },

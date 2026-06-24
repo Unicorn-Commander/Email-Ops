@@ -145,6 +145,21 @@ export async function apiPut<T = unknown>(path: string, body?: unknown, token?: 
   return (text ? JSON.parse(text) : {}) as T;
 }
 
+/** Authenticated DELETE against the backend. Throws ApiError on non-2xx. */
+export async function apiDelete<T = unknown>(path: string, token?: string): Promise<T> {
+  const bearer = token ?? getToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'DELETE',
+    headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, await errorMessage(res, `DELETE ${path} failed: ${res.status}`));
+  }
+  // Tolerate an empty 200/204 body.
+  const text = await res.text();
+  return (text ? JSON.parse(text) : {}) as T;
+}
+
 export interface EmailOpsUser {
   id: string;
   email: string;
@@ -260,6 +275,25 @@ export async function rejectAgentInboxItem(
 /** How much an agent is trusted to act on its own in the send path. */
 export type AutonomyLevel = 'L0_DRAFT_ONLY' | 'L1_APPROVE_TO_SEND' | 'L2_AUTONOMOUS_AUDIT';
 
+/** Where an agent sits in the fleet hierarchy (UNSPECIFIED = not yet placed). */
+export type AgentTier =
+  | 'EXECUTIVE'
+  | 'DOMAIN_LEAD'
+  | 'MANAGER'
+  | 'SPECIALIST'
+  | 'UNSPECIFIED';
+
+/** What an agent may do with a bound mailbox. */
+export type MailboxAccess = 'SEND' | 'READ' | 'BOTH';
+
+/** One mailbox bound to an agent (mirrors the backend AgentMailboxView). */
+export interface AgentMailboxView {
+  mailbox_account_id: string;
+  mailbox_address: string | null;
+  access: MailboxAccess;
+  is_primary: boolean;
+}
+
 /** One fleet agent (mirrors the backend AgentView wire shape; snake_case). */
 export interface AgentView {
   id: string;
@@ -272,6 +306,14 @@ export interface AgentView {
   recipient_policy: Record<string, unknown> | null;
   active: boolean;
   pending_count: number; // how many of this agent's drafts await approval
+  /** Every mailbox this agent can act on (one is_primary; may include the legacy single mailbox). */
+  mailboxes: AgentMailboxView[];
+  /** Where this agent sits in the org hierarchy. */
+  tier: AgentTier;
+  /** The key of the agent this one reports to (null = top of its branch). */
+  manager_agent_key: string | null;
+  /** Whether this agent is individually paused (distinct from the workspace kill switch). */
+  paused: boolean;
   created_at: string | null;
   updated_at: string | null;
 }
@@ -336,6 +378,77 @@ export async function updateAgent(
   token?: string,
 ): Promise<AgentView> {
   return apiPatch<AgentView>(`${agentsBase(workspaceId)}/${encodeURIComponent(id)}`, body, token);
+}
+
+/** One workspace mailbox (mirrors the backend mailbox list wire shape). */
+export interface MailboxListItem {
+  id: string;
+  email_address: string;
+  display_name: string | null;
+  owner_kind: string;
+  kind: string;
+}
+
+export interface MailboxListResponse {
+  items: MailboxListItem[];
+  count: number;
+}
+
+/** List the workspace's mailboxes — feeds the agent mailbox-binding picker. */
+export async function listMailboxes(
+  workspaceId: string,
+  token?: string,
+): Promise<MailboxListResponse> {
+  return apiGet<MailboxListResponse>(
+    '/workspaces/' + encodeURIComponent(workspaceId) + '/mailboxes',
+    token,
+  );
+}
+
+/** Body for binding (or re-binding) a mailbox to an agent. */
+export interface BindAgentMailboxBody {
+  mailbox_account_id: string;
+  access?: MailboxAccess;
+  is_primary?: boolean;
+}
+
+/**
+ * Bind a mailbox to an agent (ADMIN-gated → 403 on policy denial). Re-binding an
+ * already-bound mailbox updates its access / primary flag. Returns the refreshed agent.
+ */
+export async function bindAgentMailbox(
+  workspaceId: string,
+  agentId: string,
+  body: BindAgentMailboxBody,
+  token?: string,
+): Promise<AgentView> {
+  return apiPost<AgentView>(
+    '/workspaces/' +
+      encodeURIComponent(workspaceId) +
+      '/agents/' +
+      encodeURIComponent(agentId) +
+      '/mailboxes',
+    body,
+    token,
+  );
+}
+
+/** Unbind a mailbox from an agent (ADMIN-gated → 403). Returns the refreshed agent. */
+export async function unbindAgentMailbox(
+  workspaceId: string,
+  agentId: string,
+  mailboxId: string,
+  token?: string,
+): Promise<AgentView> {
+  return apiDelete<AgentView>(
+    '/workspaces/' +
+      encodeURIComponent(workspaceId) +
+      '/agents/' +
+      encodeURIComponent(agentId) +
+      '/mailboxes/' +
+      encodeURIComponent(mailboxId),
+    token,
+  );
 }
 
 // ── Email health (Phase 6) ────────────────────────────────────────────────

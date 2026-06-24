@@ -14,7 +14,7 @@
  * path is a follow-up — so L2 does not auto-send today.
  */
 
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
   Badge,
@@ -32,7 +32,18 @@ import { useAgents } from '@/components/useAgents';
 import { EmailHealthPanel } from '@/components/EmailHealthPanel';
 import { AgentActivityFeed } from '@/components/AgentActivityFeed';
 import { agentLabel } from '@/lib/agents';
-import type { AgentView, AutonomyLevel } from '@/lib/api';
+import {
+  ApiError,
+  bindAgentMailbox,
+  listMailboxes,
+  unbindAgentMailbox,
+  type AgentMailboxView,
+  type AgentTier,
+  type AgentView,
+  type AutonomyLevel,
+  type MailboxAccess,
+  type MailboxListItem,
+} from '@/lib/api';
 
 /** Human copy + badge tone for each autonomy level (single source of truth). */
 const AUTONOMY: Record<
@@ -63,11 +74,41 @@ const AUTONOMY_ORDER: AutonomyLevel[] = [
 ];
 const DEFAULT_AUTONOMY: AutonomyLevel = 'L1_APPROVE_TO_SEND';
 
+/** Human copy + badge tone for each hierarchy tier (UNSPECIFIED renders nothing). */
+const TIER: Record<Exclude<AgentTier, 'UNSPECIFIED'>, { label: string; tone: BadgeVariant }> = {
+  EXECUTIVE: { label: 'Executive', tone: 'accent' },
+  DOMAIN_LEAD: { label: 'Domain lead', tone: 'protected' },
+  MANAGER: { label: 'Manager', tone: 'info' },
+  SPECIALIST: { label: 'Specialist', tone: 'neutral' },
+};
+
+/** Access options for a bound mailbox, in picker order. */
+const ACCESS_ORDER: MailboxAccess[] = ['BOTH', 'SEND', 'READ'];
+const ACCESS_LABEL: Record<MailboxAccess, string> = {
+  BOTH: 'Read + send',
+  SEND: 'Send only',
+  READ: 'Read only',
+};
+const DEFAULT_ACCESS: MailboxAccess = 'BOTH';
+
 export default function AgentsPage() {
   const { workspace, items, load, error, refresh, create, update } = useAgents();
   const [createOpen, setCreateOpen] = useState(false);
 
   const activeCount = useMemo(() => items.filter((a) => a.active).length, [items]);
+
+  // Resolve each agent's manager_agent_key → its manager's display name, so a
+  // card can show "reports to …" instead of the raw slug.
+  const managerLabels = useMemo(() => {
+    const byKey = new Map(items.map((a) => [a.key, a]));
+    const out = new Map<string, string>();
+    for (const agent of items) {
+      if (!agent.manager_agent_key) continue;
+      const manager = byKey.get(agent.manager_agent_key);
+      out.set(agent.id, manager?.display_name || agentLabel(agent.manager_agent_key));
+    }
+    return out;
+  }, [items]);
 
   return (
     <div className="space-y-7">
@@ -103,7 +144,10 @@ export default function AgentsPage() {
               <AgentCard
                 key={agent.id}
                 agent={agent}
+                managedByLabel={managerLabels.get(agent.id) ?? null}
+                workspaceId={workspace?.workspace_id ?? null}
                 onUpdate={(body) => update(agent.id, body)}
+                onRefresh={() => void refresh()}
               />
             ))}
           </div>
@@ -181,16 +225,26 @@ function PolicyNote() {
 
 function AgentCard({
   agent,
+  managedByLabel,
+  workspaceId,
   onUpdate,
+  onRefresh,
 }: {
   agent: AgentView;
+  /** Resolved display name of this agent's manager (null = none). */
+  managedByLabel: string | null;
+  /** The active workspace id mailbox bindings are scoped to (null = none). */
+  workspaceId: string | null;
   onUpdate: (body: { autonomy_level?: AutonomyLevel; active?: boolean }) => Promise<{
     ok: boolean;
     error?: string;
   }>;
+  /** Re-fetch the fleet after a mailbox binding changes. */
+  onRefresh: () => void;
 }) {
   const confirm = useConfirm();
   const autonomy = AUTONOMY[agent.autonomy_level];
+  const tier = agent.tier !== 'UNSPECIFIED' ? TIER[agent.tier] : null;
   const [busy, setBusy] = useState<null | 'autonomy' | 'active'>(null);
   const [cardError, setCardError] = useState<string | null>(null);
 
@@ -236,7 +290,13 @@ function AgentCard({
             <Badge variant={agent.active ? 'success' : 'neutral'} dot>
               {agent.active ? 'active' : 'inactive'}
             </Badge>
+            {tier && <Badge variant={tier.tone}>{tier.label}</Badge>}
             <Badge variant={autonomy.tone}>{autonomy.label}</Badge>
+            {agent.paused && (
+              <Badge variant="warning" title="This agent is individually paused.">
+                paused
+              </Badge>
+            )}
             {agent.pending_count > 0 && (
               <Link href="/agent-inbox" title="Review this agent's pending drafts">
                 <Badge variant="review" className="transition hover:brightness-110">
@@ -252,16 +312,15 @@ function AgentCard({
             </p>
           )}
 
-          <p className="mt-2 truncate text-xs text-tertiary">
-            {agent.mailbox_address ? (
-              <>
-                sends from <span className="font-mono text-secondary">{agent.mailbox_address}</span>
-              </>
-            ) : (
-              <span className="text-muted">no mailbox assigned</span>
-            )}
-          </p>
+          {managedByLabel && (
+            <p className="mt-2 text-[11px] leading-5 text-muted">
+              reports to <span className="text-secondary">{managedByLabel}</span>
+            </p>
+          )}
+
           <p className="mt-1 text-[11px] leading-5 text-muted">{autonomy.desc}</p>
+
+          <AgentMailboxes agent={agent} workspaceId={workspaceId} onRefresh={onRefresh} />
 
           {cardError && <p className="mt-3 text-xs text-danger">{cardError}</p>}
         </div>
@@ -300,6 +359,295 @@ function AgentCard({
         </div>
       </div>
     </Card>
+  );
+}
+
+/** Best-effort message off a thrown error (ApiError carries the backend text). */
+function errText(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof Error) return err.message;
+  return fallback;
+}
+
+/**
+ * The per-agent Mailboxes section: lists every bound mailbox (address + access
+ * + a Primary badge), lets an admin set-primary / remove each one, and add a new
+ * binding from the workspace's mailboxes. All bind/unbind calls are ADMIN-gated
+ * server-side — a 403 surfaces inline. Refreshes the fleet on every change.
+ */
+function AgentMailboxes({
+  agent,
+  workspaceId,
+  onRefresh,
+}: {
+  agent: AgentView;
+  workspaceId: string | null;
+  onRefresh: () => void;
+}) {
+  const confirm = useConfirm();
+  const mailboxes = agent.mailboxes ?? [];
+
+  // Adder state.
+  const [open, setOpen] = useState(false);
+  const [choices, setChoices] = useState<MailboxListItem[] | null>(null);
+  const [loadingChoices, setLoadingChoices] = useState(false);
+  const [pick, setPick] = useState('');
+  const [access, setAccess] = useState<MailboxAccess>(DEFAULT_ACCESS);
+
+  // One "busy" marker per row action + the adder, plus a shared error line.
+  const [busy, setBusy] = useState<string | null>(null); // 'add' | `primary:<id>` | `remove:<id>`
+  const [mbError, setMbError] = useState<string | null>(null);
+
+  const boundIds = useMemo(
+    () => new Set(mailboxes.map((m) => m.mailbox_account_id)),
+    [mailboxes],
+  );
+
+  // Mailboxes in the workspace not already bound to this agent.
+  const available = useMemo(
+    () => (choices ?? []).filter((m) => !boundIds.has(m.id)),
+    [choices, boundIds],
+  );
+
+  const loadChoices = useCallback(async () => {
+    if (!workspaceId) return;
+    setLoadingChoices(true);
+    setMbError(null);
+    try {
+      const res = await listMailboxes(workspaceId);
+      setChoices(res.items);
+    } catch (err) {
+      setMbError(errText(err, 'Could not load the workspace mailboxes.'));
+    } finally {
+      setLoadingChoices(false);
+    }
+  }, [workspaceId]);
+
+  // Load the pickable mailboxes the first time the adder opens.
+  useEffect(() => {
+    if (open && choices === null && !loadingChoices) void loadChoices();
+  }, [open, choices, loadingChoices, loadChoices]);
+
+  // Keep the selected pick valid as the available set changes.
+  useEffect(() => {
+    if (pick && !available.some((m) => m.id === pick)) setPick('');
+  }, [available, pick]);
+
+  async function handleAdd() {
+    if (!workspaceId || !pick) return;
+    setBusy('add');
+    setMbError(null);
+    try {
+      await bindAgentMailbox(workspaceId, agent.id, {
+        mailbox_account_id: pick,
+        access,
+        // First mailbox bound becomes primary; otherwise leave the existing primary.
+        ...(mailboxes.length === 0 ? { is_primary: true } : {}),
+      });
+      setPick('');
+      setAccess(DEFAULT_ACCESS);
+      setOpen(false);
+      setChoices(null); // re-list next open so the just-bound one drops out
+      onRefresh();
+    } catch (err) {
+      setMbError(errText(err, 'Could not add the mailbox.'));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleSetPrimary(mb: AgentMailboxView) {
+    if (!workspaceId || mb.is_primary) return;
+    const ok = await confirm({
+      title: 'Make this the primary mailbox?',
+      description: (
+        <>
+          <span className="font-mono">{mb.mailbox_address ?? mb.mailbox_account_id}</span> becomes the
+          mailbox {agent.display_name || agentLabel(agent.key)} sends from by default.
+        </>
+      ),
+      confirmLabel: 'Set primary',
+      cancelLabel: 'Cancel',
+    });
+    if (!ok) return;
+    setBusy(`primary:${mb.mailbox_account_id}`);
+    setMbError(null);
+    try {
+      await bindAgentMailbox(workspaceId, agent.id, {
+        mailbox_account_id: mb.mailbox_account_id,
+        is_primary: true,
+      });
+      onRefresh();
+    } catch (err) {
+      setMbError(errText(err, 'Could not set the primary mailbox.'));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleRemove(mb: AgentMailboxView) {
+    if (!workspaceId) return;
+    const ok = await confirm({
+      title: 'Remove this mailbox?',
+      description: (
+        <>
+          {agent.display_name || agentLabel(agent.key)} will no longer act on{' '}
+          <span className="font-mono">{mb.mailbox_address ?? mb.mailbox_account_id}</span>.
+        </>
+      ),
+      confirmLabel: 'Remove',
+      cancelLabel: 'Keep',
+      destructive: true,
+    });
+    if (!ok) return;
+    setBusy(`remove:${mb.mailbox_account_id}`);
+    setMbError(null);
+    try {
+      await unbindAgentMailbox(workspaceId, agent.id, mb.mailbox_account_id);
+      setChoices(null); // it's bindable again
+      onRefresh();
+    } catch (err) {
+      setMbError(errText(err, 'Could not remove the mailbox.'));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="mt-3 rounded-token border border-subtle bg-surface-base/40 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-medium uppercase tracking-wide text-tertiary">
+          Mailboxes
+        </span>
+        {!open && (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!workspaceId}
+            onClick={() => setOpen(true)}
+          >
+            Add mailbox
+          </Button>
+        )}
+      </div>
+
+      {mailboxes.length === 0 ? (
+        <p className="mt-2 text-[11px] leading-5 text-muted">
+          No mailboxes assigned — this agent can’t send until you add one.
+        </p>
+      ) : (
+        <ul className="mt-2 space-y-1.5">
+          {mailboxes.map((mb) => {
+            const removing = busy === `remove:${mb.mailbox_account_id}`;
+            const settingPrimary = busy === `primary:${mb.mailbox_account_id}`;
+            const rowBusy = busy !== null;
+            return (
+              <li
+                key={mb.mailbox_account_id}
+                className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-token bg-surface-raised px-2.5 py-1.5"
+              >
+                <span className="min-w-0 flex-1 truncate font-mono text-xs text-secondary">
+                  {mb.mailbox_address ?? mb.mailbox_account_id}
+                </span>
+                <Badge variant="neutral">{ACCESS_LABEL[mb.access]}</Badge>
+                {mb.is_primary && <Badge variant="info">Primary</Badge>}
+                {!mb.is_primary && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={rowBusy}
+                    onClick={() => void handleSetPrimary(mb)}
+                  >
+                    {settingPrimary ? 'Setting…' : 'Set primary'}
+                  </Button>
+                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={rowBusy}
+                  onClick={() => void handleRemove(mb)}
+                  className="text-danger hover:text-danger"
+                >
+                  {removing ? 'Removing…' : 'Remove'}
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {open && (
+        <div className="mt-3 space-y-2 rounded-token border border-subtle bg-surface-raised p-2.5">
+          {loadingChoices ? (
+            <p className="text-[11px] text-muted">Loading mailboxes…</p>
+          ) : available.length === 0 ? (
+            <p className="text-[11px] text-muted">
+              No more workspace mailboxes to add.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+              <label className="block min-w-0 flex-1">
+                <span className="mb-1 block text-[11px] font-medium text-tertiary">Mailbox</span>
+                <Select
+                  aria-label="Mailbox to bind"
+                  value={pick}
+                  disabled={busy !== null}
+                  onChange={(event) => setPick(event.target.value)}
+                  className="text-xs"
+                >
+                  <option value="">Select a mailbox…</option>
+                  {available.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.email_address}
+                      {m.display_name ? ` (${m.display_name})` : ''}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+              <label className="block sm:w-[150px]">
+                <span className="mb-1 block text-[11px] font-medium text-tertiary">Access</span>
+                <Select
+                  aria-label="Mailbox access"
+                  value={access}
+                  disabled={busy !== null}
+                  onChange={(event) => setAccess(event.target.value as MailboxAccess)}
+                  className="text-xs"
+                >
+                  {ACCESS_ORDER.map((a) => (
+                    <option key={a} value={a}>
+                      {ACCESS_LABEL[a]}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={busy !== null}
+              onClick={() => {
+                setOpen(false);
+                setPick('');
+                setMbError(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              disabled={busy !== null || !pick || loadingChoices}
+              onClick={() => void handleAdd()}
+            >
+              {busy === 'add' ? 'Adding…' : 'Add'}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {mbError && <p className="mt-2 text-xs text-danger">{mbError}</p>}
+    </div>
   );
 }
 
