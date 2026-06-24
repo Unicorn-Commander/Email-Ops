@@ -151,6 +151,81 @@ enum AgentActionKind {
   REJECTED
   PAUSED
   RESUMED
+  // Provisioning + fleet-management actions (the command-center plane).
+  MAILBOX_CREATED
+  MAILBOX_UPDATED
+  MAILBOX_ACCESS_GRANTED
+  MAILBOX_ACCESS_REVOKED
+  AGENT_CREATED
+  AGENT_UPDATED
+  AUTONOMY_CHANGED
+  PROVISION_REQUESTED
+  PROVISION_APPROVED
+  PROVISION_REJECTED
+  PROVISION_APPLIED
+  PROVISION_FAILED
+}
+
+// ── Mailbox ownership + agent access (the command-center plane) ──
+//
+// A mailbox's PRINCIPAL (who it belongs to) is distinct from which agents may
+// ACT THROUGH it (AgentMailbox). ownerKind=SHARED is the back-compat default for
+// every pre-existing workspace mailbox.
+enum MailboxOwnerKind {
+  HUMAN
+  AGENT
+  SHARED
+}
+
+// What an agent may DO through a mailbox it's bound to.
+enum MailboxAccessLevel {
+  SEND
+  READ
+  BOTH
+}
+
+// SoR-row vs a real engine-minted account. PROVISIONED only once the mail engine
+// mints the actual IMAP/JMAP account; until then the row is REGISTERED (honest —
+// no fiction while the engine is dormant).
+enum MailboxProvisionState {
+  REGISTERED
+  PROVISIONING
+  PROVISIONED
+  PROVISION_FAILED
+}
+
+// The agent's org-chart rank (a thin denormalized copy of the Brigade hierarchy;
+// UNSPECIFIED = lowest privilege to any tier-aware policy).
+enum AgentTier {
+  EXECUTIVE
+  DOMAIN_LEAD
+  MANAGER
+  SPECIALIST
+  UNSPECIFIED
+}
+
+// The provisioning policy dial per action: OPEN (any member) / MANAGER / ADMIN_ONLY
+// / APPROVAL (anyone may request, an approver applies).
+enum ProvisioningMode {
+  OPEN
+  MANAGER
+  ADMIN_ONLY
+  APPROVAL
+}
+
+enum ProvisionableKind {
+  HUMAN_MAILBOX
+  AGENT_MAILBOX
+  AGENT
+}
+
+enum ProvisioningRequestState {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELED
+  APPLIED
+  FAILED
 }
 
 enum CleanupActionKind {
@@ -222,7 +297,10 @@ model Workspace {
   emailMessages     EmailMessage[]
   agentInboxItems   AgentInboxItem[]
   agents            Agent[]
+  agentMailboxes    AgentMailbox[]
   agentActionEvents AgentActionEvent[]
+  provisioningPolicy   ProvisioningPolicy?
+  provisioningRequests MailboxProvisioningRequest[]
   cleanupBatches    CleanupBatch[]
   engagementEvents  EmailEngagementEvent[]
 
@@ -313,15 +391,28 @@ model MailboxAccount {
   // (the high-rep lane) rather than Stalwart SMTP (per the suite comms lanes).
   postmarkLane Boolean  @default(true)
   active       Boolean  @default(true)
+  // The PRINCIPAL behind this mailbox (command-center plane). Pre-existing rows
+  // default SHARED (the workspace's deliverable identity, no single owner) =
+  // back-compat, no data fixup. ownerKey: HUMAN→User.keycloakId / AGENT→Agent.key
+  // / SHARED→null (soft reference). `kind` is a cheap denorm of ownerKind for the
+  // grouped mailbox view. provisionState is honest: REGISTERED until the engine
+  // mints the real account.
+  ownerKind      MailboxOwnerKind      @default(SHARED)
+  ownerKey       String?
+  kind           String                @default("shared")
+  provisionState MailboxProvisionState @default(REGISTERED)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agentMailboxes AgentMailbox[]
 
   // One mailbox identity per address per workspace.
   @@unique([workspaceId, emailAddress])
   @@index([workspaceId])
   @@index([workspaceId, isDefault])
+  // "my inboxes" / "agent X's inboxes" / "shared boxes".
+  @@index([workspaceId, ownerKind, ownerKey])
   @@map("mailbox_accounts")
 }
 
@@ -484,16 +575,65 @@ model Agent {
   autonomyLevel    AgentAutonomyLevel @default(L1_APPROVE_TO_SEND)
   recipientPolicy  Json?
   active           Boolean            @default(true)
+  // Org-chart hierarchy (a thin denorm of the Brigade fleet — Email-Ops federates
+  // the identity + governance; Brigade owns the runtime/loop/inter-agent tasking).
+  // managerAgentKey is a SOFT ref by Agent.key (the parent may be created later /
+  // reorg churn → a dangling ref renders "unmanaged", can't break a migration).
+  tier             AgentTier          @default(UNSPECIFIED)
+  managerAgentKey  String?
+  brigadeAgentId   String?
+  // Per-agent pause: stops THIS agent's compose/send (distinct from the
+  // workspace-wide kill switch, which stops the whole fleet).
+  paused           Boolean            @default(false)
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // The mailboxes this agent may act through (multi-mailbox). mailboxAccountId
+  // above is the denormalized cache of the isPrimary binding's mailbox.
+  mailboxes AgentMailbox[]
 
   // One agent identity per key per workspace (the stable provenance slug).
   @@unique([workspaceId, key])
   @@index([workspaceId])
   @@index([workspaceId, active])
+  // "list an agent's reports" / org-chart render; tier-scoped policy + pause sweep.
+  @@index([workspaceId, managerAgentKey])
+  @@index([workspaceId, tier])
   @@map("agents")
+}
+
+// ============================================================
+// AGENT MAILBOX (Email-Ops OWNS this — tenant-scoped; the multi-mailbox join)
+// ============================================================
+//
+// Which mailboxes an agent may ACT THROUGH, with what access, and which is its
+// default From (isPrimary). Distinct from ownership (MailboxAccount.ownerKind):
+// a shared sales@ is owned by no one yet several agents send from it; a delegate
+// agent reads a human's inbox it doesn't own. REAL FKs (not soft) — a junction
+// whose whole purpose is referential integrity + cascade between two same-fence
+// tables. RLS-fenced on workspaceId like every scoped table.
+model AgentMailbox {
+  id               String             @id @default(uuid())
+  workspaceId      String
+  agentId          String
+  mailboxAccountId String
+  access           MailboxAccessLevel @default(SEND)
+  // The agent's default From (exactly one TRUE per agent, app-enforced like
+  // MailboxAccount.isDefault).
+  isPrimary        Boolean            @default(false)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agent     Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, mailboxAccountId])
+  @@index([workspaceId])
+  @@index([workspaceId, agentId])
+  @@index([workspaceId, mailboxAccountId])
+  @@map("agent_mailboxes")
 }
 
 // ============================================================
@@ -514,6 +654,9 @@ model AgentActionEvent {
   workspaceId String
   kind        AgentActionKind
   agentKey    String?
+  // Delegation provenance: when agent A acts because manager/peer B tasked it,
+  // this is B's key. agentKey stays the ACTING identity; null = self-initiated.
+  onBehalfOfAgentKey String?
   messageId   String?
   actorUcUid  String?
   detail      String?
@@ -525,6 +668,79 @@ model AgentActionEvent {
   // The feed reads events newest-first.
   @@index([workspaceId, createdAt])
   @@map("agent_action_events")
+}
+
+// ============================================================
+// PROVISIONING POLICY (Email-Ops OWNS this — per-workspace RBAC control surface)
+// ============================================================
+//
+// Who may create/edit human mailboxes, agent mailboxes (send identities), and
+// agents — the founder's flexible dials. One row per workspace (1:1); when absent
+// the code DEFAULT_PROVISIONING_POLICY applies (inert until a row is written).
+// Typed (not JSON) — a fixed control surface on the hot path + edited by an admin
+// UI. RLS-fenced on workspaceId like the scoped tables (defense-in-depth, even
+// though the @id IS the workspaceId); reads/writes go through withWorkspace.
+model ProvisioningPolicy {
+  workspaceId                String           @id
+  humanMailboxCreateMode     ProvisioningMode @default(MANAGER)
+  humanMailboxEditMode       ProvisioningMode @default(MANAGER)
+  // An agent's send identity is higher-trust — default ADMIN_ONLY.
+  agentMailboxCreateMode     ProvisioningMode @default(ADMIN_ONLY)
+  agentMailboxEditMode       ProvisioningMode @default(ADMIN_ONLY)
+  agentCreateMode            ProvisioningMode @default(MANAGER)
+  agentEditMode              ProvisioningMode @default(MANAGER)
+  // The rung that approves an APPROVAL-mode request.
+  approverMinRole            WorkspaceRole    @default(ADMIN)
+  // May a MEMBER create their OWN human mailbox regardless of the mode above.
+  allowSelfServiceOwnMailbox Boolean          @default(false)
+  maxMailboxesPerWorkspace   Int?
+  maxAgentsPerWorkspace      Int?
+  updatedByUcUid             String?
+  createdAt                  DateTime         @default(now())
+  updatedAt                  DateTime         @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("provisioning_policies")
+}
+
+// ============================================================
+// MAILBOX PROVISIONING REQUEST (Email-Ops OWNS this — tenant-scoped; approval queue)
+// ============================================================
+//
+// An APPROVAL-mode (or above-the-caller's-rung) create/edit lands here PENDING. On
+// approve, the validated `payload` is REPLAYED through the SAME service method the
+// direct path uses (one write path). Separate from AgentInboxItem: a different
+// gate (a role rung, not a comms SKU), no message body, APPLIED/FAILED terminal
+// (the engine apply can defer while dormant). RLS-fenced on workspaceId.
+model MailboxProvisioningRequest {
+  id          String                   @id @default(uuid())
+  workspaceId String
+  kind        ProvisionableKind
+  action      String                   @default("CREATE")
+  state       ProvisioningRequestState @default(PENDING)
+  // The validated create/edit payload, replayed through the canonical service.
+  payload     Json
+  // The MailboxAccount/Agent id for an UPDATE (null for CREATE).
+  targetId            String?
+  summary             String?
+  requestedByUcUid    String?
+  requestedByAgentKey String?
+  reviewedByUcUid     String?
+  reviewedAt          DateTime?
+  reviewNote          String?
+  // Engine-gated: the created/updated id once applied, + why an apply deferred.
+  appliedRefId  String?
+  appliedAt     DateTime?
+  failureReason String?
+  createdAt   DateTime                 @default(now())
+  updatedAt   DateTime                 @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([workspaceId, state, createdAt])
+  @@map("mailbox_provisioning_requests")
 }
 
 // ============================================================
