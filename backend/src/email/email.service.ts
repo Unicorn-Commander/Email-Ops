@@ -444,9 +444,13 @@ export class EmailService {
       // (The agent path doesn't set fromMailboxAccountId; it uses resolveSendMailbox.)
       if (explicitFrom) {
         const kind = explicitFrom.ownerKind as string;
+        // SHARED = a workspace resource (any member may send as it); HUMAN = a
+        // person's own box (only the owner). Route the HUMAN owner-check through
+        // mayActThroughMailbox so it resolves the caller by keycloakId OR User.id
+        // and survives the same id-flavor ambiguity as the read path. AGENT (and
+        // anything else) falls through -> denied (no impersonating an agent).
         const ownsIt =
-          kind === 'SHARED' ||
-          (kind === 'HUMAN' && !!explicitFrom.ownerKey && explicitFrom.ownerKey === ucUid);
+          kind === 'SHARED' || (kind === 'HUMAN' && (await this.mayActThroughMailbox(explicitFrom, ucUid)));
         if (!ownsIt) {
           throw new ForbiddenException('You are not allowed to send as that mailbox.');
         }
