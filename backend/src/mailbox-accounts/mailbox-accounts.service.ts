@@ -93,6 +93,14 @@ export class MailboxAccountsService {
     ucUid: string | null,
     input: { provider: 'gmail' | 'microsoft'; emailAddress: string; displayName?: string | null },
   ): Promise<MailboxView> {
+    // Stamp the CANONICAL owner key (the uchub sub / keycloakId). ucUid can arrive
+    // as the keycloakId OR the local User.id depending on the auth path; resolve the
+    // owning user by EITHER and persist the stable keycloakId, so the provider/broker
+    // (which resolve a mailbox's owner by keycloakId) can always find them.
+    const owner = ucUid
+      ? await this.prisma.user.findFirst({ where: { OR: [{ keycloakId: ucUid }, { id: ucUid }] } })
+      : null;
+    const ownerKey = owner?.keycloakId ?? owner?.id ?? ucUid;
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const mb = await tx.mailboxAccount.upsert({
         where: { workspaceId_emailAddress: { workspaceId, emailAddress: input.emailAddress } },
@@ -102,14 +110,14 @@ export class MailboxAccountsService {
           displayName: input.displayName ?? null,
           provider: input.provider,
           ownerKind: MailboxOwnerKind.HUMAN,
-          ownerKey: ucUid,
+          ownerKey,
           kind: input.provider,
           postmarkLane: false,
         },
         update: {
           provider: input.provider,
           ownerKind: MailboxOwnerKind.HUMAN,
-          ownerKey: ucUid,
+          ownerKey,
           kind: input.provider,
           active: true,
         },

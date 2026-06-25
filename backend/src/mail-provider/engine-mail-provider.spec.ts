@@ -42,7 +42,10 @@ function make(opts: {
     sendMail: jest.fn().mockResolvedValue(opts.send ?? null),
   } as unknown as ConnectedAccountsEnginePort;
   const prisma = {
-    user: { findUnique: jest.fn().mockResolvedValue(opts.user ?? null) },
+    user: {
+      findUnique: jest.fn().mockResolvedValue(opts.user ?? null),
+      findFirst: jest.fn().mockResolvedValue(opts.user ?? null),
+    },
   } as unknown as PrismaService;
   return { provider: new EngineMailProvider(engine, broker, prisma), broker, engine, prisma };
 }

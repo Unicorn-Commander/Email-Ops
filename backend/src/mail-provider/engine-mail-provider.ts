@@ -144,7 +144,13 @@ export class EngineMailProvider extends MailProviderPort {
   ): Promise<Record<string, unknown> | null> {
     if (!ucUid) return null;
     try {
-      const user = await this.prisma.user.findUnique({ where: { keycloakId: ucUid } });
+      // The mailbox ownerKey is the owning user's identity, but depending on the
+      // auth path that stamped it, it can be the uchub `sub` (keycloakId) OR the
+      // local User.id. Resolve by EITHER so the broker token (keyed off the real
+      // User row) is found regardless of which flavor was stored.
+      const user = await this.prisma.user.findFirst({
+        where: { OR: [{ keycloakId: ucUid }, { id: ucUid }] },
+      });
       if (!user) return null;
       const token = await this.broker.getProviderAccessToken(user, this.aliasFor(provider));
       return token ? this.credentialsFor(provider, token) : null;

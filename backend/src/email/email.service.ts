@@ -94,11 +94,20 @@ export class EmailService {
    * send-as check in composeEmail; that one is stricter — explicit "send AS" also
    * forbids AGENT boxes — so the two predicates intentionally differ.)
    */
-  private mayActThroughMailbox(
+  private async mayActThroughMailbox(
     mailbox: { ownerKind: string; ownerKey: string | null },
     ucUid: string | null,
-  ): boolean {
-    return (mailbox.ownerKind as string) !== 'HUMAN' || (!!mailbox.ownerKey && mailbox.ownerKey === ucUid);
+  ): Promise<boolean> {
+    if ((mailbox.ownerKind as string) !== 'HUMAN') return true; // SHARED/AGENT = workspace resource
+    if (!mailbox.ownerKey || !ucUid) return false;
+    if (mailbox.ownerKey === ucUid) return true;
+    // ownerKey is canonically the keycloakId, but ucUid can arrive as the local
+    // User.id (auth-path dependent) — resolve the caller by EITHER identity and
+    // accept a match on either, so a legitimate owner is never falsely fenced out.
+    const u = await this.prisma.user.findFirst({
+      where: { OR: [{ keycloakId: ucUid }, { id: ucUid }] },
+    });
+    return !!u && (mailbox.ownerKey === u.keycloakId || mailbox.ownerKey === u.id);
   }
 
   // ── 1. list_threads_with_contact ───────────────────────────────────────
@@ -190,7 +199,7 @@ export class EmailService {
       if (mailbox && this.mailProvider.handles(mailbox)) {
         // Per-user fence (see mayActThroughMailbox): never reveal a co-member's
         // external thread — the read runs on the mailbox OWNER's broker token.
-        if (!this.mayActThroughMailbox(mailbox, ucUid)) return [];
+        if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
         live = await this.mailProvider.listThreadMessages(mailbox, threadId);
       } else if (mailbox) {
         const msgs = await this.stalwart.listMessages(mailbox.emailAddress, threadId);
@@ -255,7 +264,7 @@ export class EmailService {
       if (this.mailProvider.handles(mailbox)) {
         // Per-user fence: a HUMAN external mailbox is private to its owner — never
         // surface a co-member's connected inbox just because it shares the workspace.
-        if (!this.mayActThroughMailbox(mailbox, ucUid)) return [];
+        if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
         return this.mailProvider.listInbox(mailbox, { folder, limit });
       }
 
@@ -642,7 +651,7 @@ export class EmailService {
       // approve a send from a HUMAN mailbox — an approver can't push mail out of a
       // co-member's personal Gmail/M365. SHARED/AGENT boxes stay approvable by any
       // reviewer (the workspace-resource model).
-      if (mailbox && !this.mayActThroughMailbox(mailbox, ucUid)) {
+      if (mailbox && !(await this.mayActThroughMailbox(mailbox, ucUid))) {
         throw new ForbiddenException('Only the owner of that mailbox can approve a send from it.');
       }
 
