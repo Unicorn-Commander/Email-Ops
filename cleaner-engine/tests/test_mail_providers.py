@@ -361,6 +361,51 @@ def test_ms_get_thread_escapes_odata_single_quote(monkeypatch):
     assert "conversationId eq 'c1' or isRead eq true" not in filt
 
 
+def test_ms_get_thread_no_orderby_sorts_client_side(monkeypatch):
+    """Graph returns 400 when $orderby names a property other than the one in
+    $filter (we filter on conversationId), so get_thread must NOT send $orderby
+    and must sort the conversation chronologically client-side instead."""
+    # Graph returns the messages OUT of chronological order on purpose.
+    thread_page = {
+        "value": [
+            {
+                "id": "m2",
+                "conversationId": "c1",
+                "from": {"emailAddress": {"address": "a@example.com"}},
+                "receivedDateTime": "2024-01-02T10:00:00Z",
+                "sentDateTime": "2024-01-02T10:00:00Z",
+                "isDraft": False,
+            },
+            {
+                "id": "m1",
+                "conversationId": "c1",
+                "from": {"emailAddress": {"address": "a@example.com"}},
+                "receivedDateTime": "2024-01-01T10:00:00Z",
+                "sentDateTime": "2024-01-01T10:00:00Z",
+                "isDraft": False,
+            },
+        ]
+    }
+
+    def get_router(url, params):
+        if url.endswith("/me"):
+            return _FakeResp(json_data={"mail": "me@example.com"})
+        return _FakeResp(json_data=thread_page)
+
+    provider, sink = _make_ms(monkeypatch, get_router=get_router)
+    messages = provider.get_thread("c1")
+
+    # The conversationId-filtered query must NOT carry $orderby (avoids Graph 400).
+    msg_calls = [
+        params for (verb, url, params) in sink
+        if verb == "GET" and url.endswith("/me/messages") and params and "$filter" in params
+    ]
+    assert msg_calls, "expected a /me/messages GET with a $filter"
+    assert "$orderby" not in msg_calls[0]
+    # Sorted chronologically client-side despite Graph returning them reversed.
+    assert [m.id for m in messages] == ["m1", "m2"]
+
+
 def test_ms_translate_query_escapes_from_sender_single_quote(monkeypatch):
     """A from: sender containing a single quote is OData-escaped (doubled)."""
     provider, _ = _make_ms(monkeypatch)

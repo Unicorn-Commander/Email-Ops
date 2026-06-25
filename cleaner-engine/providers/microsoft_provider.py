@@ -348,13 +348,20 @@ class MicrosoftGraphProvider(EmailProvider):
         params = {
             '$filter': f"conversationId eq '{safe_thread_id}'",
             '$select': 'id,conversationId,subject,from,toRecipients,sentDateTime,receivedDateTime,isDraft,bodyPreview',
-            '$orderby': 'receivedDateTime asc',
+            # NOTE: deliberately NO $orderby. Microsoft Graph returns 400 Bad
+            # Request when $orderby names a property other than the one in
+            # $filter (here we filter on conversationId), so we sort the
+            # conversation chronologically client-side below instead.
             '$top': 100,
         }
         data = self._graph_get('/me/messages', params=params)
 
+        messages = data.get('value', [])
+        # receivedDateTime is ISO-8601, so a lexical sort is chronological (asc).
+        messages.sort(key=lambda m: m.get('receivedDateTime') or '')
+
         out: List[ThreadMessage] = []
-        for msg in data.get('value', []):
+        for msg in messages:
             sender = self._address(msg.get('from', {}).get('emailAddress'))
             if msg.get('isDraft'):
                 direction = 'draft'
