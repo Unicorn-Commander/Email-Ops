@@ -83,6 +83,24 @@ export class EmailService {
     return mode.toLowerCase();
   }
 
+  /**
+   * May this caller act THROUGH this mailbox (read its live folders / send from
+   * it)? A HUMAN mailbox is a person's PRIVATE account — only its owner (ucUid)
+   * may. SHARED / AGENT mailboxes are workspace resources (already workspace-
+   * fenced), so any member may. This is the per-USER fence the workspaceId
+   * predicate alone does not give: without it a co-member could pass another
+   * member's external (gmail/microsoft) mailboxId and the server would fetch
+   * THAT owner's KC-broker token — reading or sending as them. (Mirrors the
+   * send-as check in composeEmail; that one is stricter — explicit "send AS" also
+   * forbids AGENT boxes — so the two predicates intentionally differ.)
+   */
+  private mayActThroughMailbox(
+    mailbox: { ownerKind: string; ownerKey: string | null },
+    ucUid: string | null,
+  ): boolean {
+    return (mailbox.ownerKind as string) !== 'HUMAN' || (!!mailbox.ownerKey && mailbox.ownerKey === ucUid);
+  }
+
   // ── 1. list_threads_with_contact ───────────────────────────────────────
 
   /**
@@ -170,6 +188,9 @@ export class EmailService {
 
       let live: MessageView[] = [];
       if (mailbox && this.mailProvider.handles(mailbox)) {
+        // Per-user fence (see mayActThroughMailbox): never reveal a co-member's
+        // external thread — the read runs on the mailbox OWNER's broker token.
+        if (!this.mayActThroughMailbox(mailbox, ucUid)) return [];
         live = await this.mailProvider.listThreadMessages(mailbox, threadId);
       } else if (mailbox) {
         const msgs = await this.stalwart.listMessages(mailbox.emailAddress, threadId);
@@ -232,6 +253,9 @@ export class EmailService {
       // isn't connected or the engine is dormant. The local disposition overlay
       // stays a sovereign-mailbox concern (sync-back to the provider is a follow-up).
       if (this.mailProvider.handles(mailbox)) {
+        // Per-user fence: a HUMAN external mailbox is private to its owner — never
+        // surface a co-member's connected inbox just because it shares the workspace.
+        if (!this.mayActThroughMailbox(mailbox, ucUid)) return [];
         return this.mailProvider.listInbox(mailbox, { folder, limit });
       }
 
@@ -612,6 +636,15 @@ export class EmailService {
             where: { id: item.message.mailboxAccountId, workspaceId },
           })
         : await this.defaultMailbox(tx, workspaceId);
+
+      // Per-user fence: an approved send goes out THROUGH the mailbox owner's
+      // identity (for an external box, their KC-broker token). Only the owner may
+      // approve a send from a HUMAN mailbox — an approver can't push mail out of a
+      // co-member's personal Gmail/M365. SHARED/AGENT boxes stay approvable by any
+      // reviewer (the workspace-resource model).
+      if (mailbox && !this.mayActThroughMailbox(mailbox, ucUid)) {
+        throw new ForbiddenException('Only the owner of that mailbox can approve a send from it.');
+      }
 
       // Hand the approved draft to the mail engine (or the external provider).
       const sent = await this.handToEngine(tx, item.message.id, mailbox ?? null, {

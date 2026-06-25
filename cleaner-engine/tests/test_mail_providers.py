@@ -339,6 +339,36 @@ def test_ms_get_thread_infers_direction(monkeypatch):
     assert messages[0].sent_at.startswith("2024-01-01")
 
 
+def test_ms_get_thread_escapes_odata_single_quote(monkeypatch):
+    """A thread_id with a single quote must not break out of the $filter literal.
+
+    OData escapes a single quote by doubling it, so an injected ``'`` becomes
+    ``''`` and stays inside the string literal.
+    """
+    provider, sink = _make_ms(monkeypatch)
+    # Without escaping, this would close the literal and inject an OData clause.
+    provider.get_thread("c1' or isRead eq true or conversationId eq 'x")
+
+    messages_calls = [
+        params for (verb, url, params) in sink
+        if verb == "GET" and url.endswith("/me/messages") and params and "$filter" in params
+    ]
+    assert messages_calls, "expected a /me/messages GET carrying a $filter"
+    filt = messages_calls[0]["$filter"]
+    # The injected single quotes are doubled, keeping everything inside the literal.
+    assert filt == "conversationId eq 'c1'' or isRead eq true or conversationId eq ''x'"
+    # And the dangerous *unescaped* form must NOT appear.
+    assert "conversationId eq 'c1' or isRead eq true" not in filt
+
+
+def test_ms_translate_query_escapes_from_sender_single_quote(monkeypatch):
+    """A from: sender containing a single quote is OData-escaped (doubled)."""
+    provider, _ = _make_ms(monkeypatch)
+    filt = provider.translate_query("from:a' or isRead eq true or x eq 'b")
+    assert filt == "from/emailAddress/address eq 'a'' or isRead eq true or x eq ''b'"
+    assert "address eq 'a' or isRead eq true" not in filt
+
+
 def test_ms_send_posts_sendmail(monkeypatch):
     captured = {}
 

@@ -341,8 +341,12 @@ class MicrosoftGraphProvider(EmailProvider):
     def get_thread(self, thread_id: str) -> List[ThreadMessage]:
         """Return the messages of one conversation in chronological order."""
         account = self._account_address()
+        # OData escapes a single quote inside a string literal by doubling it.
+        # ``thread_id`` is caller-supplied, so escape before interpolating to
+        # prevent breaking out of the literal ($filter injection).
+        safe_thread_id = thread_id.replace("'", "''")
         params = {
-            '$filter': f"conversationId eq '{thread_id}'",
+            '$filter': f"conversationId eq '{safe_thread_id}'",
             '$select': 'id,conversationId,subject,from,toRecipients,sentDateTime,receivedDateTime,isDraft,bodyPreview',
             '$orderby': 'receivedDateTime asc',
             '$top': 100,
@@ -571,7 +575,10 @@ class MicrosoftGraphProvider(EmailProvider):
         # Handle 'from:' queries
         if q.startswith('from:'):
             sender = q[5:].strip()
-            return f"from/emailAddress/address eq '{sender}'"
+            # ``sender`` is caller-supplied; escape OData single quotes (double
+            # them) before interpolating into the string literal.
+            safe_sender = sender.replace("'", "''")
+            return f"from/emailAddress/address eq '{safe_sender}'"
 
         # Fallback: use $search instead of $filter for free-text
         # Return empty to let the caller use $search param instead

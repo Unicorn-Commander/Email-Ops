@@ -698,3 +698,84 @@ def test_ai_generate_falls_back_to_frontier(monkeypatch, ai_enabled):
     assert result[0]["category"] == "promotional"
     assert call_log[0]["model"] == "local/qwen3.5-9b"
     assert call_log[-1]["model"] == "frontier/model"
+
+
+# ---------------------------------------------------------------------------
+# Auth gate fails closed when no shared secret is configured.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def client_no_secret(monkeypatch, fake_provider_factory):
+    """A client whose engine boots with NO shared secret configured."""
+    monkeypatch.delenv("ENGINE_SHARED_SECRET", raising=False)
+    return TestClient(app.app)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},  # missing token previously bypassed the gate (compare_digest("","")==True)
+        {"X-Engine-Token": ""},  # explicit empty token
+        {"X-Engine-Token": "anything"},  # arbitrary token
+    ],
+)
+def test_auth_gate_fails_closed_when_secret_unset(headers, client_no_secret, fake_provider_factory):
+    response = client_no_secret.post(
+        "/accounts/stats",
+        headers=headers,
+        json={"provider": "gmail", "credentials": {"token": "abc"}},
+    )
+    assert response.status_code == 401
+
+
+@pytest.fixture
+def client_blank_secret(monkeypatch, fake_provider_factory):
+    """A client whose engine boots with a blank/whitespace-only shared secret."""
+    monkeypatch.setenv("ENGINE_SHARED_SECRET", "   ")
+    return TestClient(app.app)
+
+
+def test_auth_gate_fails_closed_when_secret_blank(client_blank_secret, fake_provider_factory):
+    # A whitespace-only secret must be treated as "no secret" -> deny all.
+    response = client_blank_secret.post(
+        "/accounts/stats",
+        headers={"X-Engine-Token": "   "},
+        json={"provider": "gmail", "credentials": {"token": "abc"}},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "headers, expected_status",
+    [
+        ({"X-Engine-Token": "test-secret"}, 200),  # correct token passes
+        ({"X-Engine-Token": "wrong"}, 401),  # wrong token rejected
+        ({"X-Engine-Token": ""}, 401),  # empty token rejected
+        ({}, 401),  # missing token rejected
+    ],
+)
+def test_auth_gate_with_secret_set(headers, expected_status, client, fake_provider_factory):
+    response = client.post(
+        "/accounts/stats",
+        headers=headers,
+        json={"provider": "gmail", "credentials": {"token": "abc"}},
+    )
+    assert response.status_code == expected_status
+
+
+def test_startup_logs_loud_warning_when_secret_unset(monkeypatch, caplog):
+    monkeypatch.delenv("ENGINE_SHARED_SECRET", raising=False)
+    with caplog.at_level("ERROR", logger="app"):
+        # Entering the TestClient context runs the app lifespan (startup).
+        with TestClient(app.app):
+            pass
+    assert any("ENGINE_SHARED_SECRET is not set" in rec.message for rec in caplog.records)
+
+
+def test_startup_quiet_when_secret_set(monkeypatch, caplog):
+    monkeypatch.setenv("ENGINE_SHARED_SECRET", "test-secret")
+    with caplog.at_level("ERROR", logger="app"):
+        with TestClient(app.app):
+            pass
+    assert not any("ENGINE_SHARED_SECRET is not set" in rec.message for rec in caplog.records)

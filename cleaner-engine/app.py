@@ -3,8 +3,9 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import asdict
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
@@ -23,7 +24,25 @@ logging.basicConfig(level=logging.INFO)
 
 VERSION = "0.1.0"
 
-app = FastAPI(title="Cleaner Engine", version=VERSION)
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Loudly warn (do not crash) when the engine boots without a shared secret.
+
+    The auth gate (``_require_engine_token``) fails closed in this case, so the
+    API is safe-but-unusable; surface it clearly so the misconfiguration is
+    obvious in the logs.
+    """
+    if not (load_config().engine_shared_secret or "").strip():
+        logger.error(
+            "SECURITY: ENGINE_SHARED_SECRET is not set. The engine API is "
+            "FAILING CLOSED and will reject ALL authenticated requests with 401 "
+            "until ENGINE_SHARED_SECRET is configured."
+        )
+    yield
+
+
+app = FastAPI(title="Cleaner Engine", version=VERSION, lifespan=lifespan)
 
 
 class CredentialsModel(BaseModel):
@@ -156,7 +175,15 @@ def _get_config() -> Config:
 
 
 def _require_engine_token(x_engine_token: Optional[str] = Header(default=None, alias="X-Engine-Token")) -> None:
-    secret = _get_config().engine_shared_secret
+    secret = _get_config().engine_shared_secret or ""
+    # Fail closed: if no shared secret is configured, deny ALL authed requests
+    # rather than letting an empty token match an empty secret (auth bypass).
+    if not secret.strip():
+        logger.error(
+            "ENGINE_SHARED_SECRET is not configured; denying all authenticated "
+            "requests. Set ENGINE_SHARED_SECRET to enable the engine API."
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
     token = x_engine_token or ""
     if not hmac.compare_digest(token, secret):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
