@@ -7,36 +7,36 @@ import { useConnectedAccounts } from '@/components/ConnectedAccountsProvider';
 import { useInboxStats } from '@/components/useInboxStats';
 import { formatBytes, providerMeta, storagePercent } from '@/lib/cleaner-model';
 import {
-  fetchMyWorkspaces,
   fetchProfile,
   getProviderLinkUrl,
   type ConnectedProvider,
   type LinkedAccountView,
 } from '@/lib/api';
 import { connectMailbox } from '@/lib/mailApi';
-import { pickActiveWorkspace } from '@/lib/workspace';
+import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 
 export default function AccountsPage() {
   const { accounts, loading, error, refreshAccounts } = useConnectedAccounts();
-  // The active workspace + the caller's identity email — what "Add to Mail"
-  // needs to register a connected account as a mailbox. The connected-account
-  // record carries no address, but the linked account IS the caller's own
-  // identity (the broker links the IdP to the signed-in user), so the profile
-  // email is the right address to register — no need to prompt for it.
-  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
+  // The active workspace (the OUTER org tenant, read from the ambient provider so
+  // "Add to Mail" re-targets when the org switches) + the caller's identity email
+  // — what "Add to Mail" needs to register a connected account as a mailbox. The
+  // connected-account record carries no address, but the linked account IS the
+  // caller's own identity (the broker links the IdP to the signed-in user), so
+  // the profile email is the right address to register — no need to prompt.
+  const { activeWorkspace } = useActiveWorkspace();
+  const workspaceId = activeWorkspace?.workspace_id ?? null;
   const [selfEmail, setSelfEmail] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
     void (async () => {
       try {
-        const [workspaces, profile] = await Promise.all([fetchMyWorkspaces(), fetchProfile()]);
+        const profile = await fetchProfile();
         if (!alive) return;
-        setWorkspaceId(pickActiveWorkspace(workspaces)?.workspace_id ?? null);
         setSelfEmail(profile.email?.trim() || null);
       } catch {
-        // Non-fatal: "Add to Mail" simply stays disabled if we can't resolve
-        // the workspace/identity. The cleaner cockpit below is unaffected.
+        // Non-fatal: "Add to Mail" simply stays disabled if we can't resolve the
+        // identity. The cleaner cockpit below is unaffected.
       }
     })();
     return () => {

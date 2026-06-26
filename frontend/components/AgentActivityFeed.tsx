@@ -16,12 +16,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Button, Card, Skeleton, cn } from '@/components/ui';
 import {
-  fetchMyWorkspaces,
   getAgentActivity,
   type AgentActionKind,
   type AgentActivityView,
 } from '@/lib/api';
-import { pickActiveWorkspace } from '@/lib/workspace';
+import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 
 type Load = 'loading' | 'ready' | 'error' | 'no-workspace';
 
@@ -55,21 +54,19 @@ function relativeFrom(iso: string): string | null {
 }
 
 export function AgentActivityFeed() {
+  // Consume the active org so the feed re-fetches when it switches.
+  const { activeWorkspace, load: workspaceLoad } = useActiveWorkspace();
+  const activeWorkspaceId = activeWorkspace?.workspace_id ?? null;
   const [items, setItems] = useState<AgentActivityView[]>([]);
   const [load, setLoad] = useState<Load>('loading');
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
-  const fetchActivity = useCallback(async (initial: boolean) => {
+  const fetchActivity = useCallback(async (workspaceId: string, initial: boolean) => {
     if (initial) setLoad('loading');
     else setRefreshing(true);
     try {
-      const ws = pickActiveWorkspace(await fetchMyWorkspaces());
-      if (!ws) {
-        setLoad('no-workspace');
-        return;
-      }
-      const next = await getAgentActivity(ws.workspace_id, 50);
+      const next = await getAgentActivity(workspaceId, 50);
       setItems(next.items);
       setError(null);
       setLoad('ready');
@@ -83,15 +80,13 @@ export function AgentActivityFeed() {
   }, []);
 
   useEffect(() => {
-    let alive = true;
-    void (async () => {
-      if (!alive) return;
-      await fetchActivity(true);
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [fetchActivity]);
+    if (!activeWorkspaceId) {
+      // Settle to no-workspace only once the org layer has resolved.
+      if (workspaceLoad !== 'loading') setLoad('no-workspace');
+      return;
+    }
+    void fetchActivity(activeWorkspaceId, true);
+  }, [activeWorkspaceId, workspaceLoad, fetchActivity]);
 
   // The no-workspace case renders nothing (the page's own empty state covers it).
   if (load === 'no-workspace') return null;
@@ -104,7 +99,9 @@ export function AgentActivityFeed() {
           variant="ghost"
           size="sm"
           disabled={load === 'loading' || refreshing}
-          onClick={() => void fetchActivity(false)}
+          onClick={() => {
+            if (activeWorkspaceId) void fetchActivity(activeWorkspaceId, false);
+          }}
         >
           {refreshing ? 'Refreshing…' : 'Refresh'}
         </Button>

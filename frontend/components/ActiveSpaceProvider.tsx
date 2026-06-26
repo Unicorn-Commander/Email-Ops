@@ -4,11 +4,12 @@
  * Ambient active-Space state, shared by the Top-bar switcher AND the scoped
  * pages (`/mail`, `/agents`) so they all read the SAME active Space.
  *
- * It is a thin context mounted high in `AppShell` (around `ProductChrome`): it
- * resolves the active workspace once (every route is workspace-scoped), fetches
- * the caller's visible Spaces, and tracks the active-space id — persisted per
- * workspace in localStorage, defaulting to the `ALL_SPACE_ID` sentinel ("All" =
- * no filter). `activeSpace` is the resolved `SpaceView`, or null for "All".
+ * It is a thin context mounted high in `AppShell` (inside `ActiveWorkspaceProvider`,
+ * around `ProductChrome`): it CONSUMES the active org from `useActiveWorkspace()`
+ * (Spaces live inside an org), fetches that org's visible Spaces, and tracks the
+ * active-space id — persisted per workspace in localStorage, defaulting to the
+ * `ALL_SPACE_ID` sentinel ("All" = no filter). It re-scopes whenever the org
+ * switches. `activeSpace` is the resolved `SpaceView`, or null for "All".
  *
  * It re-probes on the `'spaces:changed'` event (a CRUD in the manage modal
  * dispatches it via `useSpaces`) and on tab focus, mirroring `useAgentInbox`'s
@@ -26,8 +27,8 @@ import {
   type ReactNode,
 } from 'react';
 import { useRouter } from 'next/navigation';
-import { ApiError, fetchMyWorkspaces, type MyWorkspace } from '@/lib/api';
-import { pickActiveWorkspace } from '@/lib/workspace';
+import { ApiError, type MyWorkspace } from '@/lib/api';
+import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 import { listSpaces, type SpaceView } from '@/lib/spacesApi';
 import {
   ALL_SPACE_ID,
@@ -76,7 +77,11 @@ function messageOf(err: unknown, fallback: string): string {
 
 export function ActiveSpaceProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
-  const [workspace, setWorkspace] = useState<MyWorkspace | null>(null);
+  // Spaces live inside an org — consume the active org instead of resolving our
+  // own, so the Space scope re-derives whenever the org switches.
+  const { activeWorkspace, load: workspaceLoad } = useActiveWorkspace();
+  const workspaceId = activeWorkspace?.workspace_id ?? null;
+
   const [spaces, setSpaces] = useState<SpaceView[]>([]);
   const [load, setLoad] = useState<ActiveSpaceLoad>('loading');
   const [error, setError] = useState<string | null>(null);
@@ -97,10 +102,10 @@ export function ActiveSpaceProvider({ children }: { children: ReactNode }) {
   );
 
   const fetchFor = useCallback(
-    async (ws: MyWorkspace, silent = false) => {
+    async (wsId: string, silent = false) => {
       if (!silent) setLoad('loading');
       try {
-        const res = await listSpaces(ws.workspace_id);
+        const res = await listSpaces(wsId);
         setSpaces(res.items);
         setError(null);
         setLoad('ready');
@@ -115,35 +120,23 @@ export function ActiveSpaceProvider({ children }: { children: ReactNode }) {
     [guard401],
   );
 
-  // Resolve the active workspace once, hydrate the stored id, then load Spaces.
+  // Re-scope to the active org: hydrate the stored active-space id, then load the
+  // Spaces. Re-runs whenever the org switches (keyed on the workspace id).
   useEffect(() => {
-    let alive = true;
-    void (async () => {
-      try {
-        const ws = pickActiveWorkspace(await fetchMyWorkspaces());
-        if (!alive) return;
-        setWorkspace(ws);
-        if (!ws) {
-          setLoad('ready');
-          return;
-        }
-        setActiveSpaceIdState(readStoredActiveSpaceId(ws.workspace_id));
-        await fetchFor(ws);
-      } catch (err) {
-        if (!alive) return;
-        if (guard401(err)) return;
-        setError(messageOf(err, 'Could not resolve your workspace.'));
-        setLoad('error');
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [fetchFor, guard401]);
+    if (!workspaceId) {
+      setSpaces([]);
+      setActiveSpaceIdState(ALL_SPACE_ID);
+      // Settle only once the org layer resolved (no membership → no spaces).
+      if (workspaceLoad !== 'loading') setLoad('ready');
+      return;
+    }
+    setActiveSpaceIdState(readStoredActiveSpaceId(workspaceId));
+    void fetchFor(workspaceId);
+  }, [workspaceId, workspaceLoad, fetchFor]);
 
   const refresh = useCallback(async () => {
-    if (workspace) await fetchFor(workspace, true);
-  }, [workspace, fetchFor]);
+    if (workspaceId) await fetchFor(workspaceId, true);
+  }, [workspaceId, fetchFor]);
 
   // Re-probe when a CRUD elsewhere changes the Spaces set, or on tab focus —
   // so the switcher + scoped pages never go stale (mirrors useAgentInbox).
@@ -160,9 +153,9 @@ export function ActiveSpaceProvider({ children }: { children: ReactNode }) {
   const setActiveSpaceId = useCallback(
     (id: string) => {
       setActiveSpaceIdState(id);
-      if (workspace) writeStoredActiveSpaceId(workspace.workspace_id, id);
+      if (workspaceId) writeStoredActiveSpaceId(workspaceId, id);
     },
-    [workspace],
+    [workspaceId],
   );
 
   // Reconcile: if the active Space vanished (deleted, or no longer visible),
@@ -185,7 +178,7 @@ export function ActiveSpaceProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<ActiveSpaceState>(
     () => ({
-      workspace,
+      workspace: activeWorkspace,
       spaces,
       load,
       error,
@@ -194,7 +187,7 @@ export function ActiveSpaceProvider({ children }: { children: ReactNode }) {
       activeSpace,
       refresh,
     }),
-    [workspace, spaces, load, error, activeSpaceId, setActiveSpaceId, activeSpace, refresh],
+    [activeWorkspace, spaces, load, error, activeSpaceId, setActiveSpaceId, activeSpace, refresh],
   );
 
   return <ActiveSpaceContext.Provider value={value}>{children}</ActiveSpaceContext.Provider>;

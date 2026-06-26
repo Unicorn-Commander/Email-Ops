@@ -4,7 +4,7 @@
  * Data layer for the `/mail` client (the "retire Outlook" surface).
  *
  * Mirrors `useAgentInbox`: a `load` discriminator + `error` string + workspace
- * resolution via `pickActiveWorkspace`, plus a 401 guard that bounces to login.
+ * resolution via the active org (`useActiveWorkspace`), plus a 401 guard to login.
  * It coordinates the three reads of a 3-pane mail client — the mailbox picker,
  * the selected mailbox's thread list, and the selected thread's messages — each
  * with its own independent load state so a slow pane never blanks the others.
@@ -16,8 +16,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ApiError, fetchMyWorkspaces, type MyWorkspace } from '@/lib/api';
-import { pickActiveWorkspace } from '@/lib/workspace';
+import { ApiError, type MyWorkspace } from '@/lib/api';
+import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 import {
   composeMail,
   getMailThread,
@@ -147,19 +147,26 @@ export function useMailClient(): UseMailClient {
     [router],
   );
 
-  // Resolve the active workspace once, then load its mailboxes.
+  // Consume the active org (`ActiveWorkspaceProvider`) so the mail client
+  // re-scopes when it switches; keyed on the workspace id to avoid refetch churn.
+  const { activeWorkspace, load: workspaceLoad } = useActiveWorkspace();
+  const activeWorkspaceId = activeWorkspace?.workspace_id ?? null;
+
   useEffect(() => {
+    if (!activeWorkspace) {
+      setWorkspace(null);
+      setMailboxes([]);
+      setSelectedMailboxId(null);
+      // Settle only once the org layer resolved (no membership → no mailboxes).
+      if (workspaceLoad !== 'loading') setLoad('ready');
+      return;
+    }
+    setWorkspace(activeWorkspace);
     let alive = true;
+    setLoad('loading');
     void (async () => {
       try {
-        const ws = pickActiveWorkspace(await fetchMyWorkspaces());
-        if (!alive) return;
-        setWorkspace(ws);
-        if (!ws) {
-          setLoad('ready');
-          return;
-        }
-        const res = await listMailMailboxes(ws.workspace_id);
+        const res = await listMailMailboxes(activeWorkspace.workspace_id);
         if (!alive) return;
         setMailboxes(res.items);
         // Default to the first mailbox (matches the prompt's spec).
@@ -176,7 +183,7 @@ export function useMailClient(): UseMailClient {
     return () => {
       alive = false;
     };
-  }, [guard401]);
+  }, [activeWorkspaceId, workspaceLoad, guard401]);
 
   // Load the thread list whenever the selected mailbox or folder changes.
   const fetchThreads = useCallback(

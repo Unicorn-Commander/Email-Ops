@@ -19,7 +19,6 @@ import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   createAgent,
-  fetchMyWorkspaces,
   listAgents,
   updateAgent,
   ApiError,
@@ -28,7 +27,7 @@ import {
   type MyWorkspace,
   type UpdateAgentBody,
 } from '@/lib/api';
-import { pickActiveWorkspace } from '@/lib/workspace';
+import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 
 export type AgentsLoad = 'loading' | 'ready' | 'error';
 
@@ -99,30 +98,21 @@ export function useAgents(): UseAgents {
     [guard401],
   );
 
-  // Resolve the active workspace once, then load the fleet.
+  // Consume the active org (`ActiveWorkspaceProvider`) so the fleet re-scopes
+  // when it switches; keyed on the workspace id to avoid refetch churn.
+  const { activeWorkspace, load: workspaceLoad } = useActiveWorkspace();
+  const activeWorkspaceId = activeWorkspace?.workspace_id ?? null;
+
   useEffect(() => {
-    let alive = true;
-    void (async () => {
-      try {
-        const ws = pickActiveWorkspace(await fetchMyWorkspaces());
-        if (!alive) return;
-        setWorkspace(ws);
-        if (!ws) {
-          setLoad('ready');
-          return;
-        }
-        await fetchFor(ws);
-      } catch (err) {
-        if (!alive) return;
-        if (guard401(err)) return;
-        setError(messageOf(err, 'Could not resolve your workspace.'));
-        setLoad('error');
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [fetchFor, guard401]);
+    if (!activeWorkspace) {
+      setWorkspace(null);
+      // Settle only once the org layer resolved (no membership → empty fleet).
+      if (workspaceLoad !== 'loading') setLoad('ready');
+      return;
+    }
+    setWorkspace(activeWorkspace);
+    void fetchFor(activeWorkspace);
+  }, [activeWorkspaceId, workspaceLoad, fetchFor]);
 
   const refresh = useCallback(async () => {
     if (workspace) await fetchFor(workspace);

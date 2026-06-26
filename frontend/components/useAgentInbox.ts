@@ -19,7 +19,6 @@ import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   approveAgentInboxItem,
-  fetchMyWorkspaces,
   listAgentInbox,
   rejectAgentInboxItem,
   ApiError,
@@ -27,7 +26,7 @@ import {
   type AgentInboxState,
   type MyWorkspace,
 } from '@/lib/api';
-import { pickActiveWorkspace } from '@/lib/workspace';
+import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 
 export type AgentInboxLoad = 'loading' | 'ready' | 'error';
 
@@ -111,30 +110,22 @@ export function useAgentInbox(): UseAgentInbox {
     [guard401],
   );
 
-  // Resolve the active workspace once, then load the default (pending) slice.
+  // Consume the active org (`ActiveWorkspaceProvider`) so the queue re-scopes
+  // when it switches; keyed on the workspace id to avoid refetch churn. A switch
+  // resets the view to the default (pending) slice so the tab + items agree.
+  const { activeWorkspace, load: workspaceLoad } = useActiveWorkspace();
+  const activeWorkspaceId = activeWorkspace?.workspace_id ?? null;
+
   useEffect(() => {
-    let alive = true;
-    void (async () => {
-      try {
-        const ws = pickActiveWorkspace(await fetchMyWorkspaces());
-        if (!alive) return;
-        setWorkspace(ws);
-        if (!ws) {
-          setLoad('ready');
-          return;
-        }
-        await fetchFor(ws, 'pending');
-      } catch (err) {
-        if (!alive) return;
-        if (guard401(err)) return;
-        setError(messageOf(err, 'Could not resolve your workspace.'));
-        setLoad('error');
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [fetchFor, guard401]);
+    if (!activeWorkspace) {
+      setWorkspace(null);
+      if (workspaceLoad !== 'loading') setLoad('ready');
+      return;
+    }
+    setWorkspace(activeWorkspace);
+    setState('pending');
+    void fetchFor(activeWorkspace, 'pending');
+  }, [activeWorkspaceId, workspaceLoad, fetchFor]);
 
   const refresh = useCallback(async () => {
     if (workspace) await fetchFor(workspace, state);
@@ -205,15 +196,19 @@ export function useAgentInbox(): UseAgentInbox {
  * returns 0 on any failure and never redirects (it must never hijack a page).
  */
 export function useAgentInboxPendingCount(): number {
+  const { activeWorkspace } = useActiveWorkspace();
+  const activeWorkspaceId = activeWorkspace?.workspace_id ?? null;
   const [count, setCount] = useState(0);
 
   useEffect(() => {
+    if (!activeWorkspaceId) {
+      setCount(0);
+      return;
+    }
     let alive = true;
     const probe = async () => {
       try {
-        const ws = pickActiveWorkspace(await fetchMyWorkspaces());
-        if (!ws) return;
-        const res = await listAgentInbox(ws.workspace_id, 'pending');
+        const res = await listAgentInbox(activeWorkspaceId, 'pending');
         if (alive) setCount(res.count);
       } catch {
         /* ambient — keep the last known count */
@@ -230,7 +225,7 @@ export function useAgentInboxPendingCount(): number {
       window.removeEventListener('agent-inbox:changed', onChanged);
       window.removeEventListener('focus', onChanged);
     };
-  }, []);
+  }, [activeWorkspaceId]);
 
   return count;
 }

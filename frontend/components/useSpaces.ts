@@ -18,8 +18,8 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ApiError, fetchMyWorkspaces, type MyWorkspace } from '@/lib/api';
-import { pickActiveWorkspace } from '@/lib/workspace';
+import { ApiError, type MyWorkspace } from '@/lib/api';
+import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 import {
   createSpace,
   deleteSpace,
@@ -110,30 +110,21 @@ export function useSpaces(): UseSpaces {
     [guard401],
   );
 
-  // Resolve the active workspace once, then load the Spaces.
+  // Consume the active org (`ActiveWorkspaceProvider`) so the registry re-scopes
+  // when it switches; keyed on the workspace id to avoid refetch churn.
+  const { activeWorkspace, load: workspaceLoad } = useActiveWorkspace();
+  const activeWorkspaceId = activeWorkspace?.workspace_id ?? null;
+
   useEffect(() => {
-    let alive = true;
-    void (async () => {
-      try {
-        const ws = pickActiveWorkspace(await fetchMyWorkspaces());
-        if (!alive) return;
-        setWorkspace(ws);
-        if (!ws) {
-          setLoad('ready');
-          return;
-        }
-        await fetchFor(ws);
-      } catch (err) {
-        if (!alive) return;
-        if (guard401(err)) return;
-        setError(messageOf(err, 'Could not resolve your workspace.'));
-        setLoad('error');
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [fetchFor, guard401]);
+    if (!activeWorkspace) {
+      setWorkspace(null);
+      // Settle only once the org layer resolved (no membership → no spaces).
+      if (workspaceLoad !== 'loading') setLoad('ready');
+      return;
+    }
+    setWorkspace(activeWorkspace);
+    void fetchFor(activeWorkspace);
+  }, [activeWorkspaceId, workspaceLoad, fetchFor]);
 
   const refresh = useCallback(async () => {
     if (workspace) await fetchFor(workspace, true);

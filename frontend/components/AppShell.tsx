@@ -6,7 +6,9 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { ThemeToggle } from '@/components/ThemeToggle';
 import { Badge, Button, Card, Select, Skeleton, cn } from '@/components/ui';
 import { ConnectedAccountsProvider, useConnectedAccounts } from './ConnectedAccountsProvider';
+import { ActiveWorkspaceProvider } from './ActiveWorkspaceProvider';
 import { ActiveSpaceProvider } from './ActiveSpaceProvider';
+import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 import { SpaceSwitcher } from './SpaceSwitcher';
 import { useAgentInboxPendingCount } from './useAgentInbox';
 import { useAgentControls } from './useAgentControls';
@@ -93,9 +95,11 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <ConnectedAccountsProvider>
-      <ActiveSpaceProvider>
-        <ProductChrome>{children}</ProductChrome>
-      </ActiveSpaceProvider>
+      <ActiveWorkspaceProvider>
+        <ActiveSpaceProvider>
+          <ProductChrome>{children}</ProductChrome>
+        </ActiveSpaceProvider>
+      </ActiveWorkspaceProvider>
     </ConnectedAccountsProvider>
   );
 }
@@ -305,6 +309,9 @@ function Topbar({
         >
           <Icon name="menu" />
         </button>
+
+        {/* Leading tenant-identity slot: the active organization (outer tenant). */}
+        <WorkspaceSwitcher />
 
         <div className="hidden min-w-0 items-center gap-2 sm:flex">
           <span

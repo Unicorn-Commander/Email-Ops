@@ -9,8 +9,8 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { fetchMyWorkspaces, getAgentControls, setAgentControls } from '@/lib/api';
-import { pickActiveWorkspace } from '@/lib/workspace';
+import { getAgentControls, setAgentControls } from '@/lib/api';
+import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 
 export interface UseAgentControls {
   agentsPaused: boolean;
@@ -20,18 +20,22 @@ export interface UseAgentControls {
 }
 
 export function useAgentControls(): UseAgentControls {
-  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
+  // Consume the active org so the kill switch reads/writes the right tenant and
+  // re-reads when the org switches (mirrors the rest of the chrome).
+  const { activeWorkspace } = useActiveWorkspace();
+  const activeWorkspaceId = activeWorkspace?.workspace_id ?? null;
   const [agentsPaused, setAgentsPaused] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
+    if (!activeWorkspaceId) {
+      setAgentsPaused(false);
+      return;
+    }
     let alive = true;
     void (async () => {
       try {
-        const ws = pickActiveWorkspace(await fetchMyWorkspaces());
-        if (!ws || !alive) return;
-        setWorkspaceId(ws.workspace_id);
-        const res = await getAgentControls(ws.workspace_id);
+        const res = await getAgentControls(activeWorkspaceId);
         if (alive) setAgentsPaused(res.agents_paused);
       } catch {
         /* ambient — leave the toggle at its default */
@@ -40,19 +44,19 @@ export function useAgentControls(): UseAgentControls {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [activeWorkspaceId]);
 
   const setPaused = useCallback(
     (next: boolean) => {
       // Ignore a toggle fired before the workspace resolves — flipping the UI
       // without a PUT would leave it out of sync with the backend.
-      if (!workspaceId) return;
+      if (!activeWorkspaceId) return;
       const prev = agentsPaused;
       setAgentsPaused(next); // optimistic
       setBusy(true);
       void (async () => {
         try {
-          const res = await setAgentControls(workspaceId, next);
+          const res = await setAgentControls(activeWorkspaceId, next);
           setAgentsPaused(res.agents_paused);
         } catch {
           setAgentsPaused(prev); // revert on failure
@@ -61,7 +65,7 @@ export function useAgentControls(): UseAgentControls {
         }
       })();
     },
-    [agentsPaused, workspaceId],
+    [agentsPaused, activeWorkspaceId],
   );
 
   const toggle = useCallback(() => setPaused(!agentsPaused), [agentsPaused, setPaused]);

@@ -19,12 +19,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Badge, Button, Card, Skeleton, cn, type BadgeVariant } from '@/components/ui';
 import {
-  fetchMyWorkspaces,
   getEmailHealth,
   type EmailHealthReport,
   type HealthLevel,
 } from '@/lib/api';
-import { pickActiveWorkspace } from '@/lib/workspace';
+import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 
 type Load = 'loading' | 'ready' | 'error' | 'no-workspace';
 
@@ -71,21 +70,19 @@ function ageLabel(hours: number | null): string {
 }
 
 export function EmailHealthPanel() {
+  // Consume the active org so the snapshot re-fetches when it switches.
+  const { activeWorkspace, load: workspaceLoad } = useActiveWorkspace();
+  const activeWorkspaceId = activeWorkspace?.workspace_id ?? null;
   const [report, setReport] = useState<EmailHealthReport | null>(null);
   const [load, setLoad] = useState<Load>('loading');
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
-  const fetchReport = useCallback(async (initial: boolean) => {
+  const fetchReport = useCallback(async (workspaceId: string, initial: boolean) => {
     if (initial) setLoad('loading');
     else setRefreshing(true);
     try {
-      const ws = pickActiveWorkspace(await fetchMyWorkspaces());
-      if (!ws) {
-        setLoad('no-workspace');
-        return;
-      }
-      const next = await getEmailHealth(ws.workspace_id);
+      const next = await getEmailHealth(workspaceId);
       setReport(next);
       setError(null);
       setLoad('ready');
@@ -99,15 +96,13 @@ export function EmailHealthPanel() {
   }, []);
 
   useEffect(() => {
-    let alive = true;
-    void (async () => {
-      if (!alive) return;
-      await fetchReport(true);
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [fetchReport]);
+    if (!activeWorkspaceId) {
+      // Settle to no-workspace only once the org layer has resolved.
+      if (workspaceLoad !== 'loading') setLoad('no-workspace');
+      return;
+    }
+    void fetchReport(activeWorkspaceId, true);
+  }, [activeWorkspaceId, workspaceLoad, fetchReport]);
 
   // The no-workspace case renders nothing (the page's own empty state covers it).
   if (load === 'no-workspace') return null;
@@ -133,7 +128,9 @@ export function EmailHealthPanel() {
             variant="ghost"
             size="sm"
             disabled={load === 'loading' || refreshing}
-            onClick={() => void fetchReport(false)}
+            onClick={() => {
+              if (activeWorkspaceId) void fetchReport(activeWorkspaceId, false);
+            }}
           >
             {refreshing ? 'Re-checking…' : 'Re-check'}
           </Button>

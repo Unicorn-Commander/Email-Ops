@@ -62,6 +62,14 @@ enum MembershipStatus {
   REVOKED
 }
 
+// The lifecycle of a workspace invitation (the create-org → invite layer).
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
 // ── Outbound message lane (Email-Ops OWNS this) ──
 //
 // The compose lane selected by the cockpit / an agent:
@@ -374,6 +382,7 @@ model Workspace {
   threadDispositions ThreadDisposition[]
   senderPolicies     SenderPolicy[]
   spaces             Space[]
+  invitations        Invitation[]
 
   @@index([slug])
   @@index([status])
@@ -393,6 +402,32 @@ model Membership {
   @@index([userKey])
   @@index([workspaceId])
   @@map("memberships")
+}
+
+/// A pending invitation into a workspace (the create-org → invite layer). Like
+/// Membership, this is a control/identity table (NO RLS): the accept-by-token
+/// and list-mine paths span workspace boundaries, so they cannot be fenced by
+/// the current_workspace GUC. The app layer fences the admin surface by the
+/// caller's actual membership role; accept-by-token is self-authorizing (the
+/// random token is the secret). `email` is stored lowercased for the match.
+model Invitation {
+  id            String           @id @default(uuid())
+  workspaceId   String
+  email         String // lowercased for case-insensitive match
+  role          WorkspaceRole    @default(MEMBER)
+  token         String           @unique
+  status        InvitationStatus @default(PENDING)
+  invitedByKey  String // the inviter's membership key (keycloakId ?? User.id)
+  createdAt     DateTime         @default(now())
+  expiresAt     DateTime?
+  acceptedAt    DateTime?
+  acceptedByKey String?
+  workspace     Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([email])
+  @@index([token])
+  @@map("invitations")
 }
 
 // ============================================================

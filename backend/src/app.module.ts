@@ -22,6 +22,7 @@ import { MailboxAccountsModule } from './mailbox-accounts/mailbox-accounts.modul
 import { MailModule } from './mail/mail.module';
 import { MailTriageModule } from './mail-triage/mail-triage.module';
 import { SpacesModule } from './spaces/spaces.module';
+import { WorkspacesModule } from './workspaces/workspaces.module';
 
 @Module({
   imports: [
@@ -84,6 +85,11 @@ import { SpacesModule } from './spaces/spaces.module';
     // TEAM views) inside the workspace — the top-bar switcher scopes /mail + the
     // agents view to the active Space. JWT + membership guarded.
     SpacesModule,
+    // Multi-org tenancy: create-org, the org switcher, members + per-org RBAC,
+    // and the invite → accept flow on top of the Workspace + Membership
+    // foundation. Top-level workspaces + invites controllers (org CRUD is not
+    // workspace-scoped); RBAC is enforced against the caller's real role.
+    WorkspacesModule,
     // MCP last so it can consume the contract + agent-inbox tools.
     McpModule,
   ],
