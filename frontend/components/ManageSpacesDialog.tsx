@@ -175,7 +175,13 @@ export function ManageSpacesDialog({
       }
     }
     setBusy(null);
-    setSelectedId(newId); // switch to edit mode for the new space
+    // Switch to edit mode for the new space, but DON'T let the editor-sync effect
+    // re-read `items` — the membership refresh may not have propagated to `items`
+    // yet, so syncing now would briefly blank the mailboxes/agents we just ticked
+    // + persisted. The current form state (name/visibility/color/icon + mailboxSel
+    // /agentSel) already reflects exactly what was created, so mark this id synced.
+    lastSyncedRef.current = newId;
+    setSelectedId(newId);
   }
 
   async function handleSave() {
