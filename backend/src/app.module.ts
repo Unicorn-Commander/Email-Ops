@@ -23,6 +23,7 @@ import { MailModule } from './mail/mail.module';
 import { MailTriageModule } from './mail-triage/mail-triage.module';
 import { SpacesModule } from './spaces/spaces.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
+import { UiCommandsModule } from './ui-commands/ui-commands.module';
 
 @Module({
   imports: [
@@ -90,7 +91,11 @@ import { WorkspacesModule } from './workspaces/workspaces.module';
     // foundation. Top-level workspaces + invites controllers (org CRUD is not
     // workspace-scoped); RBAC is enforced against the caller's real role.
     WorkspacesModule,
-    // MCP last so it can consume the contract + agent-inbox tools.
+    // The "agent controls the UI" channel: the drain endpoint a cockpit polls +
+    // the UiCommandService the MCP ui_* tools enqueue into. Before McpModule so
+    // the MCP server can consume UiCommandService.
+    UiCommandsModule,
+    // MCP last so it can consume the contract + agent-inbox + ui_* tools.
     McpModule,
   ],
   providers: [

@@ -8,6 +8,9 @@
  * dormant → "Recorded — will send once the engine is live") and only auto-closes
  * when the message genuinely sent; otherwise it keeps the dialog open with the
  * status so the user sees what happened to what they wrote.
+ *
+ * It accepts an optional `initial` prefill so an agent's `ui_compose` (Phase C)
+ * can open the composer already populated — the user still reviews and sends it.
  */
 
 import { useEffect, useState } from 'react';
@@ -20,6 +23,7 @@ export function ComposeDialog({
   onClose,
   fromAddress,
   onCompose,
+  initial,
 }: {
   open: boolean;
   onClose: () => void;
@@ -30,6 +34,11 @@ export function ComposeDialog({
     subject?: string;
     body?: string;
   }) => Promise<ComposeOutcome>;
+  /**
+   * Optional prefill (e.g. an agent's `ui_compose`). Seeds the To / Subject /
+   * Message fields each time the dialog opens; null/undefined opens it blank.
+   */
+  initial?: { to?: string; subject?: string; body?: string } | null;
 }) {
   const [to, setTo] = useState('');
   const [subject, setSubject] = useState('');
@@ -38,17 +47,17 @@ export function ComposeDialog({
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Reset everything when the dialog re-opens.
+  // Seed (or clear) the fields from `initial` when the dialog re-opens.
   useEffect(() => {
     if (open) {
-      setTo('');
-      setSubject('');
-      setBody('');
+      setTo(initial?.to ?? '');
+      setSubject(initial?.subject ?? '');
+      setBody(initial?.body ?? '');
       setStatus(null);
       setError(null);
       setSending(false);
     }
-  }, [open]);
+  }, [open, initial]);
 
   const canSend = to.trim().length > 0 && !sending;
 

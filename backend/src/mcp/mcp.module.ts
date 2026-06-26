@@ -10,6 +10,7 @@ import { EmailHealthModule } from '../email-health/email-health.module';
 import { ProvisioningModule } from '../provisioning/provisioning.module';
 import { MailboxAccountsModule } from '../mailbox-accounts/mailbox-accounts.module';
 import { MailTriageModule } from '../mail-triage/mail-triage.module';
+import { UiCommandsModule } from '../ui-commands/ui-commands.module';
 
 @Module({
   // EmailModule exports EmailService so the contract MCP tools run the SAME SoR
@@ -30,6 +31,9 @@ import { MailTriageModule } from '../mail-triage/mail-triage.module';
     // The mail-triage services (folder dispositions + sender block/allow) back
     // the agent-driven triage tools.
     MailTriageModule,
+    // UiCommandsModule exports UiCommandService so the ui_* tools can enqueue a
+    // command into the caller's cockpit (the "agent controls the UI" surface).
+    UiCommandsModule,
   ],
   controllers: [McpController],
   providers: [McpService],

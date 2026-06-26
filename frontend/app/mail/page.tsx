@@ -20,7 +20,7 @@
  */
 
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -31,6 +31,7 @@ import {
   type BadgeVariant,
 } from '@/components/ui';
 import { useActiveSpace } from '@/components/ActiveSpaceProvider';
+import { useUiCommands } from '@/components/UiCommandProvider';
 import {
   formatWhen,
   participantLabel,
@@ -59,13 +60,70 @@ const FOLDERS: { id: MailFolder; label: string }[] = [
   { id: 'drafts', label: 'Drafts' },
 ];
 
+/** A composer prefill carried by an agent's `ui_compose` (Phase C). */
+interface ComposePrefill {
+  to?: string;
+  subject?: string;
+  body?: string;
+  /** If set, sending threads the message into this conversation. */
+  thread_id?: string;
+}
+
 export default function MailPage() {
   const mail = useMailClient();
   const { activeSpace } = useActiveSpace();
+  const { version, consumeLocal } = useUiCommands();
   const [composeOpen, setComposeOpen] = useState(false);
+  const [composeInitial, setComposeInitial] = useState<ComposePrefill | null>(null);
   const [sendersOpen, setSendersOpen] = useState(false);
 
   const threadOpen = mail.selectedThreadId !== null;
+
+  // ── Phase C: apply agent-staged page-local commands (open_thread / compose) ──
+  // The UiCommandBridge stages these then navigates here; we drain them on mount
+  // and whenever a new command bumps `version`. The mail setters used below are
+  // stable (useCallback in the hook); the current mailbox is read via a ref so
+  // this effect stays purely version-driven and doesn't re-consume on every
+  // unrelated mailbox change.
+  const { selectMailbox, selectThread } = mail;
+  const selectedMailboxIdRef = useRef<string | null>(null);
+  selectedMailboxIdRef.current = mail.selectedMailbox?.id ?? null;
+  // Staged target when an open_thread also has to SWITCH mailbox first — the
+  // hook's mailbox-change effect closes any open thread, so we defer opening the
+  // thread until that switch settles (see the effect below).
+  const pendingOpenRef = useRef<{ mailboxId: string; threadId: string } | null>(null);
+
+  useEffect(() => {
+    const openThread = consumeLocal('open_thread');
+    if (openThread) {
+      const { mailbox_id, thread_id } = openThread.payload;
+      if (mailbox_id && mailbox_id !== selectedMailboxIdRef.current) {
+        // Switch mailbox first, then open the thread once the list settles.
+        pendingOpenRef.current = { mailboxId: mailbox_id, threadId: thread_id };
+        selectMailbox(mailbox_id);
+      } else {
+        selectThread(thread_id);
+      }
+    }
+
+    const compose = consumeLocal('compose');
+    if (compose) {
+      setComposeInitial({ ...compose.payload });
+      setComposeOpen(true);
+    }
+  }, [version, consumeLocal, selectMailbox, selectThread]);
+
+  // Once a staged mailbox switch has settled (the hook closed the old thread and
+  // the new list is ready), open the deferred thread.
+  const { selectedMailbox, threadsLoad } = mail;
+  useEffect(() => {
+    const pending = pendingOpenRef.current;
+    if (!pending) return;
+    if (selectedMailbox?.id !== pending.mailboxId) return;
+    if (threadsLoad !== 'ready') return;
+    pendingOpenRef.current = null;
+    selectThread(pending.threadId);
+  }, [selectedMailbox?.id, threadsLoad, selectThread]);
 
   // Scope the mailbox picker to the active Space (purely client-side). "All" — a
   // null activeSpace — is unfiltered.
@@ -80,7 +138,7 @@ export default function MailPage() {
 
   // If the open mailbox got filtered out, fall back to the first visible one so
   // the user is never stranded on a hidden mailbox (don't crash / blank).
-  const { load: mailLoad, selectMailbox } = mail;
+  const { load: mailLoad } = mail;
   useEffect(() => {
     if (mailLoad !== 'ready') return;
     if (!activeSpace) return; // All — no scoping
@@ -95,7 +153,10 @@ export default function MailPage() {
         mailboxCount={visibleMailboxes.length}
         ready={mail.load === 'ready'}
         canCompose={mail.load === 'ready' && !!mail.workspace && selectedVisible}
-        onCompose={() => setComposeOpen(true)}
+        onCompose={() => {
+          setComposeInitial(null);
+          setComposeOpen(true);
+        }}
       />
 
       {!mail.workspace && mail.load === 'ready' ? (
@@ -156,7 +217,16 @@ export default function MailPage() {
         open={composeOpen}
         onClose={() => setComposeOpen(false)}
         fromAddress={mail.selectedMailbox?.email_address ?? null}
-        onCompose={mail.compose}
+        // Thread the send when the prefill carried a thread_id; otherwise a plain
+        // new message. Either way it PREFILLS — the user still clicks Send.
+        onCompose={(b) =>
+          mail.compose(
+            composeInitial?.thread_id
+              ? { ...b, in_reply_to_thread_id: composeInitial.thread_id }
+              : b,
+          )
+        }
+        initial={composeInitial}
       />
 
       <SendersDialog

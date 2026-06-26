@@ -8,6 +8,8 @@ import { Badge, Button, Card, Select, Skeleton, cn } from '@/components/ui';
 import { ConnectedAccountsProvider, useConnectedAccounts } from './ConnectedAccountsProvider';
 import { ActiveWorkspaceProvider } from './ActiveWorkspaceProvider';
 import { ActiveSpaceProvider } from './ActiveSpaceProvider';
+import { UiCommandProvider } from './UiCommandProvider';
+import { UiCommandBridge } from './UiCommandBridge';
 import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 import { SpaceSwitcher } from './SpaceSwitcher';
 import { useAgentInboxPendingCount } from './useAgentInbox';
@@ -97,7 +99,13 @@ export function AppShell({ children }: { children: ReactNode }) {
     <ConnectedAccountsProvider>
       <ActiveWorkspaceProvider>
         <ActiveSpaceProvider>
-          <ProductChrome>{children}</ProductChrome>
+          {/* Phase C: the agent-driven UI seam. The provider holds page-local
+              commands above the routed pages (so they survive router.push); the
+              bridge polls + applies, mounted inside every context it reads. */}
+          <UiCommandProvider>
+            <UiCommandBridge />
+            <ProductChrome>{children}</ProductChrome>
+          </UiCommandProvider>
         </ActiveSpaceProvider>
       </ActiveWorkspaceProvider>
     </ConnectedAccountsProvider>

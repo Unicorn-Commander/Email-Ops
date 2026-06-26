@@ -70,6 +70,17 @@ enum InvitationStatus {
   EXPIRED
 }
 
+// The kinds of UI command an agent (MCP client) can push to a user's cockpit —
+// the AG-UI / frontend-tools surface. None has an external side effect; COMPOSE
+// only PREFILLS the composer (the human still sends).
+enum UiCommandKind {
+  NAVIGATE
+  OPEN_THREAD
+  COMPOSE
+  SWITCH_SPACE
+  NOTIFY
+}
+
 // ── Outbound message lane (Email-Ops OWNS this) ──
 //
 // The compose lane selected by the cockpit / an agent:
@@ -383,6 +394,7 @@ model Workspace {
   senderPolicies     SenderPolicy[]
   spaces             Space[]
   invitations        Invitation[]
+  uiCommands         UiCommand[]
 
   @@index([slug])
   @@index([status])
@@ -428,6 +440,27 @@ model Invitation {
   @@index([email])
   @@index([token])
   @@map("invitations")
+}
+
+/// A UI command an agent (MCP client) pushes to a user's open cockpit — the
+/// "agent controls the UI" surface. It is addressed to a (workspaceId, ucUid)
+/// pair: the agent acts AS the user, and that user's browser drains pending
+/// commands on a focus-gated poll and applies them (navigate / open a thread /
+/// PREFILL a compose / switch Space / toast). Workspace-scoped + RLS-fenced like
+/// the other tenant tables; the per-USER fence (ucUid) is applied in app code.
+/// Drain-on-read (consumedAt) gives at-most-once delivery; rows are ephemeral.
+model UiCommand {
+  id          String        @id @default(uuid())
+  workspaceId String
+  ucUid       String // the target user (== the acting agent's ucUid)
+  kind        UiCommandKind
+  payload     Json
+  createdAt   DateTime      @default(now())
+  consumedAt  DateTime?
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, ucUid, consumedAt])
+  @@map("ui_commands")
 }
 
 // ============================================================

@@ -22,13 +22,14 @@ import { z } from 'zod';
 import { MembershipService } from '../common/workspace/membership.service';
 import { EmailService } from '../email/email.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
-import { ConnectedAccountsTools, EmailOpsTools } from './mcp.tools';
+import { ConnectedAccountsTools, EmailOpsTools, UiControlTools } from './mcp.tools';
 import { AgentsService } from '../agents/agents.service';
 import { EmailHealthService } from '../email-health/email-health.service';
 import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
 import { MailboxAccountsService } from '../mailbox-accounts/mailbox-accounts.service';
 import { DispositionService } from '../mail-triage/disposition.service';
 import { SenderPolicyService } from '../mail-triage/sender-policy.service';
+import { UiCommandService } from '../ui-commands/ui-commands.service';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
@@ -47,6 +48,7 @@ export class McpService {
     private readonly mailboxes: MailboxAccountsService,
     private readonly disposition: DispositionService,
     private readonly senderPolicy: SenderPolicyService,
+    private readonly uiCommands: UiCommandService,
   ) {}
 
   /**
@@ -101,6 +103,7 @@ export class McpService {
       this.senderPolicy,
     );
     const connectedTools = new ConnectedAccountsTools(this.membership, this.connectedAccounts);
+    const uiTools = new UiControlTools(this.membership, this.uiCommands);
 
     // ── Foundation tools ──
 
@@ -506,6 +509,99 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await tools.rejectAgentInboxItem(user, args)),
+    );
+
+    // ── UI-control tools (the "agent controls the UI" / AG-UI surface) ──
+    // Each enqueues a command the caller's OPEN cockpit drains + applies. No
+    // external side effect → member-level, NOT routed through the compose
+    // autonomy / agent-inbox gate. ui_compose only PREFILLS (the human sends).
+
+    server.registerTool(
+      'ui_navigate',
+      {
+        title: 'Navigate the user’s cockpit',
+        description:
+          'Push a NAVIGATE command to the calling user’s open Email-Ops cockpit: route it ' +
+          'to an app path (e.g. /mail, /agents, /agent-inbox, /cleanup, /dashboard, ' +
+          '/insights, /mailboxes, /accounts). Applied on the user’s next focus-gated poll. ' +
+          'No side effect. Returns { enqueued, command_id, kind }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          path: z.string().min(1).max(512),
+        },
+      },
+      async (args: any) => wrap(await uiTools.navigate(user, args)),
+    );
+
+    server.registerTool(
+      'ui_open_thread',
+      {
+        title: 'Open a mail thread in the cockpit',
+        description:
+          'Push an OPEN_THREAD command: navigate the user’s cockpit to /mail and select a ' +
+          'specific thread (optionally selecting its mailbox first). Read-only UI action. ' +
+          'Returns { enqueued, command_id, kind }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().optional(),
+          thread_id: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await uiTools.openThread(user, args)),
+    );
+
+    server.registerTool(
+      'ui_compose',
+      {
+        title: 'Pre-fill the composer (does NOT send)',
+        description:
+          'Push a COMPOSE command that opens the cockpit composer PRE-FILLED with an ' +
+          'optional to / subject / body (and optional thread to reply in). It does NOT ' +
+          'send — the human reviews and sends. Use compose_email instead to actually ' +
+          'queue/stage an outbound message. Returns { enqueued, command_id, kind }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          to: z.string().max(320).optional(),
+          subject: z.string().max(500).optional(),
+          body: z.string().max(100000).optional(),
+          thread_id: z.string().max(200).optional(),
+        },
+      },
+      async (args: any) => wrap(await uiTools.compose(user, args)),
+    );
+
+    server.registerTool(
+      'ui_switch_space',
+      {
+        title: 'Switch the active Space',
+        description:
+          'Push a SWITCH_SPACE command: set the cockpit’s active Space (a Space id, or ' +
+          '"all" for no filter), which re-scopes /mail + the agents view. Returns ' +
+          '{ enqueued, command_id, kind }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          space_id: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await uiTools.switchSpace(user, args)),
+    );
+
+    server.registerTool(
+      'ui_notify',
+      {
+        title: 'Show a toast in the cockpit',
+        description:
+          'Push a NOTIFY command: show a non-blocking toast in the user’s cockpit — an ' +
+          'agent → human status message (e.g. "Archived 12 newsletters"). tone ∈ ' +
+          'info|success|warning. Returns { enqueued, command_id, kind }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          title: z.string().min(1).max(200),
+          body: z.string().max(2000).optional(),
+          tone: z.enum(['info', 'success', 'warning']).optional(),
+        },
+      },
+      async (args: any) => wrap(await uiTools.notify(user, args)),
     );
 
     return server;

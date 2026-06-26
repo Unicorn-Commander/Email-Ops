@@ -31,6 +31,7 @@ import {
   MessageDisposition,
   SenderPolicyKind,
   SenderPolicyScope,
+  UiCommandKind,
   User,
 } from '@prisma/client';
 import { MembershipService } from '../common/workspace/membership.service';
@@ -52,6 +53,7 @@ import {
   CleanupPlanResult,
   ConnectedProvider,
 } from '../connected-accounts/connected-accounts.types';
+import { UiCommandService } from '../ui-commands/ui-commands.service';
 
 export class EmailOpsTools {
   constructor(
@@ -523,5 +525,85 @@ export class ConnectedAccountsTools {
 
   private async resolve(user: User, requested?: string): Promise<string> {
     return this.membership.resolveAndAuthorize(user, requested ?? null);
+  }
+}
+
+/**
+ * UiControlTools — the "agent controls the UI" tools (the AG-UI / frontend-tools
+ * surface). Each runs AS the calling user (member-level; the membership gate is
+ * the only fence — a UI command has NO external side effect, so it BYPASSES the
+ * compose autonomy / agent-inbox approval path) and ENQUEUES a command addressed
+ * to that user's (workspaceId, ucUid). The user's open cockpit drains + applies
+ * it. `ui_compose` only PREFILLS the composer — it never sends (the human stays
+ * in the loop for anything irreversible).
+ */
+export class UiControlTools {
+  constructor(
+    private readonly membership: MembershipService,
+    private readonly uiCommands: UiCommandService,
+  ) {}
+
+  /** Navigate the cockpit to an app route (e.g. /mail, /agents, /agent-inbox). */
+  async navigate(user: User, args: { workspace_id?: string; path: string }): Promise<unknown> {
+    return this.enqueue(user, args.workspace_id, UiCommandKind.NAVIGATE, { path: args.path });
+  }
+
+  /** Open a specific mail thread (navigates to /mail + selects the thread). */
+  async openThread(
+    user: User,
+    args: { workspace_id?: string; mailbox_id?: string; thread_id: string },
+  ): Promise<unknown> {
+    return this.enqueue(user, args.workspace_id, UiCommandKind.OPEN_THREAD, {
+      mailbox_id: args.mailbox_id ?? null,
+      thread_id: args.thread_id,
+    });
+  }
+
+  /** Pre-fill the composer (does NOT send — the human reviews + sends). */
+  async compose(
+    user: User,
+    args: { workspace_id?: string; to?: string; subject?: string; body?: string; thread_id?: string },
+  ): Promise<unknown> {
+    return this.enqueue(user, args.workspace_id, UiCommandKind.COMPOSE, {
+      to: args.to ?? null,
+      subject: args.subject ?? null,
+      body: args.body ?? null,
+      thread_id: args.thread_id ?? null,
+    });
+  }
+
+  /** Switch the active Space (a Space id, or 'all' for no filter). */
+  async switchSpace(
+    user: User,
+    args: { workspace_id?: string; space_id: string },
+  ): Promise<unknown> {
+    return this.enqueue(user, args.workspace_id, UiCommandKind.SWITCH_SPACE, {
+      space_id: args.space_id,
+    });
+  }
+
+  /** Show a toast in the cockpit (an agent → human status message). */
+  async notify(
+    user: User,
+    args: { workspace_id?: string; title: string; body?: string; tone?: 'info' | 'success' | 'warning' },
+  ): Promise<unknown> {
+    return this.enqueue(user, args.workspace_id, UiCommandKind.NOTIFY, {
+      title: args.title,
+      body: args.body ?? null,
+      tone: args.tone ?? 'info',
+    });
+  }
+
+  /** Resolve the workspace (membership-gated) + the acting ucUid, then enqueue. */
+  private async enqueue(
+    user: User,
+    requested: string | undefined,
+    kind: UiCommandKind,
+    payload: Record<string, unknown>,
+  ): Promise<{ enqueued: true; command_id: string; kind: string }> {
+    const workspaceId = await this.membership.resolveAndAuthorize(user, requested ?? null);
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    const { id } = await this.uiCommands.enqueue(workspaceId, ucUid, kind, payload);
+    return { enqueued: true, command_id: id, kind: kind.toLowerCase() };
   }
 }
