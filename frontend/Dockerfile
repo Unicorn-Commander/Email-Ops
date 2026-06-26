@@ -20,10 +20,12 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
-# Next standalone server bundles a minimal node_modules + server.js.
-# (no public/ dir in this app, so only standalone + static are copied)
+# Next standalone server bundles a minimal node_modules + server.js. standalone
+# does NOT include public/ or .next/static — copy both. public/ carries the
+# Brigade federation manifest (.well-known/mcps.json) served at the root URL.
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
+COPY --from=build /app/public ./public
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=6 \
   CMD curl -fsS http://localhost:3000/ || exit 1
