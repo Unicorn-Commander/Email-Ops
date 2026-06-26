@@ -29,6 +29,7 @@ import {
   type BadgeVariant,
 } from '@/components/ui';
 import { useAgents } from '@/components/useAgents';
+import { useActiveSpace } from '@/components/ActiveSpaceProvider';
 import { EmailHealthPanel } from '@/components/EmailHealthPanel';
 import { AgentActivityFeed } from '@/components/AgentActivityFeed';
 import { agentLabel } from '@/lib/agents';
@@ -93,9 +94,18 @@ const DEFAULT_ACCESS: MailboxAccess = 'BOTH';
 
 export default function AgentsPage() {
   const { workspace, items, load, error, refresh, create, update } = useAgents();
+  const { activeSpace } = useActiveSpace();
   const [createOpen, setCreateOpen] = useState(false);
 
-  const activeCount = useMemo(() => items.filter((a) => a.active).length, [items]);
+  // Scope the displayed fleet to the active Space (purely client-side). "All" —
+  // a null activeSpace — is unfiltered.
+  const visibleItems = useMemo(() => {
+    if (!activeSpace) return items;
+    const allowed = new Set(activeSpace.agent_ids);
+    return items.filter((a) => allowed.has(a.id));
+  }, [items, activeSpace]);
+
+  const activeCount = useMemo(() => visibleItems.filter((a) => a.active).length, [visibleItems]);
 
   // Resolve each agent's manager_agent_key → its manager's display name, so a
   // card can show "reports to …" instead of the raw slug.
@@ -113,7 +123,7 @@ export default function AgentsPage() {
   return (
     <div className="space-y-7">
       <Hero
-        total={items.length}
+        total={visibleItems.length}
         active={activeCount}
         loading={load === 'loading'}
         onRefresh={() => void refresh()}
@@ -129,18 +139,22 @@ export default function AgentsPage() {
         <FleetSkeleton />
       ) : load === 'error' ? (
         <ErrorState message={error} onRetry={() => void refresh()} />
-      ) : items.length === 0 ? (
-        <EmptyState onNew={() => setCreateOpen(true)} />
+      ) : visibleItems.length === 0 ? (
+        activeSpace && items.length > 0 ? (
+          <NoSpaceAgents spaceName={activeSpace.name} />
+        ) : (
+          <EmptyState onNew={() => setCreateOpen(true)} />
+        )
       ) : (
         <>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <PolicyNote />
             <span className="font-mono text-xs text-muted">
-              {items.length} {items.length === 1 ? 'agent' : 'agents'}
+              {visibleItems.length} {visibleItems.length === 1 ? 'agent' : 'agents'}
             </span>
           </div>
           <div className="space-y-3">
-            {items.map((agent) => (
+            {visibleItems.map((agent) => (
               <AgentCard
                 key={agent.id}
                 agent={agent}
@@ -907,6 +921,36 @@ function NoWorkspace() {
       <p className="mt-1 text-sm text-tertiary">
         Your account isn’t a member of an Email-Ops workspace, so there’s no agent fleet to show.
       </p>
+    </Card>
+  );
+}
+
+/** Shown when a real Space is active but scopes out every agent. */
+function NoSpaceAgents({ spaceName }: { spaceName: string }) {
+  return (
+    <Card padded className="overflow-hidden border-info/30 bg-info-subtle ring-1 ring-info/20">
+      <div className="flex items-start gap-4">
+        <div className="grid h-14 w-14 shrink-0 place-items-center rounded-full bg-gradient-to-br from-info/30 to-info/5 text-info ring-1 ring-info/30">
+          <svg viewBox="0 0 24 24" fill="none" className="h-7 w-7" aria-hidden="true">
+            <path
+              d="M4 12h4l2-7 4 14 2-7h4"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </div>
+        <div>
+          <p className="text-base font-semibold text-primary">
+            No agents in <span className="font-mono">{spaceName}</span>.
+          </p>
+          <p className="mt-1 text-sm text-tertiary">
+            This space doesn’t include any agents yet. Add some from “Manage spaces…” in the top bar,
+            or switch back to “All”.
+          </p>
+        </div>
+      </div>
     </Card>
   );
 }

@@ -20,7 +20,7 @@
  */
 
 import Link from 'next/link';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Badge,
   Button,
@@ -30,6 +30,7 @@ import {
   cn,
   type BadgeVariant,
 } from '@/components/ui';
+import { useActiveSpace } from '@/components/ActiveSpaceProvider';
 import {
   formatWhen,
   participantLabel,
@@ -60,18 +61,40 @@ const FOLDERS: { id: MailFolder; label: string }[] = [
 
 export default function MailPage() {
   const mail = useMailClient();
+  const { activeSpace } = useActiveSpace();
   const [composeOpen, setComposeOpen] = useState(false);
   const [sendersOpen, setSendersOpen] = useState(false);
 
   const threadOpen = mail.selectedThreadId !== null;
 
+  // Scope the mailbox picker to the active Space (purely client-side). "All" — a
+  // null activeSpace — is unfiltered.
+  const visibleMailboxes = useMemo(() => {
+    if (!activeSpace) return mail.mailboxes;
+    const allowed = new Set(activeSpace.mailbox_ids);
+    return mail.mailboxes.filter((m) => allowed.has(m.id));
+  }, [mail.mailboxes, activeSpace]);
+
+  // Is the currently-open mailbox still visible under the active Space?
+  const selectedVisible = visibleMailboxes.some((m) => m.id === mail.selectedMailbox?.id);
+
+  // If the open mailbox got filtered out, fall back to the first visible one so
+  // the user is never stranded on a hidden mailbox (don't crash / blank).
+  const { load: mailLoad, selectMailbox } = mail;
+  useEffect(() => {
+    if (mailLoad !== 'ready') return;
+    if (!activeSpace) return; // All — no scoping
+    if (visibleMailboxes.length === 0) return; // empty-space state handles this
+    if (!selectedVisible) selectMailbox(visibleMailboxes[0].id);
+  }, [mailLoad, activeSpace, visibleMailboxes, selectedVisible, selectMailbox]);
+
   return (
     <div className="space-y-6">
       <Hero
-        mailbox={mail.selectedMailbox}
-        mailboxCount={mail.mailboxes.length}
+        mailbox={selectedVisible ? mail.selectedMailbox : null}
+        mailboxCount={visibleMailboxes.length}
         ready={mail.load === 'ready'}
-        canCompose={mail.load === 'ready' && !!mail.workspace && !!mail.selectedMailbox}
+        canCompose={mail.load === 'ready' && !!mail.workspace && selectedVisible}
         onCompose={() => setComposeOpen(true)}
       />
 
@@ -83,13 +106,15 @@ export default function MailPage() {
         <ClientSkeleton />
       ) : mail.mailboxes.length === 0 ? (
         <NoMailboxes />
+      ) : visibleMailboxes.length === 0 ? (
+        <NoSpaceMailboxes spaceName={activeSpace?.name ?? null} />
       ) : (
         <div className="grid gap-4 lg:grid-cols-[minmax(200px,260px)_minmax(280px,360px)_1fr]">
           {/* LEFT — mailbox picker. Hidden on mobile once a thread is open. */}
           <section className={cn(threadOpen && 'max-lg:hidden')}>
             <MailboxList
-              mailboxes={mail.mailboxes}
-              selectedId={mail.selectedMailbox?.id ?? null}
+              mailboxes={visibleMailboxes}
+              selectedId={selectedVisible ? mail.selectedMailbox?.id ?? null : null}
               onSelect={mail.selectMailbox}
             />
           </section>
@@ -867,6 +892,36 @@ function NoMailboxes() {
           <p className="mt-1 text-sm text-tertiary">
             Once a mailbox is provisioned for this workspace it shows up here, and you can read it
             and compose from it.
+          </p>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/** Shown when a real Space is active but scopes out every mailbox. */
+function NoSpaceMailboxes({ spaceName }: { spaceName: string | null }) {
+  return (
+    <Card padded className="overflow-hidden border-info/30 bg-info-subtle ring-1 ring-info/20">
+      <div className="flex items-start gap-4">
+        <div className="grid h-14 w-14 shrink-0 place-items-center rounded-full bg-gradient-to-br from-info/30 to-info/5 text-info ring-1 ring-info/30">
+          <svg viewBox="0 0 24 24" fill="none" className="h-7 w-7" aria-hidden="true">
+            <path
+              d="M3 7l9 6 9-6M4 5h16a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6a1 1 0 011-1z"
+              stroke="currentColor"
+              strokeWidth={1.8}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </div>
+        <div>
+          <p className="text-base font-semibold text-primary">
+            No mailboxes in {spaceName ? <span className="font-mono">{spaceName}</span> : 'this space'}.
+          </p>
+          <p className="mt-1 text-sm text-tertiary">
+            This space doesn’t include any mailboxes yet. Add some from “Manage spaces…” in the top
+            bar, or switch back to “All”.
           </p>
         </div>
       </div>

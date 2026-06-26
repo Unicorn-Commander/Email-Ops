@@ -314,6 +314,20 @@ enum EmailEngagementKind {
   UNSUBSCRIBED
 }
 
+// ── Space visibility (Email-Ops OWNS this — the soft grouping layer) ──
+//
+// A Space is a soft, overlapping grouping of mailboxes + agents INSIDE the
+// existing RLS workspace (NOT a new hard tenant). Two flavors:
+//   PERSONAL — only its owner (ownerKey) sees it.
+//   TEAM     — shared across the whole workspace (ownerKey is null).
+// A mailbox/agent can belong to MANY spaces; switching the active Space filters
+// the /mail picker + the agents view. The implicit "All" view (no row) = show
+// everything.
+enum SpaceVisibility {
+  PERSONAL
+  TEAM
+}
+
 // ============================================================
 // SUITE TENANCY (SUITE-IDENTITY.md §2 — VERBATIM)
 // ============================================================
@@ -359,6 +373,7 @@ model Workspace {
   engagementEvents  EmailEngagementEvent[]
   threadDispositions ThreadDisposition[]
   senderPolicies     SenderPolicy[]
+  spaces             Space[]
 
   @@index([slug])
   @@index([status])
@@ -470,6 +485,7 @@ model MailboxAccount {
 
   workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   agentMailboxes AgentMailbox[]
+  spaceLinks     SpaceMailbox[]
 
   // One mailbox identity per address per workspace.
   @@unique([workspaceId, emailAddress])
@@ -815,6 +831,7 @@ model Agent {
   // The mailboxes this agent may act through (multi-mailbox). mailboxAccountId
   // above is the denormalized cache of the isPrimary binding's mailbox.
   mailboxes AgentMailbox[]
+  spaceLinks SpaceAgent[]
 
   // One agent identity per key per workspace (the stable provenance slug).
   @@unique([workspaceId, key])
@@ -1082,6 +1099,84 @@ model EmailEngagementEvent {
   // The per-message engagement timeline (newest-first reads).
   @@index([workspaceId, emailMessageId, occurredAt])
   @@map("email_engagement_events")
+}
+
+// ============================================================
+// SPACE (Email-Ops OWNS this — tenant-scoped; the soft grouping layer)
+// ============================================================
+//
+// A Space is a soft, OVERLAPPING grouping of mailboxes + agents INSIDE the
+// existing RLS workspace — a "view", NOT a new hard tenant. It lets a user slice
+// the unified inbox + the agent fleet by context (Personal=Gmail, Magic Unicorn
+// =M365, a per-platform Space = that mailbox(es) + its agents). A mailbox/agent
+// can be in MANY spaces (the join tables below). The active Space filters /mail +
+// the agents view; the implicit "All" (no Space) shows everything.
+//
+//   PERSONAL — visible only to its owner. `ownerKey` is the owner's keycloakId
+//              (canonically; the read fence also accepts the local User.id, since
+//              that id can arrive in either flavor depending on the auth path —
+//              mirrors EmailService.mayActThroughMailbox / EngineMailProvider).
+//   TEAM     — shared across the workspace; `ownerKey` is null.
+//
+// RLS-fenced on workspaceId exactly like the other scoped tables (ENABLE + FORCE,
+// identical workspace_isolation policy). A no-GUC read returns zero rows. The
+// per-USER PERSONAL fence is enforced in app code (the ownerKey predicate),
+// layered on top of the per-WORKSPACE RLS fence.
+model Space {
+  id          String          @id @default(uuid())
+  workspaceId String
+  // Owner's keycloakId for PERSONAL; null for TEAM. The per-user visibility fence.
+  ownerKey    String?
+  visibility  SpaceVisibility @default(PERSONAL)
+  name        String
+  // Optional presentation (a swatch + an icon/emoji the switcher renders).
+  color       String?
+  icon        String?
+  sortOrder   Int             @default(0)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailboxes SpaceMailbox[]
+  agents    SpaceAgent[]
+
+  // "my personal spaces in this workspace" + "all team spaces in this workspace".
+  @@index([workspaceId, ownerKey])
+  @@index([workspaceId, visibility])
+  @@map("spaces")
+}
+
+// ── SPACE ↔ MAILBOX (the many-to-many membership; cascade both ways) ──
+//
+// Which mailboxes belong to a Space. Pure join (no workspaceId column — it is
+// reached only THROUGH a Space already fenced to the workspace; the migration
+// fences this table via an EXISTS-on-parent-space RLS policy). REPLACE semantics
+// on the PUT endpoint: the service deletes + recreates the set.
+model SpaceMailbox {
+  spaceId          String
+  mailboxAccountId String
+
+  space   Space          @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  mailbox MailboxAccount @relation(fields: [mailboxAccountId], references: [id], onDelete: Cascade)
+
+  @@id([spaceId, mailboxAccountId])
+  @@index([mailboxAccountId])
+  @@map("space_mailboxes")
+}
+
+// ── SPACE ↔ AGENT (the many-to-many membership; cascade both ways) ──
+//
+// Which agents belong to a Space. Same shape + RLS posture as SpaceMailbox.
+model SpaceAgent {
+  spaceId String
+  agentId String
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([spaceId, agentId])
+  @@index([agentId])
+  @@map("space_agents")
 }
 
 // NOTE: The Workspace↔MailboxAccount / Workspace↔EmailMessage /

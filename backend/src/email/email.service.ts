@@ -62,6 +62,64 @@ import {
 import { shouldAdvanceStatus } from './message-status';
 import { decideComposeMode } from './autonomy';
 
+/**
+ * The external send request shape shared by the compose + approve send lanes
+ * (engine-agnostic; callEngine dispatches Stalwart vs the external provider).
+ */
+interface SendReq {
+  fromAddress: string;
+  fromName: string | null;
+  toAddress: string;
+  subject: string;
+  body: string;
+  inReplyToThreadId: string | null;
+  transactional: boolean;
+}
+
+/** The result callEngine() returns (normalized across Stalwart + provider). */
+interface EngineSendResult {
+  accepted: boolean;
+  providerMessageId: string | null;
+  threadId: string | null;
+  lane: string | null;
+  reason: string | null;
+}
+
+/**
+ * What composeEmail's phase 1 (validate + record, in a short tx) hands to phase 2
+ * (the external send, outside any tx). `done` short-circuits (idempotent hit or a
+ * staged draft — nothing to send); `send` carries the QUEUED row + the plan.
+ */
+type ComposePrep =
+  | { done: MessageComposeView }
+  | {
+      send: {
+        messageId: string;
+        mailbox: MailboxAccount | null;
+        agentKey: string | null;
+        subject: string | null;
+        req: SendReq;
+      };
+    };
+
+/**
+ * What approveAgentInboxItem's phase 1 hands forward: `null` → 404; `result` → a
+ * terminal answer (non-pending no-op, or a cleanup item executed in-tx); `send` →
+ * the approved email draft to hand to the engine in phase 2.
+ */
+type ApprovePrep =
+  | { kind: 'null' }
+  | { kind: 'result'; value: { inbox: AgentInboxView; message: MessageComposeView | null } }
+  | {
+      kind: 'send';
+      itemId: string;
+      messageId: string;
+      draftedBy: string | null;
+      subject: string | null;
+      mailbox: MailboxAccount | null;
+      req: SendReq;
+    };
+
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
@@ -376,109 +434,161 @@ export class EmailService {
     ucUid: string | null,
     input: ComposeInput,
   ): Promise<MessageComposeView> {
-    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      // Idempotency: a prior row with the same tuple returns unchanged.
-      const existing = await tx.emailMessage.findUnique({
-        where: {
-          workspaceId_externalSource_externalRef: {
-            workspaceId,
-            externalSource: input.externalSource,
-            externalRef: input.externalRef,
-          },
-        },
-      });
-      if (existing) {
-        this.logger.log(
-          `compose_email idempotent hit for (${workspaceId}, ${input.externalSource}, ${input.externalRef}) — returning existing message ${existing.id} (no second send)`,
-        );
-        return this.composeView(existing);
-      }
-
-      // Kill switch: when the workspace is paused, agents cannot compose/send.
-      // (An idempotent repeat above still returns; a human approving an already-
-      // staged draft is a separate path and stays unaffected.)
-      const ws = await tx.workspace.findUnique({
-        where: { id: workspaceId },
-        select: { agentsPaused: true },
-      });
-      if (ws?.agentsPaused) {
-        this.logger.log(`compose_email blocked: agents paused for workspace ${workspaceId}`);
-        throw new ForbiddenException('Agents are paused for this workspace.');
-      }
-
-      // Resolve the registered agent that drafted this (by its provenance key).
-      const agentKey = input.draftedBy ?? input.externalSource;
-      const agent = agentKey
-        ? await tx.agent.findFirst({
-            where: { workspaceId, key: agentKey, active: true },
-            select: {
-              key: true,
-              autonomyLevel: true,
-              recipientPolicy: true,
-              mailboxAccountId: true,
-              paused: true,
+    // PHASE 1 — validate, authorize, decide, and record the SoR row (a SHORT tx).
+    // The external send is deferred to phase 2 so a slow provider (Gmail/Graph,
+    // >5s) can't hold the Prisma interactive transaction open past its timeout and
+    // roll back the SoR row for mail that already DELIVERED (the §3 send bug).
+    const prep = await this.prisma.withWorkspace(
+      workspaceId,
+      ucUid,
+      async (tx): Promise<ComposePrep> => {
+        // Idempotency: a prior row with the same tuple returns unchanged.
+        const existing = await tx.emailMessage.findUnique({
+          where: {
+            workspaceId_externalSource_externalRef: {
+              workspaceId,
+              externalSource: input.externalSource,
+              externalRef: input.externalRef,
             },
-          })
-        : null;
-
-      // Per-agent kill switch: this ONE agent is paused (distinct from the
-      // workspace-wide pause above, which freezes the whole fleet).
-      if (agent?.paused) {
-        this.logger.log(`compose_email blocked: agent '${agentKey}' is paused (workspace ${workspaceId})`);
-        throw new ForbiddenException(`Agent '${agentKey}' is paused.`);
-      }
-
-      // Send identity: a registered agent sends from its OWN primary mailbox
-      // (cached on Agent.mailboxAccountId = the isPrimary binding); an unregistered
-      // agent falls back to the workspace default (legacy, unchanged). Fixes the
-      // latent bug where an agent with a mailbox still sent from the ws default.
-      // An explicit from-mailbox (the human client picks which inbox to send as)
-      // wins when it's in-workspace; otherwise resolve the agent/default identity.
-      const explicitFrom = input.fromMailboxAccountId
-        ? await tx.mailboxAccount.findFirst({
-            where: { id: input.fromMailboxAccountId, workspaceId },
-          })
-        : null;
-      // Send-as authorization: a human client may send AS a SHARED mailbox or one
-      // they personally own — never spoof another person's (or an agent's) identity.
-      // (The agent path doesn't set fromMailboxAccountId; it uses resolveSendMailbox.)
-      if (explicitFrom) {
-        const kind = explicitFrom.ownerKind as string;
-        // SHARED = a workspace resource (any member may send as it); HUMAN = a
-        // person's own box (only the owner). Route the HUMAN owner-check through
-        // mayActThroughMailbox so it resolves the caller by keycloakId OR User.id
-        // and survives the same id-flavor ambiguity as the read path. AGENT (and
-        // anything else) falls through -> denied (no impersonating an agent).
-        const ownsIt =
-          kind === 'SHARED' || (kind === 'HUMAN' && (await this.mayActThroughMailbox(explicitFrom, ucUid)));
-        if (!ownsIt) {
-          throw new ForbiddenException('You are not allowed to send as that mailbox.');
+          },
+        });
+        if (existing) {
+          this.logger.log(
+            `compose_email idempotent hit for (${workspaceId}, ${input.externalSource}, ${input.externalRef}) — returning existing message ${existing.id} (no second send)`,
+          );
+          return { done: this.composeView(existing) };
         }
-      }
-      const mailbox = explicitFrom ?? (await this.resolveSendMailbox(tx, workspaceId, agent));
-      const fromAddress = mailbox?.emailAddress ?? null;
 
-      // Enforce the autonomy dial — gate send-vs-draft by the agent's level +
-      // recipient policy. Opt-in + conservative: an UNREGISTERED agent keeps the
-      // legacy behavior, and the decision only ever makes a send MORE gated.
-      const decision = decideComposeMode({
-        requestedMode: input.mode === 'draft' ? 'draft' : 'send',
-        agent,
-        toAddress: input.toAddress,
-      });
-      const mode = decision.mode === 'draft' ? EmailMode.DRAFT : EmailMode.SEND;
-      if (decision.coerced) {
-        this.logger.log(
-          `compose_email autonomy gate: agent '${agentKey}' send→draft (${decision.reason}) — staged for approval (workspace ${workspaceId})`,
-        );
-      } else if (mode === EmailMode.SEND && agent) {
-        this.logger.log(
-          `compose_email autonomy: agent '${agentKey}' autonomous send (${decision.reason}, audited) (workspace ${workspaceId})`,
-        );
-      }
+        // Kill switch: when the workspace is paused, agents cannot compose/send.
+        // (An idempotent repeat above still returns; a human approving an already-
+        // staged draft is a separate path and stays unaffected.)
+        const ws = await tx.workspace.findUnique({
+          where: { id: workspaceId },
+          select: { agentsPaused: true },
+        });
+        if (ws?.agentsPaused) {
+          this.logger.log(`compose_email blocked: agents paused for workspace ${workspaceId}`);
+          throw new ForbiddenException('Agents are paused for this workspace.');
+        }
 
-      if (mode === EmailMode.DRAFT) {
-        // Stage the draft into the agent-inbox approval surface.
+        // Resolve the registered agent that drafted this (by its provenance key).
+        const agentKey = input.draftedBy ?? input.externalSource;
+        const agent = agentKey
+          ? await tx.agent.findFirst({
+              where: { workspaceId, key: agentKey, active: true },
+              select: {
+                key: true,
+                autonomyLevel: true,
+                recipientPolicy: true,
+                mailboxAccountId: true,
+                paused: true,
+              },
+            })
+          : null;
+
+        // Per-agent kill switch: this ONE agent is paused (distinct from the
+        // workspace-wide pause above, which freezes the whole fleet).
+        if (agent?.paused) {
+          this.logger.log(`compose_email blocked: agent '${agentKey}' is paused (workspace ${workspaceId})`);
+          throw new ForbiddenException(`Agent '${agentKey}' is paused.`);
+        }
+
+        // Send identity: a registered agent sends from its OWN primary mailbox
+        // (cached on Agent.mailboxAccountId = the isPrimary binding); an unregistered
+        // agent falls back to the workspace default (legacy, unchanged). Fixes the
+        // latent bug where an agent with a mailbox still sent from the ws default.
+        // An explicit from-mailbox (the human client picks which inbox to send as)
+        // wins when it's in-workspace; otherwise resolve the agent/default identity.
+        const explicitFrom = input.fromMailboxAccountId
+          ? await tx.mailboxAccount.findFirst({
+              where: { id: input.fromMailboxAccountId, workspaceId },
+            })
+          : null;
+        // Send-as authorization: a human client may send AS a SHARED mailbox or one
+        // they personally own — never spoof another person's (or an agent's) identity.
+        // (The agent path doesn't set fromMailboxAccountId; it uses resolveSendMailbox.)
+        if (explicitFrom) {
+          const kind = explicitFrom.ownerKind as string;
+          // SHARED = a workspace resource (any member may send as it); HUMAN = a
+          // person's own box (only the owner). Route the HUMAN owner-check through
+          // mayActThroughMailbox so it resolves the caller by keycloakId OR User.id
+          // and survives the same id-flavor ambiguity as the read path. AGENT (and
+          // anything else) falls through -> denied (no impersonating an agent).
+          const ownsIt =
+            kind === 'SHARED' || (kind === 'HUMAN' && (await this.mayActThroughMailbox(explicitFrom, ucUid)));
+          if (!ownsIt) {
+            throw new ForbiddenException('You are not allowed to send as that mailbox.');
+          }
+        }
+        const mailbox = explicitFrom ?? (await this.resolveSendMailbox(tx, workspaceId, agent));
+        const fromAddress = mailbox?.emailAddress ?? null;
+
+        // Enforce the autonomy dial — gate send-vs-draft by the agent's level +
+        // recipient policy. Opt-in + conservative: an UNREGISTERED agent keeps the
+        // legacy behavior, and the decision only ever makes a send MORE gated.
+        const decision = decideComposeMode({
+          requestedMode: input.mode === 'draft' ? 'draft' : 'send',
+          agent,
+          toAddress: input.toAddress,
+        });
+        const mode = decision.mode === 'draft' ? EmailMode.DRAFT : EmailMode.SEND;
+        if (decision.coerced) {
+          this.logger.log(
+            `compose_email autonomy gate: agent '${agentKey}' send→draft (${decision.reason}) — staged for approval (workspace ${workspaceId})`,
+          );
+        } else if (mode === EmailMode.SEND && agent) {
+          this.logger.log(
+            `compose_email autonomy: agent '${agentKey}' autonomous send (${decision.reason}, audited) (workspace ${workspaceId})`,
+          );
+        }
+
+        if (mode === EmailMode.DRAFT) {
+          // Stage the draft into the agent-inbox approval surface (no external
+          // call, so this whole path stays inside the one short tx).
+          const msg = await tx.emailMessage.create({
+            data: {
+              workspaceId,
+              mailboxAccountId: mailbox?.id ?? null,
+              contactId: input.contactId,
+              threadId: input.inReplyToThreadId ?? null,
+              inReplyToThreadId: input.inReplyToThreadId ?? null,
+              externalSource: input.externalSource,
+              externalRef: input.externalRef,
+              mode: EmailMode.DRAFT,
+              status: EmailMessageStatus.PENDING_APPROVAL,
+              direction: EmailDirection.DRAFT,
+              fromAddress,
+              toAddress: input.toAddress,
+              subject: input.subject,
+              body: input.body,
+              preview: this.snippet(input.body),
+              actorUcUid: ucUid,
+            },
+          });
+          await tx.agentInboxItem.create({
+            data: {
+              workspaceId,
+              messageId: msg.id,
+              state: AgentInboxState.PENDING,
+              draftedBy: input.draftedBy ?? input.externalSource,
+              summary: this.summary(input.subject, input.toAddress),
+            },
+          });
+          this.logger.log(
+            `compose_email DRAFT staged into agent-inbox: message ${msg.id} (workspace ${workspaceId}) pending human approval`,
+          );
+          await this.recordAction(tx, workspaceId, {
+            kind: AgentActionKind.STAGED_FOR_APPROVAL,
+            agentKey: input.draftedBy ?? input.externalSource,
+            messageId: msg.id,
+            actorUcUid: ucUid,
+            detail: decision.coerced ? `staged by dial (${decision.reason})` : (input.subject ?? null),
+          });
+          return { done: this.composeView(msg) };
+        }
+
+        // mode=send — record the SoR row QUEUED now; the external hand-off is
+        // phase 2 (outside this tx). The row is durable the instant we commit.
         const msg = await tx.emailMessage.create({
           data: {
             workspaceId,
@@ -488,9 +598,9 @@ export class EmailService {
             inReplyToThreadId: input.inReplyToThreadId ?? null,
             externalSource: input.externalSource,
             externalRef: input.externalRef,
-            mode: EmailMode.DRAFT,
-            status: EmailMessageStatus.PENDING_APPROVAL,
-            direction: EmailDirection.DRAFT,
+            mode: EmailMode.SEND,
+            status: EmailMessageStatus.QUEUED,
+            direction: EmailDirection.SENT,
             fromAddress,
             toAddress: input.toAddress,
             subject: input.subject,
@@ -499,71 +609,48 @@ export class EmailService {
             actorUcUid: ucUid,
           },
         });
-        await tx.agentInboxItem.create({
-          data: {
-            workspaceId,
+        return {
+          send: {
             messageId: msg.id,
-            state: AgentInboxState.PENDING,
-            draftedBy: input.draftedBy ?? input.externalSource,
-            summary: this.summary(input.subject, input.toAddress),
+            mailbox: mailbox ?? null,
+            agentKey: agent?.key ?? null,
+            subject: input.subject ?? null,
+            req: {
+              fromAddress: fromAddress ?? input.toAddress, // engine requires a From; degrade-safe
+              fromName: mailbox?.displayName ?? null,
+              toAddress: input.toAddress,
+              subject: input.subject,
+              body: input.body,
+              inReplyToThreadId: input.inReplyToThreadId ?? null,
+              transactional: mailbox?.postmarkLane ?? true,
+            },
           },
-        });
-        this.logger.log(
-          `compose_email DRAFT staged into agent-inbox: message ${msg.id} (workspace ${workspaceId}) pending human approval`,
-        );
-        await this.recordAction(tx, workspaceId, {
-          kind: AgentActionKind.STAGED_FOR_APPROVAL,
-          agentKey: input.draftedBy ?? input.externalSource,
-          messageId: msg.id,
-          actorUcUid: ucUid,
-          detail: decision.coerced ? `staged by dial (${decision.reason})` : (input.subject ?? null),
-        });
-        return this.composeView(msg);
-      }
+        };
+      },
+    );
 
-      // mode=send — record the SoR row, then hand to the mail engine.
-      const msg = await tx.emailMessage.create({
-        data: {
-          workspaceId,
-          mailboxAccountId: mailbox?.id ?? null,
-          contactId: input.contactId,
-          threadId: input.inReplyToThreadId ?? null,
-          inReplyToThreadId: input.inReplyToThreadId ?? null,
-          externalSource: input.externalSource,
-          externalRef: input.externalRef,
-          mode: EmailMode.SEND,
-          status: EmailMessageStatus.QUEUED,
-          direction: EmailDirection.SENT,
-          fromAddress,
-          toAddress: input.toAddress,
-          subject: input.subject,
-          body: input.body,
-          preview: this.snippet(input.body),
-          actorUcUid: ucUid,
-        },
-      });
+    // Idempotent hit OR the draft path: nothing left to send.
+    if ('done' in prep) return prep.done;
 
-      const sent = await this.handToEngine(tx, msg.id, mailbox ?? null, {
-        fromAddress: fromAddress ?? input.toAddress, // engine requires a From; degrade-safe
-        fromName: mailbox?.displayName ?? null,
-        toAddress: input.toAddress,
-        subject: input.subject,
-        body: input.body,
-        inReplyToThreadId: input.inReplyToThreadId ?? null,
-        transactional: mailbox?.postmarkLane ?? true,
-      });
-      if (agent) {
-        // A registered agent reaching the send lane is an L2 autonomous send
-        // (the gate coerces L0/L1 sends to drafts) — audit it WITH its outcome.
-        // handToEngine is degrade-clean (a rejected send returns FAILED rather
-        // than throwing), so stamp the result so the feed never reads a failed
-        // autonomous send as a delivered one.
+    // PHASE 2 — the external send, OUTSIDE any transaction. callEngine is
+    // degrade-clean (a rejected/failed send returns accepted:false, never throws),
+    // so a slow or dead provider can't roll back the committed QUEUED row.
+    const result = await this.callEngine(prep.send.mailbox, prep.send.req);
+
+    // PHASE 3 — stamp the outcome onto the QUEUED row + audit an autonomous send
+    // (a SHORT tx). The row is already durable; this only advances its status.
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const sent = await this.stampSendResult(tx, prep.send.messageId, result);
+      if (prep.send.agentKey) {
+        // A registered agent reaching the send lane is an L2 autonomous send (the
+        // gate coerces L0/L1 sends to drafts) — audit it WITH its real outcome so
+        // the feed never reads a failed autonomous send as a delivered one.
         await this.recordAction(tx, workspaceId, {
           kind: AgentActionKind.AUTONOMOUS_SEND,
-          agentKey: agent.key,
-          messageId: msg.id,
+          agentKey: prep.send.agentKey,
+          messageId: prep.send.messageId,
           actorUcUid: ucUid,
-          detail: `${input.subject ?? '(no subject)'} (${this.statusWire(sent.status)})`,
+          detail: `${prep.send.subject ?? '(no subject)'} (${this.statusWire(sent.status)})`,
         });
       }
       return this.composeView(sent);
@@ -600,78 +687,111 @@ export class EmailService {
     itemId: string,
     note?: string | null,
   ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
-    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      // Tenant fence: scope by workspaceId so a foreign item id resolves to null
-      // (→ 404) and can NEVER be acted on across tenants. RLS is inert under the
-      // owner role today, so this explicit predicate is the real guard.
-      const item = await tx.agentInboxItem.findFirst({
-        where: { id: itemId, workspaceId },
-        include: { message: true },
-      });
-      if (!item) return null;
-      if (item.state !== AgentInboxState.PENDING) {
-        return {
-          inbox: this.inboxView(item, item.message),
-          message: item.kind === AgentInboxKind.EMAIL && item.message ? this.composeView(item.message) : null,
-        };
-      }
-
-      if (item.kind === AgentInboxKind.CLEANUP) {
-        const payload = this.cleanupPayload(item.payload);
-        const owner = await this.resolveUserByUcUid(tx, ucUid);
-        if (!owner) return null;
-        const batchId = payload.batch_id;
-        if (!batchId || typeof batchId !== 'string') return null;
-
-        const executed = await this.connectedAccounts.approveCleanupBatch(workspaceId, owner, batchId);
-        if (!executed) return null;
-
-        const updated = await tx.agentInboxItem.update({
-          where: { id: itemId },
-          data: {
-            state: AgentInboxState.APPROVED,
-            reviewedByUcUid: ucUid,
-            reviewedAt: new Date(),
-            reviewNote: note ?? null,
-          },
+    // PHASE 1 — validate + authorize (a short tx). A CLEANUP item executes wholly
+    // in-tx as before; an EMAIL item resolves its mailbox + returns the send plan,
+    // deferring the external send to phase 2 so a slow provider can't time out the
+    // tx and roll back the approval for mail that already left (the §3 send bug).
+    const prep = await this.prisma.withWorkspace(
+      workspaceId,
+      ucUid,
+      async (tx): Promise<ApprovePrep> => {
+        // Tenant fence: scope by workspaceId so a foreign item id resolves to null
+        // (→ 404) and can NEVER be acted on across tenants. RLS is inert under the
+        // owner role today, so this explicit predicate is the real guard.
+        const item = await tx.agentInboxItem.findFirst({
+          where: { id: itemId, workspaceId },
           include: { message: true },
         });
-        this.logger.log(
-          `agent-inbox cleanup item ${itemId} APPROVED by ${ucUid ?? '(unknown)'} — cleanup batch ${batchId} executed`,
-        );
-        return { inbox: this.inboxView(updated, null), message: null };
-      }
+        if (!item) return { kind: 'null' };
+        if (item.state !== AgentInboxState.PENDING) {
+          return {
+            kind: 'result',
+            value: {
+              inbox: this.inboxView(item, item.message),
+              message:
+                item.kind === AgentInboxKind.EMAIL && item.message
+                  ? this.composeView(item.message)
+                  : null,
+            },
+          };
+        }
 
-      if (!item.message) return null;
+        if (item.kind === AgentInboxKind.CLEANUP) {
+          const payload = this.cleanupPayload(item.payload);
+          const owner = await this.resolveUserByUcUid(tx, ucUid);
+          if (!owner) return { kind: 'null' };
+          const batchId = payload.batch_id;
+          if (!batchId || typeof batchId !== 'string') return { kind: 'null' };
 
-      const mailbox = item.message.mailboxAccountId
-        ? await tx.mailboxAccount.findFirst({
-            where: { id: item.message.mailboxAccountId, workspaceId },
-          })
-        : await this.defaultMailbox(tx, workspaceId);
+          const executed = await this.connectedAccounts.approveCleanupBatch(workspaceId, owner, batchId);
+          if (!executed) return { kind: 'null' };
 
-      // Per-user fence: an approved send goes out THROUGH the mailbox owner's
-      // identity (for an external box, their KC-broker token). Only the owner may
-      // approve a send from a HUMAN mailbox — an approver can't push mail out of a
-      // co-member's personal Gmail/M365. SHARED/AGENT boxes stay approvable by any
-      // reviewer (the workspace-resource model).
-      if (mailbox && !(await this.mayActThroughMailbox(mailbox, ucUid))) {
-        throw new ForbiddenException('Only the owner of that mailbox can approve a send from it.');
-      }
+          const updated = await tx.agentInboxItem.update({
+            where: { id: itemId },
+            data: {
+              state: AgentInboxState.APPROVED,
+              reviewedByUcUid: ucUid,
+              reviewedAt: new Date(),
+              reviewNote: note ?? null,
+            },
+            include: { message: true },
+          });
+          this.logger.log(
+            `agent-inbox cleanup item ${itemId} APPROVED by ${ucUid ?? '(unknown)'} — cleanup batch ${batchId} executed`,
+          );
+          return { kind: 'result', value: { inbox: this.inboxView(updated, null), message: null } };
+        }
 
-      // Hand the approved draft to the mail engine (or the external provider).
-      const sent = await this.handToEngine(tx, item.message.id, mailbox ?? null, {
-        fromAddress: item.message.fromAddress ?? mailbox?.emailAddress ?? item.message.toAddress!,
-        fromName: mailbox?.displayName ?? null,
-        toAddress: item.message.toAddress!,
-        subject: item.message.subject ?? '',
-        body: item.message.body ?? '',
-        inReplyToThreadId: item.message.inReplyToThreadId ?? null,
-        transactional: mailbox?.postmarkLane ?? true,
-      });
+        if (!item.message) return { kind: 'null' };
 
+        const mailbox = item.message.mailboxAccountId
+          ? await tx.mailboxAccount.findFirst({
+              where: { id: item.message.mailboxAccountId, workspaceId },
+            })
+          : await this.defaultMailbox(tx, workspaceId);
+
+        // Per-user fence: an approved send goes out THROUGH the mailbox owner's
+        // identity (for an external box, their KC-broker token). Only the owner may
+        // approve a send from a HUMAN mailbox — an approver can't push mail out of a
+        // co-member's personal Gmail/M365. SHARED/AGENT boxes stay approvable by any
+        // reviewer (the workspace-resource model).
+        if (mailbox && !(await this.mayActThroughMailbox(mailbox, ucUid))) {
+          throw new ForbiddenException('Only the owner of that mailbox can approve a send from it.');
+        }
+
+        return {
+          kind: 'send',
+          itemId,
+          messageId: item.message.id,
+          draftedBy: item.draftedBy,
+          subject: item.message.subject ?? null,
+          mailbox: mailbox ?? null,
+          req: {
+            fromAddress: item.message.fromAddress ?? mailbox?.emailAddress ?? item.message.toAddress!,
+            fromName: mailbox?.displayName ?? null,
+            toAddress: item.message.toAddress!,
+            subject: item.message.subject ?? '',
+            body: item.message.body ?? '',
+            inReplyToThreadId: item.message.inReplyToThreadId ?? null,
+            transactional: mailbox?.postmarkLane ?? true,
+          },
+        };
+      },
+    );
+
+    if (prep.kind === 'null') return null;
+    if (prep.kind === 'result') return prep.value;
+
+    // PHASE 2 — hand the approved draft to the mail engine / provider, OUTSIDE the
+    // tx (degrade-clean: a failed send returns accepted:false, never throws).
+    const result = await this.callEngine(prep.mailbox, prep.req);
+
+    // PHASE 3 — stamp the send outcome + transition the item to APPROVED + audit
+    // (a SHORT tx). The draft was durable; this only records the send result.
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const sent = await this.stampSendResult(tx, prep.messageId, result);
       const updated = await tx.agentInboxItem.update({
-        where: { id: itemId },
+        where: { id: prep.itemId },
         data: {
           state: AgentInboxState.APPROVED,
           reviewedByUcUid: ucUid,
@@ -681,14 +801,14 @@ export class EmailService {
         include: { message: true },
       });
       this.logger.log(
-        `agent-inbox item ${itemId} APPROVED by ${ucUid ?? '(unknown)'} — draft handed to send lane (message ${item.message.id})`,
+        `agent-inbox item ${prep.itemId} APPROVED by ${ucUid ?? '(unknown)'} — draft handed to send lane (message ${prep.messageId})`,
       );
       await this.recordAction(tx, workspaceId, {
         kind: AgentActionKind.APPROVED,
-        agentKey: item.draftedBy,
-        messageId: item.message.id,
+        agentKey: prep.draftedBy,
+        messageId: prep.messageId,
         actorUcUid: ucUid,
-        detail: item.message.subject ?? null,
+        detail: prep.subject,
       });
       return { inbox: this.inboxView(updated, sent), message: this.composeView(sent) };
     });
@@ -979,56 +1099,65 @@ export class EmailService {
   // ── helpers ────────────────────────────────────────────────────────────
 
   /**
-   * Hand a recorded outbound message to the mail engine and persist the result
-   * status. Degrade-clean: an unconfigured/failed engine marks the row FAILED
-   * (the SoR row + agent-inbox state are already durable) rather than throwing.
+   * Call the mail engine / external provider to actually send. This is PURE
+   * external work (NO database access) so it runs OUTSIDE the withWorkspace
+   * interactive transaction — a slow provider send (Gmail/Graph, >5s) must not
+   * hold the Prisma tx open past its timeout and roll back the SoR row for mail
+   * that already DELIVERED (the §3 send-transaction-timeout bug). Degrade-clean:
+   * a failure returns accepted:false (never throws); the caller records FAILED.
+   *
+   * External account (gmail / microsoft) → its provider API; the sovereign
+   * mailbox → Stalwart/Postmark. The result is normalized across both.
    */
-  private async handToEngine(
+  private async callEngine(mailbox: MailboxAccount | null, req: SendReq): Promise<EngineSendResult> {
+    if (mailbox && this.mailProvider.handles(mailbox)) {
+      const r = await this.mailProvider.send(mailbox, {
+        from: req.fromAddress,
+        to: req.toAddress,
+        subject: req.subject,
+        body: req.body,
+        inReplyToThreadId: req.inReplyToThreadId,
+      });
+      return {
+        accepted: r.accepted,
+        providerMessageId: r.providerMessageId,
+        threadId: r.threadId,
+        lane: r.accepted ? mailbox.provider : null,
+        reason: r.reason,
+      };
+    }
+    const r = await this.stalwart.send(
+      req.fromAddress,
+      {
+        fromAddress: req.fromAddress,
+        fromName: req.fromName,
+        toAddress: req.toAddress,
+        subject: req.subject,
+        body: req.body,
+        inReplyToThreadId: req.inReplyToThreadId,
+      },
+      req.transactional,
+    );
+    return {
+      accepted: r.accepted,
+      providerMessageId: r.providerMessageId,
+      threadId: r.threadId,
+      lane: r.lane,
+      reason: r.reason ?? null,
+    };
+  }
+
+  /**
+   * Persist a callEngine() result onto the SoR row (status SENT/FAILED + the
+   * provider id + thread + sentAt). Runs inside the caller's SHORT post-send tx.
+   * The row is already durable (recorded QUEUED before the send); this only
+   * advances its status — so a slow send never risked rolling the row back.
+   */
+  private async stampSendResult(
     tx: WorkspaceTxClient,
     messageId: string,
-    mailbox: MailboxAccount | null,
-    req: {
-      fromAddress: string;
-      fromName: string | null;
-      toAddress: string;
-      subject: string;
-      body: string;
-      inReplyToThreadId: string | null;
-      transactional: boolean;
-    },
+    result: EngineSendResult,
   ) {
-    // External account (gmail / microsoft) → send through its provider API; the
-    // sovereign mailbox → Stalwart/Postmark. Both are degrade-clean (a failure
-    // returns accepted:false, never throws → the row is recorded FAILED).
-    const result =
-      mailbox && this.mailProvider.handles(mailbox)
-        ? await this.mailProvider
-            .send(mailbox, {
-              from: req.fromAddress,
-              to: req.toAddress,
-              subject: req.subject,
-              body: req.body,
-              inReplyToThreadId: req.inReplyToThreadId,
-            })
-            .then((r) => ({
-              accepted: r.accepted,
-              providerMessageId: r.providerMessageId,
-              threadId: r.threadId,
-              lane: r.accepted ? mailbox.provider : null,
-              reason: r.reason,
-            }))
-        : await this.stalwart.send(
-            req.fromAddress,
-            {
-              fromAddress: req.fromAddress,
-              fromName: req.fromName,
-              toAddress: req.toAddress,
-              subject: req.subject,
-              body: req.body,
-              inReplyToThreadId: req.inReplyToThreadId,
-            },
-            req.transactional,
-          );
     const status = result.accepted ? EmailMessageStatus.SENT : EmailMessageStatus.FAILED;
     if (!result.accepted) {
       this.logger.warn(

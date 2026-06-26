@@ -6,6 +6,8 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { ThemeToggle } from '@/components/ThemeToggle';
 import { Badge, Button, Card, Select, Skeleton, cn } from '@/components/ui';
 import { ConnectedAccountsProvider, useConnectedAccounts } from './ConnectedAccountsProvider';
+import { ActiveSpaceProvider } from './ActiveSpaceProvider';
+import { SpaceSwitcher } from './SpaceSwitcher';
 import { useAgentInboxPendingCount } from './useAgentInbox';
 import { useAgentControls } from './useAgentControls';
 import {
@@ -91,7 +93,9 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <ConnectedAccountsProvider>
-      <ProductChrome>{children}</ProductChrome>
+      <ActiveSpaceProvider>
+        <ProductChrome>{children}</ProductChrome>
+      </ActiveSpaceProvider>
     </ConnectedAccountsProvider>
   );
 }
@@ -287,7 +291,6 @@ function Topbar({
   onSignOut: () => void;
 }) {
   const { accounts, activeProvider, setActiveProvider, loading } = useConnectedAccounts();
-  const linkedCount = accounts.filter((account) => account.linked).length;
   const activeMeta = providerMeta(activeProvider);
   const user = getStoredUser<EmailOpsUser>();
 
@@ -315,9 +318,7 @@ function Topbar({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <p className="truncate text-sm font-medium text-primary">{activeMeta.mailboxLabel}</p>
-              <Badge variant={linkedCount > 0 ? 'success' : 'warning'} dot>
-                {linkedCount > 0 ? `${linkedCount} linked` : 'connect'}
-              </Badge>
+              <SpaceSwitcher />
             </div>
             <p className="truncate text-[11px] text-tertiary">
               {user?.email ?? 'Headers and metadata only'}
