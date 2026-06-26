@@ -2,19 +2,23 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 /**
- * Drift guard for the Brigade federation manifest.
+ * Drift + validity guard for the Brigade federation manifest.
  *
  * Email-Ops advertises itself to the Brigade federation gateway via the public
- * `.well-known/mcps.json` (the mcps-manifest-v1 schema): its MCP endpoint, the
- * `email` tool namespace, the Brigade-JWT auth descriptor, and the tool catalog.
- * The manifest is a STATIC file (served by the Next frontend at the spec root
- * URL), so this test keeps its tool list HONEST — it must list exactly the tools
- * the MCP server actually registers (parsed from mcp.service.ts), so the catalog
- * Brigade ingests never drifts from the live `tools/list`.
+ * `.well-known/mcps.json`. The gateway's validator (app/federation/manifest_schema.py
+ * in the Brigade repo) is strict: top-level name/version/mcp_endpoint, a
+ * tool_namespace matching ^[a-z0-9_]{6,12}$, auth.federated_auth with
+ * expected_audience + signing_algorithm=="RS256", and per-tool
+ * input_schema(dict) + scopes_required(list) + tier_required(free|pro|enterprise)
+ * + read_only(bool). This test holds the static manifest to BOTH that shape AND
+ * the live tool set (it must list exactly the tools mcp.service.ts registers), so
+ * registration never fails validation and the catalog never drifts.
  */
 
 const MANIFEST_PATH = join(__dirname, '../../../frontend/public/.well-known/mcps.json');
 const MCP_SERVICE_PATH = join(__dirname, 'mcp.service.ts');
+const NAMESPACE_RE = /^[a-z0-9_]{6,12}$/;
+const TIERS = new Set(['free', 'pro', 'enterprise']);
 
 /** Every tool name passed to `server.registerTool('name', …)` in mcp.service.ts. */
 function registeredToolNames(): string[] {
@@ -29,30 +33,37 @@ function registeredToolNames(): string[] {
 describe('Brigade federation manifest (.well-known/mcps.json)', () => {
   const manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8'));
 
-  it('declares the email namespace + the canonical MCP endpoint + Brigade audience', () => {
+  it('matches the gateway manifest schema (namespace, endpoint, federated auth)', () => {
     expect(manifest.name).toBe('Email-Ops');
-    expect(manifest.tool_namespace).toBe('email');
+    expect(typeof manifest.version).toBe('string');
     expect(manifest.mcp_endpoint).toBe('https://email-ops.magicunicorn.dev/api/v1/mcp');
-    // Must match the backend's BRIGADE_EXPECTED_AUDIENCE default — else a
-    // Brigade-minted token is rejected by our JWT strategy.
-    expect(manifest.auth.brigade_jwt.audience).toBe('email-ops');
-    expect(manifest.auth.brigade_jwt.trusted_issuers).toContain('https://brigade.unicorncommander.ai');
+    // tool_namespace must satisfy the gateway regex (6-12 [a-z0-9_]); "email" (5) would 422.
+    expect(manifest.tool_namespace).toMatch(NAMESPACE_RE);
+    // The gateway validates auth.federated_auth, not auth.brigade_jwt.
+    const fa = manifest.auth?.federated_auth;
+    expect(fa?.expected_audience).toBe('email-ops'); // == the backend BRIGADE_EXPECTED_AUDIENCE
+    expect(fa?.signing_algorithm).toBe('RS256'); // the gateway hard-rejects anything else
+    expect(fa?.trusted_issuer).toBe('https://brigade.unicorncommander.ai');
   });
 
   it('lists EXACTLY the tools the MCP server registers (no drift)', () => {
     const manifestTools = (manifest.tools as { name: string }[]).map((t) => t.name).sort();
-    const registered = registeredToolNames();
-    expect(manifestTools).toEqual(registered);
-    // Sanity: the Phase-C agent-controls-the-UI tools are advertised.
+    expect(manifestTools).toEqual(registeredToolNames());
     expect(manifestTools).toEqual(
       expect.arrayContaining(['ui_navigate', 'ui_open_thread', 'ui_compose', 'ui_switch_space', 'ui_notify']),
     );
   });
 
-  it('gives every advertised tool a description (the catalog Brigade rebroadcasts)', () => {
-    for (const t of manifest.tools as { name: string; description?: string }[]) {
+  it('gives every tool the per-tool fields the gateway validator requires', () => {
+    for (const t of manifest.tools as Record<string, unknown>[]) {
+      expect(typeof t.name).toBe('string');
       expect(typeof t.description).toBe('string');
-      expect((t.description ?? '').length).toBeGreaterThan(0);
+      expect((t.description as string).length).toBeGreaterThan(0);
+      // input_schema must be an object (the gateway requires a dict).
+      expect(t.input_schema && typeof t.input_schema === 'object' && !Array.isArray(t.input_schema)).toBe(true);
+      expect(Array.isArray(t.scopes_required)).toBe(true);
+      expect(TIERS.has(t.tier_required as string)).toBe(true);
+      expect(typeof t.read_only).toBe('boolean');
     }
   });
 });
