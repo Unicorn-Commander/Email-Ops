@@ -27,7 +27,14 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Invitation, InvitationStatus, MembershipStatus, User, WorkspaceRole } from '@prisma/client';
+import {
+  Invitation,
+  InvitationStatus,
+  MembershipStatus,
+  Prisma,
+  User,
+  WorkspaceRole,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { MembershipService } from '../common/workspace/membership.service';
 import { MyWorkspace } from '../common/workspace/list-my-workspaces';
@@ -165,24 +172,34 @@ export class WorkspacesService {
       throw new ForbiddenException('Cannot grant a role above your own.');
     }
 
-    // Last-owner protection: a change that would leave the org with no ACTIVE
-    // owner is rejected.
-    const losesOwner =
-      target.role === WorkspaceRole.OWNER &&
-      target.status === MembershipStatus.ACTIVE &&
-      ((patch.role !== undefined && patch.role !== WorkspaceRole.OWNER) ||
-        (patch.status !== undefined && patch.status !== MembershipStatus.ACTIVE));
-    if (losesOwner && (await this.activeOwnerCount(workspaceId)) <= 1) {
-      throw new BadRequestException('An organization must keep at least one active owner.');
-    }
-
-    const updated = await this.prisma.membership.update({
-      where: { userKey_workspaceId: { userKey: targetUserKey, workspaceId } },
-      data: {
-        ...(patch.role !== undefined ? { role: patch.role } : {}),
-        ...(patch.status !== undefined ? { status: patch.status } : {}),
-      },
+    const data: Prisma.MembershipUpdateInput = {
+      ...(patch.role !== undefined ? { role: patch.role } : {}),
+      ...(patch.status !== undefined ? { status: patch.status } : {}),
+    };
+    // Last-owner protection — the count check + the write run in ONE transaction
+    // that LOCKS the active-owner rows (FOR UPDATE), so two concurrent owner-
+    // affecting changes serialize and can't both pass the check (the TOCTOU race).
+    // The target is re-read under the lock (its role/status may have moved).
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await this.lockActiveOwners(tx, workspaceId);
+      const fresh = await tx.membership.findUnique({
+        where: { userKey_workspaceId: { userKey: targetUserKey, workspaceId } },
+      });
+      if (!fresh) return null;
+      const losesOwner =
+        fresh.role === WorkspaceRole.OWNER &&
+        fresh.status === MembershipStatus.ACTIVE &&
+        ((patch.role !== undefined && patch.role !== WorkspaceRole.OWNER) ||
+          (patch.status !== undefined && patch.status !== MembershipStatus.ACTIVE));
+      if (losesOwner && (await this.activeOwnerCount(workspaceId, tx)) <= 1) {
+        throw new BadRequestException('An organization must keep at least one active owner.');
+      }
+      return tx.membership.update({
+        where: { userKey_workspaceId: { userKey: targetUserKey, workspaceId } },
+        data,
+      });
     });
+    if (!updated) return null;
     const u = (await this.usersByKey([targetUserKey])).get(targetUserKey);
     return {
       user_key: updated.userKey,
@@ -212,18 +229,26 @@ export class WorkspacesService {
     if (!isSelf && roleRank(target.role) > roleRank(callerRole)) {
       throw new ForbiddenException('Cannot remove a member with a higher role than yours.');
     }
-    if (
-      target.role === WorkspaceRole.OWNER &&
-      target.status === MembershipStatus.ACTIVE &&
-      (await this.activeOwnerCount(workspaceId)) <= 1
-    ) {
-      throw new BadRequestException('An organization must keep at least one active owner.');
-    }
 
-    await this.prisma.membership.delete({
-      where: { userKey_workspaceId: { userKey: targetUserKey, workspaceId } },
+    // Last-owner protection — atomic check + delete under the active-owner lock.
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockActiveOwners(tx, workspaceId);
+      const fresh = await tx.membership.findUnique({
+        where: { userKey_workspaceId: { userKey: targetUserKey, workspaceId } },
+      });
+      if (!fresh) return false;
+      if (
+        fresh.role === WorkspaceRole.OWNER &&
+        fresh.status === MembershipStatus.ACTIVE &&
+        (await this.activeOwnerCount(workspaceId, tx)) <= 1
+      ) {
+        throw new BadRequestException('An organization must keep at least one active owner.');
+      }
+      await tx.membership.delete({
+        where: { userKey_workspaceId: { userKey: targetUserKey, workspaceId } },
+      });
+      return true;
     });
-    return true;
   }
 
   // ── invitations (admin surface) ──────────────────────────────────────────
@@ -241,7 +266,9 @@ export class WorkspacesService {
       throw new BadRequestException('A valid email address is required.');
     }
 
-    // If that email already maps to an active member, there is nothing to invite.
+    // If that email already maps to ANY membership, there is nothing to invite —
+    // including a SUSPENDED/REVOKED one: re-inviting must not be a back door that
+    // silently reactivates a deliberately-suspended member at their old role.
     const existingUser = await this.prisma.user.findUnique({ where: { email } });
     if (existingUser) {
       const keys = [
@@ -250,9 +277,15 @@ export class WorkspacesService {
         existingUser.keycloakId ?? '',
       ].filter(Boolean);
       const member = await this.prisma.membership.findFirst({
-        where: { workspaceId, userKey: { in: keys }, status: MembershipStatus.ACTIVE },
+        where: { workspaceId, userKey: { in: keys } },
       });
-      if (member) throw new BadRequestException('That person is already a member of this organization.');
+      if (member) {
+        throw new BadRequestException(
+          member.status === MembershipStatus.ACTIVE
+            ? 'That person is already a member of this organization.'
+            : 'That person already has a suspended/revoked membership — reactivate them in the members list instead of re-inviting.',
+        );
+      }
     }
 
     const invitedByKey = MembershipService.membershipKey(user);
@@ -348,6 +381,13 @@ export class WorkspacesService {
       });
       throw new BadRequestException('That invitation has expired.');
     }
+    // Bind acceptance to the invited identity — a forwarded/leaked invite link
+    // cannot be redeemed by a different account (critical for admin/owner-rank
+    // invites). The /invites/mine surface already filters by email, so this only
+    // tightens the token-accept path.
+    if (invite.email.trim().toLowerCase() !== (user.email ?? '').trim().toLowerCase()) {
+      throw new ForbiddenException('This invitation was issued to a different email address.');
+    }
 
     const userKey = MembershipService.membershipKey(user);
     const existing = await this.prisma.membership.findFirst({
@@ -424,11 +464,25 @@ export class WorkspacesService {
     return role;
   }
 
-  /** Count of ACTIVE OWNER memberships (the last-owner guard). */
-  private async activeOwnerCount(workspaceId: string): Promise<number> {
-    return this.prisma.membership.count({
+  /** Count of ACTIVE OWNER memberships (the last-owner guard). Pass the tx client
+   * to count under the same transaction as the owner-row lock. */
+  private async activeOwnerCount(
+    workspaceId: string,
+    client: Prisma.TransactionClient = this.prisma,
+  ): Promise<number> {
+    return client.membership.count({
       where: { workspaceId, role: WorkspaceRole.OWNER, status: MembershipStatus.ACTIVE },
     });
+  }
+
+  /** Lock the workspace's ACTIVE OWNER rows for the current transaction so a
+   * concurrent owner-affecting write serializes behind it (closes the last-owner
+   * TOCTOU race). A no-op when the org has no active owners. */
+  private async lockActiveOwners(tx: Prisma.TransactionClient, workspaceId: string): Promise<void> {
+    await tx.$executeRaw`
+      SELECT 1 FROM "memberships"
+      WHERE "workspaceId" = ${workspaceId} AND "role"::text = 'OWNER' AND "status"::text = 'ACTIVE'
+      FOR UPDATE`;
   }
 
   /** Load Users for a set of membership keys, indexed by the key that matched

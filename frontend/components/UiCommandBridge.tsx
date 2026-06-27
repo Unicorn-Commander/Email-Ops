@@ -35,6 +35,27 @@ import { drainUiCommands, type UiCommandView } from '@/lib/uiCommandsApi';
 
 /** How often to drain while the tab is visible (ms). */
 const POLL_INTERVAL = 1500;
+/** Apply at most this many commands per drain (a flood can't jam the cockpit). */
+const MAX_APPLY = 25;
+
+/**
+ * Validate an agent-supplied `navigate` target to a SAME-ORIGIN app route — a single
+ * leading "/", not "//" or "/\" (which resolve off-origin) and no scheme (e.g.
+ * `javascript:`). Returns the safe path or null (drop it). This is the load-bearing
+ * open-redirect / DOM-XSS guard; the backend zod refine is defense-in-depth.
+ */
+function safeInternalPath(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const path = raw.replace(/[\t\n\r]/g, ''); // browsers strip these mid-URL — defeat smuggling
+  if (!/^\/(?![/\\])/.test(path)) return null;
+  try {
+    const u = new URL(path, 'https://internal.invalid');
+    if (u.origin !== 'https://internal.invalid') return null;
+    return u.pathname + u.search + u.hash;
+  } catch {
+    return null;
+  }
+}
 
 export function UiCommandBridge() {
   const { activeWorkspace } = useActiveWorkspace();
@@ -52,10 +73,13 @@ export function UiCommandBridge() {
   const apply = useCallback(
     (cmd: UiCommandView) => {
       switch (cmd.kind) {
-        case 'navigate':
-          router.push(cmd.payload.path);
-          toast({ title: 'An agent moved you', body: cmd.payload.path, tone: 'info' });
+        case 'navigate': {
+          const path = safeInternalPath(cmd.payload.path);
+          if (!path) break; // drop an off-origin / scheme path rather than navigate to it
+          router.push(path);
+          toast({ title: 'An agent moved you', body: path, tone: 'info' });
           break;
+        }
         case 'switch_space':
           setActiveSpaceId(cmd.payload.space_id);
           toast({ title: 'An agent switched your Space', tone: 'info' });
@@ -83,6 +107,8 @@ export function UiCommandBridge() {
             tone: 'info',
           });
           break;
+        default:
+          break; // unknown kind (forward-compat) — ignore
       }
     },
     [router, setActiveSpaceId, toast, enqueueLocal],
@@ -95,7 +121,14 @@ export function UiCommandBridge() {
     drainingRef.current = true;
     try {
       const { commands } = await drainUiCommands(activeWorkspaceId);
-      for (const cmd of commands) apply(cmd);
+      // Bound the batch; isolate each apply so one malformed command can't abort the rest.
+      for (const cmd of commands.slice(0, MAX_APPLY)) {
+        try {
+          apply(cmd);
+        } catch {
+          // swallow — a bad command must never break the cockpit
+        }
+      }
     } catch (err) {
       // A 401 means the session lapsed — stop rather than hammer a dead session.
       // Every other failure is ambient: swallow it so the cockpit never breaks.

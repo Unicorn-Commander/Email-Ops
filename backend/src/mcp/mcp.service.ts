@@ -527,7 +527,17 @@ export class McpService {
           'No side effect. Returns { enqueued, command_id, kind }.',
         inputSchema: {
           workspace_id: z.string().optional(),
-          path: z.string().min(1).max(512),
+          // Internal app route ONLY — a single leading "/", not "//" or "/\" (which
+          // resolve off-origin) and no scheme (e.g. javascript:). This is the
+          // server-side half of the open-redirect / DOM-XSS guard; the cockpit
+          // re-validates before navigating (defense in depth).
+          path: z
+            .string()
+            .min(1)
+            .max(512)
+            .refine((p) => /^\/(?![/\\])/.test(p.replace(/[\t\n\r]/g, '')), {
+              message: 'path must be an internal app route starting with a single "/".',
+            }),
         },
       },
       async (args: any) => wrap(await uiTools.navigate(user, args)),

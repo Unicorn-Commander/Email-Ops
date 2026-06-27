@@ -6,18 +6,31 @@
  * paths run inside `withWorkspace(workspaceId, ucUid, …)` (the RLS chokepoint) and
  * scope by an explicit (workspaceId, ucUid) predicate — the per-WORKSPACE RLS
  * fence plus the per-USER ucUid fence in app code, so a command only ever reaches
- * the user it was addressed to. Delivery is drain-on-read (at-most-once); commands
- * older than `STALE_MS` are never replayed (a long-offline tab won't get a burst of
- * ancient navigations), and rows are ephemeral.
+ * the user it was addressed to. Delivery is DELETE-on-read: drain deletes the
+ * caller's rows and returns them in ONE atomic statement, so a row is handed to
+ * exactly one drainer (two racing tabs never double-apply) and consumed/stale rows
+ * never accumulate. Commands older than `STALE_MS` are deleted but NOT applied (a
+ * long-offline tab won't get a burst of ancient navigations), and the applied set
+ * is capped at `MAX_DRAIN` so a flood can't jam the cockpit.
  */
 
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { Prisma, UiCommand, UiCommandKind } from '@prisma/client';
+import { Prisma, UiCommandKind } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { UiCommandView, kindToWire } from './ui-commands.types';
 
-/** Commands older than this are skipped on drain (and effectively expire). */
+/** Commands older than this are deleted but never applied (effectively expire). */
 const STALE_MS = 5 * 60 * 1000;
+/** Cap on how many commands one drain applies (a flood can't jam the cockpit). */
+const MAX_DRAIN = 50;
+
+/** One row as returned by the raw DELETE … RETURNING. */
+interface UiCommandRow {
+  id: string;
+  kind: UiCommandKind;
+  payload: unknown;
+  createdAt: Date;
+}
 
 @Injectable()
 export class UiCommandService {
@@ -41,31 +54,40 @@ export class UiCommandService {
     });
   }
 
-  /** Drain the caller's pending, non-stale commands (oldest first) and mark them
-   * consumed in the same transaction (at-most-once delivery). */
+  /**
+   * Atomically DELETE the caller's commands and return them. The single
+   * DELETE … RETURNING is the claim: a row is removed exactly once, so concurrent
+   * drains can't double-apply (and stale rows are swept, not left to accumulate).
+   * Only the fresh ones (created within `STALE_MS`) are applied, oldest first,
+   * bounded to `MAX_DRAIN`.
+   */
   async drain(workspaceId: string, ucUid: string): Promise<UiCommandView[]> {
     if (!ucUid || !ucUid.trim()) return [];
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const cutoff = new Date(Date.now() - STALE_MS);
-      const pending = await tx.uiCommand.findMany({
-        where: { workspaceId, ucUid, consumedAt: null, createdAt: { gt: cutoff } },
-        orderBy: { createdAt: 'asc' },
-      });
-      if (pending.length > 0) {
-        await tx.uiCommand.updateMany({
-          where: { id: { in: pending.map((p) => p.id) } },
-          data: { consumedAt: new Date() },
-        });
-      }
-      return pending.map((p) => this.toView(p));
+      const cutoffMs = Date.now() - STALE_MS;
+      const rows = await tx.$queryRaw<UiCommandRow[]>(Prisma.sql`
+        DELETE FROM "ui_commands"
+        WHERE "workspaceId" = ${workspaceId} AND "ucUid" = ${ucUid}
+        RETURNING "id", "kind", "payload", "createdAt"
+      `);
+      return rows
+        .filter((r) => r.createdAt.getTime() > cutoffMs)
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .slice(0, MAX_DRAIN)
+        .map((r) => this.toView(r));
     });
   }
 
-  private toView(row: UiCommand): UiCommandView {
+  private toView(row: UiCommandRow): UiCommandView {
+    // JSONB comes back parsed from $queryRaw, but coerce defensively.
+    const payload =
+      typeof row.payload === 'string'
+        ? (JSON.parse(row.payload) as Record<string, unknown>)
+        : ((row.payload ?? {}) as Record<string, unknown>);
     return {
       id: row.id,
       kind: kindToWire(row.kind),
-      payload: (row.payload ?? {}) as Record<string, unknown>,
+      payload,
       created_at: row.createdAt.toISOString(),
     };
   }

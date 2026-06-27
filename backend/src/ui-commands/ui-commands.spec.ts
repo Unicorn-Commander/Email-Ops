@@ -98,4 +98,31 @@ describe('UiCommandService + UiControlTools (integration)', () => {
     expect(drained[1].payload).toMatchObject({ title: 'Archived 12 newsletters', tone: 'info' });
     expect(drained[2].payload).toMatchObject({ space_id: 'all' });
   });
+
+  it('delete-on-read purges ALL the caller\'s rows (incl. stale), leaving none behind', async () => {
+    await prisma.uiCommand.create({
+      data: {
+        workspaceId: A,
+        ucUid: KC,
+        kind: UiCommandKind.NOTIFY,
+        payload: { title: 'old' },
+        createdAt: new Date(Date.now() - 10 * 60 * 1000),
+      },
+    });
+    await service.enqueue(A, KC, UiCommandKind.NOTIFY, { title: 'new' });
+    const drained = await service.drain(A, KC);
+    expect(drained.map((c) => c.payload.title)).toEqual(['new']); // stale not applied
+    // …but BOTH rows are gone — the channel never accumulates.
+    expect(await prisma.uiCommand.count({ where: { workspaceId: A, ucUid: KC } })).toBe(0);
+  });
+
+  it('caps the applied set at MAX_DRAIN so a flood cannot jam the cockpit', async () => {
+    for (let i = 0; i < 60; i += 1) {
+      await service.enqueue(A, KC, UiCommandKind.NOTIFY, { title: `n${i}` });
+    }
+    const drained = await service.drain(A, KC);
+    expect(drained.length).toBeLessThanOrEqual(50);
+    // The whole flood is still purged regardless of the cap.
+    expect(await prisma.uiCommand.count({ where: { workspaceId: A, ucUid: KC } })).toBe(0);
+  });
 });

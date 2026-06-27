@@ -81,7 +81,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const toast = useCallback<ToastFn>(
     ({ title, body, tone = 'info', duration = DEFAULT_DURATION }) => {
       const id = idRef.current++;
-      setToasts((list) => [...list, { id, title, body, tone, duration }]);
+      // Cap the stack so an agent flooding ui_notify can't pile up unbounded DOM.
+      setToasts((list) => [...list, { id, title, body, tone, duration }].slice(-6));
       const timer = setTimeout(() => dismiss(id), duration);
       timersRef.current.set(id, timer);
     },

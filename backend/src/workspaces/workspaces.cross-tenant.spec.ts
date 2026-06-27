@@ -204,4 +204,36 @@ describe('WorkspacesService — multi-org RBAC + invitations (integration)', () 
     const remaining = await service.listMembers(orgA.workspace_id, owner);
     expect(remaining.map((m) => m.email)).not.toContain(member.email);
   });
+
+  it('binds invite acceptance to the invited email (a leaked token can\'t be redeemed by another account)', async () => {
+    const owner = await makeUser('owner');
+    const invitee = await makeUser('invitee');
+    const stranger = await makeUser('stranger');
+    const org = await service.createOrg(owner, { displayName: 'BTest EmailBind' });
+    const invite = await service.invite(org.workspace_id, owner, {
+      email: invitee.email,
+      role: WorkspaceRole.MEMBER,
+    });
+    // A different authenticated account holding the token cannot redeem it.
+    await expect(service.acceptInvite(stranger, invite.token!)).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    // The invited email can.
+    const joined = await service.acceptInvite(invitee, invite.token!);
+    expect(joined.workspace_id).toBe(org.workspace_id);
+  });
+
+  it('refuses to re-invite a suspended member (no silent reactivation back door)', async () => {
+    const owner = await makeUser('owner');
+    const member = await makeUser('member');
+    const org = await service.createOrg(owner, { displayName: 'BTest Suspend' });
+    await addMember(org.workspace_id, member, WorkspaceRole.MEMBER);
+    await service.updateMember(org.workspace_id, owner, member.keycloakId!, {
+      status: MembershipStatus.SUSPENDED,
+    });
+    // Re-inviting their email is refused — the admin must reactivate explicitly.
+    await expect(
+      service.invite(org.workspace_id, owner, { email: member.email }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
 });
