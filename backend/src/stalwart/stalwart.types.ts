@@ -78,8 +78,8 @@ export interface StalwartSendResult {
   providerMessageId: string | null;
   /** The thread the message landed in (new or the replied-to thread). */
   threadId: string | null;
-  /** Which deliverability lane carried it: 'stalwart' | 'postmark'. */
-  lane: 'stalwart' | 'postmark' | null;
+  /** Which deliverability lane carried it: 'stalwart' | 'james' | 'postmark'. */
+  lane: 'stalwart' | 'james' | 'postmark' | null;
   /** A human reason on rejection (logged). */
   reason?: string | null;
 }
