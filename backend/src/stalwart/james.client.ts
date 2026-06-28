@@ -38,6 +38,13 @@ import {
 export class JamesClient extends StalwartPort {
   private readonly logger = new Logger(JamesClient.name);
 
+  /** Cached JMAP mail accountId for the authenticated principal (resolved once). */
+  private accountIdCache: string | null = null;
+
+  /** JMAP method families that REQUIRE an accountId argument on James. */
+  private static readonly ACCOUNT_SCOPED =
+    /^(Email|Mailbox|Thread|EmailSubmission|Identity|SearchSnippet|VacationResponse|Quota)\//;
+
   constructor(private readonly config: ConfigService) {
     super();
     if (!this.isConfigured()) {
@@ -110,11 +117,72 @@ export class JamesClient extends StalwartPort {
     }
   }
 
+  /**
+   * Resolve (and cache) the JMAP mail accountId for the authenticated principal.
+   * James REQUIRES an explicit accountId on every account-scoped method call
+   * (Stalwart's fronting projection did not), so fetch it once from the Session
+   * resource at {JAMES_JMAP_URL}/session and reuse it. Degrade-clean: returns
+   * null (→ jmap() returns null → reads [], sends best-effort) on any gap.
+   */
+  private async resolveAccountId(): Promise<string | null> {
+    if (this.accountIdCache) return this.accountIdCache;
+    const base = this.jmapUrl;
+    if (!base) return null;
+    let res: Response;
+    try {
+      res = await this.fetchWithTimeout(`${base}/session`, {
+        method: 'GET',
+        headers: this.jmapHeaders(),
+      });
+    } catch (err) {
+      this.logger.warn(`James JMAP session transport error: ${(err as Error).message}`);
+      return null;
+    }
+    if (!res.ok) {
+      this.logger.warn(`James JMAP session HTTP ${res.status}`);
+      return null;
+    }
+    try {
+      const s = (await res.json()) as { primaryAccounts?: Record<string, string> };
+      const id = s?.primaryAccounts?.['urn:ietf:params:jmap:mail'];
+      if (typeof id === 'string' && id) {
+        this.accountIdCache = id;
+        return id;
+      }
+      this.logger.warn('James JMAP session carried no mail account');
+      return null;
+    } catch (err) {
+      this.logger.warn(`James JMAP session non-JSON: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
   /** Issue a JMAP request; return parsed methodResponses or null on any failure (never throws). */
   private async jmap(methodCalls: unknown[]): Promise<any[] | null> {
     const url = this.jmapUrl;
     if (!url) return null;
-    const body = { using: ['urn:ietf:params:jmap:core', 'urn:ietf:params:jmap:mail'], methodCalls };
+    const accountId = await this.resolveAccountId();
+    if (!accountId) return null;
+    // James requires an explicit accountId on every account-scoped call; inject
+    // it wherever the caller omitted it (result references like #ids are kept).
+    const calls = (methodCalls as any[]).map((c) =>
+      Array.isArray(c) &&
+      typeof c[0] === 'string' &&
+      JamesClient.ACCOUNT_SCOPED.test(c[0]) &&
+      c[1] &&
+      typeof c[1] === 'object' &&
+      (c[1] as Record<string, unknown>).accountId === undefined
+        ? [c[0], { accountId, ...(c[1] as Record<string, unknown>) }, c[2]]
+        : c,
+    );
+    const body = {
+      using: [
+        'urn:ietf:params:jmap:core',
+        'urn:ietf:params:jmap:mail',
+        'urn:ietf:params:jmap:submission',
+      ],
+      methodCalls: calls,
+    };
     let res: Response;
     try {
       res = await this.fetchWithTimeout(url, {
