@@ -10,7 +10,9 @@
  *   - compose_email             -> MessageComposeView
  *
  * The cockpit's client maps `message_count`→messageCount, `last_message_at`→
- * lastMessageAt, etc. — so the field NAMES below are load-bearing.
+ * lastMessageAt, etc. — so the field NAMES below are load-bearing. The
+ * webmail-wave additions (unread/has_attachments/html_body/etc.) are ADDITIVE
+ * ONLY — existing consumers that don't know these fields simply ignore them.
  */
 
 import { MessageDisposition } from '@prisma/client';
@@ -40,9 +42,26 @@ export interface ThreadView {
   // Optional on the shared federation contract — populated by the client BFF
   // (listMailboxInbox); the customer-360 contact-history surface omits it.
   disposition?: MessageDisposition;
+  // webmail wave: cheaply-derived attachment presence (JMAP `hasAttachment`).
+  // Omitted (not `false`) when the data source can't answer it for free.
+  has_attachments?: boolean;
+  // webmail wave (unified inbox aggregate only): which mailbox this thread
+  // belongs to, so the client can render/act on it in a merged list.
+  mailbox_id?: string;
+  mailbox_address?: string;
 }
 
-/** One message within a thread (bodies as previews only). */
+/** One attachment on a message (webmail wave: thread-detail enrichment). */
+export interface AttachmentView {
+  blob_id: string;
+  name: string | null;
+  type: string | null;
+  size: number | null;
+  /** Content-ID for an inline image (matches an <img cid:...> reference); null otherwise. */
+  cid: string | null;
+}
+
+/** One message within a thread (bodies as previews only, PLUS the webmail-wave detail fields). */
 export interface MessageView {
   id: string;
   thread_id: string;
@@ -52,6 +71,16 @@ export interface MessageView {
   sent_at: string | null;
   preview: string | null;
   direction: string; // received | sent | draft
+  // webmail wave — thread-detail enrichment (additive; undefined when not
+  // sourced from the live JMAP/engine path, e.g. a thin local-only SoR row).
+  cc?: ParticipantView[];
+  /** Raw HTML body — NOT sanitized server-side; the client sanitizes on render. */
+  html_body?: string | null;
+  text_body?: string | null;
+  message_id_header?: string | null;
+  references?: string[] | null;
+  is_unread?: boolean;
+  attachments?: AttachmentView[];
 }
 
 /**
@@ -69,10 +98,25 @@ export interface MessageComposeView {
   created_at: string | null;
 }
 
+/** One uploaded compose attachment reference (webmail wave: compose extension). */
+export interface ComposeAttachmentInput {
+  blob_id: string;
+  name: string;
+  type: string;
+}
+
 /** Internal: the parsed compose request the service acts on. */
 export interface ComposeInput {
   contactId: string | null;
   toAddress: string;
+  /**
+   * The full recipient list (webmail wave: `to_address` may arrive comma-joined
+   * from the client — the controller splits it here). When present + non-empty
+   * this is authoritative for the actual send; `toAddress` stays its first
+   * entry (the back-compat single-recipient field used for the SoR row / the
+   * federation contract).
+   */
+  toAddresses?: string[];
   subject: string;
   body: string;
   mode: 'send' | 'draft';
@@ -86,6 +130,16 @@ export interface ComposeInput {
    * resolution; otherwise the usual resolveSendMailbox path applies.
    */
   fromMailboxAccountId?: string | null;
+  // webmail wave — compose extension (all optional, back-compat). Carried
+  // through to the mail engine's send lane (StalwartPort); see
+  // JamesClient.send for the attachment-routing deviation (JMAP, not Postmark).
+  cc?: string[];
+  bcc?: string[];
+  attachments?: ComposeAttachmentInput[];
+  /** The Message-ID header of the message being replied to (for In-Reply-To threading). */
+  inReplyToMessageId?: string | null;
+  /** The References header chain (oldest first). */
+  references?: string[];
 }
 
 /** An agent-inbox item view (the approval queue surface). */
@@ -150,4 +204,23 @@ export interface EngagementCaptureResult {
   statusBefore: string | null;
   statusAfter: string | null;
   statusAdvanced: boolean;
+}
+
+/** One mailbox's Inbox unread/total counts (webmail wave: counts surface). */
+export interface MailboxCountsView {
+  mailbox_id: string;
+  address: string;
+  inbox_unread: number;
+  inbox_total: number;
+  /** True when the engine call for THIS mailbox failed (zeros above are a placeholder, not real). */
+  error?: boolean;
+}
+
+/** The webmail-wave bulk thread action kinds (archive/trash/spam/inbox reuse DispositionService; read/unread reuse the $seen toggle). */
+export type BulkThreadAction = 'archive' | 'trash' | 'spam' | 'inbox' | 'read' | 'unread';
+
+/** The per-thread outcome of a bulk action (webmail wave). */
+export interface BulkActionResult {
+  succeeded: string[];
+  failed: string[];
 }

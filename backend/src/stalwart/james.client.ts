@@ -18,6 +18,15 @@
  * directly; James relays out via its Postmark smarthost — an engine config, not
  * app logic.)
  *
+ * ATTACHMENT-SEND ROUTING DEVIATION (webmail wave, flagged in the wave report):
+ * an attachment-bearing send is ALWAYS routed via JMAP EmailSubmission
+ * (sendViaJames), even when Postmark is configured — the uploaded blob lives in
+ * James' own blob store (keyed by blobId under the sending account), and
+ * Postmark's API has no way to reference it directly; re-downloading + base64
+ * re-encoding every attachment just to hand it to Postmark would be wasteful and
+ * fragile. Plain sends (no attachments) keep preferring Postmark exactly as
+ * before. cc/bcc/threading (in-reply-to/references) work on BOTH lanes.
+ *
  * DELEGATION-AWARE: the configured principal (hq@) holds James delegated access
  * to the other sovereign mailboxes, so its JMAP Session lists EVERY account it
  * may act on (`session.accounts`, keyed by accountId with `name` = the mailbox
@@ -37,12 +46,30 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { StalwartPort } from './stalwart.port';
 import {
+  StalwartAttachment,
+  StalwartBlobDownload,
+  StalwartFolderQuery,
+  StalwartFolderThreadsResult,
+  StalwartMailboxCounts,
   StalwartMessage,
+  StalwartMessageDetail,
+  StalwartMessageHeaders,
   StalwartParticipant,
   StalwartSendRequest,
   StalwartSendResult,
   StalwartThread,
+  StalwartUploadResult,
 } from './stalwart.types';
+
+/** The client mail folder → the JMAP Mailbox `role` it lives under on James. */
+const FOLDER_ROLE: Record<StalwartFolderQuery['folder'], string> = {
+  inbox: 'inbox',
+  archive: 'archive',
+  spam: 'junk',
+  trash: 'trash',
+  sent: 'sent',
+  drafts: 'drafts',
+};
 
 @Injectable()
 export class JamesClient extends StalwartPort {
@@ -56,6 +83,10 @@ export class JamesClient extends StalwartPort {
 
   /** Addresses already given their one stale-session re-fetch (don't hammer /session). */
   private readonly refreshedMisses = new Set<string>();
+
+  /** The session's blob download/upload URL templates (RFC 8620 §2), cached with the session. */
+  private downloadUrlTemplate: string | null = null;
+  private uploadUrlTemplate: string | null = null;
 
   /** JMAP method families that REQUIRE an accountId argument on James. */
   private static readonly ACCOUNT_SCOPED =
@@ -116,11 +147,16 @@ export class JamesClient extends StalwartPort {
 
   // --- JMAP transport -----------------------------------------------------
 
-  private jmapHeaders(): Record<string, string> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  /** Auth-only headers (no Content-Type) — used for raw blob download/upload. */
+  private authHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {};
     if (this.bearer) headers['Authorization'] = `Bearer ${this.bearer}`;
     else if (this.basic) headers['Authorization'] = `Basic ${Buffer.from(this.basic).toString('base64')}`;
     return headers;
+  }
+
+  private jmapHeaders(): Record<string, string> {
+    return { 'Content-Type': 'application/json', ...this.authHeaders() };
   }
 
   private async fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
@@ -135,11 +171,12 @@ export class JamesClient extends StalwartPort {
 
   /**
    * Fetch the JMAP Session resource at {JAMES_JMAP_URL}/session and (re)build
-   * BOTH account caches: the primary mail accountId AND the address→accountId
+   * ALL session-derived caches: the primary mail accountId, the address→accountId
    * delegation map from `session.accounts` (every account the principal may act
-   * on; `name` is the mailbox address). Degrade-clean: returns null (→ jmap()
-   * returns null → reads [], sends best-effort) on any gap, leaving any
-   * previously cached session in place.
+   * on; `name` is the mailbox address), and the blob download/upload URL
+   * templates. Degrade-clean: returns null (→ jmap() returns null → reads [],
+   * sends best-effort) on any gap, leaving any previously cached session in
+   * place.
    */
   private async fetchSession(): Promise<string | null> {
     const base = this.jmapUrl;
@@ -162,6 +199,8 @@ export class JamesClient extends StalwartPort {
       const s = (await res.json()) as {
         primaryAccounts?: Record<string, string>;
         accounts?: Record<string, { name?: unknown }>;
+        downloadUrl?: unknown;
+        uploadUrl?: unknown;
       };
       const id = s?.primaryAccounts?.['urn:ietf:params:jmap:mail'];
       if (typeof id === 'string' && id) {
@@ -176,6 +215,8 @@ export class JamesClient extends StalwartPort {
           }
         }
         this.accountsByAddress = byAddress;
+        if (typeof s.downloadUrl === 'string' && s.downloadUrl) this.downloadUrlTemplate = s.downloadUrl;
+        if (typeof s.uploadUrl === 'string' && s.uploadUrl) this.uploadUrlTemplate = s.uploadUrl;
         return id;
       }
       this.logger.warn('James JMAP session carried no mail account');
@@ -224,6 +265,12 @@ export class JamesClient extends StalwartPort {
       );
     }
     return this.accountIdCache ?? primary;
+  }
+
+  /** Ensure the blob download/upload URL templates are cached (fetch the session if not). */
+  private async ensureBlobTemplates(): Promise<void> {
+    if (this.downloadUrlTemplate && this.uploadUrlTemplate) return;
+    await this.fetchSession();
   }
 
   /**
@@ -304,6 +351,14 @@ export class JamesClient extends StalwartPort {
       if (parsed) out.push(parsed);
     }
     return out;
+  }
+
+  /** Resolve the JMAP mailbox id for a folder's role, under `forAddress`'s account. Null when absent. */
+  private async resolveMailboxIdForRole(forAddress: string, role: string): Promise<string | null> {
+    const responses = await this.jmap([['Mailbox/query', { filter: { role } }, '0']], forAddress);
+    if (!responses) return null;
+    const ids = this.named(responses, 'Mailbox/query')?.ids;
+    return Array.isArray(ids) && typeof ids[0] === 'string' ? ids[0] : null;
   }
 
   // --- StalwartPort implementation ----------------------------------------
@@ -415,20 +470,334 @@ export class JamesClient extends StalwartPort {
     return out;
   }
 
+  /**
+   * Live, folder-scoped, paged, (optionally) full-text-searched thread listing —
+   * the webmail wave's search+paging surface. Resolves the folder's JMAP
+   * mailbox id (by role) under the mailbox's own account, then
+   * Email/query(inMailbox[+text]) → Email/get(incl. hasAttachment) →
+   * Thread/get(counts). Degrade-clean at every step (missing folder / failed
+   * call → `{ threads: [] }`).
+   */
+  async listFolderThreads(mailbox: string, query: StalwartFolderQuery): Promise<StalwartFolderThreadsResult> {
+    if (!this.jmapUrl) return { threads: [] };
+    const role = FOLDER_ROLE[query.folder] ?? 'inbox';
+    const mailboxId = await this.resolveMailboxIdForRole(mailbox, role);
+    if (!mailboxId) return { threads: [] };
+
+    const filter =
+      query.query && query.query.trim()
+        ? { operator: 'AND', conditions: [{ inMailbox: mailboxId }, { text: query.query.trim() }] }
+        : { inMailbox: mailboxId };
+
+    const responses = await this.jmap([
+      [
+        'Email/query',
+        {
+          filter,
+          collapseThreads: true,
+          sort: [{ property: 'receivedAt', isAscending: false }],
+          position: query.offset,
+          limit: query.limit,
+          calculateTotal: true,
+        },
+        '0',
+      ],
+      [
+        'Email/get',
+        {
+          '#ids': { resultOf: '0', name: 'Email/query', path: '/ids' },
+          properties: [
+            'id', 'threadId', 'subject', 'from', 'to', 'receivedAt', 'preview', 'keywords', 'hasAttachment',
+          ],
+        },
+        '1',
+      ],
+      ['Thread/get', { '#ids': { resultOf: '1', name: 'Email/get', path: '/list/*/threadId' } }, '2'],
+    ], mailbox);
+    if (!responses) return { threads: [] };
+    const emails = this.named(responses, 'Email/get')?.list;
+    if (!Array.isArray(emails)) return { threads: [] };
+    const threadList = this.named(responses, 'Thread/get')?.list;
+    const countByThread = new Map<string, number>();
+    if (Array.isArray(threadList)) {
+      for (const t of threadList) {
+        const id = (t as any)?.id;
+        const ids = (t as any)?.emailIds;
+        if (typeof id === 'string' && Array.isArray(ids)) countByThread.set(id, ids.length);
+      }
+    }
+    const threads: StalwartThread[] = [];
+    for (const m of emails) {
+      if (!m || typeof m !== 'object') continue;
+      const threadId = (m as any).threadId;
+      if (typeof threadId !== 'string' || !threadId) continue;
+      const keywords = (m as any).keywords ?? {};
+      threads.push({
+        id: threadId,
+        subject: typeof (m as any).subject === 'string' ? (m as any).subject : null,
+        messageCount: countByThread.get(threadId) ?? 1,
+        unread: keywords['$seen'] !== true,
+        lastMessageAt: typeof (m as any).receivedAt === 'string' ? (m as any).receivedAt : null,
+        lastSnippet: typeof (m as any).preview === 'string' ? (m as any).preview : null,
+        participants: [...this.toParticipants((m as any).from), ...this.toParticipants((m as any).to)],
+        hasAttachments: (m as any).hasAttachment === true,
+      });
+    }
+    const total = this.named(responses, 'Email/query')?.total;
+    return { threads, total: typeof total === 'number' ? total : undefined };
+  }
+
+  /**
+   * The FULL detail of every message in a thread — bodies (raw HTML/text),
+   * cc, threading headers, read state, attachments. Two round trips
+   * (Thread/get for the ordered emailIds, then Email/get for the detail) since
+   * Email/set-style patches can't target a back-reference-only id list, and we
+   * want a clean [] on any missing piece rather than a half-built object.
+   */
+  async getThreadDetail(mailbox: string, threadId: string): Promise<StalwartMessageDetail[]> {
+    if (!this.jmapUrl) return [];
+    const responses = await this.jmap([
+      ['Thread/get', { ids: [threadId] }, '0'],
+      [
+        'Email/get',
+        {
+          '#ids': { resultOf: '0', name: 'Thread/get', path: '/list/*/emailIds' },
+          properties: [
+            'id', 'threadId', 'from', 'to', 'cc', 'subject', 'receivedAt', 'preview', 'keywords',
+            'messageId', 'references', 'htmlBody', 'textBody', 'bodyValues', 'attachments',
+          ],
+          fetchHTMLBodyValues: true,
+          fetchTextBodyValues: true,
+        },
+        '1',
+      ],
+    ], mailbox);
+    if (!responses) return [];
+    const list = this.named(responses, 'Email/get')?.list;
+    if (!Array.isArray(list)) return [];
+    const out: StalwartMessageDetail[] = [];
+    for (const m of list) {
+      if (!m || typeof m !== 'object') continue;
+      const id = (m as any).id;
+      if (typeof id !== 'string' || !id) continue;
+      const keywords = (m as any).keywords ?? {};
+      const direction: StalwartMessage['direction'] = keywords['$draft']
+        ? 'draft'
+        : keywords['$sent']
+          ? 'sent'
+          : 'received';
+      const bodyValues = (m as any).bodyValues && typeof (m as any).bodyValues === 'object'
+        ? ((m as any).bodyValues as Record<string, { value?: unknown }>)
+        : {};
+      const htmlBody = this.bodyText((m as any).htmlBody, bodyValues);
+      const textBody = this.bodyText((m as any).textBody, bodyValues);
+      const messageIdArr = (m as any).messageId;
+      const messageIdHeader =
+        Array.isArray(messageIdArr) && typeof messageIdArr[0] === 'string' ? messageIdArr[0] : null;
+      const referencesArr = (m as any).references;
+      const references = Array.isArray(referencesArr)
+        ? referencesArr.filter((r): r is string => typeof r === 'string')
+        : null;
+      const attachments: StalwartAttachment[] = Array.isArray((m as any).attachments)
+        ? (m as any).attachments
+            .filter((a: unknown) => a && typeof a === 'object' && typeof (a as any).blobId === 'string')
+            .map((a: any) => ({
+              blobId: a.blobId,
+              name: typeof a.name === 'string' ? a.name : null,
+              type: typeof a.type === 'string' ? a.type : null,
+              size: typeof a.size === 'number' ? a.size : null,
+              cid: typeof a.cid === 'string' ? a.cid : null,
+            }))
+        : [];
+      out.push({
+        id,
+        threadId: typeof (m as any).threadId === 'string' ? (m as any).threadId : threadId,
+        from: this.toParticipant(Array.isArray((m as any).from) ? (m as any).from[0] : null),
+        to: this.toParticipants((m as any).to),
+        cc: this.toParticipants((m as any).cc),
+        subject: typeof (m as any).subject === 'string' ? (m as any).subject : null,
+        sentAt: typeof (m as any).receivedAt === 'string' ? (m as any).receivedAt : null,
+        preview: typeof (m as any).preview === 'string' ? (m as any).preview : null,
+        direction,
+        htmlBody,
+        textBody,
+        messageIdHeader,
+        references,
+        isUnread: keywords['$seen'] !== true,
+        attachments,
+      });
+    }
+    return out;
+  }
+
+  /** Resolve a JMAP `htmlBody`/`textBody` EmailBodyPart list to its bodyValues text. */
+  private bodyText(parts: unknown, bodyValues: Record<string, { value?: unknown }>): string | null {
+    if (!Array.isArray(parts) || !parts.length) return null;
+    const partId = (parts[0] as any)?.partId;
+    if (typeof partId !== 'string') return null;
+    const value = bodyValues[partId]?.value;
+    return typeof value === 'string' ? value : null;
+  }
+
+  /**
+   * Set (read=true) or clear (read=false) the `$seen` keyword on every message
+   * in a thread. Two round trips (resolve emailIds, then patch each) since the
+   * update map's keys must be concrete ids. Returns false on any degrade step.
+   */
+  async setThreadRead(mailbox: string, threadId: string, read: boolean): Promise<boolean> {
+    if (!this.jmapUrl) return false;
+    const idsResp = await this.jmap([['Thread/get', { ids: [threadId] }, '0']], mailbox);
+    if (!idsResp) return false;
+    const emailIds = this.named(idsResp, 'Thread/get')?.list?.[0]?.emailIds;
+    if (!Array.isArray(emailIds) || emailIds.length === 0) return false;
+    const update: Record<string, Record<string, boolean>> = {};
+    for (const id of emailIds) {
+      if (typeof id === 'string') update[id] = { 'keywords/$seen': read };
+    }
+    if (Object.keys(update).length === 0) return false;
+    const setResp = await this.jmap([['Email/set', { update }, '0']], mailbox);
+    if (!setResp) return false;
+    const result = this.named(setResp, 'Email/set');
+    return !!result && (result.updated == null || Object.keys(result.updated).length > 0 || Object.keys(update).length === 0 || (result.notUpdated == null));
+  }
+
+  /** The Inbox unread/total counts for one mailbox (JMAP Mailbox `role: inbox`). */
+  async getMailboxCounts(mailbox: string): Promise<StalwartMailboxCounts | null> {
+    if (!this.jmapUrl) return null;
+    const responses = await this.jmap([
+      ['Mailbox/query', { filter: { role: 'inbox' } }, '0'],
+      [
+        'Mailbox/get',
+        {
+          '#ids': { resultOf: '0', name: 'Mailbox/query', path: '/ids' },
+          properties: ['id', 'role', 'unreadEmails', 'totalEmails'],
+        },
+        '1',
+      ],
+    ], mailbox);
+    if (!responses) return null;
+    const list = this.named(responses, 'Mailbox/get')?.list;
+    const inbox = Array.isArray(list) ? list[0] : undefined;
+    if (!inbox) return null;
+    return {
+      inboxUnread: typeof inbox.unreadEmails === 'number' ? inbox.unreadEmails : 0,
+      inboxTotal: typeof inbox.totalEmails === 'number' ? inbox.totalEmails : 0,
+    };
+  }
+
+  /**
+   * Resolve one message's real Message-ID + References headers by its JMAP
+   * email id (used to build a correct In-Reply-To/References chain when the
+   * caller only has an internal message id, e.g. from the thread-detail API).
+   */
+  async getMessageHeaders(mailbox: string, messageId: string): Promise<StalwartMessageHeaders | null> {
+    if (!this.jmapUrl) return null;
+    const responses = await this.jmap([
+      ["Email/get", { ids: [messageId], properties: ["messageId", "references"] }, "0"],
+    ], mailbox);
+    if (!responses) return null;
+    const list = this.named(responses, "Email/get")?.list;
+    const m = Array.isArray(list) ? list[0] : undefined;
+    if (!m) return null;
+    const messageIdArr = (m as any).messageId;
+    const messageIdHeader =
+      Array.isArray(messageIdArr) && typeof messageIdArr[0] === "string" ? messageIdArr[0] : null;
+    const referencesArr = (m as any).references;
+    const references = Array.isArray(referencesArr)
+      ? referencesArr.filter((r: unknown): r is string => typeof r === "string")
+      : null;
+    return { messageIdHeader, references };
+  }
+
+  /** Download one blob (an attachment's bytes) via the JMAP session `downloadUrl` template. */
+  async downloadBlob(mailbox: string, blobId: string): Promise<StalwartBlobDownload | null> {
+    if (!this.jmapUrl) return null;
+    await this.ensureBlobTemplates();
+    const accountId = await this.resolveAccountIdFor(mailbox);
+    if (!accountId || !this.downloadUrlTemplate) return null;
+    const url = this.downloadUrlTemplate
+      .replace('{accountId}', encodeURIComponent(accountId))
+      .replace('{blobId}', encodeURIComponent(blobId))
+      .replace('{type}', encodeURIComponent('application/octet-stream'))
+      .replace('{name}', encodeURIComponent('attachment'));
+    let res: Response;
+    try {
+      res = await this.fetchWithTimeout(url, { method: 'GET', headers: this.authHeaders() });
+    } catch (err) {
+      this.logger.warn(`James blob download transport error: ${(err as Error).message}`);
+      return null;
+    }
+    if (!res.ok) {
+      this.logger.warn(`James blob download HTTP ${res.status}`);
+      return null;
+    }
+    try {
+      const data = Buffer.from(await res.arrayBuffer());
+      return { data, contentType: res.headers.get('content-type') };
+    } catch (err) {
+      this.logger.warn(`James blob download read error: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  /** Upload a blob (an attachment) via the JMAP session `uploadUrl` template. */
+  async uploadBlob(mailbox: string, file: Buffer, type: string, _filename: string): Promise<StalwartUploadResult | null> {
+    if (!this.jmapUrl) return null;
+    await this.ensureBlobTemplates();
+    const accountId = await this.resolveAccountIdFor(mailbox);
+    if (!accountId || !this.uploadUrlTemplate) return null;
+    const url = this.uploadUrlTemplate.replace('{accountId}', encodeURIComponent(accountId));
+    let res: Response;
+    try {
+      res = await this.fetchWithTimeout(url, {
+        method: 'POST',
+        headers: { ...this.authHeaders(), 'Content-Type': type || 'application/octet-stream' },
+        body: file as unknown as BodyInit,
+      });
+    } catch (err) {
+      this.logger.warn(`James blob upload transport error: ${(err as Error).message}`);
+      return null;
+    }
+    if (!res.ok) {
+      this.logger.warn(`James blob upload HTTP ${res.status}`);
+      return null;
+    }
+    try {
+      const body = (await res.json()) as { blobId?: unknown; type?: unknown; size?: unknown };
+      if (typeof body?.blobId !== 'string') return null;
+      return {
+        blobId: body.blobId,
+        type: typeof body.type === 'string' ? body.type : type || 'application/octet-stream',
+        size: typeof body.size === 'number' ? body.size : file.length,
+      };
+    } catch (err) {
+      this.logger.warn(`James blob upload non-JSON response: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
   async send(
     mailbox: string,
     request: StalwartSendRequest,
     transactional: boolean,
   ): Promise<StalwartSendResult> {
+    const hasAttachments = (request.attachments?.length ?? 0) > 0;
     // Postmark is the only SPF-authorised egress for these domains, so route
-    // through it whenever it is configured (transactional and otherwise). It is
-    // also the high-rep lane for transactional mail.
-    if (this.postmarkConfigured) {
+    // through it whenever it is configured (transactional and otherwise) — EXCEPT
+    // an attachment-bearing send, which routes via JMAP (see the file banner).
+    if (this.postmarkConfigured && !hasAttachments) {
       return this.sendViaPostmark(request);
     }
-    // No Postmark — attempt a best-effort JMAP submission against James.
     if (this.jmapUrl) {
       return this.sendViaJames(request);
+    }
+    if (this.postmarkConfigured) {
+      // No JMAP configured to carry the blob reference — best-effort Postmark
+      // send WITHOUT the attachment rather than failing outright.
+      this.logger.warn(
+        'send: attachments requested but JAMES_JMAP_URL unset — sending via Postmark WITHOUT attachments',
+      );
+      return this.sendViaPostmark(request);
     }
     return {
       accepted: false,
@@ -439,11 +808,22 @@ export class JamesClient extends StalwartPort {
     };
   }
 
+  /** Ensure a Message-ID-shaped value is wrapped in angle brackets for a mail header. */
+  private angleWrap(id: string): string {
+    const trimmed = id.trim();
+    return trimmed.startsWith('<') ? trimmed : `<${trimmed}>`;
+  }
+
   private async sendViaPostmark(request: StalwartSendRequest): Promise<StalwartSendResult> {
     const token = this.postmarkToken!;
     const fromHeader = request.fromName
       ? `${request.fromName} <${request.fromAddress}>`
       : request.fromAddress;
+    const headers: { Name: string; Value: string }[] = [];
+    if (request.inReplyTo) headers.push({ Name: 'In-Reply-To', Value: this.angleWrap(request.inReplyTo) });
+    if (request.references?.length) {
+      headers.push({ Name: 'References', Value: request.references.map((r) => this.angleWrap(r)).join(' ') });
+    }
     let res: Response;
     try {
       res = await this.fetchWithTimeout('https://api.postmarkapp.com/email', {
@@ -455,10 +835,13 @@ export class JamesClient extends StalwartPort {
         },
         body: JSON.stringify({
           From: fromHeader,
-          To: request.toAddress,
+          To: request.toAddresses?.length ? request.toAddresses.join(', ') : request.toAddress,
+          ...(request.cc?.length ? { Cc: request.cc.join(', ') } : {}),
+          ...(request.bcc?.length ? { Bcc: request.bcc.join(', ') } : {}),
           Subject: request.subject,
           TextBody: request.body,
           MessageStream: 'outbound',
+          ...(headers.length ? { Headers: headers } : {}),
         }),
       });
     } catch (err) {
@@ -498,7 +881,9 @@ export class JamesClient extends StalwartPort {
   private async sendViaJames(request: StalwartSendRequest): Promise<StalwartSendResult> {
     // Best-effort JMAP submission under the FROM mailbox's own (delegated)
     // account: resolve a sending Identity for the from address, stage the
-    // Email, and submit. Degrade-clean on any gap.
+    // Email (cc/bcc/attachments/threading via JMAP's convenience properties —
+    // the server builds the MIME structure from these), and submit.
+    // Degrade-clean on any gap.
     const idResp = await this.jmap([['Identity/get', {}, '0']], request.fromAddress);
     const identities = idResp ? this.named(idResp, 'Identity/get')?.list : undefined;
     const identity = Array.isArray(identities)
@@ -513,22 +898,29 @@ export class JamesClient extends StalwartPort {
         reason: 'no James sending identity for from-address',
       };
     }
+    const toList = request.toAddresses?.length ? request.toAddresses : [request.toAddress];
+    const outbound: Record<string, unknown> = {
+      from: [{ email: request.fromAddress, name: request.fromName ?? null }],
+      to: toList.map((email) => ({ email })),
+      subject: request.subject,
+      bodyValues: { body: { value: request.body } },
+      textBody: [{ partId: 'body', type: 'text/plain' }],
+    };
+    if (request.cc?.length) outbound.cc = request.cc.map((email) => ({ email }));
+    if (request.bcc?.length) outbound.bcc = request.bcc.map((email) => ({ email }));
+    if (request.inReplyTo) outbound.inReplyTo = [request.inReplyTo.replace(/^<|>$/g, '')];
+    if (request.references?.length) {
+      outbound.references = request.references.map((r) => r.replace(/^<|>$/g, ''));
+    }
+    if (request.attachments?.length) {
+      outbound.attachments = request.attachments.map((a) => ({
+        blobId: a.blobId,
+        type: a.type,
+        name: a.name,
+      }));
+    }
     const responses = await this.jmap([
-      [
-        'Email/set',
-        {
-          create: {
-            outbound: {
-              from: [{ email: request.fromAddress, name: request.fromName ?? null }],
-              to: [{ email: request.toAddress }],
-              subject: request.subject,
-              bodyValues: { body: { value: request.body } },
-              textBody: [{ partId: 'body', type: 'text/plain' }],
-            },
-          },
-        },
-        '0',
-      ],
+      ['Email/set', { create: { outbound } }, '0'],
       [
         'EmailSubmission/set',
         { create: { sub: { emailId: '#outbound', identityId: identity.id } } },

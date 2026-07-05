@@ -2,28 +2,68 @@
  * The human email-client BFF (read your inboxes + compose), distinct from the
  * agent-inbox approval surface.
  *
- *   GET  workspaces/:workspaceId/mail/:mailboxId/threads?limit=
+ *   GET  workspaces/:workspaceId/mail/threads/aggregate?folder=&limit=&q=&offset=   (unified inbox)
+ *   GET  workspaces/:workspaceId/mail/counts                                        (per-mailbox inbox counts)
+ *   POST workspaces/:workspaceId/mail/threads/bulk                                  (BulkThreadsDto)
+ *   GET  workspaces/:workspaceId/mail/:mailboxId/threads?folder=&limit=&q=&offset=
  *   GET  workspaces/:workspaceId/mail/:mailboxId/threads/:threadId
- *   POST workspaces/:workspaceId/mail/:mailboxId/compose          (ComposeMailDto)
+ *   PUT  workspaces/:workspaceId/mail/:mailboxId/threads/:threadId/read             (SetReadDto)
+ *   GET  workspaces/:workspaceId/mail/:mailboxId/blobs/:blobId?name=&type=          (attachment download)
+ *   POST workspaces/:workspaceId/mail/:mailboxId/attachments                        (multipart `file`, 25MB)
+ *   POST workspaces/:workspaceId/mail/:mailboxId/compose                            (ComposeMailDto)
  *
- * JWT + membership guarded. Delegates to EmailService (the SoR + the mail-engine
- * seam) — so it's degrade-clean: reads return the SoR view while the engine is
- * dormant and light up with received mail when it's live; a compose is recorded
- * and queued to the engine (FAILED-clean if dormant). Sends as the chosen mailbox.
+ * JWT + membership guarded (every route — including the blob download, which an
+ * XHR reaches with the same plain Bearer token as the rest). Delegates to
+ * EmailService (the SoR + the mail-engine seam) — so it's degrade-clean: reads
+ * return the SoR view while the engine is dormant and light up with received
+ * mail when it's live; a compose is recorded and queued to the engine
+ * (FAILED-clean if dormant). Sends as the chosen mailbox.
+ *
+ * Webmail-wave error semantics (binding for the FE): a capability the engine
+ * can't serve is 404 (blob unknown/unreachable) or 501 (upload unsupported) —
+ * NEVER a 500. Paging: `offset` is a plain row offset; a full page (length ==
+ * limit) means "may have more".
  */
 
 import { randomUUID } from 'crypto';
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
-import { IsEmail, IsOptional, IsString, MaxLength } from 'class-validator';
-import { User } from '@prisma/client';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  NotFoundException,
+  NotImplementedException,
+  Param,
+  Post,
+  Put,
+  Query,
+  Res,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse, ApiConsumes } from '@nestjs/swagger';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsBoolean,
+  IsEmail,
+  IsIn,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
+import { Response } from 'express';
+import { MessageDisposition, User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decorator';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
+import { DispositionService } from '../mail-triage/disposition.service';
 import { EmailService } from '../email/email.service';
-import { ComposeInput, MailFolder } from '../email/email.types';
+import { BulkThreadAction, ComposeInput, MailFolder } from '../email/email.types';
 
 const MAIL_FOLDERS: MailFolder[] = ['inbox', 'archive', 'spam', 'trash', 'sent', 'drafts'];
 function normalizeFolder(raw?: string): MailFolder {
@@ -31,11 +71,49 @@ function normalizeFolder(raw?: string): MailFolder {
   return MAIL_FOLDERS.includes(f) ? f : 'inbox';
 }
 
+function parseLimit(raw?: string): number {
+  return raw ? Math.min(Number.parseInt(raw, 10) || 50, 200) : 50;
+}
+
+function parseOffset(raw?: string): number {
+  const n = raw ? Number.parseInt(raw, 10) : 0;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** Light address shape check for the comma-split to/cc/bcc entries. */
+const ADDRESS_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const BULK_ACTIONS: BulkThreadAction[] = ['archive', 'trash', 'spam', 'inbox', 'read', 'unread'];
+const BULK_DISPOSITION: Partial<Record<BulkThreadAction, MessageDisposition>> = {
+  archive: MessageDisposition.ARCHIVE,
+  trash: MessageDisposition.TRASH,
+  spam: MessageDisposition.SPAM,
+  inbox: MessageDisposition.INBOX,
+};
+
 class ComposeMailDto {
-  @IsEmail() to_address!: string;
+  /** One address, or several comma-joined (the FE sends multi-recipient this way). */
+  @IsString() @MaxLength(2000) to_address!: string;
   @IsOptional() @IsString() @MaxLength(300) subject?: string;
   @IsOptional() @IsString() @MaxLength(50000) body?: string;
   @IsOptional() @IsString() in_reply_to_thread_id?: string;
+  // webmail wave — all optional (back-compat).
+  @IsOptional() @IsArray() @ArrayMaxSize(50) @IsEmail({}, { each: true }) cc?: string[];
+  @IsOptional() @IsArray() @ArrayMaxSize(50) @IsEmail({}, { each: true }) bcc?: string[];
+  /** Uploaded attachment refs: [{blob_id, name, type}] (validated shape-wise below). */
+  @IsOptional() @IsArray() @ArrayMaxSize(20) attachments?: { blob_id: string; name: string; type: string }[];
+  /** The INTERNAL message id being replied to (from the thread detail) — the server resolves the real Message-ID/References. */
+  @IsOptional() @IsString() @MaxLength(500) in_reply_to?: string;
+  @IsOptional() @IsArray() @ArrayMaxSize(100) @IsString({ each: true }) references?: string[];
+}
+
+class SetReadDto {
+  @IsBoolean() read!: boolean;
+}
+
+class BulkThreadsDto {
+  @IsArray() @ArrayMaxSize(200) @IsString({ each: true }) thread_ids!: string[];
+  @IsIn(BULK_ACTIONS) action!: BulkThreadAction;
 }
 
 @ApiTags('mail')
@@ -43,10 +121,90 @@ class ComposeMailDto {
 @Controller('workspaces/:workspaceId/mail')
 @UseGuards(JwtAuthGuard, WorkspaceMembershipGuard)
 export class MailController {
-  constructor(private readonly email: EmailService) {}
+  constructor(
+    private readonly email: EmailService,
+    private readonly disposition: DispositionService,
+  ) {}
+
+  // Static routes FIRST so ':mailboxId' can never shadow them.
+
+  @Get('threads/aggregate')
+  @ApiOperation({ summary: 'The unified inbox: every workspace mailbox merged, newest-first.' })
+  @ApiResponse({ status: 200, description: 'The merged threads (each carries mailbox_id + mailbox_address) + count + folder.' })
+  async aggregate(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Query('limit') limitRaw?: string,
+    @Query('folder') folderRaw?: string,
+    @Query('q') q?: string,
+    @Query('offset') offsetRaw?: string,
+  ) {
+    const limit = parseLimit(limitRaw);
+    const folder = normalizeFolder(folderRaw);
+    const threads = await this.email.listAggregateInbox(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      folder,
+      limit,
+      q ?? null,
+      parseOffset(offsetRaw),
+    );
+    return { threads, count: threads.length, folder };
+  }
+
+  @Get('counts')
+  @ApiOperation({ summary: 'Inbox unread/total per workspace mailbox (a failing account = zeros + error:true).' })
+  @ApiResponse({ status: 200, description: 'The per-mailbox counts.' })
+  async counts(@ResolvedWorkspace() workspaceId: string, @CurrentUser() user: User) {
+    const mailboxes = await this.email.getWorkspaceMailCounts(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+    );
+    return { mailboxes };
+  }
+
+  @Post('threads/bulk')
+  @ApiOperation({ summary: 'Bulk thread actions: archive/trash/spam/inbox (disposition) or read/unread ($seen).' })
+  @ApiResponse({ status: 201, description: '{ succeeded: string[], failed: string[] } (thread ids).' })
+  async bulk(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Body() body: BulkThreadsDto,
+  ) {
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    const succeeded: string[] = [];
+    const failed: string[] = [];
+    const target = BULK_DISPOSITION[body.action];
+    // Per-thread isolation: one failing thread never fails the batch.
+    const settled = await Promise.allSettled(
+      body.thread_ids.map(async (threadId) => {
+        if (target) {
+          // archive/trash/spam/inbox — the EXACT same disposition logic as the
+          // single-thread PUT .../disposition route.
+          await this.disposition.setDisposition(workspaceId, ucUid, threadId, target);
+          return true;
+        }
+        // read/unread — the same $seen keyword logic as PUT .../threads/:id/read,
+        // resolved across the workspace's mailboxes (the bulk route has no mailbox
+        // in its path while JMAP thread ids live per-account).
+        return this.email.setThreadReadAcrossMailboxes(
+          workspaceId,
+          ucUid,
+          threadId,
+          body.action === 'read',
+        );
+      }),
+    );
+    settled.forEach((r, i) => {
+      const id = body.thread_ids[i];
+      if (r.status === 'fulfilled' && r.value) succeeded.push(id);
+      else failed.push(id);
+    });
+    return { succeeded, failed };
+  }
 
   @Get(':mailboxId/threads')
-  @ApiOperation({ summary: "A mailbox's recent threads for a folder (the client inbox list)." })
+  @ApiOperation({ summary: "A mailbox's recent threads for a folder (the client inbox list); q = full-text search, offset = paging." })
   @ApiResponse({ status: 200, description: 'The threads + count + folder.' })
   async threads(
     @ResolvedWorkspace() workspaceId: string,
@@ -54,8 +212,10 @@ export class MailController {
     @Param('mailboxId') mailboxId: string,
     @Query('limit') limitRaw?: string,
     @Query('folder') folderRaw?: string,
+    @Query('q') q?: string,
+    @Query('offset') offsetRaw?: string,
   ) {
-    const limit = limitRaw ? Math.min(Number.parseInt(limitRaw, 10) || 50, 200) : 50;
+    const limit = parseLimit(limitRaw);
     const folder = normalizeFolder(folderRaw);
     const threads = await this.email.listMailboxInbox(
       workspaceId,
@@ -63,12 +223,14 @@ export class MailController {
       mailboxId,
       limit,
       folder,
+      q ?? null,
+      parseOffset(offsetRaw),
     );
     return { threads, count: threads.length, folder };
   }
 
   @Get(':mailboxId/threads/:threadId')
-  @ApiOperation({ summary: 'The messages in a thread (bodies as previews).' })
+  @ApiOperation({ summary: 'The messages in a thread (full bodies + attachments when the engine serves them).' })
   @ApiResponse({ status: 200, description: 'The messages + count.' })
   async thread(
     @ResolvedWorkspace() workspaceId: string,
@@ -85,8 +247,88 @@ export class MailController {
     return { messages, count: messages.length };
   }
 
+  @Put(':mailboxId/threads/:threadId/read')
+  @ApiOperation({ summary: 'Set/clear the $seen keyword on every message in the thread.' })
+  @ApiResponse({ status: 200, description: '{ thread_id, read, updated } — updated:false = the engine could not apply it.' })
+  async setRead(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Param('threadId') threadId: string,
+    @Body() body: SetReadDto,
+  ) {
+    return this.email.setThreadReadState(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      mailboxId,
+      threadId,
+      body.read,
+    );
+  }
+
+  @Get(':mailboxId/blobs/:blobId')
+  @ApiOperation({ summary: 'Download one attachment blob (server-side engine auth; plain Bearer for the client).' })
+  @ApiResponse({ status: 200, description: 'The blob bytes (Content-Type/-Disposition from the query params).' })
+  @ApiResponse({ status: 404, description: 'Unknown blob, unreachable mailbox, or the engine cannot serve blobs.' })
+  async downloadBlob(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Param('blobId') blobId: string,
+    @Res() res: Response,
+    @Query('name') name?: string,
+    @Query('type') type?: string,
+  ) {
+    const blob = await this.email.downloadAttachment(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      mailboxId,
+      blobId,
+    );
+    if (!blob) throw new NotFoundException('Attachment blob not found (or the mail engine cannot serve it).');
+    const contentType = (type && type.trim()) || blob.contentType || 'application/octet-stream';
+    // RFC 5987 filename* so any unicode name survives; a plain fallback too.
+    const safeName = (name && name.trim()) || 'attachment';
+    const asciiName = safeName.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, "'");
+    res.set({
+      'Content-Type': contentType,
+      'Content-Disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`,
+      'Content-Length': String(blob.data.length),
+    });
+    res.send(blob.data);
+  }
+
+  @Post(':mailboxId/attachments')
+  @ApiOperation({ summary: 'Upload a compose attachment (multipart `file`, 25MB cap) to the mail engine blob store.' })
+  @ApiConsumes('multipart/form-data')
+  @ApiResponse({ status: 201, description: '{ blob_id, name, type, size } — reference it from compose.attachments.' })
+  @ApiResponse({ status: 501, description: 'The mail engine cannot accept uploads (dormant or non-JMAP).' })
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 25 * 1024 * 1024 } }))
+  async uploadAttachment(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @UploadedFile() file?: { buffer: Buffer; originalname: string; mimetype: string; size: number },
+  ) {
+    if (!file?.buffer) throw new BadRequestException('Multipart field `file` is required.');
+    const result = await this.email.uploadAttachment(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      mailboxId,
+      file.buffer,
+      file.mimetype || 'application/octet-stream',
+      file.originalname || 'attachment',
+    );
+    if (!result) {
+      throw new NotImplementedException(
+        'The mail engine cannot accept attachment uploads right now (dormant or non-JMAP engine).',
+      );
+    }
+    return result;
+  }
+
   @Post(':mailboxId/compose')
-  @ApiOperation({ summary: 'Send an email AS the given mailbox (reply when in_reply_to_thread_id).' })
+  @ApiOperation({ summary: 'Send an email AS the given mailbox (reply when in_reply_to_thread_id; threading headers resolved from in_reply_to).' })
   @ApiResponse({ status: 201, description: 'The composed message (queued/sent/failed-clean).' })
   async compose(
     @ResolvedWorkspace() workspaceId: string,
@@ -94,9 +336,30 @@ export class MailController {
     @Param('mailboxId') mailboxId: string,
     @Body() body: ComposeMailDto,
   ) {
+    // The FE sends multi-recipient as ONE comma-joined to_address — split it.
+    const toAddresses = body.to_address
+      .split(',')
+      .map((a) => a.trim())
+      .filter(Boolean);
+    if (!toAddresses.length || toAddresses.some((a) => !ADDRESS_RE.test(a))) {
+      throw new BadRequestException('to_address must be one or more comma-separated email addresses.');
+    }
+    // Attachment refs arrive as loose JSON — validate the shape here (class-
+    // validator nested DTOs are not used elsewhere in this codebase).
+    const attachments = (body.attachments ?? []).map((a) => {
+      if (!a || typeof a.blob_id !== 'string' || !a.blob_id.trim()) {
+        throw new BadRequestException('each attachment needs a blob_id (from POST .../attachments).');
+      }
+      return {
+        blob_id: a.blob_id,
+        name: typeof a.name === 'string' && a.name.trim() ? a.name : 'attachment',
+        type: typeof a.type === 'string' && a.type.trim() ? a.type : 'application/octet-stream',
+      };
+    });
     const input: ComposeInput = {
       contactId: null,
-      toAddress: body.to_address,
+      toAddress: toAddresses[0],
+      toAddresses: toAddresses.length > 1 ? toAddresses : undefined,
       subject: body.subject ?? '',
       body: body.body ?? '',
       mode: 'send',
@@ -105,6 +368,11 @@ export class MailController {
       externalRef: randomUUID(),
       draftedBy: null,
       fromMailboxAccountId: mailboxId,
+      cc: body.cc?.length ? body.cc : undefined,
+      bcc: body.bcc?.length ? body.bcc : undefined,
+      attachments: attachments.length ? attachments : undefined,
+      inReplyToMessageId: body.in_reply_to ?? null,
+      references: body.references?.length ? body.references : undefined,
     };
     return this.email.composeEmail(workspaceId, ucUidOf(user as WithWorkspaceClaim), input);
   }

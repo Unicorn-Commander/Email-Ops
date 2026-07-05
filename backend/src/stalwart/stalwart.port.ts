@@ -18,14 +18,23 @@
  * isn't wired (verification, or any node where Stalwart isn't reachable). The
  * SoR write still happens (the message row + agent-inbox row are recorded); only
  * the engine hand-off degrades, so a draft can always be staged and a send is
- * recorded as FAILED rather than 500-ing.
+ * recorded as FAILED rather than 500-ing. The webmail-wave additions below are
+ * held to the SAME contract: any method may return an empty/null/false
+ * degrade-clean result but must NEVER throw.
  */
 
 import {
+  StalwartBlobDownload,
+  StalwartFolderQuery,
+  StalwartFolderThreadsResult,
+  StalwartMailboxCounts,
   StalwartMessage,
+  StalwartMessageDetail,
+  StalwartMessageHeaders,
   StalwartSendRequest,
   StalwartSendResult,
   StalwartThread,
+  StalwartUploadResult,
 } from './stalwart.types';
 
 export abstract class StalwartPort {
@@ -51,9 +60,72 @@ export abstract class StalwartPort {
   abstract listMessages(mailbox: string, threadId: string): Promise<StalwartMessage[]>;
 
   /**
+   * Live, folder-scoped, paged, (optionally) full-text-searched thread listing
+   * (the human email client's inbox list) — the webmail-wave search+paging
+   * surface. Returns `{ threads: [] }` when not configured / the folder can't
+   * be resolved / the call fails (degrade-clean, never throws).
+   */
+  abstract listFolderThreads(
+    mailbox: string,
+    query: StalwartFolderQuery,
+  ): Promise<StalwartFolderThreadsResult>;
+
+  /**
+   * The FULL detail of every message in a thread (bodies, cc, threading
+   * headers, read state, attachments) — the thread-detail enrichment. Returns
+   * [] when not configured / unknown / the call fails.
+   */
+  abstract getThreadDetail(mailbox: string, threadId: string): Promise<StalwartMessageDetail[]>;
+
+  /**
+   * Set (read=true) or clear (read=false) the read state on every message in a
+   * thread. Returns true on success, false when not configured / unknown / the
+   * call fails (degrade-clean; never throws).
+   */
+  abstract setThreadRead(mailbox: string, threadId: string, read: boolean): Promise<boolean>;
+
+  /**
+   * The Inbox unread/total counts for one mailbox. Returns null when not
+   * configured / unknown / the call fails — the caller renders that as a
+   * zeroed, `error:true` entry rather than omitting the mailbox.
+   */
+  abstract getMailboxCounts(mailbox: string): Promise<StalwartMailboxCounts | null>;
+
+  /**
+   * Download one blob (an attachment's bytes) from the engine's blob store.
+   * Returns null when not configured / unknown / the call fails.
+   */
+  abstract downloadBlob(mailbox: string, blobId: string): Promise<StalwartBlobDownload | null>;
+
+  /**
+   * Resolve one message's real threading headers (Message-ID + References) by
+   * its engine message id — used to build a correct In-Reply-To/References
+   * chain when the caller only has an internal message id (e.g. from the
+   * thread-detail API), not an RFC Message-ID. Returns null when not
+   * configured / unknown / the call fails (degrade-clean; the composer then
+   * sends WITHOUT proper threading headers rather than failing outright).
+   */
+  abstract getMessageHeaders(mailbox: string, messageId: string): Promise<StalwartMessageHeaders | null>;
+
+  /**
+   * Upload a blob (an attachment) to the engine's blob store, scoped to the
+   * mailbox's own account. Returns null when not configured / the call fails.
+   */
+  abstract uploadBlob(
+    mailbox: string,
+    file: Buffer,
+    type: string,
+    filename: string,
+  ): Promise<StalwartUploadResult | null>;
+
+  /**
    * Hand an outbound message to the mail engine for delivery (the SEND lane).
    * Transactional sends route via Postmark; the rest via Stalwart SMTP/JMAP.
-   * Returns `accepted:false` (lane=null) when not configured or on a transport
+   * `request` may now carry cc/bcc/attachments/inReplyTo/references (all
+   * optional, back-compat) — an implementation that can't carry one of those
+   * (e.g. attachments over Postmark) is allowed to route around it internally
+   * (see JamesClient) rather than dropping it silently. Returns
+   * `accepted:false` (lane=null) when not configured or on a transport
    * failure — never throws.
    */
   abstract send(

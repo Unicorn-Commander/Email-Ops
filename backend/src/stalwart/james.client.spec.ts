@@ -167,5 +167,446 @@ describe('JamesClient', () => {
       expect(accountIdOf(fetchSpy, 'Email/set')).toBe('acct-sales');
       expect(accountIdOf(fetchSpy, 'EmailSubmission/set')).toBe('acct-sales');
     });
+
+  });
+
+  describe('webmail-wave additions', () => {
+    const SESSION_WITH_BLOB = {
+      ...SESSION,
+      downloadUrl: 'https://james.example.test/download/{accountId}/{blobId}/{name}?accept={type}',
+      uploadUrl: 'https://james.example.test/upload/{accountId}',
+    };
+
+    it('listFolderThreads resolves the role Mailbox, scopes Email/query to it, and maps hasAttachment/unread', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        const body = JSON.parse((init as RequestInit).body as string);
+        const methods = body.methodCalls.map((c: any[]) => c[0]);
+        if (methods.length === 1 && methods[0] === 'Mailbox/query') {
+          return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-archive-1'] }, '0']] });
+        }
+        return jsonResponse({
+          methodResponses: [
+            ['Email/query', { ids: ['em-1'], total: 1 }, '0'],
+            [
+              'Email/get',
+              {
+                list: [
+                  {
+                    id: 'em-1',
+                    threadId: 'th-1',
+                    subject: 'Hi',
+                    from: [{ email: 'a@x.test' }],
+                    to: [{ email: 'b@x.test' }],
+                    receivedAt: '2026-01-01T00:00:00Z',
+                    preview: 'hey',
+                    keywords: {},
+                    hasAttachment: true,
+                  },
+                ],
+              },
+              '1',
+            ],
+            ['Thread/get', { list: [{ id: 'th-1', emailIds: ['em-1'] }] }, '2'],
+          ],
+        });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+
+      const result = await client.listFolderThreads('sales@unicorncommander.ai', {
+        folder: 'archive',
+        limit: 20,
+        offset: 0,
+        query: 'invoice',
+      });
+
+      expect(result.threads).toHaveLength(1);
+      expect(result.threads[0]).toMatchObject({ id: 'th-1', unread: true, hasAttachments: true });
+
+      // The role resolved is 'archive' (the folder->role map), and the Email/query
+      // filter combines inMailbox with the text search — real filtering.
+      const roleCall = JSON.parse(fetchSpy.mock.calls.find(([, init]: any) => {
+        if (!init?.body) return false;
+        const b = JSON.parse(init.body);
+        return b.methodCalls.some((c: any[]) => c[0] === 'Mailbox/query');
+      })[1].body).methodCalls.find((c: any[]) => c[0] === 'Mailbox/query')[1];
+      expect(roleCall.filter).toEqual({ role: 'archive' });
+
+      const queryCall = JSON.parse(fetchSpy.mock.calls.find(([, init]: any) => {
+        if (!init?.body) return false;
+        const b = JSON.parse(init.body);
+        return b.methodCalls.some((c: any[]) => c[0] === 'Email/query');
+      })[1].body).methodCalls.find((c: any[]) => c[0] === 'Email/query')[1];
+      expect(queryCall.filter).toEqual({
+        operator: 'AND',
+        conditions: [{ inMailbox: 'mbx-archive-1' }, { text: 'invoice' }],
+      });
+      expect(queryCall.position).toBe(0);
+      expect(queryCall.limit).toBe(20);
+    });
+
+    it('listFolderThreads degrades to { threads: [] } when the folder role has no Mailbox', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        return jsonResponse({ methodResponses: [['Mailbox/query', { ids: [] }, '0']] });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+      const result = await client.listFolderThreads('hq@unicorncommander.ai', {
+        folder: 'spam',
+        limit: 10,
+        offset: 0,
+      });
+      expect(result).toEqual({ threads: [] });
+    });
+
+    it('getThreadDetail returns raw HTML/text bodies, cc, threading headers, read state, and attachments', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        const body = JSON.parse((init as RequestInit).body as string);
+        const methods = body.methodCalls.map((c: any[]) => c[0]);
+        if (methods.includes('Thread/get') && !methods.includes('Email/get')) {
+          return jsonResponse({ methodResponses: [['Thread/get', { list: [{ id: 'th-1', emailIds: ['em-1'] }] }, '0']] });
+        }
+        return jsonResponse({
+          methodResponses: [
+            ['Thread/get', { list: [{ id: 'th-1', emailIds: ['em-1'] }] }, '0'],
+            [
+              'Email/get',
+              {
+                list: [
+                  {
+                    id: 'em-1',
+                    threadId: 'th-1',
+                    from: [{ email: 'a@x.test', name: 'A' }],
+                    to: [{ email: 'b@x.test' }],
+                    cc: [{ email: 'c@x.test' }],
+                    subject: 'Hi',
+                    receivedAt: '2026-01-01T00:00:00Z',
+                    preview: 'hey',
+                    keywords: { $seen: true },
+                    messageId: ['abc@x.test'],
+                    references: ['zzz@x.test'],
+                    htmlBody: [{ partId: 'html' }],
+                    textBody: [{ partId: 'text' }],
+                    bodyValues: { html: { value: '<p>hi</p>' }, text: { value: 'hi' } },
+                    attachments: [
+                      { blobId: 'blob-1', name: 'f.pdf', type: 'application/pdf', size: 123, cid: null },
+                    ],
+                  },
+                ],
+              },
+              '1',
+            ],
+          ],
+        });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+
+      const [detail] = await client.getThreadDetail('hq@unicorncommander.ai', 'th-1');
+      expect(detail).toMatchObject({
+        id: 'em-1',
+        htmlBody: '<p>hi</p>',
+        textBody: 'hi',
+        messageIdHeader: 'abc@x.test',
+        references: ['zzz@x.test'],
+        isUnread: false,
+        cc: [{ address: 'c@x.test', name: null }],
+        attachments: [{ blobId: 'blob-1', name: 'f.pdf', type: 'application/pdf', size: 123, cid: null }],
+      });
+    });
+
+    it('setThreadRead patches $seen on every message in the thread (two-step: resolve ids, then Email/set)', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        const body = JSON.parse((init as RequestInit).body as string);
+        const methods = body.methodCalls.map((c: any[]) => c[0]);
+        if (methods.includes('Thread/get')) {
+          return jsonResponse({ methodResponses: [['Thread/get', { list: [{ id: 'th-1', emailIds: ['em-1', 'em-2'] }] }, '0']] });
+        }
+        return jsonResponse({ methodResponses: [['Email/set', { updated: { 'em-1': null, 'em-2': null } }, '0']] });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+
+      const ok = await client.setThreadRead('sales@unicorncommander.ai', 'th-1', true);
+      expect(ok).toBe(true);
+
+      const setCall = JSON.parse(fetchSpy.mock.calls.find(([, init]: any) => {
+        if (!init?.body) return false;
+        const b = JSON.parse(init.body);
+        return b.methodCalls.some((c: any[]) => c[0] === 'Email/set');
+      })[1].body).methodCalls.find((c: any[]) => c[0] === 'Email/set')[1];
+      expect(setCall.update).toEqual({
+        'em-1': { 'keywords/$seen': true },
+        'em-2': { 'keywords/$seen': true },
+      });
+      expect(setCall.accountId).toBe('acct-sales');
+    });
+
+    it('setThreadRead degrades to false when the thread has no messages', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        return jsonResponse({ methodResponses: [['Thread/get', { list: [{ id: 'th-1', emailIds: [] }] }, '0']] });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+      expect(await client.setThreadRead('hq@unicorncommander.ai', 'th-1', false)).toBe(false);
+    });
+
+    it('getMailboxCounts reads unreadEmails/totalEmails off the role:inbox Mailbox', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        const body = JSON.parse((init as RequestInit).body as string);
+        const methods = body.methodCalls.map((c: any[]) => c[0]);
+        if (methods.length === 1 && methods[0] === 'Mailbox/query') {
+          return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-inbox-1'] }, '0']] });
+        }
+        return jsonResponse({
+          methodResponses: [
+            ['Mailbox/query', { ids: ['mbx-inbox-1'] }, '0'],
+            ['Mailbox/get', { list: [{ id: 'mbx-inbox-1', role: 'inbox', unreadEmails: 5, totalEmails: 42 }] }, '1'],
+          ],
+        });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+      expect(await client.getMailboxCounts('hq@unicorncommander.ai')).toEqual({ inboxUnread: 5, inboxTotal: 42 });
+    });
+
+    it('getMailboxCounts degrades to null when there is no inbox Mailbox', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        return jsonResponse({ methodResponses: [['Mailbox/get', { list: [] }, '1']] });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+      expect(await client.getMailboxCounts('hq@unicorncommander.ai')).toBeNull();
+    });
+
+    it('downloadBlob fetches the session downloadUrl template, scoped to the mailbox account', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION_WITH_BLOB);
+        if (String(url).startsWith('https://james.example.test/download/')) {
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: (k: string) => (k === 'content-type' ? 'application/pdf' : null) },
+            arrayBuffer: async () => new TextEncoder().encode('hello').buffer,
+          } as unknown as Response;
+        }
+        return jsonResponse({ methodResponses: [] });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+
+      const result = await client.downloadBlob('sales@unicorncommander.ai', 'blob-1');
+      expect(result).not.toBeNull();
+      expect(result?.data.toString()).toBe('hello');
+      expect(result?.contentType).toBe('application/pdf');
+
+      const downloadCall = fetchSpy.mock.calls.find(([u]: any) => String(u).startsWith('https://james.example.test/download/'));
+      expect(downloadCall[0]).toBe('https://james.example.test/download/acct-sales/blob-1/attachment?accept=application%2Foctet-stream');
+    });
+
+    it('downloadBlob degrades to null when the engine has no downloadUrl template', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION); // no downloadUrl
+        return jsonResponse({ methodResponses: [] });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+      expect(await client.downloadBlob('hq@unicorncommander.ai', 'blob-1')).toBeNull();
+    });
+
+    it('uploadBlob POSTs the file bytes to the session uploadUrl template and returns { blobId, type, size }', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION_WITH_BLOB);
+        if (String(url).startsWith('https://james.example.test/upload/')) {
+          expect((init as RequestInit).method).toBe('POST');
+          expect((init as RequestInit).headers).toMatchObject({ 'Content-Type': 'text/plain' });
+          return jsonResponse({ accountId: 'acct-sales', blobId: 'blob-new', type: 'text/plain', size: 11 });
+        }
+        return jsonResponse({ methodResponses: [] });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+
+      const result = await client.uploadBlob('sales@unicorncommander.ai', Buffer.from('hello world'), 'text/plain', 'f.txt');
+      expect(result).toEqual({ blobId: 'blob-new', type: 'text/plain', size: 11 });
+
+      const uploadCall = fetchSpy.mock.calls.find(([u]: any) => String(u).startsWith('https://james.example.test/upload/'));
+      expect(uploadCall[0]).toBe('https://james.example.test/upload/acct-sales');
+    });
+
+    it('getMessageHeaders resolves the real Message-ID + References for a reply built from an internal message id', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        return jsonResponse({
+          methodResponses: [
+            ['Email/get', { list: [{ id: 'em-orig', messageId: ['orig@x.test'], references: ['root@x.test'] }] }, '0'],
+          ],
+        });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+      const headers = await client.getMessageHeaders('hq@unicorncommander.ai', 'em-orig');
+      expect(headers).toEqual({ messageIdHeader: 'orig@x.test', references: ['root@x.test'] });
+    });
+
+    it('getMessageHeaders degrades to null when the message is unknown', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        return jsonResponse({ methodResponses: [['Email/get', { list: [] }, '0']] });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+      expect(await client.getMessageHeaders('hq@unicorncommander.ai', 'unknown')).toBeNull();
+    });
+
+    it('routes an attachment-bearing send via JMAP EmailSubmission even when Postmark IS configured (attachments cannot cross the Postmark lane)', async () => {
+      const CONFIGURED_WITH_POSTMARK = { ...CONFIGURED, POSTMARK_SERVER_TOKEN: 'pm-token' };
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        if (String(url).includes('postmarkapp.com')) {
+          throw new Error('must not call Postmark for an attachment-bearing send');
+        }
+        const body = JSON.parse((init as RequestInit).body as string);
+        if (body.methodCalls.some((c: any[]) => c[0] === 'Identity/get')) {
+          return jsonResponse({
+            methodResponses: [['Identity/get', { list: [{ id: 'ident-1', email: 'sales@unicorncommander.ai' }] }, '0']],
+          });
+        }
+        return jsonResponse({
+          methodResponses: [['Email/set', { created: { outbound: { id: 'em-att-1', threadId: 'th-att-1' } } }, '0']],
+        });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED_WITH_POSTMARK));
+
+      const r = await client.send(
+        'sales@unicorncommander.ai',
+        {
+          fromAddress: 'sales@unicorncommander.ai',
+          toAddress: 'jane@acme.test',
+          subject: 's',
+          body: 'b',
+          attachments: [{ blobId: 'blob-1', name: 'f.pdf', type: 'application/pdf' }],
+        },
+        false,
+      );
+      expect(r).toMatchObject({ accepted: true, lane: 'james', providerMessageId: 'em-att-1' });
+
+      // The Email/set create carried the attachment reference (the JMAP convenience property).
+      const emailSetCall = JSON.parse(fetchSpy.mock.calls.find(([, i]: any) => {
+        if (!i?.body) return false;
+        const b = JSON.parse(i.body);
+        return b.methodCalls.some((c: any[]) => c[0] === 'Email/set');
+      })[1].body).methodCalls.find((c: any[]) => c[0] === 'Email/set')[1];
+      expect(emailSetCall.create.outbound.attachments).toEqual([
+        { blobId: 'blob-1', type: 'application/pdf', name: 'f.pdf' },
+      ]);
+    });
+
+    it('a plain send (no attachments) still prefers Postmark when configured, carrying cc/bcc/in-reply-to/references', async () => {
+      const CONFIGURED_WITH_POSTMARK = { ...CONFIGURED, POSTMARK_SERVER_TOKEN: 'pm-token' };
+      let postmarkBody: any = null;
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        if (String(url).includes('postmarkapp.com')) {
+          postmarkBody = JSON.parse((init as RequestInit).body as string);
+          return jsonResponse({ MessageID: 'pm-123' });
+        }
+        throw new Error('must not call JMAP for a plain send when Postmark is configured');
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED_WITH_POSTMARK));
+
+      const r = await client.send(
+        'sales@unicorncommander.ai',
+        {
+          fromAddress: 'sales@unicorncommander.ai',
+          toAddress: 'jane@acme.test',
+          subject: 's',
+          body: 'b',
+          cc: ['cc@acme.test'],
+          bcc: ['bcc@acme.test'],
+          inReplyTo: 'orig@acme.test',
+          references: ['orig@acme.test'],
+        },
+        false,
+      );
+      expect(r).toMatchObject({ accepted: true, lane: 'postmark', providerMessageId: 'pm-123' });
+      expect(postmarkBody).toMatchObject({
+        Cc: 'cc@acme.test',
+        Bcc: 'bcc@acme.test',
+        Headers: [
+          { Name: 'In-Reply-To', Value: '<orig@acme.test>' },
+          { Name: 'References', Value: '<orig@acme.test>' },
+        ],
+      });
+    });
+
+    it('toAddresses fans out to multiple recipients on BOTH the Postmark and JMAP send lanes', async () => {
+      // Postmark lane: To is comma-joined.
+      let postmarkBody: any = null;
+      const postmarkFetch = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        if (String(url).includes('postmarkapp.com')) {
+          postmarkBody = JSON.parse((init as RequestInit).body as string);
+          return jsonResponse({ MessageID: 'pm-multi' });
+        }
+        throw new Error('unexpected JMAP call on the Postmark lane');
+      });
+      global.fetch = postmarkFetch as any;
+      const postmarkClient = new JamesClient(makeConfig({ ...CONFIGURED, POSTMARK_SERVER_TOKEN: 'pm-token' }));
+      await postmarkClient.send(
+        'sales@unicorncommander.ai',
+        {
+          fromAddress: 'sales@unicorncommander.ai',
+          toAddress: 'a@acme.test',
+          toAddresses: ['a@acme.test', 'b@acme.test'],
+          subject: 's',
+          body: 'b',
+        },
+        false,
+      );
+      expect(postmarkBody.To).toBe('a@acme.test, b@acme.test');
+
+      // JMAP lane (no Postmark): to is a proper array of EmailAddress objects.
+      const jmapFetch = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        const body = JSON.parse((init as RequestInit).body as string);
+        if (body.methodCalls.some((c: any[]) => c[0] === 'Identity/get')) {
+          return jsonResponse({
+            methodResponses: [['Identity/get', { list: [{ id: 'ident-1', email: 'sales@unicorncommander.ai' }] }, '0']],
+          });
+        }
+        return jsonResponse({
+          methodResponses: [['Email/set', { created: { outbound: { id: 'em-multi', threadId: 'th-multi' } } }, '0']],
+        });
+      });
+      global.fetch = jmapFetch as any;
+      const jmapClient = new JamesClient(makeConfig(CONFIGURED));
+      await jmapClient.send(
+        'sales@unicorncommander.ai',
+        {
+          fromAddress: 'sales@unicorncommander.ai',
+          toAddress: 'a@acme.test',
+          toAddresses: ['a@acme.test', 'b@acme.test'],
+          subject: 's',
+          body: 'b',
+        },
+        false,
+      );
+      const emailSetCall = JSON.parse(jmapFetch.mock.calls.find(([, i]: any) => {
+        if (!i?.body) return false;
+        const b = JSON.parse(i.body);
+        return b.methodCalls.some((c: any[]) => c[0] === 'Email/set');
+      })[1].body).methodCalls.find((c: any[]) => c[0] === 'Email/set')[1];
+      expect(emailSetCall.create.outbound.to).toEqual([{ email: 'a@acme.test' }, { email: 'b@acme.test' }]);
+    });
   });
 });
