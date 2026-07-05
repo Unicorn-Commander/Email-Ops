@@ -18,7 +18,16 @@
  * wire so the page can render the truth.
  */
 
-import { apiDelete, apiGet, apiPost, apiPut } from '@/lib/api';
+import { API_BASE, ApiError, apiDelete, apiGet, apiPost, apiPut, getToken } from '@/lib/api';
+
+/**
+ * Feature detection for the Wave-2 endpoints (aggregate / counts / read / blobs
+ * / attachments / bulk). Those may not be deployed yet: a 404 or 501 from one of
+ * them means "not there", and the UI hides the affordance instead of erroring.
+ */
+export function isMissingEndpoint(err: unknown): boolean {
+  return err instanceof ApiError && (err.status === 404 || err.status === 501);
+}
 
 /** The folders a thread list can be scoped to (the segmented control). */
 export type MailFolder = 'inbox' | 'archive' | 'spam' | 'trash' | 'sent' | 'drafts';
@@ -61,6 +70,21 @@ export interface ThreadView {
   participants: MailParticipant[];
   /** Where the thread currently sits (the triage overlay). Optional on the wire. */
   disposition?: ThreadDisposition;
+  /** Whether any message in the thread carries an attachment (Wave 2, optional). */
+  has_attachments?: boolean;
+  /** Present on aggregate ("All inboxes") rows: which mailbox the thread lives in. */
+  mailbox_id?: string;
+  /** Present on aggregate rows: that mailbox's address (for the per-account tag). */
+  mailbox_address?: string;
+}
+
+/** One attachment on a message (Wave 2). `cid` links inline images. */
+export interface MailAttachment {
+  blob_id: string;
+  name: string | null;
+  type: string | null;
+  size: number | null;
+  cid: string | null;
 }
 
 /** One message inside a thread (mirrors the backend MessageView). */
@@ -69,11 +93,21 @@ export interface MessageView {
   thread_id: string;
   from: MailParticipant | null;
   to: MailParticipant[];
+  /** CC recipients (Wave 2, optional on the wire). */
+  cc?: MailParticipant[];
   subject: string | null;
   sent_at: string | null;
   preview: string | null;
   /** received | sent | draft */
   direction: string;
+  /** RAW UNSANITIZED HTML body (Wave 2) — must be sanitized before rendering. */
+  html_body?: string | null;
+  /** Plain-text body (Wave 2). */
+  text_body?: string | null;
+  /** Per-message unread flag (Wave 2). */
+  is_unread?: boolean;
+  /** Attachments (Wave 2). */
+  attachments?: MailAttachment[];
 }
 
 /**
@@ -91,12 +125,29 @@ export interface MessageComposeView {
   created_at: string | null;
 }
 
-/** Body for compose / reply. `in_reply_to_thread_id` threads a reply. */
+/** A blob reference included in a compose (already uploaded via the attachments endpoint). */
+export interface ComposeAttachmentRef {
+  blob_id: string;
+  name: string;
+  type: string;
+}
+
+/**
+ * Body for compose / reply. `in_reply_to_thread_id` threads a reply.
+ * Wave 2 adds cc/bcc, uploaded-blob attachment refs, and the RFC-5322 threading
+ * hints `in_reply_to` / `references` (message ids; the backend resolves headers).
+ * NOTE: multiple To recipients are sent comma-joined in `to_address`.
+ */
 export interface ComposeBody {
   to_address: string;
   subject?: string;
   body?: string;
   in_reply_to_thread_id?: string;
+  cc?: string[];
+  bcc?: string[];
+  attachments?: ComposeAttachmentRef[];
+  in_reply_to?: string;
+  references?: string[];
 }
 
 /** A sender-policy rule targets a single ADDRESS or a whole DOMAIN. */
@@ -213,6 +264,25 @@ export async function connectMailbox(
   return apiPost<MailboxPick>(`/workspaces/${seg(workspaceId)}/mailboxes/connected`, body, token);
 }
 
+/** Options for a thread-list read (single-mailbox or aggregate). */
+export interface ListThreadsOpts {
+  folder?: MailFolder;
+  limit?: number;
+  /** Full-text search (Wave 2). Omitted when empty. */
+  q?: string;
+  /** Load-more paging offset (Wave 2). */
+  offset?: number;
+}
+
+function threadsQs(opts: ListThreadsOpts): string {
+  const params = new URLSearchParams();
+  params.set('folder', opts.folder ?? 'inbox');
+  params.set('limit', String(opts.limit ?? 50));
+  if (opts.q?.trim()) params.set('q', opts.q.trim());
+  if (opts.offset) params.set('offset', String(opts.offset));
+  return `?${params.toString()}`;
+}
+
 /**
  * List the threads in a mailbox folder, newest-first (defaults to 50, inbox).
  * `folder` ∈ inbox | archive | spam | trash | sent | drafts.
@@ -220,15 +290,185 @@ export async function connectMailbox(
 export async function listMailThreads(
   workspaceId: string,
   mailboxId: string,
-  limit = 50,
-  folder: MailFolder = 'inbox',
+  opts: ListThreadsOpts = {},
   token?: string,
 ): Promise<MailThreadsResponse> {
+  return apiGet<MailThreadsResponse>(
+    `${mailBase(workspaceId, mailboxId)}/threads${threadsQs(opts)}`,
+    token,
+  );
+}
+
+/**
+ * Unified "All inboxes" thread list across every mailbox in the workspace
+ * (Wave 2). Rows carry `mailbox_id` + `mailbox_address` so the UI can tag them
+ * and route opens/replies to the right mailbox. 404/501 → feature not deployed.
+ * Tolerates either `threads` or `items` as the list key.
+ */
+export async function listAggregateThreads(
+  workspaceId: string,
+  opts: ListThreadsOpts = {},
+  token?: string,
+): Promise<MailThreadsResponse> {
+  const raw = await apiGet<{ threads?: ThreadView[]; items?: ThreadView[]; count?: number; folder?: string }>(
+    `/workspaces/${seg(workspaceId)}/mail/threads/aggregate${threadsQs(opts)}`,
+    token,
+  );
+  const threads = raw.threads ?? raw.items ?? [];
+  return { threads, count: raw.count ?? threads.length, folder: raw.folder };
+}
+
+/** Per-mailbox inbox counts (Wave 2) — feeds the unread badges in the picker. */
+export interface MailboxCounts {
+  mailbox_id: string;
+  address: string;
+  inbox_unread: number;
+  inbox_total: number;
+  /** Set when this mailbox's engine read failed; counts may be stale/zero. */
+  error?: string | null;
+}
+
+export interface MailCountsResponse {
+  mailboxes: MailboxCounts[];
+}
+
+/** Fetch per-mailbox inbox unread/total counts (Wave 2). 404/501 → hide badges. */
+export async function getMailCounts(
+  workspaceId: string,
+  token?: string,
+): Promise<MailCountsResponse> {
+  return apiGet<MailCountsResponse>(`/workspaces/${seg(workspaceId)}/mail/counts`, token);
+}
+
+/** Mark a whole thread read/unread (Wave 2). 404/501 → feature not deployed. */
+export async function setThreadRead(
+  workspaceId: string,
+  mailboxId: string,
+  threadId: string,
+  read: boolean,
+  token?: string,
+): Promise<unknown> {
+  return apiPut(`${mailBase(workspaceId, mailboxId)}/threads/${seg(threadId)}/read`, { read }, token);
+}
+
+// ── Blobs (attachment download + cid inline images) ─────────────────────────
+
+/** The API path for an attachment blob (relative to API_BASE). */
+export function mailBlobPath(
+  workspaceId: string,
+  mailboxId: string,
+  blobId: string,
+  name?: string | null,
+  type?: string | null,
+): string {
   const params = new URLSearchParams();
-  if (folder) params.set('folder', folder);
-  if (limit) params.set('limit', String(limit));
+  if (name) params.set('name', name);
+  if (type) params.set('type', type);
   const qs = params.toString() ? `?${params.toString()}` : '';
-  return apiGet<MailThreadsResponse>(`${mailBase(workspaceId, mailboxId)}/threads${qs}`, token);
+  return `${mailBase(workspaceId, mailboxId)}/blobs/${seg(blobId)}${qs}`;
+}
+
+/**
+ * Fetch an attachment blob with the bearer token (an <img src>/<a href> can't
+ * carry the Authorization header, so callers turn this into an object URL).
+ */
+export async function fetchMailBlob(
+  workspaceId: string,
+  mailboxId: string,
+  blobId: string,
+  name?: string | null,
+  type?: string | null,
+  token?: string,
+): Promise<Blob> {
+  const bearer = token ?? getToken();
+  const res = await fetch(`${API_BASE}${mailBlobPath(workspaceId, mailboxId, blobId, name, type)}`, {
+    headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
+  });
+  if (!res.ok) throw new ApiError(res.status, `Could not download the attachment (${res.status}).`);
+  return res.blob();
+}
+
+/** The uploaded-blob echo from the attachments endpoint. */
+export interface UploadedBlob {
+  blob_id: string;
+  name: string;
+  type: string;
+  size: number;
+}
+
+/**
+ * Upload one file as a compose attachment (multipart field `file`), reporting
+ * progress. Uses XHR because fetch has no upload-progress events.
+ */
+export function uploadMailAttachment(
+  workspaceId: string,
+  mailboxId: string,
+  file: File,
+  onProgress?: (fraction: number) => void,
+  token?: string,
+): Promise<UploadedBlob> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_BASE}${mailBase(workspaceId, mailboxId)}/attachments`);
+    const bearer = token ?? getToken();
+    if (bearer) xhr.setRequestHeader('Authorization', `Bearer ${bearer}`);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as UploadedBlob);
+        } catch {
+          reject(new ApiError(xhr.status, 'Upload succeeded but the response was unreadable.'));
+        }
+      } else {
+        let message = `Upload failed (${xhr.status}).`;
+        try {
+          const data = JSON.parse(xhr.responseText);
+          if (typeof data?.message === 'string') message = data.message;
+        } catch {
+          /* non-JSON body */
+        }
+        reject(new ApiError(xhr.status, message));
+      }
+    };
+    xhr.onerror = () => reject(new ApiError(0, 'Upload failed — network error.'));
+    const form = new FormData();
+    form.append('file', file, file.name);
+    xhr.send(form);
+  });
+}
+
+// ── Bulk triage (Wave 2) ─────────────────────────────────────────────────────
+
+export type BulkAction = 'archive' | 'trash' | 'spam' | 'inbox' | 'read' | 'unread';
+
+export interface BulkActionResponse {
+  /** Count or list of thread ids, depending on backend build — normalize before display. */
+  succeeded: number | string[];
+  failed: number | string[];
+}
+
+/** Normalize a bulk result field (count or id-list) to a count. */
+export function bulkCount(v: number | string[] | undefined | null): number {
+  if (typeof v === 'number') return v;
+  if (Array.isArray(v)) return v.length;
+  return 0;
+}
+
+/** Apply one action to many threads at once (Wave 2). 404/501 → hide bulk UI. */
+export async function bulkThreadAction(
+  workspaceId: string,
+  threadIds: string[],
+  action: BulkAction,
+  token?: string,
+): Promise<BulkActionResponse> {
+  return apiPost<BulkActionResponse>(
+    `/workspaces/${seg(workspaceId)}/mail/threads/bulk`,
+    { thread_ids: threadIds, action },
+    token,
+  );
 }
 
 /** Fetch the messages of a single thread, in order. */
