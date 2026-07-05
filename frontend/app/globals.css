@@ -32,6 +32,17 @@
   }
 }
 
+/* Global app-nav width is CSS-driven (keyed off a <html> class) so the
+   pre-hydration inline script in app/layout.tsx can size the rail before React
+   mounts — no width flash on reload. The toggle is wired through
+   state/uiCollapse.ts, which flips the same class + localStorage key. */
+[data-app-nav] {
+  width: 220px;
+}
+html.eops-nav-collapsed [data-app-nav] {
+  width: 56px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

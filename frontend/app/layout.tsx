@@ -18,6 +18,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             __html: `(function(){try{var pref=localStorage.getItem("theme")}catch(e){var pref=null}if(pref!=="light"&&pref!=="dark"&&pref!=="system")pref="dark";var resolved=pref;if(pref==="system"){resolved=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}document.documentElement.setAttribute("data-theme",resolved)})();`,
           }}
         />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{if(localStorage.getItem("eops:shell:nav-collapsed")==="1")document.documentElement.classList.add("eops-nav-collapsed")}catch(e){}})();`,
+          }}
+        />
       </head>
       <body>
         <ConfirmProvider>
