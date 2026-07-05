@@ -2,10 +2,17 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import {
+  StalwartBlobDownload,
+  StalwartFolderQuery,
+  StalwartFolderThreadsResult,
+  StalwartMailboxCounts,
   StalwartMessage,
+  StalwartMessageDetail,
+  StalwartMessageHeaders,
   StalwartSendRequest,
   StalwartSendResult,
   StalwartThread,
+  StalwartUploadResult,
 } from '../stalwart/stalwart.types';
 import { EmailService } from './email.service';
 import { AgentAutonomyLevel } from '@prisma/client';
@@ -56,6 +63,30 @@ class FakeStalwart extends StalwartPort {
   }
   async listMessages(): Promise<StalwartMessage[]> {
     return this.messages;
+  }
+  async listFolderThreads(
+    _mailbox: string,
+    _query: StalwartFolderQuery,
+  ): Promise<StalwartFolderThreadsResult> {
+    return { threads: [] };
+  }
+  async getThreadDetail(): Promise<StalwartMessageDetail[]> {
+    return [];
+  }
+  async setThreadRead(): Promise<boolean> {
+    return true;
+  }
+  async getMailboxCounts(): Promise<StalwartMailboxCounts | null> {
+    return null;
+  }
+  async downloadBlob(): Promise<StalwartBlobDownload | null> {
+    return null;
+  }
+  async getMessageHeaders(): Promise<StalwartMessageHeaders | null> {
+    return null;
+  }
+  async uploadBlob(): Promise<StalwartUploadResult | null> {
+    return null;
   }
   async send(
     _mailbox: string,

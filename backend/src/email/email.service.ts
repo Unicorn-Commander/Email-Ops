@@ -47,16 +47,20 @@ import {
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
-import { StalwartThread } from '../stalwart/stalwart.types';
+import { StalwartMessageDetail, StalwartThread } from '../stalwart/stalwart.types';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import {
   AgentInboxView,
+  AttachmentView,
+  BulkActionResult,
   ComposeInput,
   EngagementCaptureInput,
   EngagementCaptureResult,
+  MailboxCountsView,
   MailFolder,
   MessageComposeView,
   MessageView,
+  ParticipantView,
   ThreadView,
 } from './email.types';
 import { shouldAdvanceStatus } from './message-status';
@@ -70,10 +74,19 @@ interface SendReq {
   fromAddress: string;
   fromName: string | null;
   toAddress: string;
+  /** The full recipient list (webmail wave: multi-recipient fan-out); toAddress is its first entry. */
+  toAddresses?: string[];
   subject: string;
   body: string;
   inReplyToThreadId: string | null;
   transactional: boolean;
+  // webmail wave: compose extension (all optional, back-compat).
+  cc?: string[];
+  bcc?: string[];
+  attachments?: { blobId: string; name: string; type: string }[];
+  /** The resolved Message-ID header of the message being replied to. */
+  inReplyTo?: string | null;
+  references?: string[];
 }
 
 /** The result callEngine() returns (normalized across Stalwart + provider). */
@@ -260,17 +273,10 @@ export class EmailService {
         if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
         live = await this.mailProvider.listThreadMessages(mailbox, threadId);
       } else if (mailbox) {
-        const msgs = await this.stalwart.listMessages(mailbox.emailAddress, threadId);
-        live = msgs.map((m) => ({
-          id: m.id,
-          thread_id: m.threadId,
-          from: m.from ? { address: m.from.address, name: m.from.name } : null,
-          to: m.to.map((p) => ({ address: p.address, name: p.name })),
-          subject: m.subject,
-          sent_at: m.sentAt,
-          preview: m.preview,
-          direction: m.direction,
-        }));
+        // webmail wave: the FULL detail (bodies/cc/threading headers/read
+        // state/attachments) — a superset of the previous previews-only read.
+        const details = await this.stalwart.getThreadDetail(mailbox.emailAddress, threadId);
+        live = details.map((m) => this.toDetailedMessageView(m));
       }
 
       const own = await tx.emailMessage.findMany({
@@ -298,10 +304,21 @@ export class EmailService {
   }
 
   /**
-   * The mailbox's recent threads — the human email client's inbox list. Engine
-   * receives light up when the engine is live; until then this is the SoR view
-   * (threads this mailbox has sent), so the client is honest rather than empty-
-   * by-bug. Workspace-scoped.
+   * The mailbox's recent threads — the human email client's inbox list.
+   * Search+paging (webmail wave): `query` is a JMAP full-text filter, `offset`
+   * pages through the folder. Workspace-scoped.
+   *
+   * Sourcing (webmail wave): for a JMAP-backed (sovereign) mailbox, live
+   * engine threads for the requested folder are now fetched directly — JMAP's
+   * own Mailbox role IS authoritative folder membership for real mail. The
+   * local ThreadDisposition overlay continues to govern ONLY the thin
+   * locally-composed SoR rows that have no live JMAP counterpart yet (the
+   * SAME "live wins" dedup pattern listThreadsWithContact already uses), so a
+   * pre-existing disposition-only thread keeps working exactly as before while
+   * live mail now correctly appears. That local supplement is only merged in
+   * on the plain, first-page call (no `query`, offset===0) — a search or a
+   * page beyond the first is answered purely from the live, paged JMAP result
+   * (mixing in an un-paged, unfiltered local supplement there would be wrong).
    */
   async listMailboxInbox(
     workspaceId: string,
@@ -309,6 +326,8 @@ export class EmailService {
     mailboxId: string,
     limit = 50,
     folder: MailFolder = 'inbox',
+    query?: string | null,
+    offset = 0,
   ): Promise<ThreadView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
@@ -319,6 +338,10 @@ export class EmailService {
       // KC-broker token + the cleaner-engine). Degrade-clean: [] when the account
       // isn't connected or the engine is dormant. The local disposition overlay
       // stays a sovereign-mailbox concern (sync-back to the provider is a follow-up).
+      // NOTE (webmail wave): the external-provider port doesn't yet carry a
+      // `query`/`offset` param — a search/page-2+ request against an external
+      // mailbox still returns its first `limit` unfiltered results (documented
+      // limitation; see the wave report).
       if (this.mailProvider.handles(mailbox)) {
         // Per-user fence: a HUMAN external mailbox is private to its owner — never
         // surface a co-member's connected inbox just because it shares the workspace.
@@ -327,6 +350,16 @@ export class EmailService {
       }
 
       const addr = mailbox.emailAddress;
+
+      // webmail wave: the live, folder-scoped (+ searched + paged) JMAP threads.
+      const live = await this.liveFolderThreads(addr, folder, limit, offset, query);
+
+      // A search or any page beyond the first is answered purely from the live
+      // result — correct paging/filtering needs the engine's own position+text
+      // semantics, which the local-only supplement below doesn't have.
+      if ((query && query.trim()) || offset > 0) {
+        return live;
+      }
 
       // The message scope per folder. Disposition folders look at every thread
       // the mailbox participates in (received + sent) and are then narrowed by
@@ -409,7 +442,7 @@ export class EmailService {
         }
       });
 
-      return visible.slice(0, limit).map((t) => ({
+      const localThreads: ThreadView[] = visible.slice(0, limit).map((t) => ({
         id: t.id,
         subject: t.subject,
         message_count: t.count,
@@ -419,6 +452,265 @@ export class EmailService {
         participants: [...t.participants].map((address) => ({ address, name: null })),
         disposition: effective(t.id),
       }));
+
+      // Live JMAP threads win on id collision (richer/authoritative); local-only
+      // rows fill in anything the engine hasn't (yet) surfaced.
+      const byId = new Map<string, ThreadView>();
+      for (const t of live) byId.set(t.id, t);
+      for (const t of localThreads) if (!byId.has(t.id)) byId.set(t.id, t);
+      return [...byId.values()]
+        .sort((a, b) => this.threadTime(b) - this.threadTime(a))
+        .slice(0, limit);
+    });
+  }
+
+  /** ISO `last_message_at` -> epoch ms (0 for null/unparseable), for merge-sorting ThreadViews. */
+  private threadTime(t: ThreadView): number {
+    return t.last_message_at ? Date.parse(t.last_message_at) || 0 : 0;
+  }
+
+  /**
+   * Live, folder-scoped (+ searched + paged) JMAP threads for one mailbox,
+   * mapped onto the ThreadView wire shape. Degrade-clean: [] when the engine
+   * isn't configured / the call fails (StalwartPort.listFolderThreads never
+   * throws).
+   */
+  private async liveFolderThreads(
+    address: string,
+    folder: MailFolder,
+    limit: number,
+    offset: number,
+    query?: string | null,
+  ): Promise<ThreadView[]> {
+    if (!this.stalwart.isConfigured()) return [];
+    const { threads } = await this.stalwart.listFolderThreads(address, {
+      folder,
+      limit,
+      offset,
+      query: query ?? null,
+    });
+    return threads.map((t) => ({
+      id: t.id,
+      subject: t.subject,
+      message_count: t.messageCount,
+      unread: t.unread,
+      last_message_at: t.lastMessageAt,
+      last_snippet: t.lastSnippet,
+      participants: t.participants.map((p) => ({ address: p.address, name: p.name })),
+      has_attachments: t.hasAttachments,
+    }));
+  }
+
+  // ── webmail wave: unified inbox / counts / read state / blobs / bulk ────
+
+  /**
+   * The workspace mailboxes this caller may READ through (workspace-fenced +
+   * the per-user HUMAN-mailbox fence). Shared helper for the aggregate/counts
+   * fan-outs. Runs inside the caller's tx.
+   */
+  private async readableMailboxes(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    ucUid: string | null,
+  ): Promise<MailboxAccount[]> {
+    const all = await tx.mailboxAccount.findMany({
+      where: { workspaceId, active: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    const out: MailboxAccount[] = [];
+    for (const mb of all) {
+      if (await this.mayActThroughMailbox(mb, ucUid)) out.push(mb);
+    }
+    return out;
+  }
+
+  /**
+   * UNIFIED INBOX (webmail wave): fan out across ALL workspace mailboxes the
+   * caller may read, CONCURRENTLY (Promise.allSettled — one failing account
+   * never fails the whole response, it is simply omitted), merge-sort by
+   * last-activity desc, and apply `limit` AFTER the merge. Every item carries
+   * `mailbox_id` + `mailbox_address`. `offset` pages each account (plain row
+   * offset per account, exactly like the single-mailbox list) — a full page
+   * (length == limit) still means "may have more".
+   */
+  async listAggregateInbox(
+    workspaceId: string,
+    ucUid: string | null,
+    folder: MailFolder = 'inbox',
+    limit = 50,
+    query?: string | null,
+    offset = 0,
+  ): Promise<ThreadView[]> {
+    const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      this.readableMailboxes(tx, workspaceId, ucUid),
+    );
+    const settled = await Promise.allSettled(
+      mailboxes.map(async (mb) => {
+        const threads = await this.listMailboxInbox(
+          workspaceId,
+          ucUid,
+          mb.id,
+          limit,
+          folder,
+          query,
+          offset,
+        );
+        return threads.map((t) => ({ ...t, mailbox_id: mb.id, mailbox_address: mb.emailAddress }));
+      }),
+    );
+    const merged: ThreadView[] = [];
+    settled.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        merged.push(...r.value);
+      } else {
+        this.logger.warn(
+          `aggregate inbox: mailbox ${mailboxes[i]?.emailAddress ?? '?'} failed (${(r.reason as Error)?.message ?? r.reason}) — omitted from the merged view`,
+        );
+      }
+    });
+    return merged.sort((a, b) => this.threadTime(b) - this.threadTime(a)).slice(0, limit);
+  }
+
+  /**
+   * COUNTS (webmail wave): the Inbox unread/total per workspace mailbox, via
+   * the engine's Mailbox surface (JMAP role:inbox), fetched CONCURRENTLY. A
+   * failing / unsupported account becomes a zeroed entry with `error: true`
+   * rather than being dropped (the client renders the mailbox row either way).
+   */
+  async getWorkspaceMailCounts(
+    workspaceId: string,
+    ucUid: string | null,
+  ): Promise<MailboxCountsView[]> {
+    const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      this.readableMailboxes(tx, workspaceId, ucUid),
+    );
+    const settled = await Promise.allSettled(
+      mailboxes.map(async (mb) => {
+        // External-provider mailboxes have no engine counts surface (yet) —
+        // honest zeros + error:true, same as a failing sovereign account.
+        if (this.mailProvider.handles(mb)) return null;
+        return this.stalwart.getMailboxCounts(mb.emailAddress);
+      }),
+    );
+    return mailboxes.map((mb, i) => {
+      const r = settled[i];
+      const counts = r.status === 'fulfilled' ? r.value : null;
+      if (r.status === 'rejected') {
+        this.logger.warn(
+          `mail counts: mailbox ${mb.emailAddress} failed (${(r.reason as Error)?.message ?? r.reason}) — zeroed entry`,
+        );
+      }
+      return counts
+        ? {
+            mailbox_id: mb.id,
+            address: mb.emailAddress,
+            inbox_unread: counts.inboxUnread,
+            inbox_total: counts.inboxTotal,
+          }
+        : {
+            mailbox_id: mb.id,
+            address: mb.emailAddress,
+            inbox_unread: 0,
+            inbox_total: 0,
+            error: true,
+          };
+    });
+  }
+
+  /**
+   * READ STATE (webmail wave): set/clear `$seen` on every message in a thread
+   * via the engine (JMAP Email/set). `updated:false` means the engine could
+   * not apply it (unknown thread / unsupported engine) — degrade-clean, not an
+   * error. The mailbox is workspace-fenced + per-user fenced like every other
+   * mailbox-scoped read/write.
+   */
+  async setThreadReadState(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    threadId: string,
+    read: boolean,
+  ): Promise<{ thread_id: string; read: boolean; updated: boolean }> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) {
+      return { thread_id: threadId, read, updated: false };
+    }
+    const updated = await this.stalwart.setThreadRead(mailbox.emailAddress, threadId, read);
+    return { thread_id: threadId, read, updated };
+  }
+
+  /**
+   * ATTACHMENT DOWNLOAD (webmail wave): fetch one blob's bytes from the
+   * engine's blob store, scoped to the mailbox's account. Null when the
+   * mailbox is out of reach, the engine can't serve blobs, or the blob is
+   * unknown — the controller maps null to 404 (never a 500).
+   */
+  async downloadAttachment(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    blobId: string,
+  ): Promise<{ data: Buffer; contentType: string | null } | null> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) return null;
+    return this.stalwart.downloadBlob(mailbox.emailAddress, blobId);
+  }
+
+  /**
+   * ATTACHMENT UPLOAD (webmail wave): push a file into the engine's blob store
+   * under the mailbox's account; the returned blob_id is later referenced by a
+   * compose. Null when the mailbox is out of reach or the engine can't accept
+   * uploads — the controller maps null to 501 (never a 500).
+   */
+  async uploadAttachment(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    file: Buffer,
+    type: string,
+    filename: string,
+  ): Promise<{ blob_id: string; name: string; type: string; size: number } | null> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) return null;
+    const up = await this.stalwart.uploadBlob(mailbox.emailAddress, file, type, filename);
+    if (!up) return null;
+    return { blob_id: up.blobId, name: filename, type: up.type, size: up.size };
+  }
+
+  /**
+   * The read/unread half of BULK (webmail wave): the bulk route is
+   * workspace-level (no mailbox in the path) while JMAP thread ids live
+   * per-account — so try each readable sovereign mailbox in turn until one
+   * accepts the toggle. Bounded: bulk lists are small and the loop stops at
+   * the first success per thread. False = no account knew the thread.
+   */
+  async setThreadReadAcrossMailboxes(
+    workspaceId: string,
+    ucUid: string | null,
+    threadId: string,
+    read: boolean,
+  ): Promise<boolean> {
+    const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      this.readableMailboxes(tx, workspaceId, ucUid),
+    );
+    for (const mb of mailboxes) {
+      if (this.mailProvider.handles(mb)) continue;
+      if (await this.stalwart.setThreadRead(mb.emailAddress, threadId, read)) return true;
+    }
+    return false;
+  }
+
+  /** Resolve a mailbox by id inside the workspace + apply the per-user HUMAN fence. */
+  private async resolveMailboxForCaller(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+  ): Promise<MailboxAccount | null> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
+      if (!mailbox) return null;
+      if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return null;
+      return mailbox;
     });
   }
 
@@ -619,10 +911,17 @@ export class EmailService {
               fromAddress: fromAddress ?? input.toAddress, // engine requires a From; degrade-safe
               fromName: mailbox?.displayName ?? null,
               toAddress: input.toAddress,
+              toAddresses: input.toAddresses?.length ? input.toAddresses : undefined,
               subject: input.subject,
               body: input.body,
               inReplyToThreadId: input.inReplyToThreadId ?? null,
               transactional: mailbox?.postmarkLane ?? true,
+              cc: input.cc?.length ? input.cc : undefined,
+              bcc: input.bcc?.length ? input.bcc : undefined,
+              attachments: input.attachments?.length
+                ? input.attachments.map((a) => ({ blobId: a.blob_id, name: a.name, type: a.type }))
+                : undefined,
+              references: input.references?.length ? input.references : undefined,
             },
           },
         };
@@ -631,6 +930,26 @@ export class EmailService {
 
     // Idempotent hit OR the draft path: nothing left to send.
     if ('done' in prep) return prep.done;
+
+    // PHASE 1.5 — resolve the REAL Message-ID/References for a reply, OUTSIDE
+    // any tx (an external JMAP call). `input.inReplyToMessageId` is an INTERNAL
+    // message id (e.g. the id the thread-detail API handed the client) — NOT an
+    // RFC Message-ID — so the composer resolves the real threading headers
+    // itself. Best-effort: unresolved just means the send goes out without a
+    // perfect In-Reply-To/References chain rather than failing.
+    if (input.inReplyToMessageId) {
+      const resolved = await this.resolveReplyHeaders(
+        prep.send.mailbox,
+        input.inReplyToMessageId,
+        workspaceId,
+        ucUid,
+      );
+      if (resolved?.messageIdHeader) prep.send.req.inReplyTo = resolved.messageIdHeader;
+      if (!prep.send.req.references) {
+        const chain = [...(resolved?.references ?? []), ...(resolved?.messageIdHeader ? [resolved.messageIdHeader] : [])];
+        if (chain.length) prep.send.req.references = chain;
+      }
+    }
 
     // PHASE 2 — the external send, OUTSIDE any transaction. callEngine is
     // degrade-clean (a rejected/failed send returns accepted:false, never throws),
@@ -1109,7 +1428,37 @@ export class EmailService {
    * External account (gmail / microsoft) → its provider API; the sovereign
    * mailbox → Stalwart/Postmark. The result is normalized across both.
    */
-  private async callEngine(mailbox: MailboxAccount | null, req: SendReq): Promise<EngineSendResult> {
+  /**
+   * Resolve a reply's REAL threading headers from an INTERNAL message id (the
+   * webmail wave's in_reply_to contract: the client sends the id from its
+   * thread-detail API, not an RFC Message-ID). Tries the id directly as a JMAP
+   * email id first (covers replying to received mail, or mail already sent via
+   * JMAP); falls back to resolving it as one of OUR OWN local SoR row ids and
+   * retrying with that row's providerMessageId. Degrade-clean: null when
+   * unresolved (the composer then sends without perfect threading headers).
+   */
+  private async resolveReplyHeaders(
+    mailbox: MailboxAccount | null,
+    internalId: string,
+    workspaceId: string,
+    ucUid: string | null,
+  ): Promise<{ messageIdHeader: string | null; references: string[] | null } | null> {
+    if (!mailbox) return null;
+    const direct = await this.stalwart.getMessageHeaders(mailbox.emailAddress, internalId);
+    if (direct) return direct;
+    const row = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      tx.emailMessage.findFirst({
+        where: { id: internalId, workspaceId },
+        select: { providerMessageId: true },
+      }),
+    );
+    if (row?.providerMessageId) {
+      return this.stalwart.getMessageHeaders(mailbox.emailAddress, row.providerMessageId);
+    }
+    return null;
+  }
+
+    private async callEngine(mailbox: MailboxAccount | null, req: SendReq): Promise<EngineSendResult> {
     if (mailbox && this.mailProvider.handles(mailbox)) {
       const r = await this.mailProvider.send(mailbox, {
         from: req.fromAddress,
@@ -1132,9 +1481,15 @@ export class EmailService {
         fromAddress: req.fromAddress,
         fromName: req.fromName,
         toAddress: req.toAddress,
+        toAddresses: req.toAddresses,
         subject: req.subject,
         body: req.body,
         inReplyToThreadId: req.inReplyToThreadId,
+        cc: req.cc,
+        bcc: req.bcc,
+        attachments: req.attachments,
+        inReplyTo: req.inReplyTo,
+        references: req.references,
       },
       req.transactional,
     );
@@ -1217,6 +1572,33 @@ export class EmailService {
       select: { toAddress: true },
     });
     return last?.toAddress ?? null;
+  }
+
+  /** StalwartMessageDetail -> the enriched MessageView wire shape (webmail-wave thread-detail). */
+  private toDetailedMessageView(m: StalwartMessageDetail): MessageView {
+    return {
+      id: m.id,
+      thread_id: m.threadId,
+      from: m.from ? { address: m.from.address, name: m.from.name } : null,
+      to: m.to.map((p) => ({ address: p.address, name: p.name })),
+      subject: m.subject,
+      sent_at: m.sentAt,
+      preview: m.preview,
+      direction: m.direction,
+      cc: m.cc.map((p) => ({ address: p.address, name: p.name })),
+      html_body: m.htmlBody,
+      text_body: m.textBody,
+      message_id_header: m.messageIdHeader,
+      references: m.references,
+      is_unread: m.isUnread,
+      attachments: m.attachments.map((a) => ({
+        blob_id: a.blobId,
+        name: a.name,
+        type: a.type,
+        size: a.size,
+        cid: a.cid,
+      })),
+    };
   }
 
   private composeView(m: {

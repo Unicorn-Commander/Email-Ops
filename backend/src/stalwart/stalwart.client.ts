@@ -30,11 +30,18 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { StalwartPort } from './stalwart.port';
 import {
+  StalwartBlobDownload,
+  StalwartFolderQuery,
+  StalwartFolderThreadsResult,
+  StalwartMailboxCounts,
   StalwartMessage,
   StalwartParticipant,
+  StalwartMessageDetail,
+  StalwartMessageHeaders,
   StalwartSendRequest,
   StalwartSendResult,
   StalwartThread,
+  StalwartUploadResult,
 } from './stalwart.types';
 
 @Injectable()
@@ -252,6 +259,50 @@ export class StalwartClient extends StalwartPort {
     return out;
   }
 
+  /**
+   * NOT SUPPORTED on the legacy Stalwart engine (the webmail-wave search+paging
+   * surface is James-first) — degrade-clean: always returns an empty
+   * threads array, never throws. Swap MAIL_ENGINE=james to light this up for real.
+   */
+  async listFolderThreads(_mailbox: string, _query: StalwartFolderQuery): Promise<StalwartFolderThreadsResult> {
+    return { threads: [] };
+  }
+
+  /** NOT SUPPORTED on Stalwart (webmail-wave thread-detail enrichment) — degrade-clean []. */
+  async getThreadDetail(_mailbox: string, _threadId: string): Promise<StalwartMessageDetail[]> {
+    return [];
+  }
+
+  /** NOT SUPPORTED on Stalwart (webmail-wave read-state toggle) — degrade-clean false. */
+  async setThreadRead(_mailbox: string, _threadId: string, _read: boolean): Promise<boolean> {
+    return false;
+  }
+
+  /** NOT SUPPORTED on Stalwart (webmail-wave counts surface) — degrade-clean null. */
+  async getMailboxCounts(_mailbox: string): Promise<StalwartMailboxCounts | null> {
+    return null;
+  }
+
+  /** NOT SUPPORTED on Stalwart (webmail-wave attachment download) — degrade-clean null. */
+  async downloadBlob(_mailbox: string, _blobId: string): Promise<StalwartBlobDownload | null> {
+    return null;
+  }
+
+  /** NOT SUPPORTED on Stalwart (webmail-wave attachment upload) — degrade-clean null. */
+  async uploadBlob(
+    _mailbox: string,
+    _file: Buffer,
+    _type: string,
+    _filename: string,
+  ): Promise<StalwartUploadResult | null> {
+    return null;
+  }
+
+  /** NOT SUPPORTED on Stalwart (webmail-wave reply-threading resolution) — degrade-clean null. */
+  async getMessageHeaders(_mailbox: string, _messageId: string): Promise<StalwartMessageHeaders | null> {
+    return null;
+  }
+
   async send(
     mailbox: string,
     request: StalwartSendRequest,
@@ -291,7 +342,7 @@ export class StalwartClient extends StalwartPort {
         },
         body: JSON.stringify({
           From: fromHeader,
-          To: request.toAddress,
+          To: request.toAddresses?.length ? request.toAddresses.join(', ') : request.toAddress,
           Subject: request.subject,
           TextBody: request.body,
           MessageStream: 'outbound',
@@ -344,7 +395,7 @@ export class StalwartClient extends StalwartPort {
           create: {
             outbound: {
               from: [{ email: request.fromAddress, name: request.fromName ?? null }],
-              to: [{ email: request.toAddress }],
+              to: (request.toAddresses?.length ? request.toAddresses : [request.toAddress]).map((email) => ({ email })),
               subject: request.subject,
               bodyValues: { body: { value: request.body } },
               textBody: [{ partId: 'body', type: 'text/plain' }],
