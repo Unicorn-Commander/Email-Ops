@@ -485,9 +485,37 @@ model User {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
+  personalAccessTokens PersonalAccessToken[]
+
   @@index([email])
   @@index([keycloakId])
   @@map("users")
+}
+
+// ============================================================
+// PERSONAL ACCESS TOKEN (agent auth — SUITE-IDENTITY §D9, `eo_pat_` prefix)
+// ============================================================
+//
+// A durable, user-mintable credential for the MCP surface (and any other
+// JwtAuthGuard-protected route) so an agent can authenticate without a
+// short-lived uchub JWT. Mirrors the suite-wide PAT pattern (Meeting-Ops
+// `mops_pat_`, Accounting-Ops `aops_pat_`). We never store the plaintext
+// token — only its sha256 hash (`tokenHash`, unique + indexed) plus a
+// display-only prefix (`tokenPrefix`). Revocation is a soft `revokedAt`
+// stamp, never a delete, so audit history survives.
+model PersonalAccessToken {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  tokenHash   String    @unique
+  tokenPrefix String
+  lastUsedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  revokedAt   DateTime?
+
+  @@index([userId])
+  @@map("personal_access_tokens")
 }
 
 // ============================================================
