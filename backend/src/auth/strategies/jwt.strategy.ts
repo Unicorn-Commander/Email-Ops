@@ -72,7 +72,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
           const decoded: any = jsonwebtoken.decode(token, { complete: true });
           const alg = decoded?.header?.alg;
           const kid = decoded?.header?.kid;
-          const iss: string | undefined = decoded?.payload?.iss;
+          const iss = AuthService.normalizeIssuer(decoded?.payload?.iss);
 
           // RS256 + Brigade-trusted-issuer -> per-issuer Brigade JWKS
           if (alg === 'RS256' && kid && iss && brigadeJwksByIss.has(iss)) {
@@ -144,8 +144,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     const source = raw === undefined || raw === null ? 'https://brigade.unicorncommander.ai' : raw;
     const issuers = source
       .split(',')
-      .map((s) => s.trim().replace(/\/$/, ''))
-      .filter(Boolean);
+      .map((s) => AuthService.normalizeIssuer(s))
+      .filter((s): s is string => !!s);
 
     const map = new Map<string, JwksClient>();
     for (const iss of issuers) {
@@ -225,8 +225,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       // enforce that its audience is THIS app before resolving the user. (Local
       // HS256 + Keycloak-realm tokens have a non-Brigade `iss` and carry no
       // app-scoped `aud`, so they are unaffected.)
-      const issuer: string | undefined = payload?.iss;
-      if (typeof issuer === 'string' && this.brigadeTrustedIssuers.has(issuer)) {
+      const issuer = AuthService.normalizeIssuer(payload?.iss);
+      if (issuer && this.brigadeTrustedIssuers.has(issuer)) {
         if (!JwtStrategy.audienceMatches(payload?.aud, this.brigadeExpectedAudience)) {
           this.logger.warn(
             `Rejected Brigade token: aud=${JSON.stringify(payload?.aud)} != ${this.brigadeExpectedAudience}`,

@@ -41,21 +41,56 @@ export class AuthService {
    * Resolve (or JIT-provision) the Email-Ops User for a verified Keycloak
    * identity. Resolution order (SUITE-IDENTITY §D1):
    *   1. by keycloakId (== uchub sub) — the canonical key.
-   *   2. by email — links an existing local row to this sub (sets keycloakId).
+   *   2. by email — LINKS an existing *unlinked* local row to this sub. It does
+   *      NOT silently rebind a row that already carries a different sub (that is
+   *      an account-identity conflict, not a link — see below).
    *   3. neither — JIT-create, GATED by the access list.
    */
   async validateKeycloakUser(keycloakId: string, profile: any): Promise<User> {
     const email: string | undefined = profile?.email;
 
-    // 1. keycloakId / sub first.
+    // 1. keycloakId / sub first (the canonical, unique key).
     let user = await this.prisma.user.findUnique({ where: { keycloakId } });
 
-    // 2. email linking fallback.
+    // 2. email linking fallback — link an UNLINKED local row (keycloakId == null)
+    //    to its first verified sub. We do NOT silently REBIND a row that already
+    //    carries a DIFFERENT sub: an email resolving to a different Keycloak
+    //    identity is a conflict (email reuse / offboarding / a forged email
+    //    claim), and rebinding would hand the existing account — its id, stored
+    //    Keycloak refresh token, and any id-keyed data — to the new sub. (Note it
+    //    would NOT even transfer workspace access: memberships key off keycloakId,
+    //    so a rebind orphans them — auto-rebind was never a complete migration
+    //    path.) The historical auto-rebind is preserved behind
+    //    EMAIL_OPS_ALLOW_KEYCLOAK_REBIND (default OFF = fail closed), for a
+    //    Keycloak realm migration where users keep their email but get a new sub
+    //    — and even then the operator must also re-key memberships.
     if (!user && email) {
-      user = await this.prisma.user.findUnique({ where: { email } });
-      if (user) {
-        user = await this.prisma.user.update({ where: { id: user.id }, data: { keycloakId } });
-        this.logger.log(`Linked existing user ${email} to Keycloak sub ${keycloakId}`);
+      const byEmail = await this.prisma.user.findUnique({ where: { email } });
+      if (byEmail) {
+        if (!byEmail.keycloakId) {
+          user = await this.prisma.user.update({
+            where: { id: byEmail.id },
+            data: { keycloakId },
+          });
+          this.logger.log(`Linked existing local user ${email} to Keycloak sub ${keycloakId}`);
+        } else if (AuthService.allowKeycloakRebind()) {
+          user = await this.prisma.user.update({
+            where: { id: byEmail.id },
+            data: { keycloakId },
+          });
+          this.logger.warn(
+            `Rebound ${email} from Keycloak sub ${byEmail.keycloakId} to ${keycloakId} ` +
+              `(EMAIL_OPS_ALLOW_KEYCLOAK_REBIND enabled — migration window; re-key memberships too)`,
+          );
+        } else {
+          this.logger.warn(
+            `Refusing to rebind ${email}: existing Keycloak sub ${byEmail.keycloakId} != token ` +
+              `sub ${keycloakId}. Enable EMAIL_OPS_ALLOW_KEYCLOAK_REBIND only during a Keycloak migration.`,
+          );
+          throw new UnauthorizedException(
+            'This email is already linked to a different identity. Contact your administrator.',
+          );
+        }
       }
     }
 
@@ -149,10 +184,14 @@ export class AuthService {
    *   - Locally-signed session token (no/foreign `iss`) → resolve by local id.
    */
   async validateJwtPayload(payload: any): Promise<User> {
-    const issuer: string | undefined = payload?.iss;
-    const isKeycloakRealmToken = typeof issuer === 'string' && issuer.includes('/realms/');
+    // Normalize the issuer (trim + strip trailing slash) BEFORE matching, using
+    // the same helper the JWT strategy uses to build its JWKS/issuer sets — so a
+    // trailing-slash config can't make a verified Brigade token fall through to
+    // the local-session branch (issuer-normalization divergence, defense in depth).
+    const issuer = AuthService.normalizeIssuer(payload?.iss);
+    const isKeycloakRealmToken = !!issuer && issuer.includes('/realms/');
     const isBrigadeFederationToken =
-      typeof issuer === 'string' && AuthService.brigadeTrustedIssuers().includes(issuer);
+      !!issuer && AuthService.brigadeTrustedIssuers().includes(issuer);
 
     if (isKeycloakRealmToken || isBrigadeFederationToken) {
       // Brigade's transitional sub may be an email; surface it as the profile
@@ -209,8 +248,36 @@ export class AuthService {
     }
     return raw
       .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+      .map((s) => AuthService.normalizeIssuer(s))
+      .filter((s): s is string => !!s);
+  }
+
+  /**
+   * Canonicalize an issuer string: trim, strip trailing slash(es), return null
+   * for a non-string/empty value. Shared by AuthService (the federation-token
+   * branch) AND JwtStrategy (the JWKS-client map + the per-request audience
+   * gate) so issuer matching is identical on the signature side and the
+   * resolution side — a trailing slash on either the config or the token can't
+   * route a verified federation token to the wrong branch.
+   */
+  static normalizeIssuer(raw: unknown): string | null {
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.trim().replace(/\/+$/, '');
+    return trimmed || null;
+  }
+
+  /**
+   * Whether to REBIND an existing user row's keycloakId when a verified token
+   * presents the same email but a different sub. Default OFF (secure: an
+   * email→different-sub collision is an identity conflict, not a silent
+   * takeover). Enable ONLY during a Keycloak realm migration where users keep
+   * their email but receive a new sub — and re-key memberships in the same
+   * migration, since they bind to keycloakId. Read per-call so an operator can
+   * flip it without a code change.
+   */
+  private static allowKeycloakRebind(): boolean {
+    const raw = process.env.EMAIL_OPS_ALLOW_KEYCLOAK_REBIND;
+    return raw === 'true' || raw === '1';
   }
 
   /**
