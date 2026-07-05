@@ -24,6 +24,7 @@ import {
   type EmailOpsUser,
 } from '@/lib/api';
 import { providerMeta } from '@/lib/cleaner-model';
+import { useNavCollapsed } from '@/state/uiCollapse';
 
 type IconName =
   | 'dashboard'
@@ -33,7 +34,9 @@ type IconName =
   | 'shield'
   | 'activity'
   | 'menu'
-  | 'mail';
+  | 'mail'
+  | 'chevron-left'
+  | 'chevron-right';
 
 const NAV = [
   { href: '/dashboard', label: 'Overview', eyebrow: 'Needs-you', icon: 'dashboard' as const, tone: 'accent' as const },
@@ -115,11 +118,15 @@ export function AppShell({ children }: { children: ReactNode }) {
 function ProductChrome({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [sidebarExpanded, setSidebarExpanded] = useState(true);
+  const [navCollapsed, toggleNav] = useNavCollapsed();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(true);
   const { agentsPaused, setPaused } = useAgentControls();
   const agentPending = useAgentInboxPendingCount();
+
+  // The webmail client is a full-bleed surface: let it claim the viewport
+  // instead of the default centered max-w-7xl reading column.
+  const wide = pathname === '/mail' || pathname?.startsWith('/mail/');
 
   useEffect(() => {
     setDrawerOpen(false);
@@ -129,16 +136,16 @@ function ProductChrome({ children }: { children: ReactNode }) {
     <div className="min-h-screen bg-surface-base text-primary">
       <div className="flex min-h-screen">
         <aside
+          data-app-nav=""
           className={cn(
             'hidden shrink-0 border-r border-subtle bg-surface-base/92 backdrop-blur md:block',
             'transition-[width] duration-token ease-token',
-            sidebarExpanded ? 'w-[220px]' : 'w-[60px]',
           )}
         >
           <Sidebar
-            expanded={sidebarExpanded}
+            expanded={!navCollapsed}
             pendingCount={agentPending}
-            onToggle={() => setSidebarExpanded((value) => !value)}
+            onToggle={toggleNav}
           />
         </aside>
 
@@ -169,8 +176,13 @@ function ProductChrome({ children }: { children: ReactNode }) {
             }}
           />
 
-          <main className="px-4 pb-10 pt-5 sm:px-6 lg:px-8">
-            <div className="mx-auto max-w-7xl">{children}</div>
+          <main
+            className={cn(
+              'pb-10 pt-5',
+              wide ? 'px-3 sm:px-4 lg:px-5' : 'px-4 sm:px-6 lg:px-8',
+            )}
+          >
+            <div className={cn('mx-auto', wide ? 'max-w-none' : 'max-w-7xl')}>{children}</div>
           </main>
         </div>
 
@@ -199,23 +211,34 @@ function Sidebar({
 
   return (
     <div className="flex h-full flex-col bg-surface-base">
-      <div className="flex h-16 items-center gap-3 border-b border-subtle px-3">
-        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-token-lg bg-gradient-to-br from-accent to-[rgb(var(--accent-2))] text-sm font-semibold text-accent-contrast shadow-lg shadow-accent/40 ring-1 ring-white/15">
-          EO
-        </div>
+      <div
+        className={cn(
+          'flex h-16 items-center gap-3 border-b border-subtle',
+          expanded ? 'px-3' : 'justify-center px-2',
+        )}
+      >
         {expanded && (
-          <div className="min-w-0">
-            <div className="text-sm font-semibold tracking-tight text-primary">Email-Ops</div>
-            <div className="text-[11px] text-tertiary">Cleaner cockpit</div>
-          </div>
+          <>
+            <div className="grid h-9 w-9 shrink-0 place-items-center rounded-token-lg bg-gradient-to-br from-accent to-[rgb(var(--accent-2))] text-sm font-semibold text-accent-contrast shadow-lg shadow-accent/40 ring-1 ring-white/15">
+              EO
+            </div>
+            <div className="min-w-0">
+              <div className="text-sm font-semibold tracking-tight text-primary">Email-Ops</div>
+              <div className="text-[11px] text-tertiary">Cleaner cockpit</div>
+            </div>
+          </>
         )}
         <button
           type="button"
           aria-label={mobile ? 'Close navigation' : expanded ? 'Collapse sidebar' : 'Expand sidebar'}
+          aria-expanded={mobile ? undefined : expanded}
           onClick={onToggle}
-          className="ml-auto grid h-8 w-8 place-items-center rounded-token text-tertiary transition hover:bg-surface-overlay hover:text-primary"
+          className={cn(
+            'grid h-8 w-8 place-items-center rounded-token text-tertiary transition hover:bg-surface-overlay hover:text-primary',
+            expanded && 'ml-auto',
+          )}
         >
-          <Icon name={mobile ? 'menu' : 'shield'} />
+          <Icon name={mobile ? 'menu' : expanded ? 'chevron-left' : 'chevron-right'} />
         </button>
       </div>
 
@@ -634,6 +657,8 @@ function Icon({ name }: { name: IconName }) {
         <path d="m3 7 9 6 9-6" />
       </>
     ),
+    'chevron-left': <path d="m15 6-6 6 6 6" />,
+    'chevron-right': <path d="m9 6 6 6-6 6" />,
   } satisfies Record<IconName, ReactNode>;
 
   return (

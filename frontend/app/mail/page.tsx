@@ -41,6 +41,7 @@ import {
 } from '@/components/ui';
 import { useActiveSpace } from '@/components/ActiveSpaceProvider';
 import { useUiCommands } from '@/components/UiCommandProvider';
+import { useMailboxCollapsed } from '@/state/uiCollapse';
 import {
   ALL_INBOXES,
   formatWhen,
@@ -363,6 +364,11 @@ export default function MailPage() {
 
   const showAllInboxes = mail.features.aggregate && visibleMailboxes.length > 1;
 
+  // Collapse for the leftmost mailbox-picker pane — hands its width to the
+  // thread-list + reading pane. Desktop only; mobile keeps the full picker.
+  const [mbxCollapsed, toggleMbx] = useMailboxCollapsed();
+  const activeMailboxForRail = mail.unified ? null : mail.selectedMailbox ?? null;
+
   return (
     <div className="space-y-6">
       <Hero
@@ -392,19 +398,43 @@ export default function MailPage() {
       ) : visibleMailboxes.length === 0 ? (
         <NoSpaceMailboxes spaceName={activeSpace?.name ?? null} />
       ) : (
-        <div className="grid gap-4 lg:grid-cols-[minmax(200px,260px)_minmax(280px,360px)_1fr]">
-          {/* LEFT — mailbox picker. Hidden on mobile once a thread is open. */}
+        <div
+          className={cn(
+            'grid gap-4 transition-[grid-template-columns] duration-token ease-token',
+            mbxCollapsed
+              ? 'lg:grid-cols-[3rem_minmax(280px,360px)_1fr]'
+              : 'lg:grid-cols-[minmax(200px,260px)_minmax(280px,360px)_1fr]',
+          )}
+        >
+          {/* LEFT — mailbox picker. Hidden on mobile once a thread is open.
+              Desktop-collapsible into a slim rail; mobile always shows the
+              full picker (the grid is single-column below lg). */}
           <section className={cn(threadOpen && 'max-lg:hidden')}>
-            <MailboxList
-              mailboxes={visibleMailboxes}
-              selectedId={
-                mail.unified ? ALL_INBOXES : selectedVisible ? mail.selectedMailbox?.id ?? null : null
-              }
-              onSelect={mail.selectMailbox}
-              showAllInboxes={showAllInboxes}
-              unreadByMailbox={unreadByMailbox}
-              totalUnread={totalUnread}
-            />
+            {/* Collapsed desktop rail (expand affordance + active mailbox + unread). */}
+            {mbxCollapsed && (
+              <div className="hidden lg:block">
+                <MailboxRail
+                  onExpand={toggleMbx}
+                  totalUnread={totalUnread}
+                  unified={mail.unified}
+                  activeMailbox={activeMailboxForRail}
+                />
+              </div>
+            )}
+            {/* Full picker — always on mobile, and on desktop when expanded. */}
+            <div className={cn(mbxCollapsed && 'lg:hidden')}>
+              <MailboxList
+                mailboxes={visibleMailboxes}
+                selectedId={
+                  mail.unified ? ALL_INBOXES : selectedVisible ? mail.selectedMailbox?.id ?? null : null
+                }
+                onSelect={mail.selectMailbox}
+                showAllInboxes={showAllInboxes}
+                unreadByMailbox={unreadByMailbox}
+                totalUnread={totalUnread}
+                onCollapse={toggleMbx}
+              />
+            </div>
           </section>
 
           {/* MIDDLE — thread list. Hidden on mobile once a thread is open. */}
@@ -596,6 +626,7 @@ function MailboxList({
   showAllInboxes,
   unreadByMailbox,
   totalUnread,
+  onCollapse,
 }: {
   mailboxes: MailboxPick[];
   selectedId: string | null;
@@ -604,6 +635,8 @@ function MailboxList({
   /** null = counts endpoint unavailable → no badges. */
   unreadByMailbox: Map<string, number> | null;
   totalUnread: number | null;
+  /** Desktop-only collapse of this whole pane into a slim rail. */
+  onCollapse?: () => void;
 }) {
   return (
     <Card className="overflow-hidden">
@@ -618,6 +651,18 @@ function MailboxList({
         >
           Connect an account
         </Link>
+        {onCollapse && (
+          <button
+            type="button"
+            onClick={onCollapse}
+            aria-label="Collapse mailbox pane"
+            aria-expanded={true}
+            title="Collapse mailbox pane"
+            className="hidden shrink-0 place-items-center rounded-token p-1 text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary lg:grid"
+          >
+            <ChevronIcon dir="left" />
+          </button>
+        )}
       </div>
       <ul className="max-h-[70vh] overflow-y-auto p-1.5">
         {showAllInboxes && (
@@ -690,6 +735,84 @@ function MailboxList({
           );
         })}
       </ul>
+    </Card>
+  );
+}
+
+/** Slim chevron used by the collapse/expand affordances. */
+function ChevronIcon({ dir }: { dir: 'left' | 'right' }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      className="h-4 w-4"
+      aria-hidden="true"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {dir === 'left' ? <path d="m15 6-6 6 6 6" /> : <path d="m9 6 6 6-6 6" />}
+    </svg>
+  );
+}
+
+/**
+ * The collapsed mailbox pane: a slim vertical strip (desktop only) that hands
+ * its width to the thread list + reading pane. Shows an expand affordance plus
+ * the active mailbox's initial and the total unread so the user keeps context.
+ */
+function MailboxRail({
+  onExpand,
+  totalUnread,
+  unified,
+  activeMailbox,
+}: {
+  onExpand: () => void;
+  totalUnread: number | null;
+  unified: boolean;
+  activeMailbox: MailboxPick | null;
+}) {
+  const initial = unified
+    ? '∗'
+    : (activeMailbox?.display_name?.trim() || activeMailbox?.email_address || '?')
+        .charAt(0)
+        .toUpperCase();
+  const label = unified
+    ? 'All inboxes'
+    : activeMailbox?.display_name?.trim() || activeMailbox?.email_address || 'Mailbox';
+  return (
+    <Card className="flex h-full flex-col items-center gap-3 overflow-hidden px-1 py-2.5">
+      <button
+        type="button"
+        onClick={onExpand}
+        aria-label="Expand mailbox pane"
+        aria-expanded={false}
+        title="Expand mailbox pane"
+        className="grid h-8 w-8 shrink-0 place-items-center rounded-token text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary"
+      >
+        <ChevronIcon dir="right" />
+      </button>
+      <div className="h-px w-6 shrink-0 bg-border" />
+      <button
+        type="button"
+        onClick={onExpand}
+        title={`${label} — expand to switch mailbox`}
+        className="grid h-9 w-9 shrink-0 place-items-center rounded-token bg-surface-overlay text-sm font-semibold text-primary ring-1 ring-border transition-colors duration-fast ease-token hover:text-accent"
+      >
+        {initial}
+      </button>
+      {totalUnread != null && totalUnread > 0 && (
+        <span className="shrink-0 rounded-full bg-accent/15 px-1.5 font-mono text-[10px] font-medium leading-4 text-accent">
+          {totalUnread > 999 ? '999+' : totalUnread}
+        </span>
+      )}
+      <span
+        className="mt-1 shrink-0 text-[10px] font-medium uppercase tracking-wide text-tertiary [writing-mode:vertical-rl]"
+        aria-hidden="true"
+      >
+        Mailboxes
+      </span>
     </Card>
   );
 }
