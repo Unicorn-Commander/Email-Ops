@@ -8,19 +8,26 @@
  * PROVISIONED) when the engine is live — honest while the engine is dormant.
  */
 
-import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common';
 import {
   AgentActionKind,
   MailboxAccount,
   MailboxOwnerKind,
+  MailboxProvisionState,
   Prisma,
 } from '@prisma/client';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
+import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
 import { CreateMailboxInput, MailboxView, UpdateMailboxInput } from './mailbox-accounts.types';
 
 @Injectable()
 export class MailboxAccountsService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(MailboxAccountsService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly admin: MailEngineAdminPort,
+  ) {}
 
   /** All mailboxes in the workspace (default first, then alphabetical). */
   async listMailboxes(workspaceId: string, ucUid: string | null): Promise<MailboxView[]> {
@@ -47,16 +54,22 @@ export class MailboxAccountsService {
     });
   }
 
-  /** Create a mailbox (REGISTERED). 409 on a duplicate address. */
+  /**
+   * Create a mailbox. The SoR row is written first (REGISTERED), then — outside
+   * the DB transaction — the real engine account is minted via the admin engine
+   * and the row flips to PROVISIONED. Degrade-clean: with no engine wired (or for
+   * external accounts) the row stays REGISTERED and this behaves exactly as
+   * before. 409 on a duplicate address.
+   */
   async createMailbox(
     workspaceId: string,
     ucUid: string | null,
     input: CreateMailboxInput,
   ): Promise<MailboxView> {
-    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+    const created = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const ownerKind = input.ownerKind ?? MailboxOwnerKind.SHARED;
       try {
-        const created = await tx.mailboxAccount.create({
+        const row = await tx.mailboxAccount.create({
           data: {
             workspaceId,
             emailAddress: input.emailAddress,
@@ -68,8 +81,8 @@ export class MailboxAccountsService {
             // provisionState defaults REGISTERED; isDefault false; active true.
           },
         });
-        await this.recordAction(tx, workspaceId, AgentActionKind.MAILBOX_CREATED, ucUid, created.emailAddress);
-        return this.toViewOne(tx, created);
+        await this.recordAction(tx, workspaceId, AgentActionKind.MAILBOX_CREATED, ucUid, row.emailAddress);
+        return row;
       } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
           throw new ConflictException(
@@ -78,6 +91,59 @@ export class MailboxAccountsService {
         }
         throw err;
       }
+    });
+
+    return this.mintOnEngine(workspaceId, ucUid, created);
+  }
+
+  /**
+   * Mint (or confirm) the real engine account for a freshly REGISTERED sovereign
+   * mailbox and flip provisionState → PROVISIONED on success. A no-op (returns
+   * the row unchanged, still REGISTERED) when the admin engine is dormant or the
+   * mailbox is external (gmail / microsoft authenticate through their provider,
+   * not the sovereign engine). NEVER throws — a provisioning failure leaves the
+   * row REGISTERED and is logged, so the SoR write is never lost.
+   *
+   * The WebAdmin call runs OUTSIDE the SoR transaction (it is network I/O, not DB
+   * work); the PROVISIONED flip is a tiny follow-up write.
+   *
+   * NOTE: ensureAccount mints the engine login with a generated password; the
+   * intended auth path for these mailboxes is OIDC (James validates the Keycloak
+   * token), so the password is a break-glass we can reset. Surfacing/rotating it
+   * (or app-passwords for agents) is a follow-up, tracked separately.
+   */
+  private async mintOnEngine(
+    workspaceId: string,
+    ucUid: string | null,
+    created: MailboxAccount,
+  ): Promise<MailboxView> {
+    const isExternal =
+      !!created.provider && created.provider !== 'stalwart' && created.provider !== 'james';
+    if (!this.admin.isConfigured() || isExternal) {
+      return this.prisma.withWorkspace(workspaceId, ucUid, (tx) => this.toViewOne(tx, created));
+    }
+
+    const res = await this.admin.ensureAccount(created.emailAddress);
+    if (!res.provisioned) {
+      this.logger.warn(
+        `Mailbox ${created.emailAddress} REGISTERED but engine provisioning failed: ${res.reason}`,
+      );
+      return this.prisma.withWorkspace(workspaceId, ucUid, (tx) => this.toViewOne(tx, created));
+    }
+
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const updated = await tx.mailboxAccount.update({
+        where: { id: created.id },
+        data: { provisionState: MailboxProvisionState.PROVISIONED },
+      });
+      await this.recordAction(
+        tx,
+        workspaceId,
+        AgentActionKind.MAILBOX_UPDATED,
+        ucUid,
+        `${updated.emailAddress} (engine-provisioned)`,
+      );
+      return this.toViewOne(tx, updated);
     });
   }
 

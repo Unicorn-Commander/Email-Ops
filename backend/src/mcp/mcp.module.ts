@@ -11,6 +11,7 @@ import { ProvisioningModule } from '../provisioning/provisioning.module';
 import { MailboxAccountsModule } from '../mailbox-accounts/mailbox-accounts.module';
 import { MailTriageModule } from '../mail-triage/mail-triage.module';
 import { UiCommandsModule } from '../ui-commands/ui-commands.module';
+import { MailEngineAdminModule } from '../mail-engine-admin/mail-engine-admin.module';
 
 @Module({
   // EmailModule exports EmailService so the contract MCP tools run the SAME SoR
@@ -34,6 +35,9 @@ import { UiCommandsModule } from '../ui-commands/ui-commands.module';
     // UiCommandsModule exports UiCommandService so the ui_* tools can enqueue a
     // command into the caller's cockpit (the "agent controls the UI" surface).
     UiCommandsModule,
+    // MailEngineAdminModule binds MailEngineAdminPort (JamesAdminClient) so the
+    // mail-engine admin MCP tools can manage domains, accounts, and quotas.
+    MailEngineAdminModule,
   ],
   controllers: [McpController],
   providers: [McpService],

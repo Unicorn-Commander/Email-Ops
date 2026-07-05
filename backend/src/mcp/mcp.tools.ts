@@ -33,6 +33,7 @@ import {
   SenderPolicyScope,
   UiCommandKind,
   User,
+  WorkspaceRole,
 } from '@prisma/client';
 import { MembershipService } from '../common/workspace/membership.service';
 import { listMyWorkspaces, MyWorkspace } from '../common/workspace/list-my-workspaces';
@@ -54,6 +55,7 @@ import {
   ConnectedProvider,
 } from '../connected-accounts/connected-accounts.types';
 import { UiCommandService } from '../ui-commands/ui-commands.service';
+import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
 
 export class EmailOpsTools {
   constructor(
@@ -65,6 +67,7 @@ export class EmailOpsTools {
     private readonly mailboxes: MailboxAccountsService,
     private readonly disposition: DispositionService,
     private readonly senderPolicy: SenderPolicyService,
+    private readonly admin: MailEngineAdminPort,
   ) {}
 
   /** Health/info — safe for any authenticated caller. */
@@ -345,6 +348,102 @@ export class EmailOpsTools {
     );
     if (!res) return { ok: false, reason: 'agent-inbox item not found in this workspace' };
     return { ok: true, ...res };
+  }
+
+
+  // ── Mail-engine admin tools (control-plane; domains / quotas / teardown) ─
+  // Read tools are member-level (resolve-and-authorize the workspace).
+  // Write tools are OWNER-only — the role is re-derived server-side via
+  // resolveWithRole; when tenancy is OFF the single-tenant operator always
+  // carries OWNER. All degrade-clean: engine_not_configured when no admin
+  // endpoint is wired; never throw.
+
+  /** List the domains the mail engine currently serves (member-level read). */
+  async listMailDomains(
+    user: User,
+    args: { workspace_id?: string },
+  ): Promise<{ domains: unknown[] } | { status: string }> {
+    await this.resolve(user, args.workspace_id);
+    if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
+    const domains = await this.admin.listDomains();
+    return { domains };
+  }
+
+  /** List the engine-hosted accounts (member-level read). */
+  async listMailAccounts(
+    user: User,
+    args: { workspace_id?: string },
+  ): Promise<{ accounts: unknown[] } | { status: string }> {
+    await this.resolve(user, args.workspace_id);
+    if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
+    const accounts = await this.admin.listAccounts();
+    return { accounts };
+  }
+
+  /** Ensure a domain is served by the mail engine (OWNER-only; idempotent). */
+  async ensureMailDomain(
+    user: User,
+    args: { workspace_id?: string; domain: string },
+  ): Promise<{ status: string; result?: unknown }> {
+    const { role } = await this.membership.resolveWithRole(
+      user,
+      args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
+    );
+    if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
+    const result = await this.admin.ensureDomain(args.domain);
+    return { status: result.provisioned ? 'ok' : 'failed', result };
+  }
+
+  /** Remove a domain from the mail engine (OWNER-only; idempotent). */
+  async removeMailDomain(
+    user: User,
+    args: { workspace_id?: string; domain: string },
+  ): Promise<{ status: string; result?: unknown }> {
+    const { role } = await this.membership.resolveWithRole(
+      user,
+      args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
+    );
+    if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
+    const result = await this.admin.removeDomain(args.domain);
+    return { status: result.provisioned ? 'ok' : 'failed', result };
+  }
+
+  /** Set a per-account storage quota in bytes (OWNER-only; pass null to clear). */
+  async setMailboxQuota(
+    user: User,
+    args: { workspace_id?: string; address: string; quota_bytes: number | null },
+  ): Promise<{ status: string; result?: unknown }> {
+    const { role } = await this.membership.resolveWithRole(
+      user,
+      args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
+    );
+    if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
+    const result = await this.admin.setQuota(args.address, args.quota_bytes ?? null);
+    return { status: result.provisioned ? 'ok' : 'failed', result };
+  }
+
+  /**
+   * Remove an engine account (OWNER-only; idempotent).
+   * Tears down the mail-server login and storage only. Does NOT touch the
+   * SoR MailboxAccount row or stored message records — call this when the
+   * engine row must be cleaned up independently (e.g. migration clean-ups,
+   * re-provisioning after the SoR has already been deleted).
+   */
+  async removeMailboxEngine(
+    user: User,
+    args: { workspace_id?: string; address: string },
+  ): Promise<{ status: string; result?: unknown }> {
+    const { role } = await this.membership.resolveWithRole(
+      user,
+      args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
+    );
+    if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
+    const result = await this.admin.removeAccount(args.address);
+    return { status: result.provisioned ? 'ok' : 'failed', result };
   }
 
   // ── helpers ────────────────────────────────────────────────────────────

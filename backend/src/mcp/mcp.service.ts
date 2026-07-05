@@ -30,6 +30,7 @@ import { MailboxAccountsService } from '../mailbox-accounts/mailbox-accounts.ser
 import { DispositionService } from '../mail-triage/disposition.service';
 import { SenderPolicyService } from '../mail-triage/sender-policy.service';
 import { UiCommandService } from '../ui-commands/ui-commands.service';
+import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
@@ -49,6 +50,7 @@ export class McpService {
     private readonly disposition: DispositionService,
     private readonly senderPolicy: SenderPolicyService,
     private readonly uiCommands: UiCommandService,
+    private readonly admin: MailEngineAdminPort,
   ) {}
 
   /**
@@ -101,6 +103,7 @@ export class McpService {
       this.mailboxes,
       this.disposition,
       this.senderPolicy,
+      this.admin,
     );
     const connectedTools = new ConnectedAccountsTools(this.membership, this.connectedAccounts);
     const uiTools = new UiControlTools(this.membership, this.uiCommands);
@@ -509,6 +512,106 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await tools.rejectAgentInboxItem(user, args)),
+    );
+
+    // ── Mail-engine admin tools (control-plane; OWNER-gated writes) ──
+
+    server.registerTool(
+      'list_mail_domains',
+      {
+        title: 'List mail engine domains',
+        description:
+          'List the domains the sovereign mail engine (Apache James) currently serves. ' +
+          'Read-only / member-level. Returns { domains: [{ domain }] } or ' +
+          '{ status:"engine_not_configured" } when no WebAdmin endpoint is wired.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.listMailDomains(user, args ?? {})),
+    );
+
+    server.registerTool(
+      'list_mail_accounts',
+      {
+        title: 'List mail engine accounts',
+        description:
+          'List the accounts (mailbox logins) the mail engine hosts. Read-only / ' +
+          'member-level. Returns { accounts: [{ address }] } or ' +
+          '{ status:"engine_not_configured" } when no WebAdmin endpoint is wired.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.listMailAccounts(user, args ?? {})),
+    );
+
+    server.registerTool(
+      'ensure_mail_domain',
+      {
+        title: 'Ensure a domain on the mail engine',
+        description:
+          'Add a domain to the mail engine if it is not already served (idempotent). ' +
+          'OWNER-only — returns { status:"forbidden" } for any lower role. ' +
+          'Returns { status:"ok"|"failed"|"engine_not_configured", result }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          domain: z.string().min(1).max(253),
+        },
+      },
+      async (args: any) => wrap(await tools.ensureMailDomain(user, args)),
+    );
+
+    server.registerTool(
+      'remove_mail_domain',
+      {
+        title: 'Remove a domain from the mail engine',
+        description:
+          'Remove a domain from the mail engine (idempotent). OWNER-only. ' +
+          'Call only when you are certain no active accounts remain under this domain. ' +
+          'Returns { status:"ok"|"failed"|"engine_not_configured", result }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          domain: z.string().min(1).max(253),
+        },
+      },
+      async (args: any) => wrap(await tools.removeMailDomain(user, args)),
+    );
+
+    server.registerTool(
+      'set_mailbox_quota',
+      {
+        title: 'Set mailbox storage quota',
+        description:
+          'Set (or clear) the storage quota for an engine mailbox account. OWNER-only. ' +
+          'quota_bytes: positive integer in bytes (e.g. 5368709120 = 5 GiB); pass null ' +
+          'to remove the quota limit entirely. Returns ' +
+          '{ status:"ok"|"failed"|"engine_not_configured", result }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          address: z.string().email(),
+          quota_bytes: z.number().int().nonnegative().nullable(),
+        },
+      },
+      async (args: any) => wrap(await tools.setMailboxQuota(user, args)),
+    );
+
+    server.registerTool(
+      'remove_mailbox_engine',
+      {
+        title: 'Remove engine mailbox account',
+        description:
+          'Remove the mail-server account for an address (idempotent). OWNER-only. ' +
+          'Tears down the engine login and storage ONLY — does NOT delete the SoR ' +
+          'MailboxAccount row or stored message records. Use for clean-ups after the ' +
+          'SoR row has already been deleted or when re-provisioning from scratch. ' +
+          'Returns { status:"ok"|"failed"|"engine_not_configured", result }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          address: z.string().email(),
+        },
+      },
+      async (args: any) => wrap(await tools.removeMailboxEngine(user, args)),
     );
 
     // ── UI-control tools (the "agent controls the UI" / AG-UI surface) ──
