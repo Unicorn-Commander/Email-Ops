@@ -4,10 +4,19 @@
  * Mail — the "retire Outlook" surface: read your inboxes + compose.
  *
  * A polished 3-pane mail client (think Superhuman/Linear restraint):
- *   LEFT   — mailbox picker (the workspace's mailboxes; defaults to the first).
- *   MIDDLE — the selected mailbox's thread list.
- *   RIGHT  — the open thread's messages + an inline Reply composer.
- * A top-level Compose button opens a new-message dialog.
+ *   LEFT   — mailbox picker ("All inboxes" pinned on top when the aggregate
+ *            endpoint is live, then the workspace's mailboxes with unread badges).
+ *   MIDDLE — the thread list: debounced search, selection checkboxes + bulk bar,
+ *            offset-paged "Load more".
+ *   RIGHT  — the open thread: collapsed conversation (last message expanded),
+ *            sanitized HTML bodies, attachments, Reply / Reply-all / Forward,
+ *            and an inline Reply composer.
+ * A top-level Compose button opens a new-message dialog. A Gmail-style keyboard
+ * layer (press ? for the reference) drives the whole thing.
+ *
+ * Every Wave-2 endpoint (aggregate, counts, read, bulk, blobs, attachments) is
+ * feature-detected: a 404/501 hides that affordance gracefully — no crashes,
+ * no error toasts.
  *
  * The mail engine is often DORMANT, which is expected and handled honestly:
  * thread lists come back empty (a calm empty state, not an error) and a compose
@@ -20,7 +29,7 @@
  */
 
 import Link from 'next/link';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import {
   Badge,
   Button,
@@ -33,21 +42,30 @@ import {
 import { useActiveSpace } from '@/components/ActiveSpaceProvider';
 import { useUiCommands } from '@/components/UiCommandProvider';
 import {
+  ALL_INBOXES,
   formatWhen,
   participantLabel,
   useMailClient,
   type Load,
   type TriageOutcome,
+  type UseMailClient,
 } from '@/components/mail/useMailClient';
-import { ReplyComposer } from '@/components/mail/ReplyComposer';
-import { ComposeDialog } from '@/components/mail/ComposeDialog';
+import { ReplyComposer, type ReplyComposerHandle } from '@/components/mail/ReplyComposer';
+import { ComposeDialog, type ComposeDialogPrefill } from '@/components/mail/ComposeDialog';
 import { SendersDialog } from '@/components/mail/SendersDialog';
+import { MessageItem } from '@/components/mail/MessageItem';
+import { SearchBar } from '@/components/mail/SearchBar';
+import { BulkBar } from '@/components/mail/BulkBar';
+import { ShortcutsHelp } from '@/components/mail/ShortcutsHelp';
+import { useMailShortcuts } from '@/components/mail/useMailShortcuts';
 import type {
+  BulkAction,
   MailboxPick,
   MailboxProvider,
   MailFolder,
   MessageView,
   ThreadView,
+  UploadedBlob,
 } from '@/lib/mailApi';
 
 /** The folder tabs, in display order. */
@@ -60,13 +78,21 @@ const FOLDERS: { id: MailFolder; label: string }[] = [
   { id: 'drafts', label: 'Drafts' },
 ];
 
-/** A composer prefill carried by an agent's `ui_compose` (Phase C). */
-interface ComposePrefill {
-  to?: string;
-  subject?: string;
-  body?: string;
+/** A composer prefill carried by an agent's `ui_compose` (Phase C) or Forward. */
+interface ComposePrefill extends ComposeDialogPrefill {
   /** If set, sending threads the message into this conversation. */
   thread_id?: string;
+}
+
+/** A reply-composer seed (default derive, or Reply / Reply-all on a message). */
+interface ReplySeed {
+  to: string[];
+  cc: string[];
+  subject: string;
+  /** RFC threading hint: the id of the message being replied to. */
+  inReplyTo: string | null;
+  /** Bumps to remount the composer when a new seed is picked. */
+  nonce: number;
 }
 
 export default function MailPage() {
@@ -76,6 +102,17 @@ export default function MailPage() {
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeInitial, setComposeInitial] = useState<ComposePrefill | null>(null);
   const [sendersOpen, setSendersOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+
+  // Selection (bulk actions) + keyboard cursor over the thread list.
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [cursor, setCursor] = useState(-1);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const replyRef = useRef<ReplyComposerHandle>(null);
+  const rowRefs = useRef(new Map<string, HTMLLIElement>());
+
+  // Reply-composer seeding (Reply vs Reply-all vs the default derive).
+  const [replySeed, setReplySeed] = useState<ReplySeed | null>(null);
 
   const threadOpen = mail.selectedThreadId !== null;
 
@@ -87,7 +124,7 @@ export default function MailPage() {
   // unrelated mailbox change.
   const { selectMailbox, selectThread } = mail;
   const selectedMailboxIdRef = useRef<string | null>(null);
-  selectedMailboxIdRef.current = mail.selectedMailbox?.id ?? null;
+  selectedMailboxIdRef.current = mail.unified ? ALL_INBOXES : mail.selectedMailbox?.id ?? null;
   // Staged target when an open_thread also has to SWITCH mailbox first — the
   // hook's mailbox-change effect closes any open thread, so we defer opening the
   // thread until that switch settles (see the effect below).
@@ -102,7 +139,7 @@ export default function MailPage() {
         pendingOpenRef.current = { mailboxId: mailbox_id, threadId: thread_id };
         selectMailbox(mailbox_id);
       } else {
-        selectThread(thread_id);
+        selectThread(thread_id, mailbox_id ?? undefined);
       }
     }
 
@@ -122,7 +159,7 @@ export default function MailPage() {
     if (selectedMailbox?.id !== pending.mailboxId) return;
     if (threadsLoad !== 'ready') return;
     pendingOpenRef.current = null;
-    selectThread(pending.threadId);
+    selectThread(pending.threadId, pending.mailboxId);
   }, [selectedMailbox?.id, threadsLoad, selectThread]);
 
   // Scope the mailbox picker to the active Space (purely client-side). "All" — a
@@ -134,7 +171,9 @@ export default function MailPage() {
   }, [mail.mailboxes, activeSpace]);
 
   // Is the currently-open mailbox still visible under the active Space?
-  const selectedVisible = visibleMailboxes.some((m) => m.id === mail.selectedMailbox?.id);
+  // (The unified "All inboxes" list is always considered visible.)
+  const selectedVisible =
+    mail.unified || visibleMailboxes.some((m) => m.id === mail.selectedMailbox?.id);
 
   // If the open mailbox got filtered out, fall back to the first visible one so
   // the user is never stranded on a hidden mailbox (don't crash / blank).
@@ -146,13 +185,196 @@ export default function MailPage() {
     if (!selectedVisible) selectMailbox(visibleMailboxes[0].id);
   }, [mailLoad, activeSpace, visibleMailboxes, selectedVisible, selectMailbox]);
 
+  // ── Selection + cursor housekeeping ────────────────────────────────────────
+  const threads = mail.threads;
+
+  // Prune selection to rows still in the list; clamp the cursor.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const inList = new Set(threads.map((t) => t.id));
+      const next = new Set([...prev].filter((id) => inList.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+    setCursor((c) => Math.min(c, threads.length - 1));
+  }, [threads]);
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleSelectAll = useCallback(() => {
+    setSelected((prev) =>
+      prev.size >= threads.length ? new Set() : new Set(threads.map((t) => t.id)),
+    );
+  }, [threads]);
+
+  // ── Open-thread context (mailbox, row, reply seeding) ──────────────────────
+  const openThreadRow = threads.find((t) => t.id === mail.selectedThreadId) ?? null;
+  const threadMailbox =
+    mail.mailboxes.find((m) => m.id === mail.selectedThreadMailboxId) ?? mail.selectedMailbox;
+  const selfAddress = threadMailbox?.email_address ?? mail.composeMailbox?.email_address ?? '';
+
+  const defaultReply = useMemo(
+    () => deriveReplyDefaults(mail.messages, openThreadRow, threadMailbox),
+    [mail.messages, openThreadRow, threadMailbox],
+  );
+  const activeSeed = replySeed ?? defaultReply;
+
+  // A new open thread resets any Reply/Reply-all seeding back to the default.
+  useEffect(() => {
+    setReplySeed(null);
+  }, [mail.selectedThreadId]);
+
+  const focusReplySoon = useCallback(() => {
+    window.setTimeout(() => replyRef.current?.focus(), 60);
+  }, []);
+
+  const seedReply = useCallback(
+    (m: MessageView) => {
+      setReplySeed((prev) => ({
+        ...deriveReplyToMessage(m, selfAddress, openThreadRow),
+        nonce: (prev?.nonce ?? 0) + 1,
+      }));
+      focusReplySoon();
+    },
+    [selfAddress, openThreadRow, focusReplySoon],
+  );
+
+  const seedReplyAll = useCallback(
+    (m: MessageView) => {
+      setReplySeed((prev) => ({
+        ...deriveReplyAll(m, selfAddress, openThreadRow),
+        nonce: (prev?.nonce ?? 0) + 1,
+      }));
+      focusReplySoon();
+    },
+    [selfAddress, openThreadRow, focusReplySoon],
+  );
+
+  const forwardMessage = useCallback((m: MessageView, thread: ThreadView | null) => {
+    setComposeInitial(buildForwardPrefill(m, thread));
+    setComposeOpen(true);
+  }, []);
+
+  // ── Bulk actions ───────────────────────────────────────────────────────────
+  const runBulk = useCallback(
+    async (action: BulkAction): Promise<{ ok: boolean; error?: string }> => {
+      const ids = [...selected];
+      if (ids.length === 0) return { ok: false };
+      const res = await mail.bulk(ids, action);
+      if (res.ok || res.unsupported) setSelected(new Set());
+      return { ok: res.ok, error: res.unsupported ? undefined : res.error };
+    },
+    [selected, mail],
+  );
+
+  // ── Keyboard layer ─────────────────────────────────────────────────────────
+  const lastMessage = mail.messages[mail.messages.length - 1] ?? null;
+  const cursorThread = cursor >= 0 ? threads[cursor] ?? null : null;
+
+  const moveCursor = useCallback(
+    (delta: 1 | -1) => {
+      if (threads.length === 0) return;
+      setCursor((c) => {
+        const next = c < 0 ? (delta > 0 ? 0 : threads.length - 1) : Math.min(threads.length - 1, Math.max(0, c + delta));
+        const id = threads[next]?.id;
+        if (id) rowRefs.current.get(id)?.scrollIntoView({ block: 'nearest' });
+        return next;
+      });
+    },
+    [threads],
+  );
+
+  const keyboardTargetId = mail.selectedThreadId ?? cursorThread?.id ?? null;
+
+  const shortcutTriage = useCallback(
+    (disposition: 'ARCHIVE' | 'TRASH') => {
+      const bulkAction: BulkAction = disposition === 'ARCHIVE' ? 'archive' : 'trash';
+      if (selected.size > 0 && mail.features.bulk) {
+        void runBulk(bulkAction);
+        return;
+      }
+      if (keyboardTargetId) void mail.triage(keyboardTargetId, disposition);
+    },
+    [selected, mail, runBulk, keyboardTargetId],
+  );
+
+  const shortcutMark = useCallback(
+    (read: boolean) => {
+      if (selected.size > 0) {
+        if (mail.features.bulk) void runBulk(read ? 'read' : 'unread');
+        else mail.markRead([...selected], read);
+        return;
+      }
+      if (keyboardTargetId) mail.markRead([keyboardTargetId], read);
+    },
+    [selected, mail, runBulk, keyboardTargetId],
+  );
+
+  useMailShortcuts(
+    {
+      onMove: moveCursor,
+      onOpen: () => {
+        const t = cursorThread ?? threads[0];
+        if (t) selectThread(t.id, t.mailbox_id);
+      },
+      onBack: () => selectThread(null),
+      onArchive: () => shortcutTriage('ARCHIVE'),
+      onTrash: () => shortcutTriage('TRASH'),
+      onReply: () => {
+        if (threadOpen) focusReplySoon();
+      },
+      onReplyAll: () => {
+        if (threadOpen && lastMessage) seedReplyAll(lastMessage);
+      },
+      onForward: () => {
+        if (threadOpen && lastMessage) forwardMessage(lastMessage, openThreadRow);
+      },
+      onFocusSearch: () => searchRef.current?.focus(),
+      onToggleSelect: () => {
+        if (cursorThread && mail.features.bulk) toggleSelect(cursorThread.id);
+      },
+      onMarkRead: () => shortcutMark(true),
+      onMarkUnread: () => shortcutMark(false),
+      onHelp: () => setHelpOpen(true),
+    },
+    !composeOpen && !sendersOpen && !helpOpen,
+  );
+
+  // Per-mailbox unread badges (Wave-2 counts endpoint; null = hidden).
+  const unreadByMailbox = useMemo(() => {
+    if (!mail.counts) return null;
+    return new Map(mail.counts.map((c) => [c.mailbox_id, c.inbox_unread]));
+  }, [mail.counts]);
+  const totalUnread = useMemo(() => {
+    if (!mail.counts) return null;
+    const visible = activeSpace ? new Set(visibleMailboxes.map((m) => m.id)) : null;
+    return mail.counts.reduce(
+      (sum, c) => (visible && !visible.has(c.mailbox_id) ? sum : sum + c.inbox_unread),
+      0,
+    );
+  }, [mail.counts, activeSpace, visibleMailboxes]);
+
+  const showAllInboxes = mail.features.aggregate && visibleMailboxes.length > 1;
+
   return (
     <div className="space-y-6">
       <Hero
-        mailbox={selectedVisible ? mail.selectedMailbox : null}
+        mailbox={selectedVisible && !mail.unified ? mail.selectedMailbox : null}
+        unified={mail.unified}
         mailboxCount={visibleMailboxes.length}
         ready={mail.load === 'ready'}
-        canCompose={mail.load === 'ready' && !!mail.workspace && selectedVisible}
+        canCompose={
+          mail.load === 'ready' &&
+          !!mail.workspace &&
+          (mail.unified ? visibleMailboxes.length > 0 : selectedVisible)
+        }
         onCompose={() => {
           setComposeInitial(null);
           setComposeOpen(true);
@@ -175,8 +397,13 @@ export default function MailPage() {
           <section className={cn(threadOpen && 'max-lg:hidden')}>
             <MailboxList
               mailboxes={visibleMailboxes}
-              selectedId={selectedVisible ? mail.selectedMailbox?.id ?? null : null}
+              selectedId={
+                mail.unified ? ALL_INBOXES : selectedVisible ? mail.selectedMailbox?.id ?? null : null
+              }
               onSelect={mail.selectMailbox}
+              showAllInboxes={showAllInboxes}
+              unreadByMailbox={unreadByMailbox}
+              totalUnread={totalUnread}
             />
           </section>
 
@@ -185,38 +412,69 @@ export default function MailPage() {
             <ThreadList
               load={mail.threadsLoad}
               error={mail.threadsError}
-              threads={mail.threads}
+              threads={threads}
               selectedThreadId={mail.selectedThreadId}
-              onSelect={mail.selectThread}
+              onSelect={(t) => selectThread(t.id, t.mailbox_id)}
               onRetry={mail.refreshThreads}
               folder={mail.folder}
               onSelectFolder={mail.selectFolder}
               onManageSenders={() => setSendersOpen(true)}
+              searchRef={searchRef}
+              query={mail.query}
+              onQuery={mail.setQuery}
+              unified={mail.unified}
+              selectable={mail.features.bulk}
+              selected={selected}
+              onToggleSelect={toggleSelect}
+              onToggleSelectAll={toggleSelectAll}
+              cursorThreadId={cursorThread?.id ?? null}
+              hasMore={mail.hasMore}
+              loadingMore={mail.loadingMore}
+              onLoadMore={mail.loadMore}
+              rowRefs={rowRefs}
             />
           </section>
 
           {/* RIGHT — the open thread. The only pane shown on mobile when open. */}
           <section className={cn('min-w-0', !threadOpen && 'max-lg:hidden')}>
             <ThreadPane
-              mailbox={mail.selectedMailbox}
-              thread={mail.threads.find((t) => t.id === mail.selectedThreadId) ?? null}
+              workspaceId={mail.workspace?.workspace_id ?? null}
+              mailbox={threadMailbox}
+              thread={openThreadRow}
               threadId={mail.selectedThreadId}
               load={mail.messagesLoad}
               error={mail.messagesError}
               messages={mail.messages}
               folder={mail.folder}
-              onBack={() => mail.selectThread(null)}
+              onBack={() => selectThread(null)}
               onReply={mail.reply}
               onTriage={mail.triage}
+              replySeed={activeSeed}
+              replyRef={replyRef}
+              onSeedReply={seedReply}
+              onSeedReplyAll={seedReplyAll}
+              onForward={(m) => forwardMessage(m, openThreadRow)}
             />
           </section>
         </div>
       )}
 
+      {/* Floating bulk bar (Wave-2 bulk endpoint; hidden when not deployed). */}
+      {mail.features.bulk && (
+        <BulkBar
+          count={selected.size}
+          folder={mail.folder}
+          onAction={runBulk}
+          onClear={() => setSelected(new Set())}
+        />
+      )}
+
       <ComposeDialog
         open={composeOpen}
         onClose={() => setComposeOpen(false)}
-        fromAddress={mail.selectedMailbox?.email_address ?? null}
+        fromAddress={mail.composeMailbox?.email_address ?? null}
+        workspaceId={mail.workspace?.workspace_id ?? null}
+        mailboxId={mail.composeMailbox?.id ?? null}
         // Thread the send when the prefill carried a thread_id; otherwise a plain
         // new message. Either way it PREFILLS — the user still clicks Send.
         onCompose={(b) =>
@@ -224,6 +482,7 @@ export default function MailPage() {
             composeInitial?.thread_id
               ? { ...b, in_reply_to_thread_id: composeInitial.thread_id }
               : b,
+            mail.composeMailbox?.id,
           )
         }
         initial={composeInitial}
@@ -234,6 +493,8 @@ export default function MailPage() {
         onClose={() => setSendersOpen(false)}
         workspaceId={mail.workspace?.workspace_id ?? null}
       />
+
+      <ShortcutsHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
 }
@@ -242,12 +503,14 @@ export default function MailPage() {
 
 function Hero({
   mailbox,
+  unified,
   mailboxCount,
   ready,
   canCompose,
   onCompose,
 }: {
   mailbox: MailboxPick | null;
+  unified: boolean;
   mailboxCount: number;
   ready: boolean;
   canCompose: boolean;
@@ -276,7 +539,12 @@ function Hero({
               </span>
             </h1>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-tertiary sm:text-base">
-              {mailbox ? (
+              {unified ? (
+                <>
+                  Reading <span className="font-medium text-secondary">all inboxes</span> in one
+                  list. Open a thread and reply — it routes through the right mailbox.
+                </>
+              ) : mailbox ? (
                 <>
                   Reading <span className="font-mono text-secondary">{mailbox.email_address}</span>.
                   Pick a mailbox, open a thread, and reply — or start a new message.
@@ -312,14 +580,30 @@ const PROVIDER_TAG: Record<MailboxProvider, { label: string; tone: BadgeVariant 
   microsoft: { label: 'Outlook', tone: 'neutral' },
 };
 
+function UnreadPill({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <span className="shrink-0 rounded-full bg-accent/15 px-1.5 font-mono text-[10px] font-medium leading-4 text-accent">
+      {count > 999 ? '999+' : count}
+    </span>
+  );
+}
+
 function MailboxList({
   mailboxes,
   selectedId,
   onSelect,
+  showAllInboxes,
+  unreadByMailbox,
+  totalUnread,
 }: {
   mailboxes: MailboxPick[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  showAllInboxes: boolean;
+  /** null = counts endpoint unavailable → no badges. */
+  unreadByMailbox: Map<string, number> | null;
+  totalUnread: number | null;
 }) {
   return (
     <Card className="overflow-hidden">
@@ -336,9 +620,39 @@ function MailboxList({
         </Link>
       </div>
       <ul className="max-h-[70vh] overflow-y-auto p-1.5">
+        {showAllInboxes && (
+          <li className="border-b border-subtle pb-1.5 mb-1.5">
+            <button
+              type="button"
+              onClick={() => onSelect(ALL_INBOXES)}
+              aria-current={selectedId === ALL_INBOXES}
+              className={cn(
+                'flex w-full items-center gap-2 rounded-token px-2.5 py-2 text-left transition-colors duration-fast ease-token',
+                selectedId === ALL_INBOXES
+                  ? 'bg-surface-overlay text-primary shadow-token'
+                  : 'text-tertiary hover:bg-surface-overlay/60 hover:text-primary',
+              )}
+            >
+              <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4 shrink-0 text-tertiary" aria-hidden="true">
+                <path
+                  d="M4 13l2-7a1 1 0 011-1h10a1 1 0 011 1l2 7M4 13v5a1 1 0 001 1h14a1 1 0 001-1v-5M4 13h4l2 2h4l2-2h4"
+                  stroke="currentColor"
+                  strokeWidth={1.6}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span className="min-w-0 flex-1 truncate text-sm font-medium text-primary">
+                All inboxes
+              </span>
+              {totalUnread != null && <UnreadPill count={totalUnread} />}
+            </button>
+          </li>
+        )}
         {mailboxes.map((mb) => {
           const active = mb.id === selectedId;
           const tag = mb.provider ? PROVIDER_TAG[mb.provider] : null;
+          const unread = unreadByMailbox?.get(mb.id) ?? null;
           return (
             <li key={mb.id}>
               <button
@@ -356,6 +670,7 @@ function MailboxList({
                   <span className="min-w-0 flex-1 truncate text-sm font-medium text-primary">
                     {mb.display_name?.trim() || mb.email_address}
                   </span>
+                  {unread != null && <UnreadPill count={unread} />}
                   <Badge variant={OWNER_TONE[mb.owner_kind] ?? 'neutral'}>
                     {mb.owner_kind.toLowerCase()}
                   </Badge>
@@ -391,17 +706,46 @@ function ThreadList({
   folder,
   onSelectFolder,
   onManageSenders,
+  searchRef,
+  query,
+  onQuery,
+  unified,
+  selectable,
+  selected,
+  onToggleSelect,
+  onToggleSelectAll,
+  cursorThreadId,
+  hasMore,
+  loadingMore,
+  onLoadMore,
+  rowRefs,
 }: {
   load: Load;
   error: string | null;
   threads: ThreadView[];
   selectedThreadId: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (thread: ThreadView) => void;
   onRetry: () => void;
   folder: MailFolder;
   onSelectFolder: (folder: MailFolder) => void;
   onManageSenders: () => void;
+  searchRef: RefObject<HTMLInputElement | null>;
+  query: string;
+  onQuery: (q: string) => void;
+  unified: boolean;
+  selectable: boolean;
+  selected: ReadonlySet<string>;
+  onToggleSelect: (id: string) => void;
+  onToggleSelectAll: () => void;
+  cursorThreadId: string | null;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
+  rowRefs: RefObject<Map<string, HTMLLIElement>>;
 }) {
+  const searching = query.trim().length > 0;
+  const allChecked = threads.length > 0 && selected.size >= threads.length;
+
   return (
     <Card className="flex h-full flex-col overflow-hidden">
       <div className="flex items-center gap-2 border-b border-subtle px-3 py-2.5">
@@ -415,6 +759,34 @@ function ThreadList({
         >
           Manage senders
         </Button>
+      </div>
+
+      <div className="space-y-2 border-b border-subtle px-3 py-2">
+        <SearchBar ref={searchRef} query={query} onQuery={onQuery} />
+        {(selectable || searching) && threads.length > 0 && load === 'ready' && (
+          <div className="flex items-center gap-2">
+            {selectable && (
+              <label className="inline-flex cursor-pointer select-none items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={allChecked}
+                  onChange={onToggleSelectAll}
+                  aria-label="Select all conversations in view"
+                  className="h-3.5 w-3.5 cursor-pointer accent-accent"
+                />
+                <span className="text-[11px] text-tertiary">
+                  {selected.size > 0 ? `${selected.size} selected` : 'Select all'}
+                </span>
+              </label>
+            )}
+            {searching && (
+              <span className="ml-auto text-[11px] text-muted">
+                {threads.length}
+                {hasMore ? '+' : ''} {threads.length === 1 ? 'result' : 'results'}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {load === 'loading' ? (
@@ -432,7 +804,11 @@ function ThreadList({
           </Button>
         </div>
       ) : threads.length === 0 ? (
-        <EmptyThreads folder={folder} />
+        searching ? (
+          <EmptySearch query={query} />
+        ) : (
+          <EmptyThreads folder={folder} />
+        )
       ) : (
         <ul className="min-h-0 flex-1 overflow-y-auto p-1.5">
           {threads.map((t) => (
@@ -440,9 +816,32 @@ function ThreadList({
               key={t.id}
               thread={t}
               active={t.id === selectedThreadId}
-              onSelect={() => onSelect(t.id)}
+              cursor={t.id === cursorThreadId}
+              unified={unified}
+              selectable={selectable}
+              checked={selected.has(t.id)}
+              anySelected={selected.size > 0}
+              onToggle={() => onToggleSelect(t.id)}
+              onSelect={() => onSelect(t)}
+              refCb={(el) => {
+                if (el) rowRefs.current?.set(t.id, el);
+                else rowRefs.current?.delete(t.id);
+              }}
             />
           ))}
+          {hasMore && (
+            <li className="p-1.5">
+              <Button
+                variant="secondary"
+                size="sm"
+                block
+                disabled={loadingMore}
+                onClick={onLoadMore}
+              >
+                {loadingMore ? 'Loading…' : 'Load more'}
+              </Button>
+            </li>
+          )}
         </ul>
       )}
     </Card>
@@ -487,14 +886,68 @@ function FolderTabs({
   );
 }
 
+/** Deterministic hue for a mailbox address (the per-account tag in All inboxes). */
+function addressHue(address: string): number {
+  let h = 0;
+  for (let i = 0; i < address.length; i++) {
+    h = (h * 31 + address.charCodeAt(i)) % 360;
+  }
+  return h;
+}
+
+function AccountTag({ address }: { address: string }) {
+  const hue = addressHue(address.toLowerCase());
+  const label = address.split('@')[0]?.slice(0, 12) || address.slice(0, 12);
+  return (
+    <span
+      className="shrink-0 rounded-token px-1.5 font-mono text-[10px] leading-4"
+      style={{
+        backgroundColor: `hsl(${hue} 70% 50% / 0.16)`,
+        color: `hsl(${hue} 65% 50%)`,
+      }}
+      title={address}
+    >
+      {label}
+    </span>
+  );
+}
+
+function PaperclipGlyph({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path
+        d="M21 12.5l-8.5 8.5a5.66 5.66 0 01-8-8l9-9a3.77 3.77 0 015.3 5.3l-9 9a1.89 1.89 0 01-2.7-2.7l8.3-8.3"
+        stroke="currentColor"
+        strokeWidth={1.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function ThreadRow({
   thread,
   active,
+  cursor,
+  unified,
+  selectable,
+  checked,
+  anySelected,
+  onToggle,
   onSelect,
+  refCb,
 }: {
   thread: ThreadView;
   active: boolean;
+  cursor: boolean;
+  unified: boolean;
+  selectable: boolean;
+  checked: boolean;
+  anySelected: boolean;
+  onToggle: () => void;
   onSelect: () => void;
+  refCb: (el: HTMLLIElement | null) => void;
 }) {
   const when = useMemo(() => formatWhen(thread.last_message_at), [thread.last_message_at]);
   const who = useMemo(() => {
@@ -507,53 +960,85 @@ function ThreadRow({
   }, [thread.participants]);
 
   return (
-    <li>
-      <button
-        type="button"
-        onClick={onSelect}
-        aria-current={active}
+    <li ref={refCb}>
+      <div
         className={cn(
-          'flex w-full flex-col gap-1 rounded-token px-2.5 py-2 text-left transition-colors duration-fast ease-token',
-          active
-            ? 'bg-surface-overlay shadow-token'
-            : 'hover:bg-surface-overlay/60',
+          'group flex items-start rounded-token transition-colors duration-fast ease-token',
+          active ? 'bg-surface-overlay shadow-token' : 'hover:bg-surface-overlay/60',
+          cursor && 'ring-1 ring-inset ring-accent/50',
+          checked && 'bg-accent/5',
         )}
       >
-        <div className="flex items-center gap-2">
-          {thread.unread && (
-            <span aria-label="unread" className="h-2 w-2 shrink-0 rounded-full bg-accent" />
-          )}
+        {selectable && (
           <span
-            className={cn(
-              'min-w-0 flex-1 truncate text-xs',
-              thread.unread ? 'font-semibold text-primary' : 'text-secondary',
-            )}
+            className="flex shrink-0 items-center pl-2 pt-[13px]"
+            onClick={(e) => e.stopPropagation()}
           >
-            {who}
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={onToggle}
+              aria-label={`Select conversation: ${thread.subject?.trim() || '(no subject)'}`}
+              className={cn(
+                'h-3.5 w-3.5 cursor-pointer accent-accent transition-opacity duration-fast ease-token',
+                checked || anySelected
+                  ? 'opacity-100'
+                  : 'opacity-0 group-hover:opacity-100 max-lg:opacity-100',
+              )}
+            />
           </span>
-          {when && <span className="shrink-0 font-mono text-[10px] text-muted">{when}</span>}
-        </div>
-        <span
+        )}
+        <button
+          type="button"
+          onClick={onSelect}
+          aria-current={active}
           className={cn(
-            'truncate text-sm',
-            thread.unread ? 'font-medium text-primary' : 'text-secondary',
+            'flex w-full min-w-0 flex-col gap-1 py-2 pr-2.5 text-left',
+            selectable ? 'pl-1.5' : 'pl-2.5',
           )}
         >
-          {thread.subject?.trim() || '(no subject)'}
-        </span>
-        <div className="flex items-center gap-2">
-          {thread.last_snippet && (
-            <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
-              {thread.last_snippet}
+          <div className="flex items-center gap-2">
+            {thread.unread && (
+              <span aria-label="unread" className="h-2 w-2 shrink-0 rounded-full bg-accent" />
+            )}
+            <span
+              className={cn(
+                'min-w-0 flex-1 truncate text-xs',
+                thread.unread ? 'font-semibold text-primary' : 'text-secondary',
+              )}
+            >
+              {who}
             </span>
-          )}
-          {thread.message_count > 1 && (
-            <span className="shrink-0 rounded-token bg-surface-base px-1.5 font-mono text-[10px] text-muted">
-              {thread.message_count}
-            </span>
-          )}
-        </div>
-      </button>
+            {thread.has_attachments && (
+              <PaperclipGlyph className="h-3 w-3 shrink-0 text-muted" />
+            )}
+            {when && <span className="shrink-0 font-mono text-[10px] text-muted">{when}</span>}
+          </div>
+          <span
+            className={cn(
+              'truncate text-sm',
+              thread.unread ? 'font-medium text-primary' : 'text-secondary',
+            )}
+          >
+            {thread.subject?.trim() || '(no subject)'}
+          </span>
+          <div className="flex items-center gap-2">
+            {thread.last_snippet && (
+              <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
+                {thread.last_snippet}
+              </span>
+            )}
+            {unified && thread.mailbox_address && (
+              <AccountTag address={thread.mailbox_address} />
+            )}
+            {thread.message_count > 1 && (
+              <span className="shrink-0 rounded-token bg-surface-base px-1.5 font-mono text-[10px] text-muted">
+                {thread.message_count}
+              </span>
+            )}
+          </div>
+        </button>
+      </div>
     </li>
   );
 }
@@ -616,9 +1101,31 @@ function EmptyThreads({ folder }: { folder: MailFolder }) {
   );
 }
 
+function EmptySearch({ query }: { query: string }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
+      <div className="grid h-12 w-12 place-items-center rounded-full bg-surface-overlay text-tertiary">
+        <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6" aria-hidden="true">
+          <path
+            d="M21 21l-4.3-4.3M17 10.5a6.5 6.5 0 11-13 0 6.5 6.5 0 0113 0z"
+            stroke="currentColor"
+            strokeWidth={1.6}
+            strokeLinecap="round"
+          />
+        </svg>
+      </div>
+      <p className="text-sm font-medium text-primary">No results</p>
+      <p className="max-w-xs text-xs leading-5 text-tertiary">
+        Nothing matches “{query}” in this folder. Try different words, or clear the search.
+      </p>
+    </div>
+  );
+}
+
 // ── RIGHT: the open thread + reply composer ──────────────────────────────────
 
 function ThreadPane({
+  workspaceId,
   mailbox,
   thread,
   threadId,
@@ -629,7 +1136,13 @@ function ThreadPane({
   onBack,
   onReply,
   onTriage,
+  replySeed,
+  replyRef,
+  onSeedReply,
+  onSeedReplyAll,
+  onForward,
 }: {
+  workspaceId: string | null;
   mailbox: MailboxPick | null;
   /** The thread row (for subject/participants); may be null if not in the list. */
   thread: ThreadView | null;
@@ -639,18 +1152,36 @@ function ThreadPane({
   messages: MessageView[];
   folder: MailFolder;
   onBack: () => void;
-  onReply: React.ComponentProps<typeof ReplyComposer>['onSend'];
+  onReply: UseMailClient['reply'];
   onTriage: (
     threadId: string,
     disposition: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM',
     opts?: { blockSender?: boolean; trustSender?: boolean; senderAddress?: string },
   ) => Promise<TriageOutcome>;
+  replySeed: ReplySeed;
+  replyRef: RefObject<ReplyComposerHandle | null>;
+  onSeedReply: (m: MessageView) => void;
+  onSeedReplyAll: (m: MessageView) => void;
+  onForward: (m: MessageView) => void;
 }) {
-  // Prefill the reply: the other party + "Re: <subject>".
-  const replyDefaults = useMemo(
-    () => deriveReplyDefaults(messages, thread, mailbox),
-    [messages, thread, mailbox],
-  );
+  // Conversation UX: all but the last message collapse (unread ones stay open).
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => {
+    const next = new Set<string>();
+    const last = messages[messages.length - 1];
+    if (last) next.add(last.id);
+    for (const m of messages) if (m.is_unread) next.add(m.id);
+    setExpanded(next);
+  }, [threadId, messages]);
+
+  const toggleExpanded = useCallback((id: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   if (!threadId) {
     return <NoThreadSelected />;
@@ -675,13 +1206,19 @@ function ThreadPane({
           {load === 'ready' && (
             <p className="mt-0.5 text-[11px] text-muted">
               {messages.length} {messages.length === 1 ? 'message' : 'messages'}
+              {mailbox && (
+                <>
+                  {' · '}
+                  <span className="font-mono">{mailbox.email_address}</span>
+                </>
+              )}
             </p>
           )}
         </div>
         <TriageActions
           threadId={threadId}
           folder={folder}
-          otherParty={replyDefaults.to || null}
+          otherParty={replySeed.to[0] ?? null}
           onTriage={onTriage}
         />
       </div>
@@ -704,19 +1241,38 @@ function ThreadPane({
             </p>
           </div>
         ) : (
-          <ul className="space-y-3 p-4">
-            {messages.map((m) => (
-              <MessageItem key={m.id} message={m} />
-            ))}
+          <ul className="space-y-2.5 p-4">
+            {messages.map((m) =>
+              workspaceId ? (
+                <MessageItem
+                  key={m.id}
+                  message={m}
+                  workspaceId={workspaceId}
+                  mailboxId={mailbox?.id ?? null}
+                  collapsed={!expanded.has(m.id)}
+                  onToggle={() => toggleExpanded(m.id)}
+                  onReply={onSeedReply}
+                  onReplyAll={onSeedReplyAll}
+                  onForward={onForward}
+                />
+              ) : null,
+            )}
           </ul>
         )}
       </div>
 
-      {/* Reply composer — available whenever a thread is open. */}
+      {/* Reply composer — available whenever a thread is open. Remounts when a
+          Reply/Reply-all seed is picked so the new defaults take. */}
       {load !== 'error' && (
         <ReplyComposer
-          defaultTo={replyDefaults.to}
-          defaultSubject={replyDefaults.subject}
+          key={`${threadId}:${replySeed.nonce}`}
+          ref={replyRef}
+          defaultTo={replySeed.to}
+          defaultCc={replySeed.cc}
+          defaultSubject={replySeed.subject}
+          workspaceId={workspaceId}
+          mailboxId={mailbox?.id ?? null}
+          inReplyTo={replySeed.inReplyTo}
           onSend={onReply}
         />
       )}
@@ -790,7 +1346,7 @@ function TriageActions({
             size="sm"
             disabled={busy}
             onClick={() => void run('ARCHIVE')}
-            title="Archive"
+            title="Archive (e)"
           >
             Archive
           </Button>
@@ -812,7 +1368,7 @@ function TriageActions({
             size="sm"
             disabled={busy}
             onClick={() => void run('TRASH')}
-            title="Move to trash"
+            title="Move to trash (#)"
           >
             Trash
           </Button>
@@ -820,44 +1376,6 @@ function TriageActions({
       </div>
       {error && <p className="max-w-[14rem] text-right text-[11px] text-danger">{error}</p>}
     </div>
-  );
-}
-
-const DIRECTION_META: Record<string, { label: string; tone: BadgeVariant }> = {
-  sent: { label: 'sent', tone: 'info' },
-  received: { label: 'received', tone: 'neutral' },
-  draft: { label: 'draft', tone: 'warning' },
-};
-
-function MessageItem({ message }: { message: MessageView }) {
-  const when = useMemo(() => formatWhen(message.sent_at), [message.sent_at]);
-  const dir = DIRECTION_META[message.direction] ?? {
-    label: message.direction || 'message',
-    tone: 'neutral' as BadgeVariant,
-  };
-  const toLabel = useMemo(
-    () => message.to.map((t) => participantLabel(t)).join(', '),
-    [message.to],
-  );
-
-  return (
-    <li className="rounded-token border border-subtle bg-surface-base/50 p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="min-w-0 truncate text-sm font-medium text-primary">
-          {participantLabel(message.from)}
-        </span>
-        <Badge variant={dir.tone}>{dir.label}</Badge>
-        {when && <span className="ml-auto shrink-0 font-mono text-[10px] text-muted">{when}</span>}
-      </div>
-      {toLabel && (
-        <p className="mt-0.5 truncate font-mono text-[11px] text-muted">to {toLabel}</p>
-      )}
-      {message.preview && (
-        <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-secondary">
-          {message.preview}
-        </p>
-      )}
-    </li>
   );
 }
 
@@ -892,7 +1410,9 @@ function NoThreadSelected() {
         </div>
         <p className="text-sm font-medium text-primary">Select a conversation</p>
         <p className="max-w-xs text-xs leading-5 text-tertiary">
-          Pick a thread from the list to read it and reply.
+          Pick a thread from the list to read it and reply. Press{' '}
+          <kbd className="rounded-token border border-border bg-surface-overlay px-1 font-mono text-[10px]">?</kbd>{' '}
+          for keyboard shortcuts.
         </p>
       </div>
     </Card>
@@ -1001,24 +1521,41 @@ function NoSpaceMailboxes({ spaceName }: { spaceName: string | null }) {
 
 // ── Reply prefill ────────────────────────────────────────────────────────────
 
+function dedupeAddresses(addresses: (string | null | undefined)[], exclude: string[]): string[] {
+  const excluded = new Set(exclude.map((a) => a.toLowerCase()));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const a of addresses) {
+    if (!a) continue;
+    const key = a.toLowerCase();
+    if (excluded.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    out.push(a);
+  }
+  return out;
+}
+
 /**
- * Derive the reply prefill: address the conversation's *other* party (not our
- * own mailbox), and prefix the subject with "Re: " once. Prefers the latest
- * received message's sender; falls back to a thread participant.
+ * Derive the default reply seed: address the conversation's *other* party (not
+ * our own mailbox), and prefix the subject with "Re: " once. Prefers the latest
+ * received message's sender; falls back to a thread participant. Also carries
+ * the id of the message being replied to as the `in_reply_to` threading hint.
  */
 function deriveReplyDefaults(
   messages: MessageView[],
   thread: ThreadView | null,
   mailbox: MailboxPick | null,
-): { to: string; subject: string } {
+): ReplySeed {
   const self = mailbox?.email_address?.toLowerCase() ?? '';
 
   // Prefer the most recent inbound message's sender as the reply target.
   let to = '';
+  let inReplyTo: string | null = null;
   for (let i = messages.length - 1; i >= 0; i--) {
     const from = messages[i].from?.address;
     if (from && from.toLowerCase() !== self) {
       to = from;
+      inReplyTo = messages[i].id;
       break;
     }
   }
@@ -1027,9 +1564,83 @@ function deriveReplyDefaults(
     const other = thread.participants.find((p) => p.address && p.address.toLowerCase() !== self);
     to = other?.address ?? thread.participants[0]?.address ?? '';
   }
+  if (!inReplyTo && messages.length > 0) inReplyTo = messages[messages.length - 1].id;
 
   const subject = deriveReSubject(thread?.subject ?? lastSubject(messages));
-  return { to, subject };
+  return { to: to ? [to] : [], cc: [], subject, inReplyTo, nonce: 0 };
+}
+
+/** Reply to a specific message: just its sender (or its recipients if it's ours). */
+function deriveReplyToMessage(
+  m: MessageView,
+  selfAddress: string,
+  thread: ThreadView | null,
+): Omit<ReplySeed, 'nonce'> {
+  const self = selfAddress.toLowerCase();
+  const from = m.from?.address;
+  const to =
+    from && from.toLowerCase() !== self
+      ? [from]
+      : dedupeAddresses(m.to.map((p) => p.address), [selfAddress]).slice(0, 1);
+  const subject = deriveReSubject(m.subject ?? thread?.subject ?? null);
+  return { to, cc: [], subject, inReplyTo: m.id };
+}
+
+/**
+ * Reply-all to a specific message: sender in To, every other recipient in Cc,
+ * minus our own address, deduped.
+ */
+function deriveReplyAll(
+  m: MessageView,
+  selfAddress: string,
+  thread: ThreadView | null,
+): Omit<ReplySeed, 'nonce'> {
+  const self = selfAddress ? [selfAddress] : [];
+  const from = m.from?.address;
+  const fromIsSelf = !!from && !!selfAddress && from.toLowerCase() === selfAddress.toLowerCase();
+  const others = dedupeAddresses(
+    [...m.to.map((p) => p.address), ...(m.cc ?? []).map((p) => p.address)],
+    self,
+  );
+  const to = !fromIsSelf && from ? [from] : others.slice(0, 1);
+  const cc = dedupeAddresses(others, to);
+  const subject = deriveReSubject(m.subject ?? thread?.subject ?? null);
+  return { to, cc, subject, inReplyTo: m.id };
+}
+
+/** Forward prefill: "Fwd:" subject, quoted original, attachments carried as blob refs. */
+function buildForwardPrefill(m: MessageView, thread: ThreadView | null): ComposePrefill {
+  const baseSubject = (m.subject ?? thread?.subject ?? '').trim();
+  const subject = /^fwd:/i.test(baseSubject) ? baseSubject : `Fwd: ${baseSubject}`.trim();
+  const fromLabel = m.from
+    ? `${participantLabel(m.from)}${m.from.address ? ` <${m.from.address}>` : ''}`
+    : 'Unknown';
+  const lines: string[] = [
+    '',
+    '',
+    '---------- Forwarded message ----------',
+    `From: ${fromLabel}`,
+  ];
+  if (m.sent_at) lines.push(`Date: ${new Date(m.sent_at).toLocaleString()}`);
+  lines.push(`Subject: ${baseSubject || '(no subject)'}`);
+  if (m.to.length > 0) lines.push(`To: ${m.to.map((p) => p.address).filter(Boolean).join(', ')}`);
+  if ((m.cc ?? []).length > 0) {
+    lines.push(`Cc: ${(m.cc ?? []).map((p) => p.address).filter(Boolean).join(', ')}`);
+  }
+  lines.push('', m.text_body ?? m.preview ?? '');
+
+  const attachments: UploadedBlob[] = (m.attachments ?? []).map((a) => ({
+    blob_id: a.blob_id,
+    name: a.name ?? 'attachment',
+    type: a.type ?? 'application/octet-stream',
+    size: a.size ?? 0,
+  }));
+
+  return {
+    subject,
+    body: lines.join('\n'),
+    ...(attachments.length > 0 ? { attachments } : {}),
+  };
 }
 
 function lastSubject(messages: MessageView[]): string | null {
