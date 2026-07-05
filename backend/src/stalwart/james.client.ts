@@ -18,6 +18,16 @@
  * directly; James relays out via its Postmark smarthost — an engine config, not
  * app logic.)
  *
+ * DELEGATION-AWARE: the configured principal (hq@) holds James delegated access
+ * to the other sovereign mailboxes, so its JMAP Session lists EVERY account it
+ * may act on (`session.accounts`, keyed by accountId with `name` = the mailbox
+ * address). Account-scoped calls resolve the target mailbox's own accountId by
+ * a case-insensitive address match against that list, so reads run against the
+ * CORRECT mailbox rather than always the primary principal. An unknown address
+ * triggers ONE session re-fetch (a delegation may have been granted since the
+ * session was cached), then falls back to the primary accountId — exactly the
+ * pre-delegation behavior.
+ *
  * DEGRADE-CLEAN (binding, identical to StalwartPort): when JAMES_JMAP_URL is
  * unset, isConfigured() is false; reads return [] and sends return
  * accepted:false (lane=null) WITHOUT any network call, and nothing throws.
@@ -40,6 +50,12 @@ export class JamesClient extends StalwartPort {
 
   /** Cached JMAP mail accountId for the authenticated principal (resolved once). */
   private accountIdCache: string | null = null;
+
+  /** Lowercased mailbox address → accountId, from `session.accounts` (own + delegated). */
+  private accountsByAddress: Map<string, string> | null = null;
+
+  /** Addresses already given their one stale-session re-fetch (don't hammer /session). */
+  private readonly refreshedMisses = new Set<string>();
 
   /** JMAP method families that REQUIRE an accountId argument on James. */
   private static readonly ACCOUNT_SCOPED =
@@ -118,14 +134,14 @@ export class JamesClient extends StalwartPort {
   }
 
   /**
-   * Resolve (and cache) the JMAP mail accountId for the authenticated principal.
-   * James REQUIRES an explicit accountId on every account-scoped method call
-   * (Stalwart's fronting projection did not), so fetch it once from the Session
-   * resource at {JAMES_JMAP_URL}/session and reuse it. Degrade-clean: returns
-   * null (→ jmap() returns null → reads [], sends best-effort) on any gap.
+   * Fetch the JMAP Session resource at {JAMES_JMAP_URL}/session and (re)build
+   * BOTH account caches: the primary mail accountId AND the address→accountId
+   * delegation map from `session.accounts` (every account the principal may act
+   * on; `name` is the mailbox address). Degrade-clean: returns null (→ jmap()
+   * returns null → reads [], sends best-effort) on any gap, leaving any
+   * previously cached session in place.
    */
-  private async resolveAccountId(): Promise<string | null> {
-    if (this.accountIdCache) return this.accountIdCache;
+  private async fetchSession(): Promise<string | null> {
     const base = this.jmapUrl;
     if (!base) return null;
     let res: Response;
@@ -143,10 +159,23 @@ export class JamesClient extends StalwartPort {
       return null;
     }
     try {
-      const s = (await res.json()) as { primaryAccounts?: Record<string, string> };
+      const s = (await res.json()) as {
+        primaryAccounts?: Record<string, string>;
+        accounts?: Record<string, { name?: unknown }>;
+      };
       const id = s?.primaryAccounts?.['urn:ietf:params:jmap:mail'];
       if (typeof id === 'string' && id) {
         this.accountIdCache = id;
+        const byAddress = new Map<string, string>();
+        if (s.accounts && typeof s.accounts === 'object') {
+          for (const [accountId, acct] of Object.entries(s.accounts)) {
+            const name = acct?.name;
+            if (typeof name === 'string' && name.trim()) {
+              byAddress.set(name.trim().toLowerCase(), accountId);
+            }
+          }
+        }
+        this.accountsByAddress = byAddress;
         return id;
       }
       this.logger.warn('James JMAP session carried no mail account');
@@ -157,11 +186,56 @@ export class JamesClient extends StalwartPort {
     }
   }
 
-  /** Issue a JMAP request; return parsed methodResponses or null on any failure (never throws). */
-  private async jmap(methodCalls: unknown[]): Promise<any[] | null> {
+  /**
+   * Resolve (and cache) the JMAP mail accountId for the authenticated principal.
+   * James REQUIRES an explicit accountId on every account-scoped method call
+   * (Stalwart's fronting projection did not), so fetch it once from the Session
+   * resource and reuse it.
+   */
+  private async resolveAccountId(): Promise<string | null> {
+    if (this.accountIdCache) return this.accountIdCache;
+    return this.fetchSession();
+  }
+
+  /**
+   * Resolve the accountId an account-scoped call should run under for the given
+   * mailbox address: the address's OWN (delegated) account when the session
+   * lists it (case-insensitive), else the primary principal — preserving the
+   * pre-delegation behavior for any mailbox hq@ cannot (yet) act on. On a map
+   * miss, the session is re-fetched ONCE per address (a delegation may have
+   * been granted since boot) before falling back.
+   */
+  private async resolveAccountIdFor(address: string | null): Promise<string | null> {
+    const primary = await this.resolveAccountId();
+    if (!primary || !address || !address.trim()) return primary;
+    const key = address.trim().toLowerCase();
+    const hit = this.accountsByAddress?.get(key);
+    if (hit) return hit;
+    if (!this.refreshedMisses.has(key)) {
+      this.refreshedMisses.add(key);
+      await this.fetchSession();
+      const refreshed = this.accountsByAddress?.get(key);
+      if (refreshed) {
+        this.refreshedMisses.delete(key);
+        return refreshed;
+      }
+      this.logger.warn(
+        `no delegated James account for ${address} — running as the primary principal`,
+      );
+    }
+    return this.accountIdCache ?? primary;
+  }
+
+  /**
+   * Issue a JMAP request; return parsed methodResponses or null on any failure
+   * (never throws). `forAddress` names the target mailbox: account-scoped calls
+   * run under that mailbox's own (delegated) accountId when the session lists
+   * it, else under the primary principal.
+   */
+  private async jmap(methodCalls: unknown[], forAddress: string | null = null): Promise<any[] | null> {
     const url = this.jmapUrl;
     if (!url) return null;
-    const accountId = await this.resolveAccountId();
+    const accountId = await this.resolveAccountIdFor(forAddress);
     if (!accountId) return null;
     // James requires an explicit accountId on every account-scoped call; inject
     // it wherever the caller omitted it (result references like #ids are kept).
@@ -236,9 +310,12 @@ export class JamesClient extends StalwartPort {
 
   async listThreads(mailbox: string, address: string): Promise<StalwartThread[]> {
     if (!this.jmapUrl) return [];
-    // Standard JMAP: query collapsed-by-thread (one representative email per
-    // thread) filtered by participant, fetch those emails, and fetch the threads
-    // for accurate message counts. Tolerant of missing pieces (degrade to []).
+    // Standard JMAP against the MAILBOX's own (delegated) account: query
+    // collapsed-by-thread (one representative email per thread) filtered by the
+    // CONTACT's address — the port contract is "threads that involve `address`",
+    // so the from/to filter is real filtering, not an account workaround — then
+    // fetch those emails, and fetch the threads for accurate message counts.
+    // Tolerant of missing pieces (degrade to []).
     const responses = await this.jmap([
       [
         'Email/query',
@@ -259,7 +336,7 @@ export class JamesClient extends StalwartPort {
         '1',
       ],
       ['Thread/get', { '#ids': { resultOf: '1', name: 'Email/get', path: '/list/*/threadId' } }, '2'],
-    ]);
+    ], mailbox);
     if (!responses) return [];
     const emails = this.named(responses, 'Email/get')?.list;
     if (!Array.isArray(emails)) return [];
@@ -297,7 +374,8 @@ export class JamesClient extends StalwartPort {
 
   async listMessages(mailbox: string, threadId: string): Promise<StalwartMessage[]> {
     if (!this.jmapUrl) return [];
-    // Standard JMAP Thread/get → Email/get chain (portable across JMAP engines).
+    // Standard JMAP Thread/get → Email/get chain (portable across JMAP engines),
+    // scoped to the mailbox's own (delegated) account — thread ids live per-account.
     const responses = await this.jmap([
       ['Thread/get', { ids: [threadId] }, '0'],
       [
@@ -308,7 +386,7 @@ export class JamesClient extends StalwartPort {
         },
         '1',
       ],
-    ]);
+    ], mailbox);
     if (!responses) return [];
     const list = this.named(responses, 'Email/get')?.list;
     if (!Array.isArray(list)) return [];
@@ -418,9 +496,10 @@ export class JamesClient extends StalwartPort {
   }
 
   private async sendViaJames(request: StalwartSendRequest): Promise<StalwartSendResult> {
-    // Best-effort JMAP submission: resolve a sending Identity for the from
-    // address, stage the Email, and submit. Degrade-clean on any gap.
-    const idResp = await this.jmap([['Identity/get', {}, '0']]);
+    // Best-effort JMAP submission under the FROM mailbox's own (delegated)
+    // account: resolve a sending Identity for the from address, stage the
+    // Email, and submit. Degrade-clean on any gap.
+    const idResp = await this.jmap([['Identity/get', {}, '0']], request.fromAddress);
     const identities = idResp ? this.named(idResp, 'Identity/get')?.list : undefined;
     const identity = Array.isArray(identities)
       ? identities.find((i: any) => i?.email === request.fromAddress) ?? identities[0]
@@ -455,7 +534,7 @@ export class JamesClient extends StalwartPort {
         { create: { sub: { emailId: '#outbound', identityId: identity.id } } },
         '1',
       ],
-    ]);
+    ], request.fromAddress);
     if (!responses) {
       return {
         accepted: false,
