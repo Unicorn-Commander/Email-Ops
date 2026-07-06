@@ -27,6 +27,7 @@ import type { ComposeOutcome } from './useMailClient';
 import { ComposeStatusLine, describeStatus } from './ComposeStatus';
 import { RecipientChips, isValidEmail } from './RecipientChips';
 import { AttachButton, ComposerAttachments, useAttachmentUploads } from './AttachmentList';
+import { ReplyIcon, CloseIcon } from './icons';
 
 export interface ReplyComposerHandle {
   /** Focus the reply body (the `r` shortcut). */
@@ -51,9 +52,11 @@ export const ReplyComposer = forwardRef<
         'to_address' | 'subject' | 'body' | 'cc' | 'attachments' | 'in_reply_to'
       >,
     ) => Promise<ComposeOutcome>;
+    /** Collapse the composer back to the compact reply action bar. */
+    onCollapse?: () => void;
   }
 >(function ReplyComposer(
-  { defaultTo, defaultCc, defaultSubject, workspaceId, mailboxId, inReplyTo, onSend },
+  { defaultTo, defaultCc, defaultSubject, workspaceId, mailboxId, inReplyTo, onSend, onCollapse },
   ref,
 ) {
   const [to, setTo] = useState<string[]>(defaultTo.filter(Boolean));
@@ -114,7 +117,7 @@ export const ReplyComposer = forwardRef<
   return (
     <div
       className={cn(
-        'border-t border-subtle bg-surface-base/40 p-4 transition-colors duration-fast ease-token',
+        'rounded-token-lg border border-subtle bg-surface-raised/50 p-3.5 shadow-token transition-colors duration-fast ease-token',
         dragging && 'bg-accent/5 ring-2 ring-inset ring-accent/40',
       )}
       onDragOver={(e) => {
@@ -126,6 +129,23 @@ export const ReplyComposer = forwardRef<
       onDragLeave={() => setDragging(false)}
       onDrop={handleDrop}
     >
+      <div className="mb-2.5 flex items-center gap-2">
+        <ReplyIcon className="h-3.5 w-3.5 text-accent" />
+        <span className="flex-1 text-[11px] font-semibold uppercase tracking-[0.07em] text-tertiary">
+          Reply
+        </span>
+        {onCollapse && (
+          <button
+            type="button"
+            onClick={onCollapse}
+            aria-label="Close reply"
+            title="Close reply"
+            className="grid h-6 w-6 place-items-center rounded-md text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay hover:text-primary"
+          >
+            <CloseIcon className="h-[14px] w-[14px]" />
+          </button>
+        )}
+      </div>
       <div className="flex flex-col gap-2.5">
         <div className="flex flex-col gap-2 sm:flex-row">
           <div className="block min-w-0 flex-1">
@@ -162,7 +182,7 @@ export const ReplyComposer = forwardRef<
         )}
 
         <label className="block">
-          <span className="mb-1 block text-[11px] font-medium text-tertiary">Reply</span>
+          <span className="mb-1 block text-[11px] font-medium text-tertiary">Message</span>
           <textarea
             ref={bodyRef}
             value={body}

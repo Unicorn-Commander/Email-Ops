@@ -41,8 +41,31 @@ import {
   CheckSquareIcon,
   BanIcon,
   SlidersIcon,
+  GearIcon,
   ChevronLeftIcon,
 } from './icons';
+
+/** Two-letter monogram for a resolved actor name (drops Re:/kebab noise). */
+function monogram(name: string): string {
+  const parts = name.replace(/[-_]+/g, ' ').split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return (parts[0]?.slice(0, 2) || '··').toUpperCase();
+}
+
+/**
+ * Resolve a feed row's drafting agent to a display label. Prefer the registered
+ * fleet (real display_name); fall back to the humanized provenance slug; and for
+ * rows with no agent key (system / mailbox-provisioning / fleet-wide events) show
+ * a calm "System" — never the literal "Unknown agent".
+ */
+function resolveActor(
+  agentKey: string | null,
+  fleet: Map<string, AgentView>,
+): { name: string; system: boolean } {
+  if (!agentKey) return { name: 'System', system: true };
+  const a = fleet.get(agentKey);
+  return { name: a?.display_name?.trim() || agentLabel(agentKey), system: false };
+}
 
 /** Compact "Nm ago" from an ISO timestamp (best-effort; mirrors AgentActivityFeed). */
 function relativeFrom(iso: string | null): string | null {
@@ -151,6 +174,10 @@ export function AgentRail({
     };
   }, [refresh]);
 
+  // Resolve feed rows against the live fleet so a drafting-agent key becomes a
+  // real display name (never "Unknown agent").
+  const fleetByKey = useMemo(() => new Map(agents.map((a) => [a.key, a])), [agents]);
+
   // Triaged/Sent are now REAL server-side counts over a 7d window (was a client
   // proxy of activity-feed volume). Awaiting stays the exact live pending queue.
   const triaged = metrics?.triaged ?? 0;
@@ -224,13 +251,13 @@ export function AgentRail({
           </span>
           <h3 className="flex-1 text-[13px] font-[650] tracking-[-0.01em] text-primary">Agent activity</h3>
           {paused ? (
-            <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-warning">
-              <span className="h-1.5 w-1.5 rounded-full bg-warning" />
+            <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.07em] text-warning/90">
+              <span className="h-[5px] w-[5px] rounded-full bg-warning" />
               Paused
             </span>
           ) : (
-            <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-success">
-              <span className="h-1.5 w-1.5 rounded-full bg-success eops-live-pulse" />
+            <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.07em] text-tertiary">
+              <span className="h-[5px] w-[5px] rounded-full bg-success eops-live-pulse" />
               Live
             </span>
           )}
@@ -244,10 +271,12 @@ export function AgentRail({
             <ChevronLeftIcon className="h-[15px] w-[15px] rotate-180" />
           </button>
         </div>
-        <div className="grid grid-cols-3 gap-2">
-          <Metric n={triaged} label="Triaged" />
-          <Metric n={sent} label="Sent" />
-          <Metric n={pendingCount} label="Awaiting" warn />
+        <div className="flex items-stretch rounded-[10px] border border-subtle bg-surface-base/40">
+          <Stat n={triaged} label="Triaged" />
+          <span className="my-2.5 w-px bg-border-subtle" />
+          <Stat n={sent} label="Sent" />
+          <span className="my-2.5 w-px bg-border-subtle" />
+          <Stat n={pendingCount} label="Awaiting" warn />
         </div>
       </div>
 
@@ -270,6 +299,7 @@ export function AgentRail({
             <EventRow
               key={ev.id}
               ev={ev}
+              fleet={fleetByKey}
               last={i === activity.length - 1}
               onReview={() => router.push('/agent-inbox')}
             />
@@ -314,44 +344,69 @@ export function AgentRail({
   );
 }
 
-function Metric({ n, label, warn }: { n: number; label: string; warn?: boolean }) {
+function Stat({ n, label, warn }: { n: number; label: string; warn?: boolean }) {
   return (
-    <div className="rounded-[9px] bg-surface-overlay px-2.5 py-2.5">
-      <div className={cn('text-[18px] font-[680] leading-none tracking-[-0.02em] mono', warn && 'text-warning')}>
+    <div className="flex-1 px-1 py-2 text-center">
+      <div
+        className={cn(
+          'text-[19px] font-[680] leading-none tracking-[-0.02em] mono',
+          warn && n > 0 ? 'text-warning' : 'text-primary',
+        )}
+      >
         {n}
       </div>
-      <div className="mt-1 text-[10px] uppercase tracking-[0.05em] text-tertiary">{label}</div>
+      <div className="mt-1.5 text-[9.5px] font-medium uppercase tracking-[0.09em] text-tertiary">
+        {label}
+      </div>
     </div>
   );
 }
 
 function EventRow({
   ev,
+  fleet,
   last,
   onReview,
 }: {
   ev: AgentActivityView;
+  fleet: Map<string, AgentView>;
   last: boolean;
   onReview: () => void;
 }) {
   const meta = KIND_META[ev.kind] ?? { tone: 'neutral' as EventTone, verb: ev.kind.toLowerCase() };
   const tone = TONE_ICON[meta.tone];
   const when = relativeFrom(ev.created_at);
-  const Glyph = tone.Glyph;
+  const actor = resolveActor(ev.agent_key, fleet);
   return (
-    <div className="relative grid grid-cols-[26px_1fr] gap-2.5 px-4 py-2.5">
-      {!last && <span className="absolute left-[28px] top-[30px] bottom-[-10px] w-[1.5px] bg-border-subtle" />}
-      <span className={cn('z-[1] grid h-[26px] w-[26px] place-items-center rounded-[7px]', tone.bg, tone.fg)}>
-        <Glyph className="h-[14px] w-[14px]" />
-      </span>
+    <div className="relative grid grid-cols-[28px_1fr] gap-2.5 px-4 py-2.5">
+      {!last && <span className="absolute left-[29px] top-[32px] bottom-[-10px] w-px bg-border-subtle" />}
+      {actor.system ? (
+        <span className="z-[1] grid h-[28px] w-[28px] place-items-center rounded-full bg-surface-overlay text-tertiary">
+          <GearIcon className="h-[15px] w-[15px]" />
+        </span>
+      ) : (
+        <span
+          className={cn(
+            'z-[1] grid h-[28px] w-[28px] place-items-center rounded-full text-[10px] font-bold mono',
+            tone.bg,
+            tone.fg,
+          )}
+          aria-hidden
+        >
+          {monogram(actor.name)}
+        </span>
+      )}
       <div className="min-w-0">
         <p className="text-[12.5px] leading-[1.45] text-secondary">
-          <b className="font-[620] text-primary">{agentLabel(ev.agent_key)}</b> {meta.verb}
+          <b className="font-[620] text-primary">{actor.name}</b> {meta.verb}
           {ev.detail ? <span className="text-tertiary"> — {ev.detail}</span> : null}
         </p>
-        <div className="mt-1 flex flex-wrap items-center gap-2 text-[10.5px] text-muted">
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10.5px] text-muted">
           {when && <span className="mono">{when}</span>}
-          <span className="rounded bg-surface-overlay px-1.5 py-px text-tertiary mono">{ev.kind.replace(/_/g, ' ').toLowerCase()}</span>
+          {when && <span className="text-border-strong">·</span>}
+          <span className="rounded bg-surface-overlay px-1.5 py-px text-tertiary mono">
+            {ev.kind.replace(/_/g, ' ').toLowerCase()}
+          </span>
         </div>
         {ev.kind === 'STAGED_FOR_APPROVAL' && (
           <div className="mt-1.5">

@@ -133,6 +133,8 @@ export function MailTopBar({
         </kbd>
       </label>
 
+      <span className="hidden h-5 w-px shrink-0 bg-border-subtle lg:block" aria-hidden />
+
       <div className="flex items-center gap-2">
         <button
           type="button"

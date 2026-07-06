@@ -18,6 +18,11 @@ module.exports = {
         secondary: 'rgb(var(--text-secondary) / <alpha-value>)',
         tertiary: 'rgb(var(--text-tertiary) / <alpha-value>)',
         muted: 'rgb(var(--text-muted) / <alpha-value>)',
+        /* Border tones exposed as colors too, so hairline dividers can use
+           `bg-border-subtle` / `bg-border-strong` (borderColor only feeds
+           `border-*`, which left these dividers rendering transparent). */
+        'border-subtle': 'rgb(var(--border-subtle) / <alpha-value>)',
+        'border-strong': 'rgb(var(--border) / <alpha-value>)',
         accent: {
           DEFAULT: 'rgb(var(--accent) / <alpha-value>)',
           hover: 'rgb(var(--accent-hover) / <alpha-value>)',

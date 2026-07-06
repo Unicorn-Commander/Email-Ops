@@ -74,6 +74,7 @@ import {
   BanIcon,
   ChevronLeftIcon,
   SlidersIcon,
+  RobotIcon,
 } from '@/components/mail/icons';
 import type {
   BulkAction,
@@ -166,6 +167,9 @@ export default function MailPage() {
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
 
   const [replySeed, setReplySeed] = useState<ReplySeed | null>(null);
+  // The inline reply composer is on-demand: collapsed to a compact action bar
+  // until the user picks Reply / Reply all (Forward opens the full dialog).
+  const [composerOpen, setComposerOpen] = useState(false);
   const threadOpen = mail.selectedThreadId !== null;
 
   // ── Debounced command-bar search (the box lives in the top bar) ─────────────
@@ -320,9 +324,13 @@ export default function MailPage() {
 
   useEffect(() => {
     setReplySeed(null);
+    setComposerOpen(false);
   }, [mail.selectedThreadId]);
 
+  // Every reply entry point (r-key, toolbar Reply, message Reply/Reply-all) funnels
+  // through here — so opening the composer + focusing it lives in one place.
   const focusReplySoon = useCallback(() => {
+    setComposerOpen(true);
     window.setTimeout(() => replyRef.current?.focus(), 60);
   }, []);
 
@@ -604,6 +612,8 @@ export default function MailPage() {
               onSeedReplyAll={seedReplyAll}
               onForward={(m) => forwardMessage(m, openThreadRow)}
               onFocusReply={focusReplySoon}
+              composerOpen={composerOpen}
+              onCollapseComposer={() => setComposerOpen(false)}
               onPopout={() => setPopoutOpen(true)}
               draft={openDraft}
               draftAutonomyLabel={
@@ -1259,12 +1269,18 @@ function EmptyList({ filter }: { filter: SegFilter }) {
         ? { t: 'No agent drafts', d: 'When an agent stages a reply, it appears here with a violet Draft-ready tag.' }
         : { t: 'Nothing here', d: 'New mail appears here once the engine is connected.' };
   return (
-    <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center">
-      <div className="grid h-11 w-11 place-items-center rounded-full bg-surface-overlay text-tertiary">
-        <MailIcon className="h-5 w-5" />
+    <div className="flex flex-col items-center justify-center gap-2.5 px-6 py-16 text-center">
+      <div className="grid h-12 w-12 place-items-center rounded-2xl border border-subtle bg-surface-raised text-tertiary shadow-token">
+        {filter === 'agent' ? (
+          <RobotIcon className="h-5 w-5" />
+        ) : filter === 'unread' ? (
+          <CheckSquareIcon className="h-5 w-5" />
+        ) : (
+          <MailIcon className="h-5 w-5" />
+        )}
       </div>
-      <p className="text-sm font-medium text-primary">{copy.t}</p>
-      <p className="max-w-xs text-xs leading-5 text-tertiary">{copy.d}</p>
+      <p className="text-[13.5px] font-[620] text-primary">{copy.t}</p>
+      <p className="max-w-[240px] text-[12px] leading-5 text-tertiary">{copy.d}</p>
     </div>
   );
 }
@@ -1335,6 +1351,8 @@ function Reader({
   onSeedReplyAll,
   onForward,
   onFocusReply,
+  composerOpen,
+  onCollapseComposer,
   onPopout,
   draft,
   draftAutonomyLabel,
@@ -1363,6 +1381,8 @@ function Reader({
   onSeedReplyAll: (m: MessageView) => void;
   onForward: (m: MessageView) => void;
   onFocusReply: () => void;
+  composerOpen: boolean;
+  onCollapseComposer: () => void;
   onPopout: () => void;
   draft: AgentInboxItemView | null;
   draftAutonomyLabel: string;
@@ -1399,6 +1419,7 @@ function Reader({
   }, [messages, mailbox, thread]);
   const when = formatWhen(thread?.last_message_at ?? messages[messages.length - 1]?.sent_at ?? null);
   const [g0, g1] = avatarGradient(sender?.address || threadId || 'x');
+  const lastMsg = messages[messages.length - 1] ?? null;
 
   const [triageBusy, setTriageBusy] = useState(false);
   const runTriage = async (d: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM', opts?: { blockSender?: boolean }) => {
@@ -1532,21 +1553,78 @@ function Reader({
             )}
           </ul>
         )}
-      </div>
 
-      {load !== 'error' && (
-        <ReplyComposer
-          key={`${threadId}:${replySeed.nonce}`}
-          ref={replyRef}
-          defaultTo={replySeed.to}
-          defaultCc={replySeed.cc}
-          defaultSubject={replySeed.subject}
-          workspaceId={workspaceId}
-          mailboxId={mailbox?.id ?? null}
-          inReplyTo={replySeed.inReplyTo}
-          onSend={onReply}
-        />
-      )}
+        {/* On-demand reply zone: docked tight under the last message. Collapsed it
+            is a compact action bar (no empty void); Reply / Reply all expand the
+            full composer inline, Forward opens the full dialog. */}
+        {load !== 'error' && load !== 'loading' && (
+          <div className="px-4 pb-5 pt-1 sm:px-6">
+            {composerOpen ? (
+              <ReplyComposer
+                key={`${threadId}:${replySeed.nonce}`}
+                ref={replyRef}
+                defaultTo={replySeed.to}
+                defaultCc={replySeed.cc}
+                defaultSubject={replySeed.subject}
+                workspaceId={workspaceId}
+                mailboxId={mailbox?.id ?? null}
+                inReplyTo={replySeed.inReplyTo}
+                onSend={onReply}
+                onCollapse={onCollapseComposer}
+              />
+            ) : (
+              <ReplyActionBar
+                hasMessage={!!lastMsg}
+                onReply={onFocusReply}
+                onReplyAll={() => lastMsg && onSeedReplyAll(lastMsg)}
+                onForward={() => lastMsg && onForward(lastMsg)}
+              />
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ReplyActionBar({
+  hasMessage,
+  onReply,
+  onReplyAll,
+  onForward,
+}: {
+  /** Reply-all / Forward need a concrete message; plain Reply uses the thread default. */
+  hasMessage: boolean;
+  onReply: () => void;
+  onReplyAll: () => void;
+  onForward: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        onClick={onReply}
+        className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface-raised px-3.5 text-[13px] font-semibold text-primary transition-colors duration-fast ease-token hover:border-accent/60 hover:bg-accent/[0.06] hover:text-accent"
+      >
+        <ReplyIcon className="h-4 w-4" />
+        Reply
+      </button>
+      <button
+        type="button"
+        disabled={!hasMessage}
+        onClick={onReplyAll}
+        className="inline-flex h-9 items-center rounded-lg px-3 text-[13px] font-medium text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay hover:text-primary disabled:opacity-40"
+      >
+        Reply all
+      </button>
+      <button
+        type="button"
+        disabled={!hasMessage}
+        onClick={onForward}
+        className="inline-flex h-9 items-center rounded-lg px-3 text-[13px] font-medium text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay hover:text-primary disabled:opacity-40"
+      >
+        Forward
+      </button>
     </div>
   );
 }
@@ -1596,18 +1674,42 @@ function MessageSkeleton() {
   );
 }
 
+function Kbd({ children }: { children: ReactNode }) {
+  return (
+    <kbd className="inline-grid h-[18px] min-w-[18px] place-items-center rounded-[5px] border border-border bg-surface-overlay px-1 text-[10.5px] leading-none text-secondary mono">
+      {children}
+    </kbd>
+  );
+}
+
 function NoThreadSelected() {
   return (
-    <div className="hidden h-full flex-col items-center justify-center gap-2 p-10 text-center lg:flex">
-      <div className="grid h-12 w-12 place-items-center rounded-full bg-surface-overlay text-tertiary">
+    <div className="hidden h-full flex-col items-center justify-center gap-3.5 p-10 text-center lg:flex">
+      <div className="grid h-14 w-14 place-items-center rounded-2xl border border-subtle bg-surface-raised text-tertiary shadow-token">
         <MailIcon className="h-6 w-6" />
       </div>
-      <p className="text-sm font-medium text-primary">Select a conversation</p>
-      <p className="max-w-xs text-xs leading-5 text-tertiary">
-        Pick a thread from the list to read it and reply. Press{' '}
-        <kbd className="rounded-token border border-border bg-surface-overlay px-1 text-[10px] mono">?</kbd>{' '}
-        for keyboard shortcuts.
-      </p>
+      <div className="space-y-1">
+        <p className="text-[15px] font-[620] tracking-[-0.01em] text-primary">
+          Select a conversation
+        </p>
+        <p className="mx-auto max-w-[248px] text-[12.5px] leading-5 text-tertiary">
+          Pick a thread to read it and reply — or let an agent draft one for you.
+        </p>
+      </div>
+      <div className="mt-1 flex flex-wrap items-center justify-center gap-x-2 gap-y-1.5 text-[11px] text-tertiary">
+        <Kbd>J</Kbd>
+        <Kbd>K</Kbd>
+        <span className="text-muted">move</span>
+        <span className="text-border-strong">·</span>
+        <Kbd>↵</Kbd>
+        <span className="text-muted">open</span>
+        <span className="text-border-strong">·</span>
+        <Kbd>C</Kbd>
+        <span className="text-muted">compose</span>
+        <span className="text-border-strong">·</span>
+        <Kbd>?</Kbd>
+        <span className="text-muted">shortcuts</span>
+      </div>
     </div>
   );
 }
