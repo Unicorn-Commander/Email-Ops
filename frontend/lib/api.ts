@@ -822,3 +822,33 @@ export async function getAgentActivity(
     token,
   );
 }
+
+/**
+ * Real server-side rail metrics (mirrors the backend AgentMetricsView).
+ *   triaged  — distinct threads an AGENT filed in the window.
+ *   sent     — agent autonomous + approved-then-sent sends in the window.
+ *   awaiting — CURRENT pending approvals (not windowed; = the nav badge).
+ * Honest server counts — NOT the old client-side activity-volume proxy.
+ */
+export interface AgentMetrics {
+  triaged: number;
+  sent: number;
+  awaiting: number;
+  window_days: number;
+}
+
+/**
+ * Fetch the workspace's agent-metrics. `window` is a lookback like "7d" / "30d"
+ * (the backend clamps to 1–90d and is degrade-clean: zeros on no data).
+ */
+export async function getAgentMetrics(
+  workspaceId: string,
+  window?: string,
+  token?: string,
+): Promise<AgentMetrics> {
+  const qs = window ? `?window=${encodeURIComponent(window)}` : '';
+  return apiGet<AgentMetrics>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/agent-metrics${qs}`,
+    token,
+  );
+}

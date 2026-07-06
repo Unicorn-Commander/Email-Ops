@@ -27,8 +27,10 @@ import { agentLabel } from '@/lib/agents';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 import {
   getAgentActivity,
+  getAgentMetrics,
   type AgentActionKind,
   type AgentActivityView,
+  type AgentMetrics,
   type AgentView,
   type AutonomyLevel,
 } from '@/lib/api';
@@ -110,22 +112,31 @@ export function AgentRail({
   const [activity, setActivity] = useState<AgentActivityView[]>([]);
   const [activityOk, setActivityOk] = useState<boolean>(true);
   const [loaded, setLoaded] = useState(false);
+  // Real server-computed metrics (null until the first fetch settles / on error).
+  const [metrics, setMetrics] = useState<AgentMetrics | null>(null);
 
   const refresh = useCallback(async () => {
     if (!workspaceId) {
       setLoaded(true); // no workspace → calm empty state, not an endless skeleton
       return;
     }
-    try {
-      const res = await getAgentActivity(workspaceId, 40);
-      setActivity(res.items);
+    // Feed + metrics load together but degrade independently: a metrics hiccup
+    // never blanks the feed (and vice-versa).
+    const [activityRes, metricsRes] = await Promise.allSettled([
+      getAgentActivity(workspaceId, 40),
+      getAgentMetrics(workspaceId, '7d'),
+    ]);
+    if (activityRes.status === 'fulfilled') {
+      setActivity(activityRes.value.items);
       setActivityOk(true);
-    } catch {
+    } else {
       // Endpoint absent / errored → degrade clean (empty feed, rail stays).
       setActivityOk(false);
-    } finally {
-      setLoaded(true);
     }
+    // Metrics are best-effort chrome: on failure fall back to nothing (the tiles
+    // then show the honest server default of 0 rather than an activity-count guess).
+    setMetrics(metricsRes.status === 'fulfilled' ? metricsRes.value : null);
+    setLoaded(true);
   }, [workspaceId]);
 
   useEffect(() => {
@@ -140,13 +151,10 @@ export function AgentRail({
     };
   }, [refresh]);
 
-  // Metrics from real data. Awaiting is exact (pending queue); Triaged/Sent are
-  // read off the recent governance activity window.
-  const sent = useMemo(
-    () => activity.filter((a) => a.kind === 'AUTONOMOUS_SEND' || a.kind === 'APPROVED').length,
-    [activity],
-  );
-  const triaged = activity.length;
+  // Triaged/Sent are now REAL server-side counts over a 7d window (was a client
+  // proxy of activity-feed volume). Awaiting stays the exact live pending queue.
+  const triaged = metrics?.triaged ?? 0;
+  const sent = metrics?.sent ?? 0;
 
   // The dial targets one agent: prefer the one bound to the open mailbox, else the
   // first active agent, else the first agent.
