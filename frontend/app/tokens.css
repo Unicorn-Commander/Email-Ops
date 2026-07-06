@@ -41,6 +41,7 @@
 
   --shadow: 0 1px 2px 0 rgb(0 0 0 / 0.4);
   --shadow-lg: 0 8px 24px -6px rgb(0 0 0 / 0.5);
+  --shadow-pop: 0 24px 70px -12px rgb(0 0 0 / 0.7);
 
   --radius: 8px;
   --radius-lg: 12px;
@@ -91,6 +92,7 @@
   --shadow: 0 1px 2px 0 rgb(16 16 24 / 0.06), 0 1px 3px 0 rgb(16 16 24 / 0.08);
   --shadow-lg: 0 10px 30px -8px rgb(16 16 24 / 0.18),
     0 4px 10px -4px rgb(16 16 24 / 0.1);
+  --shadow-pop: 0 30px 80px -16px rgb(16 16 24 / 0.28);
 }
 
 .lo-dialog-overlay[data-state='open'] {
