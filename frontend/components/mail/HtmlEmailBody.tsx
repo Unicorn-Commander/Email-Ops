@@ -288,7 +288,7 @@ export function HtmlEmailBody({
     const muted = tokenRgb('--text-muted', 'rgb(120 120 132)');
     const baseCss = `
       :root { color-scheme: light dark; }
-      html, body { height: auto !important; }
+      html, body { height: auto !important; min-height: 0 !important; }
       body {
         margin: 0; padding: 2px 1px;
         font-family: Inter, ui-sans-serif, system-ui, sans-serif;
@@ -308,14 +308,19 @@ export function HtmlEmailBody({
     return `<!doctype html><style>${baseCss}</style>${body}`;
   }, [processed, showQuoted]);
 
-  // Auto-height: measure the same-origin srcDoc body; track late layout shifts.
+  // Auto-height: measure the same-origin srcDoc BODY content; track late shifts.
+  // Only the body is measured — `documentElement.scrollHeight` is floored at the
+  // iframe's own viewport height, so folding it in (via Math.max) trapped short
+  // messages: the frame could grow for tall email but never shrink back to a
+  // one-liner's true height, leaving a dead gap. `html, body { height: auto }`
+  // (set !important in the srcDoc CSS) lets the body hug its content.
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const [height, setHeight] = useState(80);
+  const [height, setHeight] = useState(40);
   const measure = useCallback(() => {
     const doc = iframeRef.current?.contentDocument;
     if (!doc?.body) return;
-    const h = Math.max(doc.body.scrollHeight, doc.documentElement?.scrollHeight ?? 0);
-    if (h > 0) setHeight(Math.min(h + 8, 20000));
+    const h = doc.body.scrollHeight;
+    if (h > 0) setHeight(Math.min(Math.max(h + 4, 24), 20000));
   }, []);
   const handleLoad = useCallback(() => {
     measure();

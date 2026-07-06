@@ -34,6 +34,7 @@ export function MessageItem({
   workspaceId,
   mailboxId,
   collapsed,
+  isLast,
   onToggle,
   onReply,
   onReplyAll,
@@ -44,6 +45,9 @@ export function MessageItem({
   /** The mailbox the thread was opened from (routes blob fetches). */
   mailboxId: string | null;
   collapsed: boolean;
+  /** The newest message in the thread — its reply actions live in the reader's
+   *  single ReplyActionBar / composer below, so its own footer is suppressed. */
+  isLast?: boolean;
   onToggle: () => void;
   onReply?: (message: MessageView) => void;
   onReplyAll?: (message: MessageView) => void;
@@ -159,7 +163,7 @@ export function MessageItem({
         />
       )}
 
-      {(onReply || onReplyAll || onForward) && (
+      {!isLast && (onReply || onReplyAll || onForward) && (
         <div className="mt-2.5 flex flex-wrap items-center gap-1 border-t border-subtle pt-2">
           {onReply && (
             <MessageAction label="Reply" hint="r" onClick={() => onReply(message)} />

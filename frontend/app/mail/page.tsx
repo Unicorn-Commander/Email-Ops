@@ -1544,6 +1544,7 @@ function Reader({
                   workspaceId={workspaceId}
                   mailboxId={mailbox?.id ?? null}
                   collapsed={!expanded.has(m.id)}
+                  isLast={m.id === lastMsg?.id}
                   onToggle={() => toggleExpanded(m.id)}
                   onReply={onSeedReply}
                   onReplyAll={onSeedReplyAll}
