@@ -110,18 +110,6 @@ const AUTONOMY_BADGE: Record<AutonomyLevel, string> = {
   L2_AUTONOMOUS_AUDIT: 'L2 · AUTONOMOUS',
 };
 
-/** Deterministic avatar gradient pairs (spec-matched). */
-const AV_GRADIENTS: [string, string][] = [
-  ['#7c5cff', '#e879f9'],
-  ['#f59e0b', '#ef4444'],
-  ['#22d3ee', '#3b82f6'],
-  ['#34d399', '#10b981'],
-  ['#a78bfa', '#7c5cff'],
-  ['#f0883e', '#d9534f'],
-  ['#60a5fa', '#818cf8'],
-  ['#f472b6', '#db2777'],
-];
-
 /** A composer prefill carried by an agent's `ui_compose` (Phase C) or Forward. */
 interface ComposePrefill extends ComposeDialogPrefill {
   thread_id?: string;
@@ -559,7 +547,7 @@ export default function MailPage() {
           {/* (3) conversation list — the only left pane on mobile until a thread opens. */}
           <section
             className={cn(
-              'flex min-w-0 flex-col overflow-hidden border-r border-subtle',
+              'flex min-w-0 flex-col overflow-hidden border-r border-subtle bg-surface-base',
               threadOpen && 'max-lg:hidden',
             )}
           >
@@ -707,6 +695,17 @@ function addressHue(address: string): number {
   let h = 0;
   for (let i = 0; i < address.length; i++) h = (h * 31 + address.charCodeAt(i)) % 360;
   return h;
+}
+
+/**
+ * Deterministic avatar fill for a sender — a same-hue gradient keyed off the
+ * address, matching the per-account color-dot hue so a sender reads the same
+ * colour in the list, the reader, and its account tag. Mid-lightness stops keep
+ * white initials legible on both dark and light themes.
+ */
+function avatarHueStyle(seed: string): CSSProperties {
+  const h = addressHue((seed || 'x').toLowerCase());
+  return { background: `linear-gradient(140deg, hsl(${h} 70% 56%), hsl(${h} 62% 45%))` };
 }
 
 function FoldersColumn({
@@ -1084,17 +1083,23 @@ function ConversationRow({
     if (names.length <= 2) return names.join(', ');
     return `${names[0]} +${names.length - 1}`;
   }, [thread.participants]);
-  const [g0, g1] = avatarGradient(lead?.address || thread.id);
 
   return (
     <div
       className={cn(
-        'group relative flex items-start gap-2.5 border-b border-subtle px-3 py-2.5 pl-3',
-        active ? 'bg-surface-raised' : 'hover:bg-surface-raised',
+        'group relative flex cursor-pointer items-start gap-2.5 border-b border-subtle px-3 py-2.5 pl-3 transition-colors duration-fast ease-token',
+        active ? 'bg-surface-raised' : 'hover:bg-surface-raised/70',
         cursor && 'ring-1 ring-inset ring-accent/50',
       )}
     >
-      {active && <span className="absolute left-0 top-0 bottom-0 w-0.5 bg-accent" />}
+      {/* Selection accent — animates in/out instead of snapping. */}
+      <span
+        aria-hidden
+        className={cn(
+          'pointer-events-none absolute left-0 top-0 bottom-0 w-[3px] origin-left rounded-r-[2px] bg-accent transition-[opacity,transform] duration-token ease-token',
+          active ? 'scale-x-100 opacity-100' : 'scale-x-0 opacity-0',
+        )}
+      />
       <span
         className={cn(
           'mt-0.5 w-1 shrink-0 self-stretch rounded-[3px]',
@@ -1116,8 +1121,11 @@ function ConversationRow({
         </span>
       )}
       <span
-        className="mt-0.5 grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full text-[12.5px] font-[640] text-white"
-        style={{ background: `linear-gradient(140deg, ${g0}, ${g1})` }}
+        className={cn(
+          'mt-0.5 grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full text-[12.5px] font-[640] text-white transition-opacity duration-token ease-token',
+          thread.unread ? 'opacity-100' : 'opacity-[0.82]',
+        )}
+        style={avatarHueStyle(lead?.address || thread.id)}
         aria-hidden
       >
         {initials(lead?.name, lead?.address)}
@@ -1138,18 +1146,32 @@ function ConversationRow({
           >
             {who}
           </span>
-          {when && <span className="shrink-0 text-[11px] text-tertiary mono">{when}</span>}
+          {when && (
+            <span
+              className={cn(
+                'shrink-0 text-[11px] mono',
+                thread.unread ? 'font-medium text-secondary' : 'text-tertiary',
+              )}
+            >
+              {when}
+            </span>
+          )}
         </span>
         <span
           className={cn(
             'mt-0.5 block truncate text-[13px]',
-            thread.unread ? 'font-semibold text-primary' : 'text-primary',
+            thread.unread ? 'font-semibold text-primary' : 'font-normal text-tertiary',
           )}
         >
           {thread.subject?.trim() || '(no subject)'}
         </span>
         {thread.last_snippet && (
-          <span className="mt-0.5 block truncate text-[12px] text-tertiary">
+          <span
+            className={cn(
+              'mt-0.5 block truncate text-[12px]',
+              thread.unread ? 'text-tertiary' : 'text-muted',
+            )}
+          >
             {thread.last_snippet}
           </span>
         )}
@@ -1418,7 +1440,6 @@ function Reader({
     return messages[messages.length - 1]?.from ?? thread?.participants[0] ?? null;
   }, [messages, mailbox, thread]);
   const when = formatWhen(thread?.last_message_at ?? messages[messages.length - 1]?.sent_at ?? null);
-  const [g0, g1] = avatarGradient(sender?.address || threadId || 'x');
   const lastMsg = messages[messages.length - 1] ?? null;
 
   const [triageBusy, setTriageBusy] = useState(false);
@@ -1482,7 +1503,7 @@ function Reader({
         <div className="flex items-center gap-3">
           <span
             className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-[15px] font-[640] text-white"
-            style={{ background: `linear-gradient(140deg, ${g0}, ${g1})` }}
+            style={avatarHueStyle(sender?.address || threadId || 'x')}
             aria-hidden
           >
             {initials(sender?.name, sender?.address)}
@@ -1535,7 +1556,7 @@ function Reader({
             </p>
           </div>
         ) : (
-          <ul className="space-y-2.5 p-4 sm:px-6">
+          <ul className="divide-y divide-border-subtle px-4 pb-1 sm:px-6">
             {messages.map((m) =>
               workspaceId ? (
                 <MessageItem
@@ -1601,11 +1622,11 @@ function ReplyActionBar({
   onForward: () => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="eops-rise-in flex flex-wrap items-center gap-2">
       <button
         type="button"
         onClick={onReply}
-        className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface-raised px-3.5 text-[13px] font-semibold text-primary transition-colors duration-fast ease-token hover:border-accent/60 hover:bg-accent/[0.06] hover:text-accent"
+        className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface-raised px-3.5 text-[13px] font-semibold text-primary transition-colors duration-fast ease-token hover:border-accent/60 hover:bg-accent/[0.06] hover:text-accent active:bg-accent/[0.1]"
       >
         <ReplyIcon className="h-4 w-4" />
         Reply
@@ -1727,12 +1748,6 @@ function initials(name?: string | null, address?: string | null): string {
   const a = address?.trim();
   if (a) return a.slice(0, 2).toUpperCase();
   return '··';
-}
-
-function avatarGradient(seed: string): [string, string] {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  return AV_GRADIENTS[h % AV_GRADIENTS.length];
 }
 
 function normSubject(subject: string | null): string {

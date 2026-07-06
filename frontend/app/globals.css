@@ -79,6 +79,22 @@ html.eops-nav-collapsed [data-app-nav] {
   animation: eops-approval-pulse 1.8s var(--ease) infinite;
 }
 
+/* Gentle rise-in for on-demand surfaces (reply composer / action bar). Kept
+   small + ease-token; auto-neutralized by the reduced-motion block below. */
+@keyframes eops-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.eops-rise-in {
+  animation: eops-rise-in var(--dur) var(--ease);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

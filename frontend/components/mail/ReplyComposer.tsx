@@ -117,7 +117,7 @@ export const ReplyComposer = forwardRef<
   return (
     <div
       className={cn(
-        'rounded-token-lg border border-subtle bg-surface-raised/50 p-3.5 shadow-token transition-colors duration-fast ease-token',
+        'eops-rise-in rounded-token-lg border border-subtle bg-surface-raised/50 p-3.5 shadow-token transition-colors duration-fast ease-token',
         dragging && 'bg-accent/5 ring-2 ring-inset ring-accent/40',
       )}
       onDragOver={(e) => {

@@ -80,13 +80,13 @@ export function MessageItem({
 
   if (collapsed) {
     return (
-      <li>
+      <li className="py-1.5">
         <button
           type="button"
           onClick={onToggle}
           className={cn(
-            'flex w-full items-center gap-2 rounded-token border border-subtle bg-surface-base/30 px-3 py-2 text-left',
-            'transition-colors duration-fast ease-token hover:bg-surface-overlay/60',
+            '-mx-2 flex w-[calc(100%+1rem)] items-center gap-2 rounded-lg px-2 py-1.5 text-left',
+            'transition-colors duration-fast ease-token hover:bg-surface-overlay/50',
           )}
           title="Expand message"
         >
@@ -122,7 +122,7 @@ export function MessageItem({
   const text = message.text_body ?? message.preview ?? '';
 
   return (
-    <li className="rounded-token border border-subtle bg-surface-base/50 p-3">
+    <li className="py-3.5">
       <button
         type="button"
         onClick={onToggle}
