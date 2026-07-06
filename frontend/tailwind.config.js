@@ -75,10 +75,15 @@ module.exports = {
         pop: 'var(--shadow-pop)',
       },
       transitionDuration: {
+        /* Bare `transition` / `transition-colors` (which otherwise fall back to
+           150ms linear) now inherit the token timing, unifying hover feedback
+           across the chrome and message area without touching each component. */
+        DEFAULT: 'var(--dur-fast)',
         fast: 'var(--dur-fast)',
         token: 'var(--dur)',
       },
       transitionTimingFunction: {
+        DEFAULT: 'var(--ease)',
         token: 'var(--ease)',
       },
       opacity: Object.fromEntries(

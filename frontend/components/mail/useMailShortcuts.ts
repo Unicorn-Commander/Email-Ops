@@ -6,8 +6,9 @@
  *   j / k        move the row cursor          Enter / o   open the cursor thread
  *   u            back to the list             e           archive
  *   #            trash                        r / a / f   reply / reply-all / forward
- *   /            focus search                 x           toggle select
- *   ⇧I / ⇧U      mark read / unread           ?           shortcuts help
+ *   c            compose                      /           focus search
+ *   x            toggle select               ⇧I / ⇧U     mark read / unread
+ *   ?            shortcuts help
  *
  * Ignored while focus is in an input/textarea/select/contenteditable, while a
  * dialog is open (callers pass `enabled: false`), and for any ⌘/Ctrl/Alt chord.
@@ -28,6 +29,7 @@ export interface MailShortcutHandlers {
   onToggleSelect?: () => void;
   onMarkRead?: () => void;
   onMarkUnread?: () => void;
+  onCompose?: () => void;
   onHelp?: () => void;
 }
 
@@ -80,6 +82,9 @@ export function useMailShortcuts(handlers: MailShortcutHandlers, enabled: boolea
           break;
         case 'f':
           h.onForward?.();
+          break;
+        case 'c':
+          h.onCompose?.();
           break;
         case '/':
           h.onFocusSearch?.();

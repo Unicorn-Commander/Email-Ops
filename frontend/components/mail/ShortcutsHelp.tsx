@@ -20,11 +20,11 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
       ['Enter or o', 'Open conversation'],
       ['u', 'Back to list'],
       ['/', 'Focus search'],
-      ['⌘K', 'Jump to search from anywhere'],
+      ['⌘K', 'Command menu'],
     ],
   },
   {
-    title: 'Act',
+    title: 'Triage',
     rows: [
       ['e', 'Archive'],
       ['#', 'Trash'],
@@ -33,13 +33,17 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
     ],
   },
   {
-    title: 'Write',
+    title: 'Compose',
     rows: [
+      ['c', 'Compose'],
       ['r', 'Reply'],
       ['a', 'Reply all'],
       ['f', 'Forward'],
-      ['?', 'Open this help'],
     ],
+  },
+  {
+    title: 'General',
+    rows: [['?', 'Open this help']],
   },
 ];
 

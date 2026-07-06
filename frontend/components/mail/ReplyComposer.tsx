@@ -16,10 +16,12 @@
 
 import {
   forwardRef,
+  useEffect,
   useImperativeHandle,
   useRef,
   useState,
   type DragEvent,
+  type KeyboardEvent,
 } from 'react';
 import { Button, Input, cn } from '@/components/ui';
 import type { ComposeBody } from '@/lib/mailApi';
@@ -28,6 +30,36 @@ import { ComposeStatusLine, describeStatus } from './ComposeStatus';
 import { RecipientChips, isValidEmail } from './RecipientChips';
 import { AttachButton, ComposerAttachments, useAttachmentUploads } from './AttachmentList';
 import { ReplyIcon, CloseIcon } from './icons';
+
+/**
+ * Draft persistence helpers — SSR- and private-mode-safe (guard `window`, swallow
+ * QuotaExceeded/SecurityError). A null key disables persistence entirely.
+ */
+function readDraft(key: string | null): string | null {
+  if (!key || typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function writeDraft(key: string | null, value: string): boolean {
+  if (!key || typeof window === 'undefined') return false;
+  try {
+    window.localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function clearDraft(key: string | null): void {
+  if (!key || typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    /* private mode / unavailable — nothing to clean up */
+  }
+}
 
 export interface ReplyComposerHandle {
   /** Focus the reply body (the `r` shortcut). */
@@ -59,18 +91,50 @@ export const ReplyComposer = forwardRef<
   { defaultTo, defaultCc, defaultSubject, workspaceId, mailboxId, inReplyTo, onSend, onCollapse },
   ref,
 ) {
+  // Draft is keyed on `inReplyTo` (the RFC threading anchor for this thread) —
+  // the page remounts this composer per thread, so hydrate lazily from storage.
+  const draftKey = inReplyTo ? `emailops:draft:reply:${inReplyTo}` : null;
+
   const [to, setTo] = useState<string[]>(defaultTo.filter(Boolean));
   const [cc, setCc] = useState<string[]>(defaultCc ?? []);
   const [showCc, setShowCc] = useState((defaultCc?.length ?? 0) > 0);
   const [subject, setSubject] = useState(defaultSubject);
-  const [body, setBody] = useState('');
+  const [body, setBody] = useState(() => readDraft(draftKey) ?? '');
   const [sending, setSending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [draftSaved, setDraftSaved] = useState(false);
 
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   useImperativeHandle(ref, () => ({ focus: () => bodyRef.current?.focus() }), []);
+
+  // Debounced autosave. Skip the first run (hydration) so we don't flash "Saved"
+  // on mount, and never persist a whitespace-only draft (clear the key instead).
+  const firstRun = useRef(true);
+  useEffect(() => {
+    if (firstRun.current) {
+      firstRun.current = false;
+      return;
+    }
+    if (!draftKey) return;
+    const t = setTimeout(() => {
+      if (body.trim().length === 0) {
+        clearDraft(draftKey);
+        setDraftSaved(false);
+      } else if (writeDraft(draftKey, body)) {
+        setDraftSaved(true);
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [body, draftKey]);
+
+  // Fade the "Saved" pill back out shortly after it appears.
+  useEffect(() => {
+    if (!draftSaved) return;
+    const t = setTimeout(() => setDraftSaved(false), 1600);
+    return () => clearTimeout(t);
+  }, [draftSaved]);
 
   const uploads = useAttachmentUploads(workspaceId, mailboxId);
 
@@ -103,6 +167,16 @@ export const ReplyComposer = forwardRef<
     if (describeStatus(res.message?.status).sent) {
       setBody('');
       uploads.reset();
+      clearDraft(draftKey);
+      setDraftSaved(false);
+    }
+  }
+
+  function handleBodyKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // ⌘/Ctrl + Enter mirrors the Send button (guards live inside handleSend).
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      void handleSend();
     }
   }
 
@@ -187,6 +261,7 @@ export const ReplyComposer = forwardRef<
             ref={bodyRef}
             value={body}
             onChange={(e) => setBody(e.target.value)}
+            onKeyDown={handleBodyKeyDown}
             rows={4}
             placeholder="Write a reply…  (drop files here to attach)"
             className="block w-full resize-y rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40"
@@ -210,9 +285,24 @@ export const ReplyComposer = forwardRef<
               <p className="text-[11px] text-muted">Replies thread into this conversation.</p>
             )}
           </div>
-          <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
-            {sending ? 'Sending…' : uploads.uploading ? 'Uploading…' : 'Send reply'}
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            <span
+              aria-live="polite"
+              className={cn(
+                'flex items-center gap-1 text-[11px] text-tertiary transition-opacity duration-token ease-token',
+                draftSaved ? 'opacity-100' : 'opacity-0',
+              )}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-accent/70" />
+              Saved
+            </span>
+            <kbd className="hidden rounded-token border border-border bg-surface-overlay px-1.5 py-0.5 font-mono text-[11px] text-tertiary sm:block">
+              ⌘↵
+            </kbd>
+            <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
+              {sending ? 'Sending…' : uploads.uploading ? 'Uploading…' : 'Send reply'}
+            </Button>
+          </div>
         </div>
       </div>
     </div>

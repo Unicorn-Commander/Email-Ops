@@ -49,6 +49,7 @@ export function MailTopBar({
   onCompose,
   canCompose,
   onHelp,
+  onCommandPalette,
 }: {
   query: string;
   onQuery: (q: string) => void;
@@ -65,23 +66,25 @@ export function MailTopBar({
   canCompose: boolean;
   /** Open the command-center Help dialog (the same one the `?` key opens). */
   onHelp: () => void;
+  /** Open the ⌘K command palette. */
+  onCommandPalette?: () => void;
 }) {
   const router = useRouter();
   const { resolved, setPref } = useTheme();
   const user = getStoredUser<EmailOpsUser>();
 
-  // ⌘K / Ctrl-K focuses the command search from anywhere on the surface.
+  // ⌘K / Ctrl-K opens the command palette from anywhere on the surface. (The `/`
+  // shortcut still focuses the search box for a plain text search.)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
-        searchRef.current?.focus();
-        searchRef.current?.select();
+        onCommandPalette?.();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [searchRef]);
+  }, [onCommandPalette]);
 
   const pauseLabel = agentsPaused
     ? 'Agents paused'
@@ -128,7 +131,10 @@ export function MailTopBar({
           aria-label="Search"
           className="min-w-0 flex-1 bg-transparent text-[13px] text-primary outline-none placeholder:text-tertiary"
         />
-        <kbd className="hidden rounded-[5px] border border-border bg-surface-base px-1.5 py-px text-[11px] text-tertiary sm:block mono">
+        <kbd
+          title="Open command menu"
+          className="hidden rounded-[5px] border border-border bg-surface-base px-1.5 py-px text-[11px] text-tertiary sm:block mono"
+        >
           ⌘K
         </kbd>
       </label>

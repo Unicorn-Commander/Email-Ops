@@ -13,7 +13,9 @@
   --text-primary: 231 231 234;
   --text-secondary: 180 180 190;
   --text-tertiary: 138 138 150;
-  --text-muted: 95 95 107;
+  /* Lightened from 95 95 107 (~3.2:1 on surface-base) to clear WCAG AA 4.5:1
+     for small snippet/timestamp text (measures ~4.5:1 on --surface-base). */
+  --text-muted: 120 120 133;
 
   --accent: 124 92 255;
   --accent-hover: 143 114 255;
@@ -63,7 +65,9 @@
   --text-primary: 27 27 32;
   --text-secondary: 63 63 74;
   --text-tertiary: 92 92 104;
-  --text-muted: 138 138 150;
+  /* Darkened from 138 138 150 (~3.3:1 on light surface-base — 138 is lighter
+     than the ~118 AA threshold) to clear WCAG AA 4.5:1 (measures ~4.7:1). */
+  --text-muted: 112 112 124;
 
   --accent: 124 92 255;
   --accent-hover: 107 69 240;

@@ -40,6 +40,31 @@
     background: rgb(var(--accent) / 0.28);
     color: rgb(var(--text-primary));
   }
+
+  /* Global keyboard-focus ring — the biggest a11y gap was that icon buttons had
+     no visible focus state. One crisp, consistent accent outline on every
+     interactive element, drawn OUTSIDE the box (outline + offset, never inset
+     box-shadow) so it never clips inside rounded corners and reads well on both
+     surface-base and surface-raised. Mouse/touch focus stays clean: the ring
+     only shows for :focus-visible (keyboard), and we explicitly suppress the
+     UA outline on plain :focus. This complements — does not replace — the
+     component-level input focus rings. */
+  :focus-visible,
+  a:focus-visible,
+  button:focus-visible,
+  [role='button']:focus-visible,
+  [role='option']:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid rgb(var(--accent) / 0.7);
+    outline-offset: 2px;
+  }
+
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
 }
 
 /* Global app-nav width is CSS-driven (keyed off a <html> class) so the

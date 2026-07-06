@@ -57,6 +57,7 @@ import { MessageItem } from '@/components/mail/MessageItem';
 import { BulkBar } from '@/components/mail/BulkBar';
 import { ShortcutsHelp } from '@/components/mail/ShortcutsHelp';
 import { useMailShortcuts } from '@/components/mail/useMailShortcuts';
+import { CommandPalette, type CommandAction } from '@/components/mail/CommandPalette';
 import { MailTopBar } from '@/components/mail/MailTopBar';
 import { MailIconNav } from '@/components/mail/MailIconNav';
 import { AgentRail } from '@/components/mail/AgentRail';
@@ -70,6 +71,7 @@ import {
   TrashIcon,
   ReplyIcon,
   PopOutIcon,
+  PlusIcon,
   CheckSquareIcon,
   BanIcon,
   ChevronLeftIcon,
@@ -141,6 +143,7 @@ export default function MailPage() {
   const [sendersOpen, setSendersOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [popoutOpen, setPopoutOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [filter, setFilter] = useState<SegFilter>('all');
 
   // Chrome collapse state (reused folders store + new rail store).
@@ -153,6 +156,9 @@ export default function MailPage() {
   const searchRef = useRef<HTMLInputElement>(null);
   const replyRef = useRef<ReplyComposerHandle>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
+  // After triaging the OPEN thread, advance to the conversation that shifts into
+  // its slot. Holds that pre-triage index until the refreshed list consumes it.
+  const advanceAfterTriageRef = useRef<number | null>(null);
 
   const [replySeed, setReplySeed] = useState<ReplySeed | null>(null);
   // The inline reply composer is on-demand: collapsed to a compact action bar
@@ -282,6 +288,22 @@ export default function MailPage() {
     setCursor((c) => Math.min(c, displayThreads.length - 1));
   }, [threads, displayThreads.length]);
 
+  // One-pass auto-advance: when a triage armed a target index, re-open whatever
+  // conversation now occupies that slot in the refreshed list (clamped), or fall
+  // back to the empty state when the list drained.
+  useEffect(() => {
+    const idx = advanceAfterTriageRef.current;
+    if (idx === null) return;
+    advanceAfterTriageRef.current = null;
+    if (displayThreads.length === 0) {
+      selectThread(null);
+      return;
+    }
+    const next = displayThreads[Math.min(idx, displayThreads.length - 1)];
+    if (next) selectThread(next.id, next.mailbox_id);
+    else selectThread(null);
+  }, [displayThreads, selectThread]);
+
   const toggleSelect = useCallback((id: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -349,6 +371,11 @@ export default function MailPage() {
     setComposeOpen(true);
   }, []);
 
+  const openCompose = useCallback(() => {
+    setComposeInitial(null);
+    setComposeOpen(true);
+  }, []);
+
   // ── Bulk actions ─────────────────────────────────────────────────────────────
   const runBulk = useCallback(
     async (action: BulkAction): Promise<{ ok: boolean; error?: string }> => {
@@ -385,6 +412,32 @@ export default function MailPage() {
 
   const keyboardTargetId = mail.selectedThreadId ?? cursorThread?.id ?? null;
 
+  // Triage a thread and, when it's the OPEN one, arm a one-pass auto-advance:
+  // remember the row's index now so the refreshed list can re-open whatever
+  // conversation slides into that slot. Only the open thread advances.
+  const { triage: mailTriage, selectedThreadId } = mail;
+  const triageAndAdvance = useCallback(
+    (
+      threadId: string,
+      disposition: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM',
+      opts?: { blockSender?: boolean; trustSender?: boolean; senderAddress?: string },
+    ): Promise<TriageOutcome> => {
+      const isOpen = threadId === selectedThreadId;
+      if (isOpen) {
+        const idx = displayThreads.findIndex((t) => t.id === threadId);
+        advanceAfterTriageRef.current = idx >= 0 ? idx : null;
+      }
+      const p = mailTriage(threadId, disposition, opts);
+      if (isOpen) {
+        void p.then((res) => {
+          if (!res.ok) advanceAfterTriageRef.current = null;
+        });
+      }
+      return p;
+    },
+    [mailTriage, selectedThreadId, displayThreads],
+  );
+
   const shortcutTriage = useCallback(
     (disposition: 'ARCHIVE' | 'TRASH') => {
       const bulkAction: BulkAction = disposition === 'ARCHIVE' ? 'archive' : 'trash';
@@ -392,9 +445,9 @@ export default function MailPage() {
         void runBulk(bulkAction);
         return;
       }
-      if (keyboardTargetId) void mail.triage(keyboardTargetId, disposition);
+      if (keyboardTargetId) void triageAndAdvance(keyboardTargetId, disposition);
     },
-    [selected, mail, runBulk, keyboardTargetId],
+    [selected, mail.features.bulk, runBulk, keyboardTargetId, triageAndAdvance],
   );
 
   const shortcutMark = useCallback(
@@ -434,9 +487,10 @@ export default function MailPage() {
       },
       onMarkRead: () => shortcutMark(true),
       onMarkUnread: () => shortcutMark(false),
+      onCompose: openCompose,
       onHelp: () => setHelpOpen(true),
     },
-    !composeOpen && !sendersOpen && !helpOpen && !popoutOpen,
+    !composeOpen && !sendersOpen && !helpOpen && !popoutOpen && !paletteOpen,
   );
 
   // Per-mailbox unread badges (Wave-2 counts endpoint; null = hidden).
@@ -454,6 +508,188 @@ export default function MailPage() {
   }, [mail.counts, activeSpace, visibleMailboxes]);
 
   const showAllInboxes = mail.features.aggregate && visibleMailboxes.length > 1;
+
+  // Re-open the current thread to re-run its messages fetch (used by the reader's
+  // error-retry). Re-selecting mints a fresh open-thread ref → the loader re-fires.
+  const { selectedThreadMailboxId } = mail;
+  const reloadOpenThread = useCallback(() => {
+    if (selectedThreadId) selectThread(selectedThreadId, selectedThreadMailboxId ?? undefined);
+  }, [selectThread, selectedThreadId, selectedThreadMailboxId]);
+
+  // ── ⌘K command palette actions (built from the real handlers) ───────────────
+  const { selectFolder } = mail;
+  const commandActions = useMemo<CommandAction[]>(() => {
+    const list: CommandAction[] = [];
+
+    // Navigate — folders
+    for (const f of FOLDERS) {
+      const Glyph = FOLDER_GLYPH[f.id];
+      list.push({
+        id: `folder:${f.id}`,
+        label: f.label,
+        group: 'Navigate',
+        icon: <Glyph />,
+        keywords: `folder go to ${f.label}`,
+        run: () => selectFolder(f.id),
+      });
+    }
+    // Navigate — segment filters
+    list.push(
+      {
+        id: 'filter:all',
+        label: 'All mail',
+        group: 'Navigate',
+        icon: <MailIcon />,
+        keywords: 'filter show everything all',
+        run: () => setFilter('all'),
+      },
+      {
+        id: 'filter:unread',
+        label: 'Unread',
+        group: 'Navigate',
+        icon: <CheckSquareIcon />,
+        keywords: 'filter unseen new unread',
+        run: () => setFilter('unread'),
+      },
+      {
+        id: 'filter:agent',
+        label: 'Agent drafts',
+        group: 'Navigate',
+        icon: <RobotIcon />,
+        keywords: 'filter agent draft ready violet',
+        run: () => setFilter('agent'),
+      },
+    );
+
+    // Accounts — unified + each mailbox
+    if (showAllInboxes) {
+      list.push({
+        id: 'mailbox:all',
+        label: 'All inboxes',
+        group: 'Accounts',
+        icon: <MailIcon />,
+        keywords: 'unified merge every mailbox account inbox',
+        run: () => selectMailbox(ALL_INBOXES),
+      });
+    }
+    for (const mb of visibleMailboxes) {
+      list.push({
+        id: `mailbox:${mb.id}`,
+        label: mb.display_name?.trim() || mb.email_address,
+        group: 'Accounts',
+        icon: <MailIcon />,
+        keywords: `account mailbox ${mb.email_address}`,
+        run: () => selectMailbox(mb.id),
+      });
+    }
+
+    // Actions — always Compose; thread-scoped ones only with a thread open.
+    list.push({
+      id: 'action:compose',
+      label: 'Compose',
+      group: 'Actions',
+      hint: 'C',
+      icon: <PlusIcon />,
+      keywords: 'new message write email compose',
+      run: openCompose,
+    });
+    if (selectedThreadId) {
+      list.push(
+        {
+          id: 'action:reply',
+          label: 'Reply',
+          group: 'Actions',
+          hint: 'R',
+          icon: <ReplyIcon />,
+          keywords: 'respond answer reply',
+          run: () => focusReplySoon(),
+        },
+        {
+          id: 'action:reply-all',
+          label: 'Reply all',
+          group: 'Actions',
+          hint: 'A',
+          icon: <ReplyIcon />,
+          keywords: 'respond everyone reply all',
+          disabled: !lastMessage,
+          run: () => {
+            if (lastMessage) seedReplyAll(lastMessage);
+          },
+        },
+        {
+          id: 'action:forward',
+          label: 'Forward',
+          group: 'Actions',
+          hint: 'F',
+          icon: <SendIcon />,
+          keywords: 'forward send on fwd',
+          disabled: !lastMessage,
+          run: () => {
+            if (lastMessage) forwardMessage(lastMessage, openThreadRow);
+          },
+        },
+        {
+          id: 'action:archive',
+          label: 'Archive',
+          group: 'Actions',
+          hint: 'E',
+          icon: <ArchiveIcon />,
+          keywords: 'archive file done',
+          run: () => shortcutTriage('ARCHIVE'),
+        },
+        {
+          id: 'action:trash',
+          label: 'Move to trash',
+          group: 'Actions',
+          hint: '#',
+          icon: <TrashIcon />,
+          keywords: 'trash delete remove bin',
+          run: () => shortcutTriage('TRASH'),
+        },
+        {
+          id: 'action:mark-read',
+          label: 'Mark read',
+          group: 'Actions',
+          icon: <CheckSquareIcon />,
+          keywords: 'mark read seen',
+          run: () => shortcutMark(true),
+        },
+        {
+          id: 'action:mark-unread',
+          label: 'Mark unread',
+          group: 'Actions',
+          keywords: 'mark unread unseen',
+          run: () => shortcutMark(false),
+        },
+      );
+    }
+
+    // Help
+    list.push({
+      id: 'help:shortcuts',
+      label: 'Keyboard shortcuts',
+      group: 'Help',
+      hint: '?',
+      keywords: 'help keyboard shortcuts keys cheatsheet',
+      run: () => setHelpOpen(true),
+    });
+
+    return list;
+  }, [
+    selectFolder,
+    selectMailbox,
+    showAllInboxes,
+    visibleMailboxes,
+    selectedThreadId,
+    lastMessage,
+    openThreadRow,
+    focusReplySoon,
+    seedReplyAll,
+    forwardMessage,
+    shortcutTriage,
+    shortcutMark,
+    openCompose,
+  ]);
 
   const canCompose =
     mail.load === 'ready' &&
@@ -506,12 +742,10 @@ export default function MailPage() {
         agentsPaused={agentsPaused}
         onTogglePause={() => setPaused(!agentsPaused)}
         activeAgentCount={activeAgentCount}
-        onCompose={() => {
-          setComposeInitial(null);
-          setComposeOpen(true);
-        }}
+        onCompose={openCompose}
         canCompose={canCompose}
         onHelp={() => setHelpOpen(true)}
+        onCommandPalette={() => setPaletteOpen(true)}
       />
 
       <div className="flex min-h-0 flex-1">
@@ -593,7 +827,8 @@ export default function MailPage() {
               folder={mail.folder}
               onBack={() => selectThread(null)}
               onReply={mail.reply}
-              onTriage={mail.triage}
+              onTriage={triageAndAdvance}
+              onReload={reloadOpenThread}
               replySeed={activeSeed}
               replyRef={replyRef}
               onSeedReply={seedReply}
@@ -675,6 +910,8 @@ export default function MailPage() {
       />
 
       <ShortcutsHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
+
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} actions={commandActions} />
 
       <MessagePopout
         open={popoutOpen && threadOpen}
@@ -1367,6 +1604,7 @@ function Reader({
   onBack,
   onReply,
   onTriage,
+  onReload,
   replySeed,
   replyRef,
   onSeedReply,
@@ -1397,6 +1635,8 @@ function Reader({
     disposition: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM',
     opts?: { blockSender?: boolean; trustSender?: boolean; senderAddress?: string },
   ) => Promise<TriageOutcome>;
+  /** Re-run the open thread's messages fetch (reader error-retry). */
+  onReload: () => void;
   replySeed: ReplySeed;
   replyRef: RefObject<ReplyComposerHandle | null>;
   onSeedReply: (m: MessageView) => void;
@@ -1548,6 +1788,9 @@ function Reader({
           <div className="p-6">
             <p className="text-sm font-medium text-primary">Could not load this conversation.</p>
             <p className="mt-1 text-xs text-danger">{error ?? 'Unknown error.'}</p>
+            <Button variant="secondary" size="sm" className="mt-3" onClick={onReload}>
+              Try again
+            </Button>
           </div>
         ) : messages.length === 0 ? (
           <div className="p-8 text-center">

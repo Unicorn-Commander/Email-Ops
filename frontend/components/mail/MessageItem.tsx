@@ -149,7 +149,9 @@ export function MessageItem({
             resolveCidUrl={resolveCidUrl}
           />
         ) : text ? (
-          <p className="whitespace-pre-wrap text-sm leading-6 text-secondary">{text}</p>
+          <div className="w-full max-w-[680px]">
+            <p className="whitespace-pre-wrap text-sm leading-6 text-secondary">{text}</p>
+          </div>
         ) : (
           <p className="text-xs italic text-muted">No content.</p>
         )}

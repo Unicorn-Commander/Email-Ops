@@ -18,7 +18,7 @@
  * can open the composer already populated — the user still reviews and sends it.
  */
 
-import { useEffect, useState, type DragEvent } from 'react';
+import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
 import { Button, Dialog, Input, cn } from '@/components/ui';
 import type { ComposeBody, UploadedBlob } from '@/lib/mailApi';
 import type { ComposeOutcome } from './useMailClient';
@@ -40,6 +40,39 @@ export interface ComposeDialogPrefill {
 function toList(v: string | string[] | undefined): string[] {
   if (!v) return [];
   return Array.isArray(v) ? v.filter(Boolean) : v.trim() ? [v.trim()] : [];
+}
+
+/** Stable key for the new-message draft body. */
+const COMPOSE_DRAFT_KEY = 'emailops:draft:compose:new';
+
+/**
+ * Draft persistence helpers — SSR- and private-mode-safe (guard `window`, swallow
+ * QuotaExceeded/SecurityError).
+ */
+function readDraft(key: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function writeDraft(key: string, value: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    window.localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function clearDraft(key: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    /* private mode / unavailable — nothing to clean up */
+  }
 }
 
 export function ComposeDialog({
@@ -77,11 +110,17 @@ export function ComposeDialog({
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [draftSaved, setDraftSaved] = useState(false);
 
   const uploads = useAttachmentUploads(workspaceId, mailboxId);
   const { reset: resetUploads } = uploads;
 
-  // Seed (or clear) the fields from `initial` when the dialog re-opens.
+  // Skips the autosave run caused by the seed effect below, so re-opening the
+  // dialog doesn't immediately flash "Saved".
+  const skipNextAutosave = useRef(false);
+
+  // Seed the fields when the dialog re-opens. An explicit prefill (Forward /
+  // agent `ui_compose`) wins; otherwise hydrate the body from the saved draft.
   useEffect(() => {
     if (open) {
       setTo(toList(initial?.to));
@@ -89,14 +128,42 @@ export function ComposeDialog({
       setBcc(initial?.bcc ?? []);
       setShowCcBcc((initial?.cc?.length ?? 0) > 0 || (initial?.bcc?.length ?? 0) > 0);
       setSubject(initial?.subject ?? '');
-      setBody(initial?.body ?? '');
+      setBody(initial?.body ?? readDraft(COMPOSE_DRAFT_KEY) ?? '');
       setStatus(null);
       setError(null);
       setSending(false);
       setDragging(false);
+      setDraftSaved(false);
+      skipNextAutosave.current = true;
       resetUploads(initial?.attachments);
     }
   }, [open, initial, resetUploads]);
+
+  // Debounced autosave of the body while the dialog is open. Never persists a
+  // whitespace-only draft (clears the key instead).
+  useEffect(() => {
+    if (!open) return;
+    if (skipNextAutosave.current) {
+      skipNextAutosave.current = false;
+      return;
+    }
+    const t = setTimeout(() => {
+      if (body.trim().length === 0) {
+        clearDraft(COMPOSE_DRAFT_KEY);
+        setDraftSaved(false);
+      } else if (writeDraft(COMPOSE_DRAFT_KEY, body)) {
+        setDraftSaved(true);
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [open, body]);
+
+  // Fade the "Saved" pill back out shortly after it appears.
+  useEffect(() => {
+    if (!draftSaved) return;
+    const t = setTimeout(() => setDraftSaved(false), 1600);
+    return () => clearTimeout(t);
+  }, [draftSaved]);
 
   const allRecipients = [...to, ...cc, ...bcc];
   const invalidCount = allRecipients.filter((a) => !isValidEmail(a)).length;
@@ -128,7 +195,19 @@ export function ComposeDialog({
     const meta = describeStatus(res.message?.status);
     setStatus(res.message?.status ?? null);
     // Only close on a genuine send; otherwise hold so the truthful status shows.
-    if (meta.sent) onClose();
+    if (meta.sent) {
+      clearDraft(COMPOSE_DRAFT_KEY);
+      setDraftSaved(false);
+      onClose();
+    }
+  }
+
+  function handleBodyKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // ⌘/Ctrl + Enter submits directly (guards live inside handleSend).
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      void handleSend();
+    }
   }
 
   function handleDrop(e: DragEvent<HTMLFormElement>) {
@@ -163,9 +242,22 @@ export function ComposeDialog({
               className="mr-auto"
             />
           )}
+          <span
+            aria-live="polite"
+            className={cn(
+              'mr-1 flex items-center gap-1 text-[11px] text-tertiary transition-opacity duration-token ease-token',
+              draftSaved ? 'opacity-100' : 'opacity-0',
+            )}
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-accent/70" />
+            Draft saved
+          </span>
           <Button variant="secondary" size="sm" disabled={sending} onClick={() => handleOpenChange(false)}>
             {status ? 'Close' : 'Cancel'}
           </Button>
+          <kbd className="hidden rounded-token border border-border bg-surface-overlay px-1.5 py-0.5 font-mono text-[11px] text-tertiary sm:block">
+            ⌘↵
+          </kbd>
           <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
             {sending ? 'Sending…' : uploads.uploading ? 'Uploading…' : 'Send'}
           </Button>
@@ -233,6 +325,7 @@ export function ComposeDialog({
           <textarea
             value={body}
             onChange={(e) => setBody(e.target.value)}
+            onKeyDown={handleBodyKeyDown}
             rows={6}
             placeholder="Write your message…  (drop files here to attach)"
             className="block w-full resize-y rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40"

@@ -370,16 +370,21 @@ export function HtmlEmailBody({
         </div>
       )}
 
-      <iframe
-        ref={iframeRef}
-        title="Email content"
-        sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-        referrerPolicy="no-referrer"
-        srcDoc={srcDoc}
-        onLoad={handleLoad}
-        className="w-full border-0 bg-transparent"
-        style={{ height: `${height}px`, colorScheme: 'auto' }}
-      />
+      {/* Cap the readable body column at a comfortable ~680px measure while
+          staying fluid below; the iframe stays w-full inside so the existing
+          width→reflow→height measurement logic is unchanged. */}
+      <div className="w-full max-w-[680px]">
+        <iframe
+          ref={iframeRef}
+          title="Email content"
+          sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+          referrerPolicy="no-referrer"
+          srcDoc={srcDoc}
+          onLoad={handleLoad}
+          className="w-full border-0 bg-transparent"
+          style={{ height: `${height}px`, colorScheme: 'auto' }}
+        />
+      </div>
 
       {processed.quotedHtml && (
         <button
