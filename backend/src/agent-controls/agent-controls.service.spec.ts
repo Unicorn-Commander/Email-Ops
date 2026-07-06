@@ -1,6 +1,6 @@
-import { AgentActionKind } from '@prisma/client';
+import { AgentActionKind, AgentInboxState } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { AgentControlsService } from './agent-controls.service';
+import { AgentControlsService, parseWindowDays } from './agent-controls.service';
 
 /**
  * AgentControlsService unit tests: the kill-switch read/set (with the
@@ -14,7 +14,9 @@ describe('AgentControlsService', () => {
   function makeTx() {
     return {
       workspace: { findUnique: jest.fn(), update: jest.fn() },
-      agentActionEvent: { create: jest.fn(), findMany: jest.fn() },
+      agentActionEvent: { create: jest.fn(), findMany: jest.fn(), count: jest.fn() },
+      threadDisposition: { count: jest.fn() },
+      agentInboxItem: { count: jest.fn() },
     };
   }
   function svcOf(tx: ReturnType<typeof makeTx>) {
@@ -81,6 +83,96 @@ describe('AgentControlsService', () => {
       actor_uc_uid: null,
       detail: 'sent',
       created_at: '2026-06-24T00:00:00.000Z',
+    });
+  });
+
+  // ── getMetrics: the real server-side rail metrics ─────────────────────────
+
+  describe('getMetrics', () => {
+    it('counts the real signals: agent-triaged threads, agent sends, pending', async () => {
+      const tx = makeTx();
+      tx.threadDisposition.count.mockResolvedValue(4);
+      tx.agentActionEvent.count.mockResolvedValue(9);
+      tx.agentInboxItem.count.mockResolvedValue(2);
+
+      const out = await svcOf(tx).getMetrics(WS, UID, 7);
+
+      expect(out).toEqual({ triaged: 4, sent: 9, awaiting: 2, window_days: 7 });
+
+      // triaged = distinct threads an AGENT filed in the window (setByAgentKey set).
+      expect(tx.threadDisposition.count).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          workspaceId: WS,
+          setByAgentKey: { not: null },
+          updatedAt: expect.objectContaining({ gte: expect.any(Date) }),
+        }),
+      });
+      // sent = AUTONOMOUS_SEND + APPROVED in the window.
+      expect(tx.agentActionEvent.count).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          workspaceId: WS,
+          kind: { in: [AgentActionKind.AUTONOMOUS_SEND, AgentActionKind.APPROVED] },
+          createdAt: expect.objectContaining({ gte: expect.any(Date) }),
+        }),
+      });
+      // awaiting = CURRENT pending items (not windowed) — the nav-badge value.
+      expect(tx.agentInboxItem.count).toHaveBeenCalledWith({
+        where: { workspaceId: WS, state: AgentInboxState.PENDING },
+      });
+    });
+
+    it('every count carries an explicit workspaceId predicate (cross-tenant fence)', async () => {
+      const tx = makeTx();
+      tx.threadDisposition.count.mockResolvedValue(0);
+      tx.agentActionEvent.count.mockResolvedValue(0);
+      tx.agentInboxItem.count.mockResolvedValue(0);
+
+      await svcOf(tx).getMetrics(WS, UID, 30);
+
+      // RLS is inert under the owner role, so the explicit predicate is the real
+      // tenant fence: a foreign workspace's rows can NEVER be counted here.
+      for (const call of [
+        tx.threadDisposition.count,
+        tx.agentActionEvent.count,
+        tx.agentInboxItem.count,
+      ]) {
+        expect(call).toHaveBeenCalledWith(
+          expect.objectContaining({ where: expect.objectContaining({ workspaceId: WS }) }),
+        );
+      }
+    });
+
+    it('is degrade-clean: returns zeros (never throws) when a query fails', async () => {
+      const tx = makeTx();
+      tx.threadDisposition.count.mockRejectedValue(new Error('db down'));
+      tx.agentActionEvent.count.mockResolvedValue(3);
+      tx.agentInboxItem.count.mockResolvedValue(1);
+
+      const out = await svcOf(tx).getMetrics(WS, UID, 7);
+      expect(out).toEqual({ triaged: 0, sent: 0, awaiting: 0, window_days: 7 });
+    });
+
+    it('clamps the window to 1–90 days', async () => {
+      const tx = makeTx();
+      tx.threadDisposition.count.mockResolvedValue(0);
+      tx.agentActionEvent.count.mockResolvedValue(0);
+      tx.agentInboxItem.count.mockResolvedValue(0);
+
+      expect((await svcOf(tx).getMetrics(WS, UID, 9999)).window_days).toBe(90);
+      expect((await svcOf(tx).getMetrics(WS, UID, 0)).window_days).toBe(7); // 0 → default
+      expect((await svcOf(tx).getMetrics(WS, UID, -5)).window_days).toBe(1);
+    });
+  });
+
+  describe('parseWindowDays', () => {
+    it('parses "Nd" / bare-N, defaults + clamps', () => {
+      expect(parseWindowDays('7d')).toBe(7);
+      expect(parseWindowDays('30')).toBe(30);
+      expect(parseWindowDays('  14d ')).toBe(14);
+      expect(parseWindowDays(undefined)).toBe(7);
+      expect(parseWindowDays('garbage')).toBe(7);
+      expect(parseWindowDays('999d')).toBe(90);
+      expect(parseWindowDays('0')).toBe(7);
     });
   });
 });

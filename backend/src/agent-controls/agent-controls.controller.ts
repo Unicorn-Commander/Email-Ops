@@ -20,7 +20,7 @@ import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decora
 import { WorkspaceRoleParam } from '../common/workspace/workspace-role.decorator';
 import { roleAtLeast } from '../common/workspace/role-rank';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
-import { AgentControlsService } from './agent-controls.service';
+import { AgentControlsService, parseWindowDays } from './agent-controls.service';
 
 class SetControlsDto {
   @IsBoolean()
@@ -80,5 +80,27 @@ export class AgentControlsController {
       limit,
     );
     return { items, count: items.length };
+  }
+
+  @Get('agent-metrics')
+  @ApiOperation({
+    summary:
+      'Real server-side rail metrics for the agent command center: triaged ' +
+      '(threads an agent filed), sent (agent autonomous + approved sends), and ' +
+      'awaiting (current pending approvals). Honest counts — no client-side ' +
+      'proxy. `?window=7d` sets the lookback (default 7d, clamped 1–90d). ' +
+      'Degrade-clean: zeros on no data, never 500.',
+  })
+  @ApiResponse({ status: 200, description: 'The metrics + the window in days.' })
+  async getMetrics(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Query('window') windowRaw?: string,
+  ) {
+    return this.controls.getMetrics(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      parseWindowDays(windowRaw),
+    );
   }
 }
