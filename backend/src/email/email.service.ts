@@ -65,6 +65,19 @@ import {
 } from './email.types';
 import { shouldAdvanceStatus } from './message-status';
 import { decideComposeMode } from './autonomy';
+import { mapWithConcurrency, withTimeout } from '../common/async/concurrency';
+
+/**
+ * Fan-out bounds for the multi-mailbox webmail endpoints (unified inbox +
+ * counts). With ~10 mailboxes — several slow external providers — an unbounded
+ * fan-out both hammers the engines and blocks on the slowest one.
+ *   • CONCURRENCY caps how many mailbox reads run at once.
+ *   • TIMEOUT caps how long any ONE mailbox may take before it's treated as a
+ *     failed slot (omitted from the aggregate / error:true in counts) so a
+ *     wedged provider can never stall the whole response.
+ */
+const MAILBOX_FANOUT_CONCURRENCY = 5;
+const MAILBOX_FANOUT_TIMEOUT_MS = 8000;
 
 /**
  * The external send request shape shared by the compose + approve send lanes
@@ -544,19 +557,19 @@ export class EmailService {
     const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
       this.readableMailboxes(tx, workspaceId, ucUid),
     );
-    const settled = await Promise.allSettled(
-      mailboxes.map(async (mb) => {
-        const threads = await this.listMailboxInbox(
-          workspaceId,
-          ucUid,
-          mb.id,
-          limit,
-          folder,
-          query,
-          offset,
-        );
-        return threads.map((t) => ({ ...t, mailbox_id: mb.id, mailbox_address: mb.emailAddress }));
-      }),
+    // Bounded + timed fan-out: at most MAILBOX_FANOUT_CONCURRENCY reads in flight,
+    // each capped at MAILBOX_FANOUT_TIMEOUT_MS so one slow provider can't stall
+    // the whole aggregate. A failed/timed-out mailbox is a rejected slot we omit
+    // (partial results) — never a 500 (the degrade-clean contract the FE relies on).
+    const settled = await mapWithConcurrency(mailboxes, MAILBOX_FANOUT_CONCURRENCY, (mb) =>
+      withTimeout(
+        this.listMailboxInbox(workspaceId, ucUid, mb.id, limit, folder, query, offset).then(
+          (threads) =>
+            threads.map((t) => ({ ...t, mailbox_id: mb.id, mailbox_address: mb.emailAddress })),
+        ),
+        MAILBOX_FANOUT_TIMEOUT_MS,
+        `aggregate inbox read for ${mb.emailAddress}`,
+      ),
     );
     const merged: ThreadView[] = [];
     settled.forEach((r, i) => {
@@ -568,7 +581,24 @@ export class EmailService {
         );
       }
     });
-    return merged.sort((a, b) => this.threadTime(b) - this.threadTime(a)).slice(0, limit);
+    // Dedupe defensively (same thread id seen under one mailbox only), then merge-
+    // sort DETERMINISTICALLY: newest first, with stable tiebreaks (mailbox, then
+    // thread id) so equal timestamps across mailboxes always order the same way.
+    const seen = new Set<string>();
+    const deduped = merged.filter((t) => {
+      const key = `${t.mailbox_id ?? ''}:${t.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    deduped.sort((a, b) => {
+      const dt = this.threadTime(b) - this.threadTime(a);
+      if (dt !== 0) return dt;
+      const ma = (a.mailbox_address ?? '').localeCompare(b.mailbox_address ?? '');
+      if (ma !== 0) return ma;
+      return a.id.localeCompare(b.id);
+    });
+    return deduped.slice(0, limit);
   }
 
   /**
@@ -584,14 +614,18 @@ export class EmailService {
     const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
       this.readableMailboxes(tx, workspaceId, ucUid),
     );
-    const settled = await Promise.allSettled(
-      mailboxes.map(async (mb) => {
-        // External-provider mailboxes have no engine counts surface (yet) —
-        // honest zeros + error:true, same as a failing sovereign account.
-        if (this.mailProvider.handles(mb)) return null;
-        return this.stalwart.getMailboxCounts(mb.emailAddress);
-      }),
-    );
+    // Same bounded + timed fan-out as the aggregate: a slow account times out
+    // into a rejected slot (→ error:true below) instead of stalling the row.
+    const settled = await mapWithConcurrency(mailboxes, MAILBOX_FANOUT_CONCURRENCY, (mb) => {
+      // External-provider mailboxes have no engine counts surface (yet) —
+      // honest zeros + error:true, same as a failing sovereign account.
+      if (this.mailProvider.handles(mb)) return Promise.resolve(null);
+      return withTimeout(
+        this.stalwart.getMailboxCounts(mb.emailAddress),
+        MAILBOX_FANOUT_TIMEOUT_MS,
+        `mail counts for ${mb.emailAddress}`,
+      );
+    });
     return mailboxes.map((mb, i) => {
       const r = settled[i];
       const counts = r.status === 'fulfilled' ? r.value : null;
