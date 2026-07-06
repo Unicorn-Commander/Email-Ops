@@ -67,6 +67,7 @@ module.exports = {
       boxShadow: {
         token: 'var(--shadow)',
         'token-lg': 'var(--shadow-lg)',
+        pop: 'var(--shadow-pop)',
       },
       transitionDuration: {
         fast: 'var(--dur-fast)',

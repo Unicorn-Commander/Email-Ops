@@ -1,47 +1,46 @@
 'use client';
 
 /**
- * Mail — the "retire Outlook" surface: read your inboxes + compose.
+ * Mail — the Agent Email Command Center (was the "retire Outlook" 3-pane).
  *
- * A polished 3-pane mail client (think Superhuman/Linear restraint):
- *   LEFT   — mailbox picker ("All inboxes" pinned on top when the aggregate
- *            endpoint is live, then the workspace's mailboxes with unread badges).
- *   MIDDLE — the thread list: debounced search, selection checkboxes + bulk bar,
- *            offset-paged "Load more".
- *   RIGHT  — the open thread: collapsed conversation (last message expanded),
- *            sanitized HTML bodies, attachments, Reply / Reply-all / Forward,
- *            and an inline Reply composer.
- * A top-level Compose button opens a new-message dialog. A Gmail-style keyboard
- * layer (press ? for the reference) drives the whole thing.
+ * A mission-control, 5-zone surface reproducing the signed-off design:
+ *   (1) 52px icon nav · (2) accounts + folders · (3) dense conversation list ·
+ *   (4) reader (with the inline agent-draft card + pop-out) · (5) right
+ *   agent-activity rail.
  *
- * Every Wave-2 endpoint (aggregate, counts, read, bulk, blobs, attachments) is
- * feature-detected: a 404/501 hides that affordance gracefully — no crashes,
- * no error toasts.
+ * Split typographic voice: monospace/tabular for machine data (timestamps,
+ * addresses, counts, autonomy), sans for human content. Violet = an agent
+ * touched this — the "Draft ready" chip in the list and the inline draft card in
+ * the reader, both wired to the real agent-inbox approve/reject endpoints.
  *
- * The mail engine is often DORMANT, which is expected and handled honestly:
- * thread lists come back empty (a calm empty state, not an error) and a compose
- * is recorded with `status: 'failed'` (the composer reports "Recorded — will
- * send once the engine is live"). Loading shows skeletons; real errors show
- * inline with a retry; a caller with no workspace gets an explicit empty state.
- *
- * Responsive: on mobile the three panes collapse to a single column — the thread
- * list drills into the open thread, with a Back control to return.
+ * All the webmail-wave behaviour is preserved: debounced search, selection +
+ * bulk bar, offset paging, unified "All inboxes", attachments, compose with
+ * cc/bcc/reply-all/forward, the Gmail-style keyboard layer, the agent
+ * UiCommandBridge (open_thread / compose), and light/dark + mobile single-column.
+ * Every Wave-2 endpoint stays feature-detected; the agent surfaces degrade clean
+ * when their endpoints are absent.
  */
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import {
-  Badge,
-  Button,
-  Card,
-  Skeleton,
-  SkeletonText,
-  cn,
-  type BadgeVariant,
-} from '@/components/ui';
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+  type RefObject,
+} from 'react';
+import { Button, Skeleton, cn } from '@/components/ui';
 import { useActiveSpace } from '@/components/ActiveSpaceProvider';
 import { useUiCommands } from '@/components/UiCommandProvider';
-import { useMailboxCollapsed } from '@/state/uiCollapse';
+import { useMailboxCollapsed, useRailCollapsed } from '@/state/uiCollapse';
+import { useAgentInbox } from '@/components/useAgentInbox';
+import { useAgents } from '@/components/useAgents';
+import { useAgentControls } from '@/components/useAgentControls';
+import { agentLabel } from '@/lib/agents';
+import type { AgentInboxItemView, AutonomyLevel } from '@/lib/api';
 import {
   ALL_INBOXES,
   formatWhen,
@@ -55,14 +54,30 @@ import { ReplyComposer, type ReplyComposerHandle } from '@/components/mail/Reply
 import { ComposeDialog, type ComposeDialogPrefill } from '@/components/mail/ComposeDialog';
 import { SendersDialog } from '@/components/mail/SendersDialog';
 import { MessageItem } from '@/components/mail/MessageItem';
-import { SearchBar } from '@/components/mail/SearchBar';
 import { BulkBar } from '@/components/mail/BulkBar';
 import { ShortcutsHelp } from '@/components/mail/ShortcutsHelp';
 import { useMailShortcuts } from '@/components/mail/useMailShortcuts';
+import { MailTopBar } from '@/components/mail/MailTopBar';
+import { MailIconNav } from '@/components/mail/MailIconNav';
+import { AgentRail } from '@/components/mail/AgentRail';
+import { AgentDraftCard } from '@/components/mail/AgentDraftCard';
+import { MessagePopout } from '@/components/mail/MessagePopout';
+import {
+  MailIcon,
+  InboxTrayIcon,
+  SendIcon,
+  ArchiveIcon,
+  TrashIcon,
+  ReplyIcon,
+  PopOutIcon,
+  CheckSquareIcon,
+  BanIcon,
+  ChevronLeftIcon,
+  SlidersIcon,
+} from '@/components/mail/icons';
 import type {
   BulkAction,
   MailboxPick,
-  MailboxProvider,
   MailFolder,
   MessageView,
   ThreadView,
@@ -72,16 +87,42 @@ import type {
 /** The folder tabs, in display order. */
 const FOLDERS: { id: MailFolder; label: string }[] = [
   { id: 'inbox', label: 'Inbox' },
+  { id: 'sent', label: 'Sent' },
+  { id: 'drafts', label: 'Drafts' },
   { id: 'archive', label: 'Archive' },
   { id: 'spam', label: 'Spam' },
   { id: 'trash', label: 'Trash' },
-  { id: 'sent', label: 'Sent' },
-  { id: 'drafts', label: 'Drafts' },
+];
+
+const FOLDER_GLYPH: Record<MailFolder, (p: { className?: string }) => ReactNode> = {
+  inbox: InboxTrayIcon,
+  sent: SendIcon,
+  drafts: ReplyIcon,
+  archive: ArchiveIcon,
+  spam: BanIcon,
+  trash: TrashIcon,
+};
+
+const AUTONOMY_BADGE: Record<AutonomyLevel, string> = {
+  L0_DRAFT_ONLY: 'L0 · DRAFT ONLY',
+  L1_APPROVE_TO_SEND: 'L1 · APPROVE TO SEND',
+  L2_AUTONOMOUS_AUDIT: 'L2 · AUTONOMOUS',
+};
+
+/** Deterministic avatar gradient pairs (spec-matched). */
+const AV_GRADIENTS: [string, string][] = [
+  ['#7c5cff', '#e879f9'],
+  ['#f59e0b', '#ef4444'],
+  ['#22d3ee', '#3b82f6'],
+  ['#34d399', '#10b981'],
+  ['#a78bfa', '#7c5cff'],
+  ['#f0883e', '#d9534f'],
+  ['#60a5fa', '#818cf8'],
+  ['#f472b6', '#db2777'],
 ];
 
 /** A composer prefill carried by an agent's `ui_compose` (Phase C) or Forward. */
 interface ComposePrefill extends ComposeDialogPrefill {
-  /** If set, sending threads the message into this conversation. */
   thread_id?: string;
 }
 
@@ -90,45 +131,61 @@ interface ReplySeed {
   to: string[];
   cc: string[];
   subject: string;
-  /** RFC threading hint: the id of the message being replied to. */
   inReplyTo: string | null;
-  /** Bumps to remount the composer when a new seed is picked. */
   nonce: number;
 }
+
+type SegFilter = 'all' | 'unread' | 'agent';
 
 export default function MailPage() {
   const mail = useMailClient();
   const { activeSpace } = useActiveSpace();
   const { version, consumeLocal } = useUiCommands();
+
+  // Agent data layer (reused, single-fetch): approvals + fleet + kill switch.
+  const inbox = useAgentInbox();
+  const agents = useAgents();
+  const { agentsPaused, setPaused } = useAgentControls();
+
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeInitial, setComposeInitial] = useState<ComposePrefill | null>(null);
   const [sendersOpen, setSendersOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [popoutOpen, setPopoutOpen] = useState(false);
+  const [filter, setFilter] = useState<SegFilter>('all');
+
+  // Chrome collapse state (reused folders store + new rail store).
+  const [foldersCollapsed, toggleFolders] = useMailboxCollapsed();
+  const [railCollapsed, toggleRail] = useRailCollapsed();
 
   // Selection (bulk actions) + keyboard cursor over the thread list.
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [cursor, setCursor] = useState(-1);
   const searchRef = useRef<HTMLInputElement>(null);
   const replyRef = useRef<ReplyComposerHandle>(null);
-  const rowRefs = useRef(new Map<string, HTMLLIElement>());
+  const rowRefs = useRef(new Map<string, HTMLButtonElement>());
 
-  // Reply-composer seeding (Reply vs Reply-all vs the default derive).
   const [replySeed, setReplySeed] = useState<ReplySeed | null>(null);
-
   const threadOpen = mail.selectedThreadId !== null;
 
-  // ── Phase C: apply agent-staged page-local commands (open_thread / compose) ──
-  // The UiCommandBridge stages these then navigates here; we drain them on mount
-  // and whenever a new command bumps `version`. The mail setters used below are
-  // stable (useCallback in the hook); the current mailbox is read via a ref so
-  // this effect stays purely version-driven and doesn't re-consume on every
-  // unrelated mailbox change.
+  // ── Debounced command-bar search (the box lives in the top bar) ─────────────
+  const { setQuery } = mail;
+  const [searchDraft, setSearchDraft] = useState(mail.query);
+  useEffect(() => setSearchDraft(mail.query), [mail.query]);
+  const searchTimer = useRef<number | undefined>(undefined);
+  const onSearchInput = useCallback(
+    (v: string) => {
+      setSearchDraft(v);
+      window.clearTimeout(searchTimer.current);
+      searchTimer.current = window.setTimeout(() => setQuery(v), 300);
+    },
+    [setQuery],
+  );
+
+  // ── Phase C: agent-staged page-local commands (open_thread / compose) ───────
   const { selectMailbox, selectThread } = mail;
   const selectedMailboxIdRef = useRef<string | null>(null);
   selectedMailboxIdRef.current = mail.unified ? ALL_INBOXES : mail.selectedMailbox?.id ?? null;
-  // Staged target when an open_thread also has to SWITCH mailbox first — the
-  // hook's mailbox-change effect closes any open thread, so we defer opening the
-  // thread until that switch settles (see the effect below).
   const pendingOpenRef = useRef<{ mailboxId: string; threadId: string } | null>(null);
 
   useEffect(() => {
@@ -136,7 +193,6 @@ export default function MailPage() {
     if (openThread) {
       const { mailbox_id, thread_id } = openThread.payload;
       if (mailbox_id && mailbox_id !== selectedMailboxIdRef.current) {
-        // Switch mailbox first, then open the thread once the list settles.
         pendingOpenRef.current = { mailboxId: mailbox_id, threadId: thread_id };
         selectMailbox(mailbox_id);
       } else {
@@ -151,8 +207,6 @@ export default function MailPage() {
     }
   }, [version, consumeLocal, selectMailbox, selectThread]);
 
-  // Once a staged mailbox switch has settled (the hook closed the old thread and
-  // the new list is ready), open the deferred thread.
   const { selectedMailbox, threadsLoad } = mail;
   useEffect(() => {
     const pending = pendingOpenRef.current;
@@ -163,33 +217,66 @@ export default function MailPage() {
     selectThread(pending.threadId, pending.mailboxId);
   }, [selectedMailbox?.id, threadsLoad, selectThread]);
 
-  // Scope the mailbox picker to the active Space (purely client-side). "All" — a
-  // null activeSpace — is unfiltered.
+  // Scope the mailbox picker to the active Space (purely client-side).
   const visibleMailboxes = useMemo(() => {
     if (!activeSpace) return mail.mailboxes;
     const allowed = new Set(activeSpace.mailbox_ids);
     return mail.mailboxes.filter((m) => allowed.has(m.id));
   }, [mail.mailboxes, activeSpace]);
 
-  // Is the currently-open mailbox still visible under the active Space?
-  // (The unified "All inboxes" list is always considered visible.)
   const selectedVisible =
     mail.unified || visibleMailboxes.some((m) => m.id === mail.selectedMailbox?.id);
 
-  // If the open mailbox got filtered out, fall back to the first visible one so
-  // the user is never stranded on a hidden mailbox (don't crash / blank).
   const { load: mailLoad } = mail;
   useEffect(() => {
     if (mailLoad !== 'ready') return;
-    if (!activeSpace) return; // All — no scoping
-    if (visibleMailboxes.length === 0) return; // empty-space state handles this
+    if (!activeSpace) return;
+    if (visibleMailboxes.length === 0) return;
     if (!selectedVisible) selectMailbox(visibleMailboxes[0].id);
   }, [mailLoad, activeSpace, visibleMailboxes, selectedVisible, selectMailbox]);
 
-  // ── Selection + cursor housekeeping ────────────────────────────────────────
+  // ── Selection + cursor housekeeping ─────────────────────────────────────────
   const threads = mail.threads;
 
-  // Prune selection to rows still in the list; clamp the cursor.
+  // Pending agent drafts (the violet signal) — pending items only.
+  const pendingItems = useMemo(
+    () => inbox.items.filter((i) => i.state === 'pending'),
+    [inbox.items],
+  );
+  const draftForThread = useCallback(
+    (thread: ThreadView | null): AgentInboxItemView | null => {
+      if (!thread || pendingItems.length === 0) return null;
+      // 1) explicit thread id in the item payload.
+      for (const it of pendingItems) {
+        const p = it.payload ?? {};
+        const tid = (p.thread_id ?? p.in_reply_to_thread_id ?? p.conversation_id) as
+          | string
+          | undefined;
+        if (tid && String(tid) === thread.id) return it;
+      }
+      // 2) fallback: normalized subject + a matching recipient/participant.
+      const nsub = normSubject(thread.subject);
+      if (!nsub) return null;
+      const parts = new Set(
+        thread.participants.map((p) => p.address?.toLowerCase()).filter(Boolean) as string[],
+      );
+      for (const it of pendingItems) {
+        if (it.subject && normSubject(it.subject) === nsub) {
+          if (!it.to_address || parts.has(it.to_address.toLowerCase())) return it;
+        }
+      }
+      return null;
+    },
+    [pendingItems],
+  );
+
+  // Segmented filter over the current list (All / Unread / Agent).
+  const displayThreads = useMemo(() => {
+    if (filter === 'unread') return threads.filter((t) => t.unread);
+    if (filter === 'agent') return threads.filter((t) => draftForThread(t) !== null);
+    return threads;
+  }, [threads, filter, draftForThread]);
+
   useEffect(() => {
     setSelected((prev) => {
       if (prev.size === 0) return prev;
@@ -197,8 +284,8 @@ export default function MailPage() {
       const next = new Set([...prev].filter((id) => inList.has(id)));
       return next.size === prev.size ? prev : next;
     });
-    setCursor((c) => Math.min(c, threads.length - 1));
-  }, [threads]);
+    setCursor((c) => Math.min(c, displayThreads.length - 1));
+  }, [threads, displayThreads.length]);
 
   const toggleSelect = useCallback((id: string) => {
     setSelected((prev) => {
@@ -211,15 +298,16 @@ export default function MailPage() {
 
   const toggleSelectAll = useCallback(() => {
     setSelected((prev) =>
-      prev.size >= threads.length ? new Set() : new Set(threads.map((t) => t.id)),
+      prev.size >= displayThreads.length ? new Set() : new Set(displayThreads.map((t) => t.id)),
     );
-  }, [threads]);
+  }, [displayThreads]);
 
-  // ── Open-thread context (mailbox, row, reply seeding) ──────────────────────
+  // ── Open-thread context ─────────────────────────────────────────────────────
   const openThreadRow = threads.find((t) => t.id === mail.selectedThreadId) ?? null;
   const threadMailbox =
     mail.mailboxes.find((m) => m.id === mail.selectedThreadMailboxId) ?? mail.selectedMailbox;
   const selfAddress = threadMailbox?.email_address ?? mail.composeMailbox?.email_address ?? '';
+  const openDraft = draftForThread(openThreadRow);
 
   const defaultReply = useMemo(
     () => deriveReplyDefaults(mail.messages, openThreadRow, threadMailbox),
@@ -227,7 +315,6 @@ export default function MailPage() {
   );
   const activeSeed = replySeed ?? defaultReply;
 
-  // A new open thread resets any Reply/Reply-all seeding back to the default.
   useEffect(() => {
     setReplySeed(null);
   }, [mail.selectedThreadId]);
@@ -263,7 +350,7 @@ export default function MailPage() {
     setComposeOpen(true);
   }, []);
 
-  // ── Bulk actions ───────────────────────────────────────────────────────────
+  // ── Bulk actions ─────────────────────────────────────────────────────────────
   const runBulk = useCallback(
     async (action: BulkAction): Promise<{ ok: boolean; error?: string }> => {
       const ids = [...selected];
@@ -275,21 +362,26 @@ export default function MailPage() {
     [selected, mail],
   );
 
-  // ── Keyboard layer ─────────────────────────────────────────────────────────
+  // ── Keyboard layer ────────────────────────────────────────────────────────────
   const lastMessage = mail.messages[mail.messages.length - 1] ?? null;
-  const cursorThread = cursor >= 0 ? threads[cursor] ?? null : null;
+  const cursorThread = cursor >= 0 ? displayThreads[cursor] ?? null : null;
 
   const moveCursor = useCallback(
     (delta: 1 | -1) => {
-      if (threads.length === 0) return;
+      if (displayThreads.length === 0) return;
       setCursor((c) => {
-        const next = c < 0 ? (delta > 0 ? 0 : threads.length - 1) : Math.min(threads.length - 1, Math.max(0, c + delta));
-        const id = threads[next]?.id;
+        const next =
+          c < 0
+            ? delta > 0
+              ? 0
+              : displayThreads.length - 1
+            : Math.min(displayThreads.length - 1, Math.max(0, c + delta));
+        const id = displayThreads[next]?.id;
         if (id) rowRefs.current.get(id)?.scrollIntoView({ block: 'nearest' });
         return next;
       });
     },
-    [threads],
+    [displayThreads],
   );
 
   const keyboardTargetId = mail.selectedThreadId ?? cursorThread?.id ?? null;
@@ -322,7 +414,7 @@ export default function MailPage() {
     {
       onMove: moveCursor,
       onOpen: () => {
-        const t = cursorThread ?? threads[0];
+        const t = cursorThread ?? displayThreads[0];
         if (t) selectThread(t.id, t.mailbox_id);
       },
       onBack: () => selectThread(null),
@@ -345,7 +437,7 @@ export default function MailPage() {
       onMarkUnread: () => shortcutMark(false),
       onHelp: () => setHelpOpen(true),
     },
-    !composeOpen && !sendersOpen && !helpOpen,
+    !composeOpen && !sendersOpen && !helpOpen && !popoutOpen,
   );
 
   // Per-mailbox unread badges (Wave-2 counts endpoint; null = hidden).
@@ -364,94 +456,114 @@ export default function MailPage() {
 
   const showAllInboxes = mail.features.aggregate && visibleMailboxes.length > 1;
 
-  // Collapse for the leftmost mailbox-picker pane — hands its width to the
-  // thread-list + reading pane. Desktop only; mobile keeps the full picker.
-  const [mbxCollapsed, toggleMbx] = useMailboxCollapsed();
-  const activeMailboxForRail = mail.unified ? null : mail.selectedMailbox ?? null;
+  const canCompose =
+    mail.load === 'ready' &&
+    !!mail.workspace &&
+    (mail.unified ? visibleMailboxes.length > 0 : selectedVisible);
+
+  const activeAgentCount =
+    agents.load === 'ready' ? agents.items.filter((a) => a.active && !a.paused).length : null;
+
+  const selectedMailboxId = mail.unified ? null : mail.selectedMailbox?.id ?? null;
+
+  // Top-level non-ready banner (rendered inside the list column).
+  const banner: ListBanner | null =
+    !mail.workspace && mail.load === 'ready'
+      ? 'no-workspace'
+      : mail.load === 'error'
+        ? 'error'
+        : mail.load === 'loading'
+          ? 'loading'
+          : mail.mailboxes.length === 0
+            ? 'no-mailboxes'
+            : visibleMailboxes.length === 0
+              ? 'no-space'
+              : null;
+
+  // The 4-column grid (folders · list · reader · rail). iconnav is a flex sibling.
+  const gridCols = `${foldersCollapsed ? '0px' : '236px'} minmax(300px,1.15fr) minmax(360px,1.9fr) ${
+    railCollapsed ? '44px' : '320px'
+  }`;
+
+  const listTitle = mail.unified
+    ? 'All inboxes'
+    : mail.selectedMailbox?.display_name?.trim() || mail.selectedMailbox?.email_address || 'Mailbox';
+  const listUnread = mail.unified
+    ? totalUnread
+    : selectedMailboxId
+      ? unreadByMailbox?.get(selectedMailboxId) ?? null
+      : null;
 
   return (
-    <div className="space-y-6">
-      <Hero
-        mailbox={selectedVisible && !mail.unified ? mail.selectedMailbox : null}
-        unified={mail.unified}
-        mailboxCount={visibleMailboxes.length}
-        ready={mail.load === 'ready'}
-        canCompose={
-          mail.load === 'ready' &&
-          !!mail.workspace &&
-          (mail.unified ? visibleMailboxes.length > 0 : selectedVisible)
-        }
+    <div className="flex h-screen flex-col overflow-hidden bg-surface-base text-primary">
+      <MailTopBar
+        query={searchDraft}
+        onQuery={onSearchInput}
+        searchRef={searchRef}
+        foldersCollapsed={foldersCollapsed}
+        onToggleFolders={toggleFolders}
+        railCollapsed={railCollapsed}
+        onToggleRail={toggleRail}
+        agentsPaused={agentsPaused}
+        onTogglePause={() => setPaused(!agentsPaused)}
+        activeAgentCount={activeAgentCount}
         onCompose={() => {
           setComposeInitial(null);
           setComposeOpen(true);
         }}
+        canCompose={canCompose}
       />
 
-      {!mail.workspace && mail.load === 'ready' ? (
-        <NoWorkspace />
-      ) : mail.load === 'error' ? (
-        <ErrorState message={mail.error} />
-      ) : mail.load === 'loading' ? (
-        <ClientSkeleton />
-      ) : mail.mailboxes.length === 0 ? (
-        <NoMailboxes />
-      ) : visibleMailboxes.length === 0 ? (
-        <NoSpaceMailboxes spaceName={activeSpace?.name ?? null} />
-      ) : (
-        <div
-          className={cn(
-            'grid gap-4 transition-[grid-template-columns] duration-token ease-token',
-            mbxCollapsed
-              ? 'lg:grid-cols-[3rem_minmax(280px,360px)_1fr]'
-              : 'lg:grid-cols-[minmax(200px,260px)_minmax(280px,360px)_1fr]',
-          )}
-        >
-          {/* LEFT — mailbox picker. Hidden on mobile once a thread is open.
-              Desktop-collapsible into a slim rail; mobile always shows the
-              full picker (the grid is single-column below lg). */}
-          <section className={cn(threadOpen && 'max-lg:hidden')}>
-            {/* Collapsed desktop rail (expand affordance + active mailbox + unread). */}
-            {mbxCollapsed && (
-              <div className="hidden lg:block">
-                <MailboxRail
-                  onExpand={toggleMbx}
-                  totalUnread={totalUnread}
-                  unified={mail.unified}
-                  activeMailbox={activeMailboxForRail}
-                />
-              </div>
-            )}
-            {/* Full picker — always on mobile, and on desktop when expanded. */}
-            <div className={cn(mbxCollapsed && 'lg:hidden')}>
-              <MailboxList
-                mailboxes={visibleMailboxes}
-                selectedId={
-                  mail.unified ? ALL_INBOXES : selectedVisible ? mail.selectedMailbox?.id ?? null : null
-                }
-                onSelect={mail.selectMailbox}
-                showAllInboxes={showAllInboxes}
-                unreadByMailbox={unreadByMailbox}
-                totalUnread={totalUnread}
-                onCollapse={toggleMbx}
-              />
-            </div>
-          </section>
+      <div className="flex min-h-0 flex-1">
+        <MailIconNav pendingCount={inbox.pendingCount} />
 
-          {/* MIDDLE — thread list. Hidden on mobile once a thread is open. */}
-          <section className={cn('min-w-0', threadOpen && 'max-lg:hidden')}>
-            <ThreadList
+        <div
+          className="grid min-h-0 flex-1 grid-cols-1 transition-[grid-template-columns] duration-token ease-token lg:[grid-template-columns:var(--cols)]"
+          style={{ '--cols': gridCols } as CSSProperties}
+        >
+          {/* (2) accounts + folders — hidden on mobile; width 0 when collapsed. */}
+          <div className={cn('overflow-hidden max-lg:hidden', foldersCollapsed && 'lg:hidden')}>
+            <FoldersColumn
+              mailboxes={visibleMailboxes}
+              selectedId={
+                mail.unified
+                  ? ALL_INBOXES
+                  : selectedVisible
+                    ? mail.selectedMailbox?.id ?? null
+                    : null
+              }
+              onSelect={mail.selectMailbox}
+              showAllInboxes={showAllInboxes}
+              unreadByMailbox={unreadByMailbox}
+              totalUnread={totalUnread}
+              folder={mail.folder}
+              onSelectFolder={mail.selectFolder}
+              pendingCount={inbox.pendingCount}
+              onManageSenders={() => setSendersOpen(true)}
+              onCollapse={toggleFolders}
+            />
+          </div>
+
+          {/* (3) conversation list — the only left pane on mobile until a thread opens. */}
+          <section
+            className={cn(
+              'flex min-w-0 flex-col overflow-hidden border-r border-subtle',
+              threadOpen && 'max-lg:hidden',
+            )}
+          >
+            <ConversationList
+              banner={banner}
+              error={mail.threadsError ?? mail.error}
+              title={listTitle}
+              unreadCount={listUnread}
+              filter={filter}
+              onFilter={setFilter}
+              spaceName={activeSpace?.name ?? null}
               load={mail.threadsLoad}
-              error={mail.threadsError}
-              threads={threads}
+              threads={displayThreads}
               selectedThreadId={mail.selectedThreadId}
               onSelect={(t) => selectThread(t.id, t.mailbox_id)}
               onRetry={mail.refreshThreads}
-              folder={mail.folder}
-              onSelectFolder={mail.selectFolder}
-              onManageSenders={() => setSendersOpen(true)}
-              searchRef={searchRef}
-              query={mail.query}
-              onQuery={mail.setQuery}
               unified={mail.unified}
               selectable={mail.features.bulk}
               selected={selected}
@@ -462,12 +574,15 @@ export default function MailPage() {
               loadingMore={mail.loadingMore}
               onLoadMore={mail.loadMore}
               rowRefs={rowRefs}
+              draftForThread={draftForThread}
             />
           </section>
 
-          {/* RIGHT — the open thread. The only pane shown on mobile when open. */}
-          <section className={cn('min-w-0', !threadOpen && 'max-lg:hidden')}>
-            <ThreadPane
+          {/* (4) reader — the only pane shown on mobile when a thread is open. */}
+          <section
+            className={cn('flex min-w-0 flex-col overflow-hidden', !threadOpen && 'max-lg:hidden')}
+          >
+            <Reader
               workspaceId={mail.workspace?.workspace_id ?? null}
               mailbox={threadMailbox}
               thread={openThreadRow}
@@ -484,10 +599,45 @@ export default function MailPage() {
               onSeedReply={seedReply}
               onSeedReplyAll={seedReplyAll}
               onForward={(m) => forwardMessage(m, openThreadRow)}
+              onFocusReply={focusReplySoon}
+              onPopout={() => setPopoutOpen(true)}
+              draft={openDraft}
+              draftAutonomyLabel={
+                openDraft ? autonomyBadgeFor(openDraft, agents.items) : ''
+              }
+              onApproveDraft={() => inbox.approve(openDraft!.id)}
+              onDiscardDraft={() => inbox.reject(openDraft!.id)}
+              onEditDraft={() => {
+                if (!openDraft) return;
+                setComposeInitial({
+                  to: openDraft.to_address ? [openDraft.to_address] : [],
+                  subject: openDraft.subject ?? '',
+                  body: openDraft.body_preview ?? '',
+                  thread_id: openThreadRow?.id,
+                });
+                setComposeOpen(true);
+              }}
             />
           </section>
+
+          {/* (5) right agent-activity rail — desktop only. */}
+          <div className={cn('hidden lg:block', 'overflow-hidden')}>
+            <AgentRail
+              collapsed={railCollapsed}
+              onExpand={toggleRail}
+              onCollapse={toggleRail}
+              pendingCount={inbox.pendingCount}
+              agents={agents.items}
+              agentsAvailable={agents.load === 'ready'}
+              selectedMailboxId={selectedMailboxId}
+              paused={agentsPaused}
+              onSetAutonomy={(agentId, level) =>
+                agents.update(agentId, { autonomy_level: level })
+              }
+            />
+          </div>
         </div>
-      )}
+      </div>
 
       {/* Floating bulk bar (Wave-2 bulk endpoint; hidden when not deployed). */}
       {mail.features.bulk && (
@@ -505,8 +655,6 @@ export default function MailPage() {
         fromAddress={mail.composeMailbox?.email_address ?? null}
         workspaceId={mail.workspace?.workspace_id ?? null}
         mailboxId={mail.composeMailbox?.id ?? null}
-        // Thread the send when the prefill carried a thread_id; otherwise a plain
-        // new message. Either way it PREFILLS — the user still clicks Send.
         onCompose={(b) =>
           mail.compose(
             composeInitial?.thread_id
@@ -525,313 +673,233 @@ export default function MailPage() {
       />
 
       <ShortcutsHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
+
+      <MessagePopout
+        open={popoutOpen && threadOpen}
+        onClose={() => setPopoutOpen(false)}
+        subject={openThreadRow?.subject?.trim() || '(no subject)'}
+        messages={mail.messages}
+        workspaceId={mail.workspace?.workspace_id ?? null}
+        mailboxId={threadMailbox?.id ?? null}
+      />
     </div>
   );
 }
 
-// ── Hero ───────────────────────────────────────────────────────────────────
+// ── (2) Accounts + folders column ─────────────────────────────────────────────
 
-function Hero({
-  mailbox,
-  unified,
-  mailboxCount,
-  ready,
-  canCompose,
-  onCompose,
-}: {
-  mailbox: MailboxPick | null;
-  unified: boolean;
-  mailboxCount: number;
-  ready: boolean;
-  canCompose: boolean;
-  onCompose: () => void;
-}) {
-  return (
-    <header className="relative overflow-hidden rounded-[20px] border border-subtle bg-surface-raised shadow-token">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(120%_140%_at_100%_0%,rgb(var(--accent-2)/0.20),transparent_55%),radial-gradient(95%_130%_at_0%_100%,rgb(var(--accent)/0.18),transparent_55%),radial-gradient(80%_90%_at_50%_120%,rgb(var(--info)/0.12),transparent_60%)]" />
-      <div className="relative p-5 sm:p-6">
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="info" dot>
-                {ready
-                  ? mailboxCount === 1
-                    ? '1 mailbox'
-                    : `${mailboxCount} mailboxes`
-                  : 'your inboxes'}
-              </Badge>
-              <Badge variant="protected">retire Outlook</Badge>
-            </div>
-            <h1 className="mt-4 text-3xl font-semibold tracking-[-0.02em] text-primary sm:text-5xl">
-              Your mail.{' '}
-              <span className="bg-gradient-to-br from-accent via-[rgb(var(--accent-2))] to-info bg-clip-text text-transparent">
-                One calm place.
-              </span>
-            </h1>
-            <p className="mt-3 max-w-2xl text-sm leading-6 text-tertiary sm:text-base">
-              {unified ? (
-                <>
-                  Reading <span className="font-medium text-secondary">all inboxes</span> in one
-                  list. Open a thread and reply — it routes through the right mailbox.
-                </>
-              ) : mailbox ? (
-                <>
-                  Reading <span className="font-mono text-secondary">{mailbox.email_address}</span>.
-                  Pick a mailbox, open a thread, and reply — or start a new message.
-                </>
-              ) : (
-                'Read your inboxes and compose, all in one place.'
-              )}
-            </p>
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row lg:items-center">
-            <Button onClick={onCompose} disabled={!canCompose}>
-              Compose
-            </Button>
-          </div>
-        </div>
-      </div>
-    </header>
-  );
+/** Deterministic hue for a mailbox address (the per-account tag). */
+function addressHue(address: string): number {
+  let h = 0;
+  for (let i = 0; i < address.length; i++) h = (h * 31 + address.charCodeAt(i)) % 360;
+  return h;
 }
 
-// ── LEFT: mailbox picker ─────────────────────────────────────────────────────
-
-const OWNER_TONE: Record<string, BadgeVariant> = {
-  HUMAN: 'accent',
-  AGENT: 'info',
-  SHARED: 'protected',
-};
-
-/** Subtle per-mailbox provider tag (the backend it reads/sends through). */
-const PROVIDER_TAG: Record<MailboxProvider, { label: string; tone: BadgeVariant }> = {
-  stalwart: { label: 'Sovereign', tone: 'protected' },
-  gmail: { label: 'Gmail', tone: 'neutral' },
-  microsoft: { label: 'Outlook', tone: 'neutral' },
-};
-
-function UnreadPill({ count }: { count: number }) {
-  if (count <= 0) return null;
-  return (
-    <span className="shrink-0 rounded-full bg-accent/15 px-1.5 font-mono text-[10px] font-medium leading-4 text-accent">
-      {count > 999 ? '999+' : count}
-    </span>
-  );
-}
-
-function MailboxList({
+function FoldersColumn({
   mailboxes,
   selectedId,
   onSelect,
   showAllInboxes,
   unreadByMailbox,
   totalUnread,
+  folder,
+  onSelectFolder,
+  pendingCount,
+  onManageSenders,
   onCollapse,
 }: {
   mailboxes: MailboxPick[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   showAllInboxes: boolean;
-  /** null = counts endpoint unavailable → no badges. */
   unreadByMailbox: Map<string, number> | null;
   totalUnread: number | null;
-  /** Desktop-only collapse of this whole pane into a slim rail. */
-  onCollapse?: () => void;
+  folder: MailFolder;
+  onSelectFolder: (folder: MailFolder) => void;
+  pendingCount: number;
+  onManageSenders: () => void;
+  onCollapse: () => void;
 }) {
   return (
-    <Card className="overflow-hidden">
-      <div className="flex items-center gap-2 border-b border-subtle px-3 py-2.5">
-        <span className="text-[11px] font-medium uppercase tracking-wide text-tertiary">
-          Mailboxes
-        </span>
+    <aside className="flex h-full w-[236px] flex-col overflow-y-auto border-r border-subtle bg-surface-raised">
+      <div className="flex items-center justify-between px-3.5 pb-1.5 pt-3.5">
+        <h3 className="text-[11px] font-semibold uppercase tracking-[0.09em] text-tertiary">
+          Accounts
+        </h3>
+        <button
+          type="button"
+          onClick={onCollapse}
+          aria-label="Collapse accounts & folders"
+          title="Collapse"
+          className="grid h-[22px] w-[22px] place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+        >
+          <ChevronLeftIcon className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {showAllInboxes && (
+        <AccountButton
+          active={selectedId === ALL_INBOXES}
+          onClick={() => onSelect(ALL_INBOXES)}
+          tag="gradient"
+          name="All inboxes"
+          sub={`${mailboxes.length} mailbox${mailboxes.length === 1 ? '' : 'es'}`}
+          count={totalUnread}
+        />
+      )}
+      {mailboxes.map((mb) => {
+        const unread = unreadByMailbox?.get(mb.id) ?? null;
+        return (
+          <AccountButton
+            key={mb.id}
+            active={mb.id === selectedId}
+            onClick={() => onSelect(mb.id)}
+            tag={`hsl(${addressHue(mb.email_address.toLowerCase())} 70% 55%)`}
+            name={mb.display_name?.trim() || mb.email_address}
+            sub={mb.email_address}
+            count={unread}
+          />
+        );
+      })}
+      {mailboxes.length === 0 && (
+        <p className="px-4 py-3 text-[12px] leading-5 text-tertiary">
+          No mailboxes yet. Provision one to start reading and sending.
+        </p>
+      )}
+
+      <div className="mx-3.5 my-2 h-px bg-border-subtle" />
+
+      <div className="px-3.5 pb-1.5 pt-1">
+        <h3 className="text-[11px] font-semibold uppercase tracking-[0.09em] text-tertiary">
+          Folders
+        </h3>
+      </div>
+      {/* Needs approval — the human-in-the-loop queue (real pending count). */}
+      <Link
+        href="/agent-inbox"
+        className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-secondary transition-colors hover:bg-surface-overlay"
+      >
+        <CheckSquareIcon className="h-4 w-4 shrink-0 text-tertiary" />
+        <span className="flex-1 text-[13px]">Needs approval</span>
+        {pendingCount > 0 && (
+          <span className="rounded-full bg-warning/[0.14] px-1.5 py-px text-[11px] font-semibold text-warning mono">
+            {pendingCount}
+          </span>
+        )}
+      </Link>
+      {FOLDERS.map((f) => {
+        const Glyph = FOLDER_GLYPH[f.id];
+        const active = f.id === folder;
+        return (
+          <button
+            key={f.id}
+            type="button"
+            onClick={() => onSelectFolder(f.id)}
+            aria-current={active}
+            className={cn(
+              'mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left transition-colors',
+              active
+                ? 'bg-surface-elevated text-primary'
+                : 'text-secondary hover:bg-surface-overlay',
+            )}
+          >
+            <Glyph className={cn('h-4 w-4 shrink-0', active ? 'text-accent' : 'text-tertiary')} />
+            <span className="flex-1 text-[13px]">{f.label}</span>
+          </button>
+        );
+      })}
+
+      <div className="flex-1" />
+      <div className="border-t border-subtle p-2">
+        <button
+          type="button"
+          onClick={onManageSenders}
+          className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[12px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+        >
+          <SlidersIcon className="h-4 w-4 shrink-0" />
+          Blocked &amp; trusted senders
+        </button>
         <Link
           href="/accounts"
-          className="ml-auto shrink-0 rounded-token px-2 py-0.5 text-[11px] font-medium text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary"
-          title="Connect a Gmail or Microsoft 365 account"
+          className="mt-0.5 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[12px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
         >
+          <MailIcon className="h-4 w-4 shrink-0" />
           Connect an account
         </Link>
-        {onCollapse && (
-          <button
-            type="button"
-            onClick={onCollapse}
-            aria-label="Collapse mailbox pane"
-            aria-expanded={true}
-            title="Collapse mailbox pane"
-            className="hidden shrink-0 place-items-center rounded-token p-1 text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary lg:grid"
-          >
-            <ChevronIcon dir="left" />
-          </button>
-        )}
       </div>
-      <ul className="max-h-[70vh] overflow-y-auto p-1.5">
-        {showAllInboxes && (
-          <li className="border-b border-subtle pb-1.5 mb-1.5">
-            <button
-              type="button"
-              onClick={() => onSelect(ALL_INBOXES)}
-              aria-current={selectedId === ALL_INBOXES}
-              className={cn(
-                'flex w-full items-center gap-2 rounded-token px-2.5 py-2 text-left transition-colors duration-fast ease-token',
-                selectedId === ALL_INBOXES
-                  ? 'bg-surface-overlay text-primary shadow-token'
-                  : 'text-tertiary hover:bg-surface-overlay/60 hover:text-primary',
-              )}
-            >
-              <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4 shrink-0 text-tertiary" aria-hidden="true">
-                <path
-                  d="M4 13l2-7a1 1 0 011-1h10a1 1 0 011 1l2 7M4 13v5a1 1 0 001 1h14a1 1 0 001-1v-5M4 13h4l2 2h4l2-2h4"
-                  stroke="currentColor"
-                  strokeWidth={1.6}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-              <span className="min-w-0 flex-1 truncate text-sm font-medium text-primary">
-                All inboxes
-              </span>
-              {totalUnread != null && <UnreadPill count={totalUnread} />}
-            </button>
-          </li>
-        )}
-        {mailboxes.map((mb) => {
-          const active = mb.id === selectedId;
-          const tag = mb.provider ? PROVIDER_TAG[mb.provider] : null;
-          const unread = unreadByMailbox?.get(mb.id) ?? null;
-          return (
-            <li key={mb.id}>
-              <button
-                type="button"
-                onClick={() => onSelect(mb.id)}
-                aria-current={active}
-                className={cn(
-                  'flex w-full flex-col items-start gap-1 rounded-token px-2.5 py-2 text-left transition-colors duration-fast ease-token',
-                  active
-                    ? 'bg-surface-overlay text-primary shadow-token'
-                    : 'text-tertiary hover:bg-surface-overlay/60 hover:text-primary',
-                )}
-              >
-                <span className="flex w-full items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-primary">
-                    {mb.display_name?.trim() || mb.email_address}
-                  </span>
-                  {unread != null && <UnreadPill count={unread} />}
-                  <Badge variant={OWNER_TONE[mb.owner_kind] ?? 'neutral'}>
-                    {mb.owner_kind.toLowerCase()}
-                  </Badge>
-                </span>
-                <span className="flex w-full items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted">
-                    {mb.email_address}
-                  </span>
-                  {tag && (
-                    <Badge variant={tag.tone} className="shrink-0">
-                      {tag.label}
-                    </Badge>
-                  )}
-                </span>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-    </Card>
+    </aside>
   );
 }
 
-/** Slim chevron used by the collapse/expand affordances. */
-function ChevronIcon({ dir }: { dir: 'left' | 'right' }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      className="h-4 w-4"
-      aria-hidden="true"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      {dir === 'left' ? <path d="m15 6-6 6 6 6" /> : <path d="m9 6 6 6-6 6" />}
-    </svg>
-  );
-}
-
-/**
- * The collapsed mailbox pane: a slim vertical strip (desktop only) that hands
- * its width to the thread list + reading pane. Shows an expand affordance plus
- * the active mailbox's initial and the total unread so the user keeps context.
- */
-function MailboxRail({
-  onExpand,
-  totalUnread,
-  unified,
-  activeMailbox,
+function AccountButton({
+  active,
+  onClick,
+  tag,
+  name,
+  sub,
+  count,
 }: {
-  onExpand: () => void;
-  totalUnread: number | null;
-  unified: boolean;
-  activeMailbox: MailboxPick | null;
+  active: boolean;
+  onClick: () => void;
+  /** 'gradient' for All inboxes, else an hsl/color string. */
+  tag: string;
+  name: string;
+  sub: string;
+  count: number | null;
 }) {
-  const initial = unified
-    ? '∗'
-    : (activeMailbox?.display_name?.trim() || activeMailbox?.email_address || '?')
-        .charAt(0)
-        .toUpperCase();
-  const label = unified
-    ? 'All inboxes'
-    : activeMailbox?.display_name?.trim() || activeMailbox?.email_address || 'Mailbox';
+  const unread = count != null && count > 0;
   return (
-    <Card className="flex h-full flex-col items-center gap-3 overflow-hidden px-1 py-2.5">
-      <button
-        type="button"
-        onClick={onExpand}
-        aria-label="Expand mailbox pane"
-        aria-expanded={false}
-        title="Expand mailbox pane"
-        className="grid h-8 w-8 shrink-0 place-items-center rounded-token text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary"
-      >
-        <ChevronIcon dir="right" />
-      </button>
-      <div className="h-px w-6 shrink-0 bg-border" />
-      <button
-        type="button"
-        onClick={onExpand}
-        title={`${label} — expand to switch mailbox`}
-        className="grid h-9 w-9 shrink-0 place-items-center rounded-token bg-surface-overlay text-sm font-semibold text-primary ring-1 ring-border transition-colors duration-fast ease-token hover:text-accent"
-      >
-        {initial}
-      </button>
-      {totalUnread != null && totalUnread > 0 && (
-        <span className="shrink-0 rounded-full bg-accent/15 px-1.5 font-mono text-[10px] font-medium leading-4 text-accent">
-          {totalUnread > 999 ? '999+' : totalUnread}
-        </span>
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active}
+      className={cn(
+        'mx-2 my-px flex items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left transition-colors',
+        active ? 'bg-accent/[0.13] text-primary' : 'text-secondary hover:bg-surface-overlay',
       )}
+    >
       <span
-        className="mt-1 shrink-0 text-[10px] font-medium uppercase tracking-wide text-tertiary [writing-mode:vertical-rl]"
-        aria-hidden="true"
-      >
-        Mailboxes
+        className={cn('h-2 w-2 shrink-0 rounded-[3px]', active && 'ring-2 ring-accent/40')}
+        style={{
+          background:
+            tag === 'gradient'
+              ? 'linear-gradient(135deg,rgb(var(--accent)),rgb(var(--accent-2)))'
+              : tag,
+        }}
+      />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[13px] font-medium">{name}</span>
+        <span className="block truncate text-[11px] text-tertiary mono">{sub}</span>
       </span>
-    </Card>
+      <span
+        className={cn(
+          'shrink-0 text-[11.5px] font-semibold mono',
+          unread ? 'text-accent' : 'text-tertiary',
+        )}
+      >
+        {count == null ? '—' : count > 999 ? '999+' : count || '—'}
+      </span>
+    </button>
   );
 }
 
-// ── MIDDLE: thread list ──────────────────────────────────────────────────────
+// ── (3) Conversation list ──────────────────────────────────────────────────────
 
-function ThreadList({
-  load,
+type ListBanner = 'no-workspace' | 'error' | 'loading' | 'no-mailboxes' | 'no-space';
+
+function ConversationList({
+  banner,
   error,
+  title,
+  unreadCount,
+  filter,
+  onFilter,
+  spaceName,
+  load,
   threads,
   selectedThreadId,
   onSelect,
   onRetry,
-  folder,
-  onSelectFolder,
-  onManageSenders,
-  searchRef,
-  query,
-  onQuery,
   unified,
   selectable,
   selected,
@@ -842,19 +910,20 @@ function ThreadList({
   loadingMore,
   onLoadMore,
   rowRefs,
+  draftForThread,
 }: {
-  load: Load;
+  banner: ListBanner | null;
   error: string | null;
+  title: string;
+  unreadCount: number | null;
+  filter: SegFilter;
+  onFilter: (f: SegFilter) => void;
+  spaceName: string | null;
+  load: Load;
   threads: ThreadView[];
   selectedThreadId: string | null;
   onSelect: (thread: ThreadView) => void;
   onRetry: () => void;
-  folder: MailFolder;
-  onSelectFolder: (folder: MailFolder) => void;
-  onManageSenders: () => void;
-  searchRef: RefObject<HTMLInputElement | null>;
-  query: string;
-  onQuery: (q: string) => void;
   unified: boolean;
   selectable: boolean;
   selected: ReadonlySet<string>;
@@ -864,192 +933,111 @@ function ThreadList({
   hasMore: boolean;
   loadingMore: boolean;
   onLoadMore: () => void;
-  rowRefs: RefObject<Map<string, HTMLLIElement>>;
+  rowRefs: RefObject<Map<string, HTMLButtonElement>>;
+  draftForThread: (thread: ThreadView | null) => AgentInboxItemView | null;
 }) {
-  const searching = query.trim().length > 0;
   const allChecked = threads.length > 0 && selected.size >= threads.length;
 
   return (
-    <Card className="flex h-full flex-col overflow-hidden">
-      <div className="flex items-center gap-2 border-b border-subtle px-3 py-2.5">
-        <FolderTabs folder={folder} onSelect={onSelectFolder} />
-        <Button
-          variant="ghost"
-          size="sm"
-          className="ml-auto shrink-0"
-          onClick={onManageSenders}
-          title="Blocked & trusted senders"
-        >
-          Manage senders
-        </Button>
+    <div className="flex h-full flex-col">
+      <div className="sticky top-0 z-[2] flex items-center justify-between gap-2 border-b border-subtle bg-surface-base/90 px-4 py-3 backdrop-blur">
+        <div className="flex min-w-0 items-baseline gap-2.5">
+          <h2 className="truncate text-[15px] font-[640] tracking-[-0.01em]">{title}</h2>
+          {unreadCount != null && unreadCount > 0 && (
+            <span className="shrink-0 text-[12px] text-tertiary">{unreadCount} unread</span>
+          )}
+        </div>
+        <div className="flex shrink-0 gap-0.5 rounded-lg bg-surface-overlay p-0.5">
+          {(['all', 'unread', 'agent'] as SegFilter[]).map((seg) => (
+            <button
+              key={seg}
+              type="button"
+              onClick={() => onFilter(seg)}
+              className={cn(
+                'rounded-md px-2.5 py-1 text-[12px] font-medium capitalize transition-colors',
+                filter === seg
+                  ? 'bg-surface-raised text-primary shadow-token-lg'
+                  : 'text-tertiary hover:text-secondary',
+              )}
+            >
+              {seg}
+            </button>
+          ))}
+        </div>
       </div>
 
-      <div className="space-y-2 border-b border-subtle px-3 py-2">
-        <SearchBar ref={searchRef} query={query} onQuery={onQuery} />
-        {(selectable || searching) && threads.length > 0 && load === 'ready' && (
-          <div className="flex items-center gap-2">
-            {selectable && (
-              <label className="inline-flex cursor-pointer select-none items-center gap-1.5">
-                <input
-                  type="checkbox"
-                  checked={allChecked}
-                  onChange={onToggleSelectAll}
-                  aria-label="Select all conversations in view"
-                  className="h-3.5 w-3.5 cursor-pointer accent-accent"
-                />
-                <span className="text-[11px] text-tertiary">
-                  {selected.size > 0 ? `${selected.size} selected` : 'Select all'}
-                </span>
-              </label>
-            )}
-            {searching && (
-              <span className="ml-auto text-[11px] text-muted">
-                {threads.length}
-                {hasMore ? '+' : ''} {threads.length === 1 ? 'result' : 'results'}
-              </span>
-            )}
+      {selectable && threads.length > 0 && load === 'ready' && !banner && (
+        <div className="flex items-center gap-2 border-b border-subtle px-4 py-1.5">
+          <label className="inline-flex cursor-pointer select-none items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={allChecked}
+              onChange={onToggleSelectAll}
+              aria-label="Select all conversations in view"
+              className="h-3.5 w-3.5 cursor-pointer accent-accent"
+            />
+            <span className="text-[11px] text-tertiary">
+              {selected.size > 0 ? `${selected.size} selected` : 'Select all'}
+            </span>
+          </label>
+        </div>
+      )}
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {banner ? (
+          <ListBannerView banner={banner} error={error} spaceName={spaceName} onRetry={onRetry} />
+        ) : load === 'loading' ? (
+          <div className="space-y-px p-2">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <RowSkeleton key={i} />
+            ))}
           </div>
+        ) : load === 'error' ? (
+          <div className="p-4">
+            <p className="text-sm font-medium text-primary">Could not load this folder.</p>
+            <p className="mt-1 text-xs text-danger">{error ?? 'Unknown error.'}</p>
+            <Button variant="secondary" size="sm" className="mt-3" onClick={onRetry}>
+              Try again
+            </Button>
+          </div>
+        ) : threads.length === 0 ? (
+          <EmptyList filter={filter} />
+        ) : (
+          <>
+            {threads.map((t) => (
+              <ConversationRow
+                key={t.id}
+                thread={t}
+                active={t.id === selectedThreadId}
+                cursor={t.id === cursorThreadId}
+                unified={unified}
+                selectable={selectable}
+                checked={selected.has(t.id)}
+                anySelected={selected.size > 0}
+                onToggle={() => onToggleSelect(t.id)}
+                onSelect={() => onSelect(t)}
+                draft={draftForThread(t)}
+                refCb={(el) => {
+                  if (el) rowRefs.current?.set(t.id, el);
+                  else rowRefs.current?.delete(t.id);
+                }}
+              />
+            ))}
+            {hasMore && (
+              <div className="p-2">
+                <Button variant="secondary" size="sm" block disabled={loadingMore} onClick={onLoadMore}>
+                  {loadingMore ? 'Loading…' : 'Load more'}
+                </Button>
+              </div>
+            )}
+          </>
         )}
       </div>
-
-      {load === 'loading' ? (
-        <div className="space-y-1 p-2">
-          {[0, 1, 2, 3].map((i) => (
-            <ThreadRowSkeleton key={i} />
-          ))}
-        </div>
-      ) : load === 'error' ? (
-        <div className="p-4">
-          <p className="text-sm font-medium text-primary">Could not load this folder.</p>
-          <p className="mt-1 text-xs text-danger">{error ?? 'Unknown error.'}</p>
-          <Button variant="secondary" size="sm" className="mt-3" onClick={onRetry}>
-            Try again
-          </Button>
-        </div>
-      ) : threads.length === 0 ? (
-        searching ? (
-          <EmptySearch query={query} />
-        ) : (
-          <EmptyThreads folder={folder} />
-        )
-      ) : (
-        <ul className="min-h-0 flex-1 overflow-y-auto p-1.5">
-          {threads.map((t) => (
-            <ThreadRow
-              key={t.id}
-              thread={t}
-              active={t.id === selectedThreadId}
-              cursor={t.id === cursorThreadId}
-              unified={unified}
-              selectable={selectable}
-              checked={selected.has(t.id)}
-              anySelected={selected.size > 0}
-              onToggle={() => onToggleSelect(t.id)}
-              onSelect={() => onSelect(t)}
-              refCb={(el) => {
-                if (el) rowRefs.current?.set(t.id, el);
-                else rowRefs.current?.delete(t.id);
-              }}
-            />
-          ))}
-          {hasMore && (
-            <li className="p-1.5">
-              <Button
-                variant="secondary"
-                size="sm"
-                block
-                disabled={loadingMore}
-                onClick={onLoadMore}
-              >
-                {loadingMore ? 'Loading…' : 'Load more'}
-              </Button>
-            </li>
-          )}
-        </ul>
-      )}
-    </Card>
-  );
-}
-
-/** The folder segmented control — a compact, horizontally-scrollable pill row. */
-function FolderTabs({
-  folder,
-  onSelect,
-}: {
-  folder: MailFolder;
-  onSelect: (folder: MailFolder) => void;
-}) {
-  return (
-    <div
-      role="tablist"
-      aria-label="Folders"
-      className="-mx-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-    >
-      {FOLDERS.map((f) => {
-        const active = f.id === folder;
-        return (
-          <button
-            key={f.id}
-            type="button"
-            role="tab"
-            aria-selected={active}
-            onClick={() => onSelect(f.id)}
-            className={cn(
-              'shrink-0 rounded-token px-2.5 py-1 text-xs font-medium transition-colors duration-fast ease-token',
-              active
-                ? 'bg-surface-overlay text-primary shadow-token'
-                : 'text-tertiary hover:bg-surface-overlay/60 hover:text-primary',
-            )}
-          >
-            {f.label}
-          </button>
-        );
-      })}
     </div>
   );
 }
 
-/** Deterministic hue for a mailbox address (the per-account tag in All inboxes). */
-function addressHue(address: string): number {
-  let h = 0;
-  for (let i = 0; i < address.length; i++) {
-    h = (h * 31 + address.charCodeAt(i)) % 360;
-  }
-  return h;
-}
-
-function AccountTag({ address }: { address: string }) {
-  const hue = addressHue(address.toLowerCase());
-  const label = address.split('@')[0]?.slice(0, 12) || address.slice(0, 12);
-  return (
-    <span
-      className="shrink-0 rounded-token px-1.5 font-mono text-[10px] leading-4"
-      style={{
-        backgroundColor: `hsl(${hue} 70% 50% / 0.16)`,
-        color: `hsl(${hue} 65% 50%)`,
-      }}
-      title={address}
-    >
-      {label}
-    </span>
-  );
-}
-
-function PaperclipGlyph({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
-      <path
-        d="M21 12.5l-8.5 8.5a5.66 5.66 0 01-8-8l9-9a3.77 3.77 0 015.3 5.3l-9 9a1.89 1.89 0 01-2.7-2.7l8.3-8.3"
-        stroke="currentColor"
-        strokeWidth={1.6}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ThreadRow({
+function ConversationRow({
   thread,
   active,
   cursor,
@@ -1059,6 +1047,7 @@ function ThreadRow({
   anySelected,
   onToggle,
   onSelect,
+  draft,
   refCb,
 }: {
   thread: ThreadView;
@@ -1070,184 +1059,261 @@ function ThreadRow({
   anySelected: boolean;
   onToggle: () => void;
   onSelect: () => void;
-  refCb: (el: HTMLLIElement | null) => void;
+  draft: AgentInboxItemView | null;
+  refCb: (el: HTMLButtonElement | null) => void;
 }) {
   const when = useMemo(() => formatWhen(thread.last_message_at), [thread.last_message_at]);
+  const lead = thread.participants[0] ?? null;
   const who = useMemo(() => {
-    const names = thread.participants
-      .map((p) => p.name?.trim() || p.address)
-      .filter(Boolean);
+    const names = thread.participants.map((p) => p.name?.trim() || p.address).filter(Boolean);
     if (names.length === 0) return 'No participants';
     if (names.length <= 2) return names.join(', ');
-    return `${names[0]}, ${names[1]} +${names.length - 2}`;
+    return `${names[0]} +${names.length - 1}`;
   }, [thread.participants]);
+  const [g0, g1] = avatarGradient(lead?.address || thread.id);
 
   return (
-    <li ref={refCb}>
-      <div
+    <div
+      className={cn(
+        'group relative flex items-start gap-2.5 border-b border-subtle px-3 py-2.5 pl-3',
+        active ? 'bg-surface-raised' : 'hover:bg-surface-raised',
+        cursor && 'ring-1 ring-inset ring-accent/50',
+      )}
+    >
+      {active && <span className="absolute left-0 top-0 bottom-0 w-0.5 bg-accent" />}
+      <span
         className={cn(
-          'group flex items-start rounded-token transition-colors duration-fast ease-token',
-          active ? 'bg-surface-overlay shadow-token' : 'hover:bg-surface-overlay/60',
-          cursor && 'ring-1 ring-inset ring-accent/50',
-          checked && 'bg-accent/5',
+          'mt-0.5 w-1 shrink-0 self-stretch rounded-[3px]',
+          thread.unread ? 'bg-accent' : 'bg-transparent',
         )}
+      />
+      {selectable && (
+        <span className="flex shrink-0 items-center pt-1" onClick={(e) => e.stopPropagation()}>
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={onToggle}
+            aria-label={`Select conversation: ${thread.subject?.trim() || '(no subject)'}`}
+            className={cn(
+              'h-3.5 w-3.5 cursor-pointer accent-accent transition-opacity',
+              checked || anySelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 max-lg:opacity-100',
+            )}
+          />
+        </span>
+      )}
+      <span
+        className="mt-0.5 grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full text-[12.5px] font-[640] text-white"
+        style={{ background: `linear-gradient(140deg, ${g0}, ${g1})` }}
+        aria-hidden
       >
-        {selectable && (
-          <span
-            className="flex shrink-0 items-center pl-2 pt-[13px]"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <input
-              type="checkbox"
-              checked={checked}
-              onChange={onToggle}
-              aria-label={`Select conversation: ${thread.subject?.trim() || '(no subject)'}`}
-              className={cn(
-                'h-3.5 w-3.5 cursor-pointer accent-accent transition-opacity duration-fast ease-token',
-                checked || anySelected
-                  ? 'opacity-100'
-                  : 'opacity-0 group-hover:opacity-100 max-lg:opacity-100',
-              )}
-            />
-          </span>
-        )}
-        <button
-          type="button"
-          onClick={onSelect}
-          aria-current={active}
-          className={cn(
-            'flex w-full min-w-0 flex-col gap-1 py-2 pr-2.5 text-left',
-            selectable ? 'pl-1.5' : 'pl-2.5',
-          )}
-        >
-          <div className="flex items-center gap-2">
-            {thread.unread && (
-              <span aria-label="unread" className="h-2 w-2 shrink-0 rounded-full bg-accent" />
-            )}
-            <span
-              className={cn(
-                'min-w-0 flex-1 truncate text-xs',
-                thread.unread ? 'font-semibold text-primary' : 'text-secondary',
-              )}
-            >
-              {who}
-            </span>
-            {thread.has_attachments && (
-              <PaperclipGlyph className="h-3 w-3 shrink-0 text-muted" />
-            )}
-            {when && <span className="shrink-0 font-mono text-[10px] text-muted">{when}</span>}
-          </div>
+        {initials(lead?.name, lead?.address)}
+      </span>
+      <button
+        type="button"
+        ref={refCb}
+        onClick={onSelect}
+        aria-current={active}
+        className="min-w-0 flex-1 text-left"
+      >
+        <span className="flex items-baseline gap-2">
           <span
             className={cn(
-              'truncate text-sm',
-              thread.unread ? 'font-medium text-primary' : 'text-secondary',
+              'min-w-0 flex-1 truncate text-[13.5px]',
+              thread.unread ? 'font-[660] text-primary' : 'font-medium text-secondary',
             )}
           >
-            {thread.subject?.trim() || '(no subject)'}
+            {who}
           </span>
-          <div className="flex items-center gap-2">
-            {thread.last_snippet && (
-              <span className="min-w-0 flex-1 truncate text-[11px] text-muted">
-                {thread.last_snippet}
-              </span>
-            )}
-            {unified && thread.mailbox_address && (
-              <AccountTag address={thread.mailbox_address} />
-            )}
-            {thread.message_count > 1 && (
-              <span className="shrink-0 rounded-token bg-surface-base px-1.5 font-mono text-[10px] text-muted">
-                {thread.message_count}
-              </span>
-            )}
-          </div>
-        </button>
-      </div>
-    </li>
-  );
-}
-
-function ThreadRowSkeleton() {
-  return (
-    <div className="space-y-2 rounded-token px-2.5 py-2">
-      <Skeleton w="40%" h={11} />
-      <Skeleton w="80%" h={14} />
-      <Skeleton w="60%" h={11} />
+          {when && <span className="shrink-0 text-[11px] text-tertiary mono">{when}</span>}
+        </span>
+        <span
+          className={cn(
+            'mt-0.5 block truncate text-[13px]',
+            thread.unread ? 'font-semibold text-primary' : 'text-primary',
+          )}
+        >
+          {thread.subject?.trim() || '(no subject)'}
+        </span>
+        {thread.last_snippet && (
+          <span className="mt-0.5 block truncate text-[12px] text-tertiary">
+            {thread.last_snippet}
+          </span>
+        )}
+        <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          {draft && <Chip tone="agent" icon="bot" label="Draft ready" />}
+          {draft && <Chip tone="approve" icon="alert" label="Needs approval" />}
+          {unified && thread.mailbox_address && <AccountChip address={thread.mailbox_address} />}
+          {thread.has_attachments && (
+            <span className="inline-flex items-center gap-1 text-[11px] text-tertiary">
+              <Paperclip className="h-3 w-3" /> attachment
+            </span>
+          )}
+          {thread.message_count > 1 && (
+            <span className="rounded bg-surface-overlay px-1.5 text-[10px] text-muted mono">
+              {thread.message_count}
+            </span>
+          )}
+        </span>
+      </button>
     </div>
   );
 }
 
-const EMPTY_COPY: Record<MailFolder, { title: string; detail: string }> = {
-  inbox: {
-    title: 'Inbox zero',
-    detail: 'Nothing in your inbox. New mail appears here once the engine is connected.',
-  },
-  archive: {
-    title: 'Archive is empty',
-    detail: 'Threads you archive land here, out of your inbox but kept.',
-  },
-  spam: {
-    title: 'No spam — nice',
-    detail: 'Mail you mark as spam shows up here, and its sender gets blocked.',
-  },
-  trash: {
-    title: 'Trash is empty',
-    detail: 'Threads you delete rest here until they’re cleared.',
-  },
-  sent: {
-    title: 'Nothing sent yet',
-    detail: 'Messages you send appear here once the mail engine is connected.',
-  },
-  drafts: {
-    title: 'No drafts',
-    detail: 'Messages you start but don’t send are saved here.',
-  },
-};
-
-function EmptyThreads({ folder }: { folder: MailFolder }) {
-  const copy = EMPTY_COPY[folder];
+function Chip({
+  tone,
+  icon,
+  label,
+}: {
+  tone: 'agent' | 'approve' | 'sent';
+  icon?: 'bot' | 'alert' | 'check';
+  label: string;
+}) {
+  const cls =
+    tone === 'agent'
+      ? 'text-accent bg-accent/[0.13]'
+      : tone === 'approve'
+        ? 'text-warning bg-warning/[0.14]'
+        : 'text-success bg-success/[0.14]';
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
-      <div className="grid h-12 w-12 place-items-center rounded-full bg-surface-overlay text-tertiary">
-        <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6" aria-hidden="true">
-          <path
-            d="M3 7l9 6 9-6M4 5h16a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6a1 1 0 011-1z"
-            stroke="currentColor"
-            strokeWidth={1.6}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
+    <span
+      className={cn(
+        'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold',
+        cls,
+      )}
+    >
+      {icon === 'bot' && <RobotDot />}
+      {icon === 'alert' && <AlertDot />}
+      {icon === 'check' && <CheckSquareIcon className="h-[11px] w-[11px]" />}
+      {label}
+    </span>
+  );
+}
+
+function RobotDot() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-[11px] w-[11px]">
+      <rect x="4" y="7" width="16" height="12" rx="2.5" />
+      <path d="M9 7V5a3 3 0 0 1 6 0v2" />
+    </svg>
+  );
+}
+function AlertDot() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-[11px] w-[11px]">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 8v4M12 16h.01" />
+    </svg>
+  );
+}
+function Paperclip({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path
+        d="M21 12.5l-8.5 8.5a5.66 5.66 0 01-8-8l9-9a3.77 3.77 0 015.3 5.3l-9 9a1.89 1.89 0 01-2.7-2.7l8.3-8.3"
+        stroke="currentColor"
+        strokeWidth={1.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function AccountChip({ address }: { address: string }) {
+  const hue = addressHue(address.toLowerCase());
+  const label = address.split('@')[0]?.slice(0, 12) || address.slice(0, 12);
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold mono"
+      style={{ backgroundColor: `hsl(${hue} 70% 50% / 0.16)`, color: `hsl(${hue} 65% 55%)` }}
+      title={address}
+    >
+      <span className="h-[7px] w-[7px] rounded-[2px]" style={{ background: `hsl(${hue} 70% 55%)` }} />
+      {label}
+    </span>
+  );
+}
+
+function RowSkeleton() {
+  return (
+    <div className="flex gap-2.5 px-3 py-2.5">
+      <div className="h-[34px] w-[34px] shrink-0 animate-pulse rounded-full bg-surface-overlay" />
+      <div className="flex-1 space-y-1.5 py-0.5">
+        <Skeleton w="45%" h={11} />
+        <Skeleton w="80%" h={13} />
+        <Skeleton w="65%" h={11} />
       </div>
-      <p className="text-sm font-medium text-primary">{copy.title}</p>
-      <p className="max-w-xs text-xs leading-5 text-tertiary">{copy.detail}</p>
     </div>
   );
 }
 
-function EmptySearch({ query }: { query: string }) {
+function EmptyList({ filter }: { filter: SegFilter }) {
+  const copy =
+    filter === 'unread'
+      ? { t: 'All caught up', d: 'No unread conversations in this view.' }
+      : filter === 'agent'
+        ? { t: 'No agent drafts', d: 'When an agent stages a reply, it appears here with a violet Draft-ready tag.' }
+        : { t: 'Nothing here', d: 'New mail appears here once the engine is connected.' };
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
-      <div className="grid h-12 w-12 place-items-center rounded-full bg-surface-overlay text-tertiary">
-        <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6" aria-hidden="true">
-          <path
-            d="M21 21l-4.3-4.3M17 10.5a6.5 6.5 0 11-13 0 6.5 6.5 0 0113 0z"
-            stroke="currentColor"
-            strokeWidth={1.6}
-            strokeLinecap="round"
-          />
-        </svg>
+    <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center">
+      <div className="grid h-11 w-11 place-items-center rounded-full bg-surface-overlay text-tertiary">
+        <MailIcon className="h-5 w-5" />
       </div>
-      <p className="text-sm font-medium text-primary">No results</p>
-      <p className="max-w-xs text-xs leading-5 text-tertiary">
-        Nothing matches “{query}” in this folder. Try different words, or clear the search.
+      <p className="text-sm font-medium text-primary">{copy.t}</p>
+      <p className="max-w-xs text-xs leading-5 text-tertiary">{copy.d}</p>
+    </div>
+  );
+}
+
+function ListBannerView({
+  banner,
+  error,
+  spaceName,
+  onRetry,
+}: {
+  banner: ListBanner;
+  error: string | null;
+  spaceName: string | null;
+  onRetry: () => void;
+}) {
+  const map: Record<ListBanner, { t: string; d: string }> = {
+    'no-workspace': {
+      t: 'No workspace yet',
+      d: 'Your account isn’t a member of an Email-Ops workspace, so there are no mailboxes to show.',
+    },
+    error: { t: 'Could not load your mail', d: error ?? 'Unknown error.' },
+    loading: { t: 'Loading…', d: 'Fetching your mailboxes.' },
+    'no-mailboxes': {
+      t: 'No mailboxes yet',
+      d: 'Once a mailbox is provisioned for this workspace it shows up here.',
+    },
+    'no-space': {
+      t: `No mailboxes in ${spaceName ?? 'this space'}`,
+      d: 'This space doesn’t include any mailboxes yet. Switch back to “All”, or add some.',
+    },
+  };
+  const copy = map[banner];
+  return (
+    <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center">
+      <div className="grid h-11 w-11 place-items-center rounded-full bg-surface-overlay text-tertiary">
+        <MailIcon className="h-5 w-5" />
+      </div>
+      <p className="text-sm font-medium text-primary">{copy.t}</p>
+      <p className={cn('max-w-xs text-xs leading-5', banner === 'error' ? 'text-danger' : 'text-tertiary')}>
+        {copy.d}
       </p>
+      {banner === 'error' && (
+        <Button variant="secondary" size="sm" className="mt-2" onClick={onRetry}>
+          Try again
+        </Button>
+      )}
     </div>
   );
 }
 
-// ── RIGHT: the open thread + reply composer ──────────────────────────────────
+// ── (4) Reader ──────────────────────────────────────────────────────────────────
 
-function ThreadPane({
+function Reader({
   workspaceId,
   mailbox,
   thread,
@@ -1264,10 +1330,16 @@ function ThreadPane({
   onSeedReply,
   onSeedReplyAll,
   onForward,
+  onFocusReply,
+  onPopout,
+  draft,
+  draftAutonomyLabel,
+  onApproveDraft,
+  onDiscardDraft,
+  onEditDraft,
 }: {
   workspaceId: string | null;
   mailbox: MailboxPick | null;
-  /** The thread row (for subject/participants); may be null if not in the list. */
   thread: ThreadView | null;
   threadId: string | null;
   load: Load;
@@ -1286,8 +1358,14 @@ function ThreadPane({
   onSeedReply: (m: MessageView) => void;
   onSeedReplyAll: (m: MessageView) => void;
   onForward: (m: MessageView) => void;
+  onFocusReply: () => void;
+  onPopout: () => void;
+  draft: AgentInboxItemView | null;
+  draftAutonomyLabel: string;
+  onApproveDraft: () => Promise<{ ok: boolean; error?: string }>;
+  onDiscardDraft: () => Promise<{ ok: boolean; error?: string }>;
+  onEditDraft: () => void;
 }) {
-  // Conversation UX: all but the last message collapse (unread ones stay open).
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
     const next = new Set<string>();
@@ -1306,65 +1384,133 @@ function ThreadPane({
     });
   }, []);
 
-  if (!threadId) {
-    return <NoThreadSelected />;
-  }
+  // Reader identity: prefer the latest inbound message's sender, else lead participant.
+  const sender = useMemo(() => {
+    const self = mailbox?.email_address?.toLowerCase() ?? '';
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const f = messages[i].from;
+      if (f?.address && f.address.toLowerCase() !== self) return f;
+    }
+    return messages[messages.length - 1]?.from ?? thread?.participants[0] ?? null;
+  }, [messages, mailbox, thread]);
+  const when = formatWhen(thread?.last_message_at ?? messages[messages.length - 1]?.sent_at ?? null);
+  const [g0, g1] = avatarGradient(sender?.address || threadId || 'x');
+
+  const [triageBusy, setTriageBusy] = useState(false);
+  const runTriage = async (d: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM', opts?: { blockSender?: boolean }) => {
+    if (!threadId || triageBusy) return;
+    setTriageBusy(true);
+    const res = await onTriage(threadId, d, opts);
+    if (!res.ok) setTriageBusy(false);
+  };
+
+  if (!threadId) return <NoThreadSelected />;
 
   return (
-    <Card className="flex h-full flex-col overflow-hidden">
-      <div className="flex items-start gap-2 border-b border-subtle px-4 py-3">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onBack}
-          className="lg:hidden"
-          aria-label="Back to threads"
-        >
-          ← Back
-        </Button>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-primary">
+    <div className="flex h-full flex-col bg-surface-base">
+      <div className="sticky top-0 z-[2] border-b border-subtle bg-surface-base/[0.92] px-5 py-3.5 backdrop-blur sm:px-6">
+        <div className="mb-3 flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={onBack}
+            aria-label="Back to conversations"
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-tertiary hover:bg-surface-overlay hover:text-primary lg:hidden"
+          >
+            <ChevronLeftIcon className="h-[18px] w-[18px]" />
+          </button>
+          <h1 className="flex-1 text-[19px] font-[680] leading-[1.3] tracking-[-0.015em] text-primary">
             {thread?.subject?.trim() || '(no subject)'}
-          </p>
-          {load === 'ready' && (
-            <p className="mt-0.5 text-[11px] text-muted">
-              {messages.length} {messages.length === 1 ? 'message' : 'messages'}
-              {mailbox && (
-                <>
-                  {' · '}
-                  <span className="font-mono">{mailbox.email_address}</span>
-                </>
-              )}
-            </p>
-          )}
+          </h1>
+          <div className="flex shrink-0 items-center gap-1">
+            {folder !== 'inbox' && (
+              <ReaderTool label="Move to inbox" onClick={() => void runTriage('INBOX')} disabled={triageBusy}>
+                <InboxTrayIcon className="h-[17px] w-[17px]" />
+              </ReaderTool>
+            )}
+            {folder !== 'archive' && (
+              <ReaderTool label="Archive" onClick={() => void runTriage('ARCHIVE')} disabled={triageBusy}>
+                <ArchiveIcon className="h-[17px] w-[17px]" />
+              </ReaderTool>
+            )}
+            {folder !== 'spam' && (
+              <ReaderTool
+                label="Mark spam & block sender"
+                onClick={() => void runTriage('SPAM', { blockSender: true })}
+                disabled={triageBusy}
+              >
+                <BanIcon className="h-[17px] w-[17px]" />
+              </ReaderTool>
+            )}
+            {folder !== 'trash' && (
+              <ReaderTool label="Trash" onClick={() => void runTriage('TRASH')} disabled={triageBusy}>
+                <TrashIcon className="h-[17px] w-[17px]" />
+              </ReaderTool>
+            )}
+            <ReaderTool label="Reply" onClick={onFocusReply}>
+              <ReplyIcon className="h-[17px] w-[17px]" />
+            </ReaderTool>
+            <ReaderTool label="Pop out message" accent onClick={onPopout}>
+              <PopOutIcon className="h-4 w-4" />
+            </ReaderTool>
+          </div>
         </div>
-        <TriageActions
-          threadId={threadId}
-          folder={folder}
-          otherParty={replySeed.to[0] ?? null}
-          onTriage={onTriage}
-        />
+        <div className="flex items-center gap-3">
+          <span
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-[15px] font-[640] text-white"
+            style={{ background: `linear-gradient(140deg, ${g0}, ${g1})` }}
+            aria-hidden
+          >
+            {initials(sender?.name, sender?.address)}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[14px] font-[620] text-primary">
+              {participantLabel(sender)}
+            </span>
+            {sender?.address && (
+              <span className="block truncate text-[12px] text-tertiary mono">{sender.address}</span>
+            )}
+          </span>
+          <span className="shrink-0 text-right text-[12px] text-tertiary mono">
+            {when}
+            {mailbox && (
+              <>
+                <br />
+                <span className="text-muted">to {mailbox.email_address}</span>
+              </>
+            )}
+          </span>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
+        {draft && (
+          <AgentDraftCard
+            item={draft}
+            autonomyLabel={draftAutonomyLabel}
+            onApprove={onApproveDraft}
+            onDiscard={onDiscardDraft}
+            onEdit={onEditDraft}
+          />
+        )}
+
         {load === 'loading' ? (
-          <div className="space-y-3 p-4">
+          <div className="space-y-3 p-4 sm:px-6">
             <MessageSkeleton />
             <MessageSkeleton />
           </div>
         ) : load === 'error' ? (
-          <div className="p-4">
+          <div className="p-6">
             <p className="text-sm font-medium text-primary">Could not load this conversation.</p>
             <p className="mt-1 text-xs text-danger">{error ?? 'Unknown error.'}</p>
           </div>
         ) : messages.length === 0 ? (
-          <div className="p-6 text-center">
+          <div className="p-8 text-center">
             <p className="text-sm text-tertiary">
               No messages in this thread yet — they appear here once the mail engine is connected.
             </p>
           </div>
         ) : (
-          <ul className="space-y-2.5 p-4">
+          <ul className="space-y-2.5 p-4 sm:px-6">
             {messages.map((m) =>
               workspaceId ? (
                 <MessageItem
@@ -1384,8 +1530,6 @@ function ThreadPane({
         )}
       </div>
 
-      {/* Reply composer — available whenever a thread is open. Remounts when a
-          Reply/Reply-all seed is picked so the new defaults take. */}
       {load !== 'error' && (
         <ReplyComposer
           key={`${threadId}:${replySeed.nonce}`}
@@ -1399,106 +1543,37 @@ function ThreadPane({
           onSend={onReply}
         />
       )}
-    </Card>
+    </div>
   );
 }
 
-/**
- * Triage buttons in the thread header. The set adapts to the current folder:
- * Inbox shows Archive / Spam / Trash; other folders add "Move to Inbox", and in
- * Spam that action becomes "Not spam" (which trusts the sender). Marking Spam
- * blocks the other party. All actions disable while a call is in flight, and a
- * failure surfaces a small inline note.
- */
-function TriageActions({
-  threadId,
-  folder,
-  otherParty,
-  onTriage,
+function ReaderTool({
+  label,
+  onClick,
+  accent,
+  disabled,
+  children,
 }: {
-  threadId: string;
-  folder: MailFolder;
-  otherParty: string | null;
-  onTriage: (
-    threadId: string,
-    disposition: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM',
-    opts?: { blockSender?: boolean; trustSender?: boolean; senderAddress?: string },
-  ) => Promise<TriageOutcome>;
+  label: string;
+  onClick: () => void;
+  accent?: boolean;
+  disabled?: boolean;
+  children: ReactNode;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function run(
-    disposition: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM',
-    opts?: { blockSender?: boolean; trustSender?: boolean; senderAddress?: string },
-  ) {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    const res = await onTriage(threadId, disposition, opts);
-    // On success the thread closes (it left this folder); only need to surface
-    // an error, in which case the pane is still mounted to show it.
-    if (!res.ok) {
-      setError(res.error ?? 'Could not move this conversation.');
-      setBusy(false);
-    }
-  }
-
-  const inSpam = folder === 'spam';
-  const showInbox = folder !== 'inbox';
-
   return (
-    <div className="flex shrink-0 flex-col items-end gap-1">
-      <div className="flex items-center gap-1">
-        {showInbox && (
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={busy}
-            onClick={() =>
-              void run('INBOX', inSpam ? { trustSender: true, senderAddress: otherParty ?? undefined } : undefined)
-            }
-            title={inSpam ? 'Not spam — move to inbox and trust the sender' : 'Move to inbox'}
-          >
-            {inSpam ? 'Not spam' : 'Move to inbox'}
-          </Button>
-        )}
-        {folder !== 'archive' && (
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={busy}
-            onClick={() => void run('ARCHIVE')}
-            title="Archive (e)"
-          >
-            Archive
-          </Button>
-        )}
-        {!inSpam && (
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={busy}
-            onClick={() => void run('SPAM', { blockSender: true, senderAddress: otherParty ?? undefined })}
-            title="Mark as spam and block the sender"
-          >
-            Spam
-          </Button>
-        )}
-        {folder !== 'trash' && (
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={busy}
-            onClick={() => void run('TRASH')}
-            title="Move to trash (#)"
-          >
-            Trash
-          </Button>
-        )}
-      </div>
-      {error && <p className="max-w-[14rem] text-right text-[11px] text-danger">{error}</p>}
-    </div>
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      aria-label={label}
+      className={cn(
+        'grid h-8 w-8 place-items-center rounded-lg text-tertiary transition-colors disabled:opacity-40',
+        accent ? 'hover:bg-accent/12 hover:text-accent' : 'hover:bg-surface-overlay hover:text-primary',
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -1509,8 +1584,9 @@ function MessageSkeleton() {
         <Skeleton w="30%" h={14} />
         <Skeleton w={56} h={16} className="ml-auto" />
       </div>
-      <div className="mt-3">
-        <SkeletonText lines={2} />
+      <div className="mt-3 space-y-2">
+        <Skeleton w="90%" h={12} />
+        <Skeleton w="75%" h={12} />
       </div>
     </div>
   );
@@ -1518,131 +1594,56 @@ function MessageSkeleton() {
 
 function NoThreadSelected() {
   return (
-    <Card className="hidden h-full lg:flex">
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 p-10 text-center">
-        <div className="grid h-12 w-12 place-items-center rounded-full bg-surface-overlay text-tertiary">
-          <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6" aria-hidden="true">
-            <path
-              d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"
-              stroke="currentColor"
-              strokeWidth={1.6}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </div>
-        <p className="text-sm font-medium text-primary">Select a conversation</p>
-        <p className="max-w-xs text-xs leading-5 text-tertiary">
-          Pick a thread from the list to read it and reply. Press{' '}
-          <kbd className="rounded-token border border-border bg-surface-overlay px-1 font-mono text-[10px]">?</kbd>{' '}
-          for keyboard shortcuts.
-        </p>
+    <div className="hidden h-full flex-col items-center justify-center gap-2 p-10 text-center lg:flex">
+      <div className="grid h-12 w-12 place-items-center rounded-full bg-surface-overlay text-tertiary">
+        <MailIcon className="h-6 w-6" />
       </div>
-    </Card>
-  );
-}
-
-// ── Top-level states ─────────────────────────────────────────────────────────
-
-function ClientSkeleton() {
-  return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(200px,260px)_minmax(280px,360px)_1fr]">
-      <Card padded className="space-y-2">
-        {[0, 1, 2].map((i) => (
-          <Skeleton key={i} h={44} />
-        ))}
-      </Card>
-      <Card padded className="space-y-2">
-        {[0, 1, 2, 3].map((i) => (
-          <ThreadRowSkeleton key={i} />
-        ))}
-      </Card>
-      <Card padded className="hidden space-y-3 lg:block">
-        <MessageSkeleton />
-        <MessageSkeleton />
-      </Card>
+      <p className="text-sm font-medium text-primary">Select a conversation</p>
+      <p className="max-w-xs text-xs leading-5 text-tertiary">
+        Pick a thread from the list to read it and reply. Press{' '}
+        <kbd className="rounded-token border border-border bg-surface-overlay px-1 text-[10px] mono">?</kbd>{' '}
+        for keyboard shortcuts.
+      </p>
     </div>
   );
 }
 
-function ErrorState({ message }: { message: string | null }) {
-  return (
-    <Card padded className="border-danger/30 ring-1 ring-danger/15">
-      <p className="text-sm font-medium text-primary">Could not load your mail.</p>
-      <p className="mt-1 text-xs text-danger">{message ?? 'Unknown error.'}</p>
-    </Card>
-  );
+// ── Small shared helpers ────────────────────────────────────────────────────────
+
+function initials(name?: string | null, address?: string | null): string {
+  const n = name?.trim();
+  if (n) {
+    const parts = n.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+    return n.slice(0, 2).toUpperCase();
+  }
+  const a = address?.trim();
+  if (a) return a.slice(0, 2).toUpperCase();
+  return '··';
 }
 
-function NoWorkspace() {
-  return (
-    <Card padded>
-      <p className="text-sm font-medium text-primary">No workspace yet.</p>
-      <p className="mt-1 text-sm text-tertiary">
-        Your account isn’t a member of an Email-Ops workspace, so there are no mailboxes to show.
-      </p>
-    </Card>
-  );
+function avatarGradient(seed: string): [string, string] {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  return AV_GRADIENTS[h % AV_GRADIENTS.length];
 }
 
-function NoMailboxes() {
-  return (
-    <Card padded className="overflow-hidden border-info/30 bg-info-subtle ring-1 ring-info/20">
-      <div className="flex items-start gap-4">
-        <div className="grid h-14 w-14 shrink-0 place-items-center rounded-full bg-gradient-to-br from-info/30 to-info/5 text-info ring-1 ring-info/30">
-          <svg viewBox="0 0 24 24" fill="none" className="h-7 w-7" aria-hidden="true">
-            <path
-              d="M3 7l9 6 9-6M4 5h16a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6a1 1 0 011-1z"
-              stroke="currentColor"
-              strokeWidth={1.8}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </div>
-        <div>
-          <p className="text-base font-semibold text-primary">No mailboxes yet.</p>
-          <p className="mt-1 text-sm text-tertiary">
-            Once a mailbox is provisioned for this workspace it shows up here, and you can read it
-            and compose from it.
-          </p>
-        </div>
-      </div>
-    </Card>
-  );
+function normSubject(subject: string | null): string {
+  return (subject ?? '')
+    .replace(/^(\s*(re|fwd|fw)\s*:\s*)+/i, '')
+    .trim()
+    .toLowerCase();
 }
 
-/** Shown when a real Space is active but scopes out every mailbox. */
-function NoSpaceMailboxes({ spaceName }: { spaceName: string | null }) {
-  return (
-    <Card padded className="overflow-hidden border-info/30 bg-info-subtle ring-1 ring-info/20">
-      <div className="flex items-start gap-4">
-        <div className="grid h-14 w-14 shrink-0 place-items-center rounded-full bg-gradient-to-br from-info/30 to-info/5 text-info ring-1 ring-info/30">
-          <svg viewBox="0 0 24 24" fill="none" className="h-7 w-7" aria-hidden="true">
-            <path
-              d="M3 7l9 6 9-6M4 5h16a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6a1 1 0 011-1z"
-              stroke="currentColor"
-              strokeWidth={1.8}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </div>
-        <div>
-          <p className="text-base font-semibold text-primary">
-            No mailboxes in {spaceName ? <span className="font-mono">{spaceName}</span> : 'this space'}.
-          </p>
-          <p className="mt-1 text-sm text-tertiary">
-            This space doesn’t include any mailboxes yet. Add some from “Manage spaces…” in the top
-            bar, or switch back to “All”.
-          </p>
-        </div>
-      </div>
-    </Card>
-  );
+function autonomyBadgeFor(
+  item: AgentInboxItemView,
+  fleet: { key: string; autonomy_level: AutonomyLevel }[],
+): string {
+  const a = fleet.find((x) => x.key === item.drafted_by);
+  return a ? AUTONOMY_BADGE[a.autonomy_level] : 'HELD FOR APPROVAL';
 }
 
-// ── Reply prefill ────────────────────────────────────────────────────────────
+// ── Reply / forward prefill (preserved from the webmail wave) ─────────────────────
 
 function dedupeAddresses(addresses: (string | null | undefined)[], exclude: string[]): string[] {
   const excluded = new Set(exclude.map((a) => a.toLowerCase()));
@@ -1658,20 +1659,12 @@ function dedupeAddresses(addresses: (string | null | undefined)[], exclude: stri
   return out;
 }
 
-/**
- * Derive the default reply seed: address the conversation's *other* party (not
- * our own mailbox), and prefix the subject with "Re: " once. Prefers the latest
- * received message's sender; falls back to a thread participant. Also carries
- * the id of the message being replied to as the `in_reply_to` threading hint.
- */
 function deriveReplyDefaults(
   messages: MessageView[],
   thread: ThreadView | null,
   mailbox: MailboxPick | null,
 ): ReplySeed {
   const self = mailbox?.email_address?.toLowerCase() ?? '';
-
-  // Prefer the most recent inbound message's sender as the reply target.
   let to = '';
   let inReplyTo: string | null = null;
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -1682,7 +1675,6 @@ function deriveReplyDefaults(
       break;
     }
   }
-  // Fall back to a thread participant that isn't us.
   if (!to && thread) {
     const other = thread.participants.find((p) => p.address && p.address.toLowerCase() !== self);
     to = other?.address ?? thread.participants[0]?.address ?? '';
@@ -1693,7 +1685,6 @@ function deriveReplyDefaults(
   return { to: to ? [to] : [], cc: [], subject, inReplyTo, nonce: 0 };
 }
 
-/** Reply to a specific message: just its sender (or its recipients if it's ours). */
 function deriveReplyToMessage(
   m: MessageView,
   selfAddress: string,
@@ -1709,10 +1700,6 @@ function deriveReplyToMessage(
   return { to, cc: [], subject, inReplyTo: m.id };
 }
 
-/**
- * Reply-all to a specific message: sender in To, every other recipient in Cc,
- * minus our own address, deduped.
- */
 function deriveReplyAll(
   m: MessageView,
   selfAddress: string,
@@ -1731,19 +1718,13 @@ function deriveReplyAll(
   return { to, cc, subject, inReplyTo: m.id };
 }
 
-/** Forward prefill: "Fwd:" subject, quoted original, attachments carried as blob refs. */
 function buildForwardPrefill(m: MessageView, thread: ThreadView | null): ComposePrefill {
   const baseSubject = (m.subject ?? thread?.subject ?? '').trim();
   const subject = /^fwd:/i.test(baseSubject) ? baseSubject : `Fwd: ${baseSubject}`.trim();
   const fromLabel = m.from
     ? `${participantLabel(m.from)}${m.from.address ? ` <${m.from.address}>` : ''}`
     : 'Unknown';
-  const lines: string[] = [
-    '',
-    '',
-    '---------- Forwarded message ----------',
-    `From: ${fromLabel}`,
-  ];
+  const lines: string[] = ['', '', '---------- Forwarded message ----------', `From: ${fromLabel}`];
   if (m.sent_at) lines.push(`Date: ${new Date(m.sent_at).toLocaleString()}`);
   lines.push(`Subject: ${baseSubject || '(no subject)'}`);
   if (m.to.length > 0) lines.push(`To: ${m.to.map((p) => p.address).filter(Boolean).join(', ')}`);

@@ -132,6 +132,15 @@ function ProductChrome({ children }: { children: ReactNode }) {
     setDrawerOpen(false);
   }, [pathname]);
 
+  // /mail is the Agent Email Command Center: it renders its OWN 5-zone chrome
+  // (top command bar, icon nav, folders, list, reader, agent rail) and claims
+  // the whole viewport. The shared context providers (workspace / space / UI
+  // commands) live above ProductChrome, so we simply hand it the full screen and
+  // skip the global sidebar / top bar / rail here — no double chrome.
+  if (wide) {
+    return <div className="h-screen overflow-hidden bg-surface-base text-primary">{children}</div>;
+  }
+
   return (
     <div className="min-h-screen bg-surface-base text-primary">
       <div className="flex min-h-screen">

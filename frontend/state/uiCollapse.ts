@@ -116,6 +116,12 @@ export const MBX_COLLAPSED_KEY = 'eops:mail:mbx-collapsed';
 /** /mail mailbox-picker pane collapse state. Default: expanded. */
 export const mailboxCollapsedStore = makeBoolStore(MBX_COLLAPSED_KEY, false);
 
+/** localStorage key for the /mail right agent-activity rail collapse. */
+export const RAIL_COLLAPSED_KEY = 'eops:mail:rail-collapsed';
+
+/** /mail right agent-activity rail collapse state. Default: OPEN (expanded). */
+export const railCollapsedStore = makeBoolStore(RAIL_COLLAPSED_KEY, false);
+
 /** Convenience hooks with a stable toggle callback. */
 export function useNavCollapsed(): [boolean, () => void] {
   const collapsed = navCollapsedStore.use();
@@ -126,5 +132,11 @@ export function useNavCollapsed(): [boolean, () => void] {
 export function useMailboxCollapsed(): [boolean, () => void] {
   const collapsed = mailboxCollapsedStore.use();
   const toggle = useCallback(() => mailboxCollapsedStore.toggle(), []);
+  return [collapsed, toggle];
+}
+
+export function useRailCollapsed(): [boolean, () => void] {
+  const collapsed = railCollapsedStore.use();
+  const toggle = useCallback(() => railCollapsedStore.toggle(), []);
   return [collapsed, toggle];
 }

@@ -17,13 +17,23 @@
   body {
     min-height: 100vh;
     margin: 0;
+    /* Clean token ground for the Agent Command Center — the old body-wide radial
+       purple wash is gone (it read as generic). A single, barely-there accent
+       glow anchored top-left keeps the surface from feeling flat, nothing more. */
     background:
-      radial-gradient(circle at 12% -8%, rgb(var(--accent) / 0.18), transparent 28rem),
-      radial-gradient(circle at 88% 8%, rgb(var(--info) / 0.12), transparent 26rem),
+      radial-gradient(80% 55% at 0% -10%, rgb(var(--accent) / 0.05), transparent 60%),
       rgb(var(--surface-base));
     color: rgb(var(--text-primary));
     font-family: Inter, ui-sans-serif, system-ui, sans-serif;
     text-rendering: geometricPrecision;
+  }
+
+  /* Machine-data voice: monospace with tabular figures for timestamps, email
+     addresses, counts, autonomy levels — the "an agent/computer said this" tone
+     that plays against the sans used for human message content. */
+  .mono {
+    font-family: 'JetBrains Mono', 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-variant-numeric: tabular-nums;
   }
 
   ::selection {
@@ -41,6 +51,32 @@
 }
 html.eops-nav-collapsed [data-app-nav] {
   width: 56px;
+}
+
+/* Agent-rail "Live" indicator + collapsed-strip approval pulse. */
+@keyframes eops-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(var(--success) / 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgb(var(--success) / 0);
+  }
+}
+.eops-live-pulse {
+  animation: eops-pulse 2s var(--ease) infinite;
+}
+@keyframes eops-approval-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(var(--warning) / 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgb(var(--warning) / 0);
+  }
+}
+.eops-approval-pulse {
+  animation: eops-approval-pulse 1.8s var(--ease) infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
