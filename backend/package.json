@@ -1,6 +1,6 @@
 {
   "name": "email-ops-backend",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Email-Ops Backend API — the mailbox / thread surface + agent-inbox of the Unicorn Commander suite (Stalwart-fronted)",
   "author": "Magic Unicorn",
   "private": true,

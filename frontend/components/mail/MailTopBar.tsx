@@ -48,6 +48,7 @@ export function MailTopBar({
   activeAgentCount,
   onCompose,
   canCompose,
+  onHelp,
 }: {
   query: string;
   onQuery: (q: string) => void;
@@ -62,6 +63,8 @@ export function MailTopBar({
   activeAgentCount: number | null;
   onCompose: () => void;
   canCompose: boolean;
+  /** Open the command-center Help dialog (the same one the `?` key opens). */
+  onHelp: () => void;
 }) {
   const router = useRouter();
   const { resolved, setPref } = useTheme();
@@ -167,6 +170,16 @@ export function MailTopBar({
           )}
         >
           <RobotIcon className="h-[17px] w-[17px]" />
+        </button>
+
+        <button
+          type="button"
+          onClick={onHelp}
+          title="Help — how Email-Ops works (?)"
+          aria-label="Help — how Email-Ops works"
+          className="grid h-8 w-8 place-items-center rounded-lg border border-transparent text-[15px] font-semibold text-secondary transition-colors hover:bg-surface-overlay hover:text-primary"
+        >
+          ?
         </button>
 
         <button

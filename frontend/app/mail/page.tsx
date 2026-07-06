@@ -515,6 +515,7 @@ export default function MailPage() {
           setComposeOpen(true);
         }}
         canCompose={canCompose}
+        onHelp={() => setHelpOpen(true)}
       />
 
       <div className="flex min-h-0 flex-1">
