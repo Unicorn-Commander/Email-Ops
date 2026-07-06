@@ -41,8 +41,16 @@ function readToken(name: string, fallback: string): string {
 
 /** Build + open a self-contained standalone window for the message(s). */
 function ejectToWindow(subject: string, messages: MessageView[]) {
-  const win = window.open('', '_blank', 'noopener,noreferrer,width=780,height=880');
+  // NB: do NOT pass noopener/noreferrer in the feature string — either token
+  // forces window.open to return null, leaving a blank window that never gets
+  // the document written. Sever the opener manually after opening instead.
+  const win = window.open('', '_blank', 'width=780,height=880');
   if (!win) return; // popup blocked — the overlay remains available
+  try {
+    win.opener = null;
+  } catch {
+    /* opener already severed */
+  }
 
   const bg = readToken('--surface-base', '#0b0b0e');
   const raised = readToken('--surface-raised', '#131318');

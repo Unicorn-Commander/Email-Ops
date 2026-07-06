@@ -261,8 +261,11 @@ export default function MailPage() {
         thread.participants.map((p) => p.address?.toLowerCase()).filter(Boolean) as string[],
       );
       for (const it of pendingItems) {
+        // Subject-only fallback must still pin to a real participant — a
+        // draft with no recipient must NOT paint onto every same-subject
+        // thread, so require a concrete to_address that matches a participant.
         if (it.subject && normSubject(it.subject) === nsub) {
-          if (!it.to_address || parts.has(it.to_address.toLowerCase())) return it;
+          if (it.to_address && parts.has(it.to_address.toLowerCase())) return it;
         }
       }
       return null;

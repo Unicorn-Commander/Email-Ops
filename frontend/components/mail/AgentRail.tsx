@@ -112,7 +112,10 @@ export function AgentRail({
   const [loaded, setLoaded] = useState(false);
 
   const refresh = useCallback(async () => {
-    if (!workspaceId) return;
+    if (!workspaceId) {
+      setLoaded(true); // no workspace → calm empty state, not an endless skeleton
+      return;
+    }
     try {
       const res = await getAgentActivity(workspaceId, 40);
       setActivity(res.items);
