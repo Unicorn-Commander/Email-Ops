@@ -22,6 +22,7 @@
  */
 
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import {
   Fragment,
   useCallback,
@@ -166,6 +167,7 @@ export default function MailPage() {
   // until the user picks Reply / Reply all (Forward opens the full dialog).
   const [composerOpen, setComposerOpen] = useState(false);
   const threadOpen = mail.selectedThreadId !== null;
+  const router = useRouter();
 
   // ── Debounced command-bar search (the box lives in the top bar) ─────────────
   const { setQuery } = mail;
@@ -741,6 +743,32 @@ export default function MailPage() {
       ? unreadByMailbox?.get(selectedMailboxId) ?? null
       : null;
 
+  // Daily brief shown in the reader when no thread is open — assembled from
+  // data already in hand (no extra fetch), with one-key ways to start working.
+  const firstUnread = displayThreads.find((t) => t.unread) ?? null;
+  const brief: BriefData = {
+    mailboxName: listTitle,
+    unread: listUnread,
+    pendingCount: inbox.pendingCount,
+    agentsLive: activeAgentCount,
+    mailboxCount: visibleMailboxes.length,
+    pending: pendingItems.slice(0, 3),
+    hasUnread: firstUnread !== null,
+    onStartTriage: () => {
+      if (firstUnread) selectThread(firstUnread.id, firstUnread.mailbox_id);
+    },
+    onCompose: openCompose,
+    onReviewApprovals: () => router.push('/agent-inbox'),
+    onReviewItem: (it) => {
+      const p = it.payload ?? {};
+      const tid = (p.thread_id ?? p.in_reply_to_thread_id ?? p.conversation_id) as
+        | string
+        | undefined;
+      if (tid) selectThread(String(tid), (p.mailbox_id as string | undefined) ?? undefined);
+      else router.push('/agent-inbox');
+    },
+  };
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-surface-base text-primary">
       <MailTopBar
@@ -858,6 +886,7 @@ export default function MailPage() {
               draftAutonomyLabel={
                 openDraft ? autonomyBadgeFor(openDraft, agents.items) : ''
               }
+              brief={brief}
               onApproveDraft={() => inbox.approve(openDraft!.id)}
               onDiscardDraft={() => inbox.reject(openDraft!.id)}
               onEditDraft={() => {
@@ -1687,6 +1716,7 @@ function Reader({
   onApproveDraft,
   onDiscardDraft,
   onEditDraft,
+  brief,
 }: {
   workspaceId: string | null;
   mailbox: MailboxPick | null;
@@ -1719,6 +1749,7 @@ function Reader({
   onApproveDraft: () => Promise<{ ok: boolean; error?: string }>;
   onDiscardDraft: () => Promise<{ ok: boolean; error?: string }>;
   onEditDraft: () => void;
+  brief: BriefData;
 }) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
@@ -1758,7 +1789,7 @@ function Reader({
     if (!res.ok) setTriageBusy(false);
   };
 
-  if (!threadId) return <NoThreadSelected />;
+  if (!threadId) return <DailyBrief brief={brief} />;
 
   return (
     <div className="flex h-full flex-col bg-surface-raised">
@@ -1788,8 +1819,8 @@ function Reader({
             )}
             {folder !== 'spam' && (
               <ReaderTool
-                label="Mark spam & block sender"
-                onClick={() => void runTriage('SPAM', { blockSender: true })}
+                label="Report spam"
+                onClick={() => void runTriage('SPAM')}
                 disabled={triageBusy}
               >
                 <BanIcon className="h-[17px] w-[17px]" />
@@ -1800,6 +1831,8 @@ function Reader({
                 <TrashIcon className="h-[17px] w-[17px]" />
               </ReaderTool>
             )}
+            {/* Divide destructive triage from safe compose actions. */}
+            <span aria-hidden className="mx-0.5 h-5 w-px bg-border-subtle" />
             <ReaderTool label="Reply" onClick={onFocusReply}>
               <ReplyIcon className="h-[17px] w-[17px]" />
             </ReaderTool>
@@ -2015,33 +2048,195 @@ function Kbd({ children }: { children: ReactNode }) {
   );
 }
 
-function NoThreadSelected() {
+export interface BriefData {
+  mailboxName: string;
+  unread: number | null;
+  pendingCount: number;
+  agentsLive: number | null;
+  mailboxCount: number;
+  pending: AgentInboxItemView[];
+  hasUnread: boolean;
+  onStartTriage: () => void;
+  onCompose: () => void;
+  onReviewApprovals: () => void;
+  onReviewItem: (item: AgentInboxItemView) => void;
+}
+
+function greeting(): string {
+  const h = new Date().getHours();
+  if (h < 5) return 'Good night';
+  if (h < 12) return 'Good morning';
+  if (h < 18) return 'Good afternoon';
+  return 'Good evening';
+}
+
+function BriefStat({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number | null;
+  tone?: 'accent' | 'warn';
+}) {
   return (
-    <div className="hidden h-full flex-col items-center justify-center gap-3.5 p-10 text-center lg:flex">
-      <div className="grid h-14 w-14 place-items-center rounded-2xl border border-subtle bg-surface-raised text-tertiary shadow-token">
-        <MailIcon className="h-6 w-6" />
+    <div className="flex-1 rounded-token border border-subtle bg-surface-base/50 px-3 py-2.5">
+      <div
+        className={cn(
+          'text-[22px] font-bold leading-none tracking-[-0.02em] tabular-nums mono',
+          tone === 'warn' && value ? 'text-warning' : 'text-primary',
+        )}
+      >
+        {value ?? '—'}
       </div>
-      <div className="space-y-1">
-        <p className="text-[15px] font-semibold tracking-[-0.01em] text-primary">
-          Select a conversation
-        </p>
-        <p className="mx-auto max-w-[248px] text-[12px] leading-5 text-tertiary">
-          Pick a thread to read it and reply — or let an agent draft one for you.
-        </p>
+      <div className="mt-1.5 text-[10px] font-medium uppercase tracking-[0.08em] text-tertiary">
+        {label}
       </div>
-      <div className="mt-1 flex flex-wrap items-center justify-center gap-x-2 gap-y-1.5 text-[11px] text-tertiary">
-        <Kbd>J</Kbd>
-        <Kbd>K</Kbd>
-        <span className="text-muted">move</span>
-        <span className="text-border-strong">·</span>
-        <Kbd>↵</Kbd>
-        <span className="text-muted">open</span>
-        <span className="text-border-strong">·</span>
-        <Kbd>C</Kbd>
-        <span className="text-muted">compose</span>
-        <span className="text-border-strong">·</span>
-        <Kbd>?</Kbd>
-        <span className="text-muted">shortcuts</span>
+    </div>
+  );
+}
+
+/** The reader pane when nothing is open — a daily brief that earns the app's
+ *  largest surface: the day's counts, what agents are waiting on you to
+ *  approve, and one-key ways to start working. All from data already in hand. */
+function DailyBrief({ brief }: { brief: BriefData }) {
+  return (
+    <div className="hidden h-full flex-col overflow-y-auto p-8 lg:flex">
+      <div className="mx-auto flex w-full max-w-[560px] flex-col gap-6">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-tertiary">
+            {new Date().toLocaleDateString(undefined, {
+              weekday: 'long',
+              month: 'long',
+              day: 'numeric',
+            })}
+          </p>
+          <h1 className="mt-1 text-[22px] font-bold tracking-[-0.02em] text-primary">
+            {greeting()}
+          </h1>
+          <p className="mt-0.5 text-[13px] text-secondary">
+            Here’s where <span className="text-primary">{brief.mailboxName}</span> stands.
+          </p>
+        </div>
+
+        <div className="flex gap-2.5">
+          <BriefStat label="Unread" value={brief.unread} />
+          <BriefStat label="Needs approval" value={brief.pendingCount} tone="warn" />
+          <BriefStat label="Agents live" value={brief.agentsLive} />
+          <BriefStat label="Inboxes" value={brief.mailboxCount} />
+        </div>
+
+        <div>
+          <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary">
+            Waiting on you
+          </p>
+          {brief.pending.length === 0 ? (
+            <div className="flex items-center gap-3 rounded-token border border-subtle bg-surface-base/50 px-4 py-3.5">
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-success/15 text-success">
+                <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" aria-hidden>
+                  <path
+                    d="M3.5 8.5l3 3 6-7"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
+              <p className="text-[13px] text-secondary">
+                All caught up — no drafts waiting for your approval.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {brief.pending.map((it) => (
+                <button
+                  key={it.id}
+                  type="button"
+                  onClick={() => brief.onReviewItem(it)}
+                  className="group flex w-full items-center gap-3 rounded-token border border-subtle bg-surface-base/50 px-3 py-2.5 text-left transition-colors hover:border-accent/50 hover:bg-accent/[0.06]"
+                >
+                  <span
+                    className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-[11px] font-semibold text-white"
+                    style={avatarHueStyle(it.drafted_by || it.id)}
+                    aria-hidden
+                  >
+                    {initials(agentLabel(it.drafted_by), it.drafted_by)}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-baseline gap-2">
+                      <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-primary">
+                        {it.subject?.trim() || '(no subject)'}
+                      </span>
+                      {it.created_at && (
+                        <span className="shrink-0 text-[11px] tabular-nums text-tertiary mono">
+                          {formatWhen(it.created_at)}
+                        </span>
+                      )}
+                    </span>
+                    <span className="mt-0.5 block truncate text-[12px] text-tertiary">
+                      {agentLabel(it.drafted_by)} drafted
+                      {it.to_address ? ` → ${it.to_address}` : ''}
+                    </span>
+                  </span>
+                  <span className="shrink-0 rounded-md bg-accent px-2.5 py-1 text-[11px] font-semibold text-white opacity-0 transition-opacity group-hover:opacity-100">
+                    Review
+                  </span>
+                </button>
+              ))}
+              {brief.pendingCount > brief.pending.length && (
+                <button
+                  type="button"
+                  onClick={brief.onReviewApprovals}
+                  className="px-1 pt-1 text-[12px] font-medium text-accent hover:underline"
+                >
+                  +{brief.pendingCount - brief.pending.length} more in approvals →
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          {brief.hasUnread && (
+            <button
+              type="button"
+              onClick={brief.onStartTriage}
+              className="inline-flex h-9 items-center gap-2 rounded-lg bg-accent px-4 text-[13px] font-semibold text-white transition-colors hover:bg-accent-hover"
+            >
+              Start triage
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={brief.onCompose}
+            className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface-base px-4 text-[13px] font-semibold text-secondary transition-colors hover:border-accent/60 hover:text-primary"
+          >
+            Compose
+          </button>
+          <button
+            type="button"
+            onClick={brief.onReviewApprovals}
+            className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface-base px-4 text-[13px] font-semibold text-secondary transition-colors hover:border-accent/60 hover:text-primary"
+          >
+            Review approvals
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-t border-subtle pt-4 text-[11px] text-tertiary">
+          <Kbd>J</Kbd>
+          <Kbd>K</Kbd>
+          <span className="text-muted">move</span>
+          <span className="text-border-strong">·</span>
+          <Kbd>↵</Kbd>
+          <span className="text-muted">open</span>
+          <span className="text-border-strong">·</span>
+          <Kbd>C</Kbd>
+          <span className="text-muted">compose</span>
+          <span className="text-border-strong">·</span>
+          <Kbd>⌘K</Kbd>
+          <span className="text-muted">command menu</span>
+        </div>
       </div>
     </div>
   );
