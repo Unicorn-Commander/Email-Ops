@@ -77,6 +77,7 @@ import {
   CheckSquareIcon,
   BanIcon,
   ChevronLeftIcon,
+  ChevronRightIcon,
   SlidersIcon,
   RobotIcon,
 } from '@/components/mail/icons';
@@ -730,7 +731,9 @@ export default function MailPage() {
               : null;
 
   // The 4-column grid (folders · list · reader · rail). iconnav is a flex sibling.
-  const gridCols = `${foldersCollapsed ? '0px' : '236px'} minmax(300px,1.15fr) minmax(360px,1.9fr) ${
+  // Collapsed, the folders pane becomes a slim 56px avatar rail (never 0) so the
+  // webmail never fully vanishes.
+  const gridCols = `${foldersCollapsed ? '56px' : '236px'} minmax(300px,1.15fr) minmax(360px,1.9fr) ${
     railCollapsed ? '44px' : '320px'
   }`;
 
@@ -827,27 +830,49 @@ export default function MailPage() {
           className="grid min-h-0 flex-1 grid-cols-1 transition-[grid-template-columns] duration-token ease-token lg:[grid-template-columns:var(--cols)]"
           style={{ '--cols': gridCols } as CSSProperties}
         >
-          {/* (2) accounts + folders — hidden on mobile; width 0 when collapsed. */}
-          <div className={cn('overflow-hidden max-lg:hidden', foldersCollapsed && 'lg:hidden')}>
-            <FoldersColumn
-              mailboxes={visibleMailboxes}
-              selectedId={
-                mail.unified
-                  ? ALL_INBOXES
-                  : selectedVisible
-                    ? mail.selectedMailbox?.id ?? null
-                    : null
-              }
-              onSelect={mail.selectMailbox}
-              showAllInboxes={showAllInboxes}
-              unreadByMailbox={unreadByMailbox}
-              totalUnread={totalUnread}
-              folder={mail.folder}
-              onSelectFolder={mail.selectFolder}
-              pendingCount={inbox.pendingCount}
-              onManageSenders={() => setSendersOpen(true)}
-              onCollapse={toggleFolders}
-            />
+          {/* (2) accounts + folders — hidden on mobile. Collapses to a slim
+              avatar rail (never fully vanishes) instead of disappearing. */}
+          <div className="overflow-hidden max-lg:hidden">
+            {foldersCollapsed ? (
+              <FoldersRail
+                mailboxes={visibleMailboxes}
+                selectedId={
+                  mail.unified
+                    ? ALL_INBOXES
+                    : selectedVisible
+                      ? mail.selectedMailbox?.id ?? null
+                      : null
+                }
+                onSelect={mail.selectMailbox}
+                showAllInboxes={showAllInboxes}
+                unreadByMailbox={unreadByMailbox}
+                totalUnread={totalUnread}
+                folder={mail.folder}
+                onSelectFolder={mail.selectFolder}
+                pendingCount={inbox.pendingCount}
+                onExpand={toggleFolders}
+              />
+            ) : (
+              <FoldersColumn
+                mailboxes={visibleMailboxes}
+                selectedId={
+                  mail.unified
+                    ? ALL_INBOXES
+                    : selectedVisible
+                      ? mail.selectedMailbox?.id ?? null
+                      : null
+                }
+                onSelect={mail.selectMailbox}
+                showAllInboxes={showAllInboxes}
+                unreadByMailbox={unreadByMailbox}
+                totalUnread={totalUnread}
+                folder={mail.folder}
+                onSelectFolder={mail.selectFolder}
+                pendingCount={inbox.pendingCount}
+                onManageSenders={() => setSendersOpen(true)}
+                onCollapse={toggleFolders}
+              />
+            )}
           </div>
 
           {/* (3) conversation list — the only left pane on mobile until a thread opens. */}
@@ -1209,6 +1234,168 @@ function AccountButton({
       >
         {count == null ? '—' : count > 999 ? '999+' : count || '—'}
       </span>
+    </button>
+  );
+}
+
+/**
+ * Collapsed form of the accounts+folders column: a slim 56px avatar rail so the
+ * webmail never fully vanishes when the folder pane is shut. Mailbox avatars
+ * (switch account) sit over a divider over the folder glyphs (switch folder) —
+ * icon-only mirrors of FoldersColumn, each carrying its unread pip. The chevron
+ * re-expands to the full 236px column.
+ */
+function FoldersRail({
+  mailboxes,
+  selectedId,
+  onSelect,
+  showAllInboxes,
+  unreadByMailbox,
+  totalUnread,
+  folder,
+  onSelectFolder,
+  pendingCount,
+  onExpand,
+}: {
+  mailboxes: MailboxPick[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  showAllInboxes: boolean;
+  unreadByMailbox: Map<string, number> | null;
+  totalUnread: number | null;
+  folder: MailFolder;
+  onSelectFolder: (folder: MailFolder) => void;
+  pendingCount: number;
+  onExpand: () => void;
+}) {
+  return (
+    <aside className="flex h-full w-[56px] flex-col items-center gap-1 overflow-y-auto overflow-x-visible border-r border-subtle bg-surface-raised py-2.5">
+      <button
+        type="button"
+        onClick={onExpand}
+        aria-label="Expand accounts & folders"
+        title="Expand accounts & folders"
+        className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+      >
+        <ChevronRightIcon className="h-[18px] w-[18px]" />
+      </button>
+
+      {/* Accounts — one avatar per mailbox. */}
+      {showAllInboxes && (
+        <RailAvatar
+          active={selectedId === ALL_INBOXES}
+          onClick={() => onSelect(ALL_INBOXES)}
+          gradient
+          initial="∀"
+          title="All inboxes"
+          unread={totalUnread}
+        />
+      )}
+      {mailboxes.map((mb) => {
+        const name = mb.display_name?.trim() || mb.email_address;
+        return (
+          <RailAvatar
+            key={mb.id}
+            active={mb.id === selectedId}
+            onClick={() => onSelect(mb.id)}
+            hue={addressHue(mb.email_address.toLowerCase())}
+            initial={(name.trim()[0] || '?').toUpperCase()}
+            title={`${name} · ${mb.email_address}`}
+            unread={unreadByMailbox?.get(mb.id) ?? null}
+          />
+        );
+      })}
+
+      <div className="my-1 h-px w-6 shrink-0 bg-border-subtle" />
+
+      {/* Needs approval — the human-in-the-loop queue. */}
+      <Link
+        href="/agent-inbox"
+        title="Needs approval"
+        aria-label="Needs approval"
+        className="relative grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+      >
+        <CheckSquareIcon className="h-[18px] w-[18px]" />
+        {pendingCount > 0 && (
+          <span className="absolute -right-0.5 -top-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-lg border-2 border-surface-raised bg-warning px-[3px] text-[9px] font-bold leading-none text-white mono">
+            {pendingCount > 99 ? '99+' : pendingCount}
+          </span>
+        )}
+      </Link>
+
+      {/* Folders — icon-only, active glyph filled. */}
+      {FOLDERS.map((f) => {
+        const Glyph = FOLDER_GLYPH[f.id];
+        const active = f.id === folder;
+        return (
+          <button
+            key={f.id}
+            type="button"
+            onClick={() => onSelectFolder(f.id)}
+            aria-current={active}
+            aria-label={f.label}
+            title={f.label}
+            className={cn(
+              'grid h-9 w-9 shrink-0 place-items-center rounded-[9px] transition-colors',
+              active
+                ? 'bg-accent/[0.13] text-accent'
+                : 'text-tertiary hover:bg-surface-overlay hover:text-secondary',
+            )}
+          >
+            <Glyph className="h-[18px] w-[18px]" />
+          </button>
+        );
+      })}
+    </aside>
+  );
+}
+
+function RailAvatar({
+  active,
+  onClick,
+  hue,
+  gradient,
+  initial,
+  title,
+  unread,
+}: {
+  active: boolean;
+  onClick: () => void;
+  hue?: number;
+  gradient?: boolean;
+  initial: string;
+  title: string;
+  unread: number | null;
+}) {
+  const hasUnread = unread != null && unread > 0;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active}
+      title={title}
+      className="relative grid h-9 w-9 shrink-0 place-items-center"
+    >
+      <span
+        className={cn(
+          'grid h-[30px] w-[30px] place-items-center rounded-full text-[12px] font-semibold text-white transition-transform',
+          active
+            ? 'ring-2 ring-accent ring-offset-2 ring-offset-surface-raised'
+            : 'opacity-90 hover:scale-105 hover:opacity-100',
+        )}
+        style={
+          gradient
+            ? { background: 'linear-gradient(135deg,rgb(var(--accent)),rgb(var(--accent-2)))' }
+            : { background: `linear-gradient(140deg, hsl(${hue} 70% 56%), hsl(${hue} 62% 45%))` }
+        }
+      >
+        {initial}
+      </span>
+      {hasUnread && (
+        <span className="absolute right-0 top-0 grid h-[15px] min-w-[15px] place-items-center rounded-lg border-2 border-surface-raised bg-accent px-[3px] text-[9px] font-bold leading-none text-white mono">
+          {unread > 99 ? '99+' : unread}
+        </span>
+      )}
     </button>
   );
 }
