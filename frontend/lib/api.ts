@@ -184,6 +184,8 @@ export interface EmailOpsUser {
   username: string;
   firstName: string;
   lastName: string;
+  /** Avatar URL from the Keycloak `picture` claim (suite avatar spine). */
+  picture?: string | null;
 }
 
 export async function fetchProfile(token?: string): Promise<EmailOpsUser> {

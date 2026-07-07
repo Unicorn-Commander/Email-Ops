@@ -15,7 +15,14 @@ import { useRouter } from 'next/navigation';
 import { cn } from '@/components/ui';
 import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
 import { useTheme } from '@/state/theme';
-import { clearSession, getStoredUser, type EmailOpsUser } from '@/lib/api';
+import {
+  clearSession,
+  fetchProfile,
+  getStoredUser,
+  setSession,
+  getToken,
+  type EmailOpsUser,
+} from '@/lib/api';
 import {
   SearchIcon,
   PlusIcon,
@@ -34,6 +41,62 @@ function initialsOf(user: EmailOpsUser | null): string {
   const parts = handle.split(/[@\s._-]+/).filter(Boolean);
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
   return (parts[0]?.slice(0, 2) || 'YO').toUpperCase();
+}
+
+/**
+ * The stored session only holds the token (SSO stored `null` for the user), so
+ * the avatar fell back to "YO". Hydrate the real profile (name + Keycloak
+ * `picture`) once on mount so existing sessions get correct initials/photo
+ * without needing to sign in again.
+ */
+function useHydratedUser(): EmailOpsUser | null {
+  const [user, setUser] = useState<EmailOpsUser | null>(() => getStoredUser<EmailOpsUser>());
+  useEffect(() => {
+    if (user?.firstName || user?.picture) return;
+    const token = getToken();
+    if (!token) return;
+    let alive = true;
+    fetchProfile(token)
+      .then((p) => {
+        if (!alive) return;
+        setSession(token, p);
+        setUser(p);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [user?.firstName, user?.picture]);
+  return user;
+}
+
+/** Avatar disc — the Keycloak photo when we have one, else gradient initials. */
+function Avatar({ user, size }: { user: EmailOpsUser | null; size: number }) {
+  const cls = 'shrink-0 overflow-hidden rounded-full';
+  if (user?.picture) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={user.picture}
+        alt=""
+        width={size}
+        height={size}
+        className={cn(cls, 'object-cover')}
+        style={{ width: size, height: size }}
+      />
+    );
+  }
+  return (
+    <span
+      className={cn(
+        cls,
+        'grid place-items-center bg-gradient-to-br from-[#f0883e] to-[#d9534f] font-semibold text-white',
+      )}
+      style={{ width: size, height: size, fontSize: Math.round(size * 0.4) }}
+    >
+      {initialsOf(user)}
+    </span>
+  );
 }
 
 export function MailTopBar({
@@ -71,7 +134,7 @@ export function MailTopBar({
   onCommandPalette?: () => void;
 }) {
   const { resolved, setPref } = useTheme();
-  const user = getStoredUser<EmailOpsUser>();
+  const user = useHydratedUser();
 
   // ⌘K / Ctrl-K opens the command palette from anywhere on the surface. (The `/`
   // shortcut still focuses the search box for a plain text search.)
@@ -256,11 +319,11 @@ function AccountMenu({ user }: { user: EmailOpsUser | null }) {
         title={user?.email ?? 'Account'}
         aria-label="Account menu"
         className={cn(
-          'grid h-[30px] w-[30px] shrink-0 place-items-center rounded-full bg-gradient-to-br from-[#f0883e] to-[#d9534f] text-[12px] font-semibold text-white transition-shadow',
+          'shrink-0 rounded-full transition-shadow',
           open && 'ring-2 ring-accent/60 ring-offset-2 ring-offset-surface-raised',
         )}
       >
-        {initialsOf(user)}
+        <Avatar user={user} size={30} />
       </button>
 
       {open && (
@@ -269,9 +332,7 @@ function AccountMenu({ user }: { user: EmailOpsUser | null }) {
           className="eops-rise-in absolute right-0 top-[calc(100%+8px)] z-50 w-64 overflow-hidden rounded-xl border border-subtle bg-surface-overlay shadow-pop"
         >
           <div className="flex items-center gap-3 border-b border-subtle px-3.5 py-3">
-            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-[#f0883e] to-[#d9534f] text-[13px] font-semibold text-white">
-              {initialsOf(user)}
-            </span>
+            <Avatar user={user} size={36} />
             <span className="min-w-0">
               <span className="block truncate text-[13px] font-semibold text-primary">{name}</span>
               {user?.email && (

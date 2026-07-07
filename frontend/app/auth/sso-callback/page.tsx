@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { setSession } from '@/lib/api';
+import { setSession, fetchProfile } from '@/lib/api';
 import { Skeleton } from '@/components/ui';
 
 function Callback() {
@@ -12,7 +12,12 @@ function Callback() {
     const token = params.get('token');
     if (token) {
       setSession(token, null);
-      router.replace('/dashboard');
+      // Hydrate the profile so the account avatar shows real initials/photo
+      // instead of a fallback; never block the redirect on it.
+      fetchProfile(token)
+        .then((u) => setSession(token, u))
+        .catch(() => {})
+        .finally(() => router.replace('/dashboard'));
     } else {
       router.replace('/auth/login');
     }
