@@ -746,9 +746,13 @@ export default function MailPage() {
   // Daily brief shown in the reader when no thread is open — assembled from
   // data already in hand (no extra fetch), with one-key ways to start working.
   const firstUnread = displayThreads.find((t) => t.unread) ?? null;
+  // The per-mailbox aggregate can lag/read 0 for Stalwart mailboxes even when
+  // rows are flagged unread — never show 0 next to a visibly-unread list; fall
+  // back to at least the count of loaded unread threads.
+  const loadedUnread = displayThreads.reduce((n, t) => n + (t.unread ? 1 : 0), 0);
   const brief: BriefData = {
     mailboxName: listTitle,
-    unread: listUnread,
+    unread: Math.max(listUnread ?? 0, loadedUnread) || null,
     pendingCount: inbox.pendingCount,
     agentsLive: activeAgentCount,
     mailboxCount: visibleMailboxes.length,
@@ -850,6 +854,9 @@ export default function MailPage() {
               rowRefs={rowRefs}
               draftForThread={draftForThread}
               selfAddresses={selfAddresses}
+              onBulk={(a) => void runBulk(a)}
+              onQuickTriage={(id, d) => void triageAndAdvance(id, d)}
+              onQuickMark={(id, read) => mail.markRead([id], read)}
             />
           </section>
 
@@ -1226,6 +1233,9 @@ function ConversationList({
   rowRefs,
   draftForThread,
   selfAddresses,
+  onBulk,
+  onQuickTriage,
+  onQuickMark,
 }: {
   banner: ListBanner | null;
   error: string | null;
@@ -1251,8 +1261,12 @@ function ConversationList({
   rowRefs: RefObject<Map<string, HTMLButtonElement>>;
   draftForThread: (thread: ThreadView | null) => AgentInboxItemView | null;
   selfAddresses: ReadonlySet<string>;
+  onBulk: (action: BulkAction) => void;
+  onQuickTriage: (id: string, disposition: 'ARCHIVE' | 'TRASH') => void;
+  onQuickMark: (id: string, read: boolean) => void;
 }) {
   const allChecked = threads.length > 0 && selected.size >= threads.length;
+  const anySelected = selected.size > 0;
 
   return (
     <div className="flex h-full flex-col">
@@ -1283,19 +1297,40 @@ function ConversationList({
       </div>
 
       {selectable && threads.length > 0 && load === 'ready' && !banner && (
-        <div className="flex items-center gap-2 border-b border-subtle px-4 py-1.5">
+        <div
+          className={cn(
+            'flex items-center gap-2 border-b border-subtle px-4 py-1.5 transition-colors',
+            anySelected && 'bg-surface-overlay/60',
+          )}
+        >
           <label className="inline-flex cursor-pointer select-none items-center gap-1.5">
             <input
               type="checkbox"
+              ref={(el) => {
+                if (el) el.indeterminate = anySelected && !allChecked;
+              }}
               checked={allChecked}
               onChange={onToggleSelectAll}
               aria-label="Select all conversations in view"
               className="h-3.5 w-3.5 cursor-pointer accent-accent"
             />
-            <span className="text-[11px] text-tertiary">
-              {selected.size > 0 ? `${selected.size} selected` : 'Select all'}
+            <span className={cn('text-[11px]', anySelected ? 'text-secondary' : 'text-tertiary')}>
+              {anySelected ? `${selected.size} selected` : 'Select all'}
             </span>
           </label>
+          {anySelected && (
+            <div className="ml-auto flex items-center gap-1">
+              <BulkButton label="Archive" onClick={() => onBulk('archive')}>
+                <ArchiveIcon className="h-3.5 w-3.5" />
+              </BulkButton>
+              <BulkButton label="Trash" onClick={() => onBulk('trash')}>
+                <TrashIcon className="h-3.5 w-3.5" />
+              </BulkButton>
+              <BulkButton label="Mark read" onClick={() => onBulk('read')}>
+                <CheckSquareIcon className="h-3.5 w-3.5" />
+              </BulkButton>
+            </div>
+          )}
         </div>
       )}
 
@@ -1345,6 +1380,8 @@ function ConversationList({
                       onSelect={() => onSelect(t)}
                       draft={draftForThread(t)}
                       selfAddresses={selfAddresses}
+                      onQuickTriage={onQuickTriage}
+                      onQuickMark={onQuickMark}
                       refCb={(el) => {
                         if (el) rowRefs.current?.set(t.id, el);
                         else rowRefs.current?.delete(t.id);
@@ -1381,6 +1418,8 @@ function ConversationRow({
   draft,
   refCb,
   selfAddresses,
+  onQuickTriage,
+  onQuickMark,
 }: {
   thread: ThreadView;
   active: boolean;
@@ -1394,6 +1433,8 @@ function ConversationRow({
   draft: AgentInboxItemView | null;
   refCb: (el: HTMLButtonElement | null) => void;
   selfAddresses: ReadonlySet<string>;
+  onQuickTriage: (id: string, disposition: 'ARCHIVE' | 'TRASH') => void;
+  onQuickMark: (id: string, read: boolean) => void;
 }) {
   const when = useMemo(() => formatWhen(thread.last_message_at), [thread.last_message_at]);
   // The people who AREN'T you — the list should surface the other party, never
@@ -1480,7 +1521,7 @@ function ConversationRow({
           {when && (
             <span
               className={cn(
-                'shrink-0 text-right text-[11px] tabular-nums mono',
+                'shrink-0 text-right text-[11px] tabular-nums mono transition-opacity group-hover:opacity-0',
                 thread.unread ? 'font-medium text-secondary' : 'text-tertiary',
               )}
             >
@@ -1525,7 +1566,75 @@ function ConversationRow({
           )}
         </span>
       </button>
+      {/* Hover triage — sits over the timestamp slot so you can archive/trash/
+          mark-read without opening the thread. Keyboard-reachable, hidden until
+          hover/focus-within so it never adds resting clutter. */}
+      <div className="pointer-events-none absolute right-2 top-2 flex items-center gap-0.5 rounded-lg border border-subtle bg-surface-raised/95 p-0.5 opacity-0 shadow-token backdrop-blur transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
+        <RowAction label="Archive" onClick={() => onQuickTriage(thread.id, 'ARCHIVE')}>
+          <ArchiveIcon className="h-4 w-4" />
+        </RowAction>
+        <RowAction label={thread.unread ? 'Mark read' : 'Mark unread'} onClick={() => onQuickMark(thread.id, thread.unread)}>
+          <CheckSquareIcon className="h-4 w-4" />
+        </RowAction>
+        <RowAction label="Trash" danger onClick={() => onQuickTriage(thread.id, 'TRASH')}>
+          <TrashIcon className="h-4 w-4" />
+        </RowAction>
+      </div>
     </div>
+  );
+}
+
+function BulkButton({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className="grid h-7 w-7 place-items-center rounded-md text-secondary transition-colors hover:bg-surface-elevated hover:text-primary"
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Per-row hover action — appears on the right of a conversation row so you can
+ *  triage without opening it. Stops propagation so it never selects the row. */
+function RowAction({
+  label,
+  onClick,
+  danger,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      className={cn(
+        'grid h-7 w-7 place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-elevated',
+        danger ? 'hover:text-danger' : 'hover:text-primary',
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
