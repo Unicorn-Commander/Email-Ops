@@ -22,6 +22,7 @@ import {
   InboxTrayIcon,
   TrashIcon,
   GearIcon,
+  BarChartIcon,
 } from './icons';
 
 type NavItem = {
@@ -37,11 +38,12 @@ const TOP: NavItem[] = [
   { href: '/agent-inbox', label: 'Approvals', icon: CheckSquareIcon, badgeKey: 'approvals' },
   { href: '/agents', label: 'Agents', icon: RobotIcon },
   { href: '/mailboxes', label: 'Mailboxes', icon: InboxTrayIcon },
+  { href: '/insights', label: 'Insights', icon: BarChartIcon },
 ];
 
 const BOTTOM: NavItem[] = [
   { href: '/cleanup', label: 'Cleanup', icon: TrashIcon },
-  { href: '/accounts', label: 'Settings', icon: GearIcon },
+  { href: '/accounts', label: 'Accounts', icon: GearIcon },
 ];
 
 export function MailIconNav({ pendingCount }: { pendingCount: number }) {

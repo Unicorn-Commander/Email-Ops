@@ -44,6 +44,15 @@ export const GridIcon = (p: SVGProps<SVGSVGElement>) => (
   </Svg>
 );
 
+export const BarChartIcon = (p: SVGProps<SVGSVGElement>) => (
+  <Svg {...p}>
+    <path d="M3 21h18" />
+    <rect x="5" y="11" width="4" height="7" rx="1" />
+    <rect x="11" y="6" width="4" height="12" rx="1" />
+    <rect x="17" y="14" width="4" height="4" rx="1" />
+  </Svg>
+);
+
 export const CheckSquareIcon = (p: SVGProps<SVGSVGElement>) => (
   <Svg {...p}>
     <path d="M9 11l3 3L22 4" />
