@@ -9,7 +9,8 @@
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { cn } from '@/components/ui';
-import { assistantChat } from '@/lib/api';
+import { assistantChat, assistantChatStream } from '@/lib/api';
+import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 import { RobotIcon, SendSolidIcon } from './icons';
 
 /** Inline **bold** and `code` within one line → React nodes (no HTML injection). */
@@ -134,6 +135,8 @@ export function AgentChat({
   const [busy, setBusy] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const { activeWorkspace } = useActiveWorkspace();
+  const workspaceId = activeWorkspace?.workspace_id ?? null;
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
@@ -150,21 +153,48 @@ export function AgentChat({
       setBusy(true);
       try {
         const ctx = getContext?.() ?? {};
-        const res = await assistantChat(text, ctx);
-        setMessages((m) =>
-          m.map((x) =>
-            x.id === thinking.id
-              ? { ...x, text: res.response, pending: false, error: !res.ok }
-              : x,
-          ),
-        );
+        if (workspaceId) {
+          // Streamed reply — types out live as tokens arrive.
+          let acc = '';
+          await assistantChatStream(workspaceId, text, ctx, {
+            onToken: (delta) => {
+              acc += delta;
+              setMessages((m) =>
+                m.map((x) => (x.id === thinking.id ? { ...x, text: acc, pending: false } : x)),
+              );
+            },
+            onError: () => {
+              setMessages((m) =>
+                m.map((x) => (x.id === thinking.id ? { ...x, pending: false, error: true } : x)),
+              );
+            },
+          });
+          // Settle the bubble: drop the typing state and guard the empty-reply edge.
+          setMessages((m) =>
+            m.map((x) => {
+              if (x.id !== thinking.id) return x;
+              if (x.error) return { ...x, pending: false };
+              return { ...x, pending: false, text: x.text || '(No response.)' };
+            }),
+          );
+        } else {
+          // No active workspace resolved — fall back to the buffered turn.
+          const res = await assistantChat(text, ctx);
+          setMessages((m) =>
+            m.map((x) =>
+              x.id === thinking.id
+                ? { ...x, text: res.response, pending: false, error: !res.ok }
+                : x,
+            ),
+          );
+        }
       } catch {
         setMessages((m) =>
           m.map((x) =>
             x.id === thinking.id
               ? {
                   ...x,
-                  text: 'Something went wrong reaching the assistant. Try again.',
+                  text: x.text || 'Something went wrong reaching the assistant. Try again.',
                   pending: false,
                   error: true,
                 }
@@ -176,7 +206,7 @@ export function AgentChat({
         taRef.current?.focus();
       }
     },
-    [busy, getContext],
+    [busy, getContext, workspaceId],
   );
 
   const empty = messages.length === 0;

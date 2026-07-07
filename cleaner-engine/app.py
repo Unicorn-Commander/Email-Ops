@@ -528,6 +528,35 @@ def ai_chat(request: AiChatRequest) -> dict[str, str]:
     return {"response": response}
 
 
+@app.post("/ai/chat/stream", dependencies=[Depends(_require_engine_token)])
+def ai_chat_stream(request: AiChatRequest):
+    """Streaming chat: SSE `token` frames for the prose reply, then one `actions`
+    frame (proposed confirm-before-anything actions), then `done`."""
+    cfg = _get_config()
+
+    def generate():
+        if not cfg.litellm_base_url:
+            yield _sse_event("token", {"delta": "ai_unavailable: LITELLM_BASE_URL is not configured"})
+            yield _sse_event("actions", {"actions": []})
+            yield _sse_event("done", {})
+            return
+
+        llm = _build_llm_analyzer()
+        try:
+            for kind, payload in llm.chat_stream(request.message, context=request.context):
+                if kind == "token":
+                    yield _sse_event("token", {"delta": payload})
+                elif kind == "actions":
+                    yield _sse_event("actions", {"actions": payload})
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("ai_chat_stream failed")
+            yield _sse_event("token", {"delta": f"\n\n_(The assistant hit an error: {exc})_"})
+            yield _sse_event("actions", {"actions": []})
+        yield _sse_event("done", {})
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 @app.post("/ai/models", dependencies=[Depends(_require_engine_token)], response_model=AiModelsResponse)
 def ai_models() -> AiModelsResponse:
     llm = _build_llm_analyzer()

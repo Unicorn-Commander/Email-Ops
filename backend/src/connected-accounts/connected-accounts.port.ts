@@ -30,6 +30,17 @@ export abstract class ConnectedAccountsEnginePort {
 
   abstract chat(message: string, context?: Record<string, unknown>): Promise<string | null>;
 
+  /**
+   * Open a streaming chat turn against the engine. Returns the raw `text/event-stream`
+   * Response (SSE `token` / `actions` / `done` frames) so the caller can proxy it, or
+   * null when the engine is dormant/unreachable. No client-side timeout — the caller
+   * owns the stream lifetime.
+   */
+  abstract chatStream(
+    message: string,
+    context?: Record<string, unknown>,
+  ): Promise<Response | null>;
+
   abstract getInboxStats(
     provider: 'gmail' | 'microsoft',
     credentials: Record<string, unknown>,

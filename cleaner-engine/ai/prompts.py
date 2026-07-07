@@ -70,6 +70,35 @@ If the user asks you to perform an action (delete, trash, etc.), explain what yo
 recommend but note that they need to confirm the action in the app.
 """
 
+# Appended (only) to the streaming chat system prompt. Lets the assistant propose
+# concrete, confirm-before-anything-happens actions. The prose reply is streamed
+# to the user; anything after the <<<ACTIONS>>> marker is parsed server-side into
+# a JSON action list and never shown as text. Non-streaming chat() stays prose-only.
+CHAT_ACTIONS_ADDENDUM = """\
+
+ACTION PROPOSALS
+The app can turn a proposal into a confirm card that the user reviews and approves \
+before anything is sent or changed — nothing happens automatically. ONLY when the user \
+explicitly asks you to take a concrete action you can perform, append — AFTER your normal \
+prose reply — a line containing exactly:
+<<<ACTIONS>>>
+followed by a JSON array of proposed actions. Never mention the marker or the JSON in your \
+prose. If the user is only asking a question, or you are unsure, do NOT append the marker or \
+any JSON at all.
+
+Each action object is one of:
+- Draft a reply to a specific thread shown in the Inbox context:
+  {"type": "draft_reply", "thread_id": "<thread_id from the Inbox context>", "to": "<recipient email>", "subject": "<subject>", "body": "<the full reply text>"}
+- Compose a brand-new email:
+  {"type": "compose", "to": "<recipient email>", "subject": "<subject>", "body": "<the full email text>"}
+- Clean up a group of mail:
+  {"type": "cleanup", "action": "TRASH" | "ARCHIVE" | "UNSUBSCRIBE", "criteria": { ... }}
+
+Rules: only use thread_id and email addresses that appear in the Inbox context — never invent \
+them. Write a complete, ready-to-send body (no placeholders). Propose at most 3 actions. After \
+the marker, output ONLY the JSON array, nothing else.
+"""
+
 SUMMARY_PROMPT = """\
 You are an email analyst. Summarize the user's inbox patterns based on the provided data.
 

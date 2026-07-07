@@ -149,6 +149,37 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
     return res?.response ?? null;
   }
 
+  /**
+   * Streaming chat — POSTs to the engine's SSE endpoint and returns the raw Response
+   * so the controller can proxy the `token`/`actions`/`done` frames to the browser.
+   * Deliberately bypasses `fetchWithTimeout` (a long stream must not be aborted at
+   * the 10s buffered-request timeout); returns null when the engine is dormant.
+   */
+  async chatStream(
+    message: string,
+    context: Record<string, unknown> = {},
+  ): Promise<Response | null> {
+    const url = this.endpoint('/ai/chat/stream');
+    if (!url || !this.token) return null;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { ...this.headers(), Accept: 'text/event-stream' },
+        body: JSON.stringify({ message, context }),
+      });
+      if (!res.ok) {
+        this.logger.warn(`Cleaner Engine HTTP ${res.status} on /ai/chat/stream`);
+        return null;
+      }
+      return res;
+    } catch (err) {
+      this.logger.warn(
+        `Cleaner Engine transport error on /ai/chat/stream: ${(err as Error).message}`,
+      );
+      return null;
+    }
+  }
+
   async analyzeInbox(
     provider: 'gmail' | 'microsoft',
     credentials: Record<string, unknown>,

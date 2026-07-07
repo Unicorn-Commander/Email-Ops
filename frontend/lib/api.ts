@@ -122,6 +122,98 @@ export async function assistantChat(
   return apiPost<AssistantChatResult>('/assistant/chat', { message, context: context ?? {} }, token);
 }
 
+/** A confirm-before-anything action the assistant proposes from a chat turn. */
+export interface AssistantAction {
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface AssistantStreamHandlers {
+  /** Called for each prose delta as it arrives — append to the live reply. */
+  onToken: (delta: string) => void;
+  /** Called once at the end with any proposed actions (may be empty). */
+  onActions?: (actions: AssistantAction[]) => void;
+  /** Called when the stream reports an error (before or during streaming). */
+  onError?: () => void;
+}
+
+/** Parse one SSE frame (`event:` + `data:` lines) into a typed event. */
+function parseSseFrame(frame: string): { event: string; data: Record<string, unknown> } | null {
+  let event = 'message';
+  const dataLines: string[] = [];
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
+  }
+  if (dataLines.length === 0) return null;
+  try {
+    return { event, data: JSON.parse(dataLines.join('\n')) as Record<string, unknown> };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Streaming assistant turn — the reply types out live, then any proposed actions
+ * arrive. Workspace-scoped so the backend can resolve the acting user + workspace
+ * (and, for actions, stage into that workspace's approval queue). `context` is the
+ * same light digest as `assistantChat` — subjects/senders/snippets only.
+ */
+export async function assistantChatStream(
+  workspaceId: string,
+  message: string,
+  context: Record<string, unknown> | undefined,
+  handlers: AssistantStreamHandlers,
+  token?: string,
+): Promise<void> {
+  const bearer = token ?? getToken();
+  const res = await fetch(
+    `${API_BASE}/workspaces/${encodeURIComponent(workspaceId)}/assistant/chat/stream`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+      },
+      body: JSON.stringify({ message, context: context ?? {} }),
+    },
+  );
+  if (!res.ok || !res.body) {
+    handlers.onError?.();
+    throw new ApiError(res.status, `chat stream failed: ${res.status}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let sawError = false;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep: number;
+    while ((sep = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      const evt = parseSseFrame(frame);
+      if (!evt) continue;
+      if (evt.event === 'token') {
+        const delta = typeof evt.data.delta === 'string' ? evt.data.delta : '';
+        if (delta) handlers.onToken(delta);
+      } else if (evt.event === 'actions') {
+        const actions = Array.isArray(evt.data.actions)
+          ? (evt.data.actions as AssistantAction[])
+          : [];
+        handlers.onActions?.(actions);
+      } else if (evt.event === 'error') {
+        sawError = true;
+      }
+    }
+  }
+  if (sawError) handlers.onError?.();
+}
+
 /** Authenticated PATCH against the backend. Throws ApiError on non-2xx. */
 export async function apiPatch<T = unknown>(
   path: string,
