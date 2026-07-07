@@ -759,7 +759,11 @@ export default function MailPage() {
         (p) => !p.address || !selfAddresses.has(p.address.toLowerCase().trim()),
       );
       return {
+        // thread_id + from_address let the assistant thread a reply to the right
+        // conversation and address the right person (metadata only, never bodies).
+        thread_id: t.id,
         from: other?.name?.trim() || other?.address || 'Unknown',
+        from_address: other?.address ?? null,
         subject: t.subject?.trim() || '(no subject)',
         snippet: (t.last_snippet ?? '').slice(0, 140),
         unread: !!t.unread,
