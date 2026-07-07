@@ -10,7 +10,7 @@
  * full-bleed /mail surface, so every affordance it used to host lives here.
  */
 
-import { useEffect, type RefObject } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import { useRouter } from 'next/navigation';
 import { cn } from '@/components/ui';
 import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
@@ -23,6 +23,7 @@ import {
   MoonIcon,
   RobotIcon,
   ChevronRightIcon,
+  GearIcon,
 } from './icons';
 
 function initialsOf(user: EmailOpsUser | null): string {
@@ -69,7 +70,6 @@ export function MailTopBar({
   /** Open the ⌘K command palette. */
   onCommandPalette?: () => void;
 }) {
-  const router = useRouter();
   const { resolved, setPref } = useTheme();
   const user = getStoredUser<EmailOpsUser>();
 
@@ -214,19 +214,135 @@ export function MailTopBar({
           <span className="hidden sm:inline">Compose</span>
         </button>
 
-        <button
-          type="button"
-          onClick={() => {
-            clearSession();
-            router.replace('/auth/login');
-          }}
-          title={`${user?.email ?? 'Sign out'} — sign out`}
-          aria-label="Sign out"
-          className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-full bg-gradient-to-br from-[#f0883e] to-[#d9534f] text-[12px] font-semibold text-white"
-        >
-          {initialsOf(user)}
-        </button>
+        <AccountMenu user={user} />
       </div>
     </header>
+  );
+}
+
+function AccountMenu({ user }: { user: EmailOpsUser | null }) {
+  const router = useRouter();
+  const { resolved, setPref } = useTheme();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const name =
+    [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim() ||
+    user?.username ||
+    user?.email ||
+    'Signed in';
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={user?.email ?? 'Account'}
+        aria-label="Account menu"
+        className={cn(
+          'grid h-[30px] w-[30px] shrink-0 place-items-center rounded-full bg-gradient-to-br from-[#f0883e] to-[#d9534f] text-[12px] font-semibold text-white transition-shadow',
+          open && 'ring-2 ring-accent/60 ring-offset-2 ring-offset-surface-raised',
+        )}
+      >
+        {initialsOf(user)}
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          className="eops-rise-in absolute right-0 top-[calc(100%+8px)] z-50 w-64 overflow-hidden rounded-xl border border-subtle bg-surface-overlay shadow-pop"
+        >
+          <div className="flex items-center gap-3 border-b border-subtle px-3.5 py-3">
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-[#f0883e] to-[#d9534f] text-[13px] font-semibold text-white">
+              {initialsOf(user)}
+            </span>
+            <span className="min-w-0">
+              <span className="block truncate text-[13px] font-semibold text-primary">{name}</span>
+              {user?.email && (
+                <span className="block truncate text-[12px] text-tertiary">{user.email}</span>
+              )}
+            </span>
+          </div>
+
+          <div className="p-1">
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => setPref(resolved === 'dark' ? 'light' : 'dark')}
+              className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] text-secondary transition-colors hover:bg-surface-elevated hover:text-primary"
+            >
+              {resolved === 'dark' ? (
+                <SunIcon className="h-4 w-4" />
+              ) : (
+                <MoonIcon className="h-4 w-4" />
+              )}
+              {resolved === 'dark' ? 'Light theme' : 'Dark theme'}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                router.push('/accounts');
+              }}
+              className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] text-secondary transition-colors hover:bg-surface-elevated hover:text-primary"
+            >
+              <GearIcon className="h-4 w-4" />
+              Accounts &amp; settings
+            </button>
+          </div>
+
+          <div className="border-t border-subtle p-1">
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                clearSession();
+                router.replace('/auth/login');
+              }}
+              className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] text-secondary transition-colors hover:bg-danger/10 hover:text-danger"
+            >
+              <SignOutIcon className="h-4 w-4" />
+              Sign out
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SignOutIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M15 4h3a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-3" />
+      <path d="M10 17l-5-5 5-5" />
+      <path d="M5 12h11" />
+    </svg>
   );
 }
