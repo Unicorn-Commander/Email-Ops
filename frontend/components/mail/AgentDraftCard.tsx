@@ -54,15 +54,15 @@ export function AgentDraftCard({
         <span className="grid h-[22px] w-[22px] place-items-center rounded-md bg-accent text-white">
           <RobotIcon className="h-[13px] w-[13px]" />
         </span>
-        <span className="text-[13px] font-[620] text-primary">
+        <span className="text-[13px] font-semibold text-primary">
           {agentLabel(item.drafted_by)} drafted a reply
         </span>
-        <span className="ml-auto rounded-md bg-warning/[0.14] px-2 py-0.5 text-[10.5px] font-bold uppercase tracking-[0.04em] text-warning mono">
+        <span className="ml-auto rounded-md bg-warning/[0.14] px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.04em] text-warning mono">
           {autonomyLabel}
         </span>
       </div>
 
-      <div className="px-4 py-3.5 text-[13.5px] leading-[1.6] text-secondary">
+      <div className="px-4 py-3.5 text-[13px] leading-[1.6] text-secondary">
         {item.subject && (
           <p className="mb-1.5 truncate text-[11px] font-medium uppercase tracking-wide text-tertiary">
             {item.subject}
@@ -77,7 +77,7 @@ export function AgentDraftCard({
           type="button"
           disabled={busy !== null}
           onClick={() => void run('approve', onApprove)}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accent px-3.5 text-[12.5px] font-semibold text-white shadow-[0_2px_8px_-2px_rgb(var(--accent)/0.5)] transition-colors hover:bg-accent-hover disabled:opacity-60"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accent px-3.5 text-[12px] font-semibold text-white shadow-[0_2px_8px_-2px_rgb(var(--accent)/0.5)] transition-colors hover:bg-accent-hover disabled:opacity-60"
         >
           <SendSolidIcon className="h-[14px] w-[14px]" />
           {busy === 'approve' ? 'Sending…' : 'Approve & send'}
@@ -86,7 +86,7 @@ export function AgentDraftCard({
           type="button"
           disabled={busy !== null}
           onClick={onEdit}
-          className="inline-flex h-8 items-center rounded-lg border border-border px-3.5 text-[12.5px] font-semibold text-secondary transition-colors hover:border-muted hover:text-primary disabled:opacity-60"
+          className="inline-flex h-8 items-center rounded-lg border border-border px-3.5 text-[12px] font-semibold text-secondary transition-colors hover:border-muted hover:text-primary disabled:opacity-60"
         >
           Edit
         </button>
@@ -94,7 +94,7 @@ export function AgentDraftCard({
           type="button"
           disabled={busy !== null}
           onClick={() => void run('discard', onDiscard)}
-          className="inline-flex h-8 items-center rounded-lg border border-transparent px-3.5 text-[12.5px] font-semibold text-secondary transition-colors hover:text-primary disabled:opacity-60"
+          className="inline-flex h-8 items-center rounded-lg border border-transparent px-3.5 text-[12px] font-semibold text-secondary transition-colors hover:text-primary disabled:opacity-60"
         >
           {busy === 'discard' ? 'Discarding…' : 'Discard'}
         </button>

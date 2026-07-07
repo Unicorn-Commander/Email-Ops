@@ -70,7 +70,7 @@ export function MailIconNav({ pendingCount }: { pendingCount: number }) {
         )}
         <Glyph className="h-[18px] w-[18px]" />
         {badge > 0 && (
-          <span className="absolute -right-0.5 -top-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-lg border-2 border-surface-raised bg-accent px-[3px] text-[9.5px] font-bold leading-none text-white mono">
+          <span className="absolute -right-0.5 -top-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-lg border-2 border-surface-raised bg-accent px-[3px] text-[9px] font-bold leading-none text-white mono">
             {badge > 99 ? '99+' : badge}
           </span>
         )}

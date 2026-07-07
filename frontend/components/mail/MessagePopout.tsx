@@ -192,7 +192,7 @@ export function MessagePopout({
             <i className="block h-[11px] w-[11px] rounded-full bg-[#febc2e]" />
             <i className="block h-[11px] w-[11px] rounded-full bg-[#28c840]" />
           </div>
-          <div className="flex-1 truncate text-center text-[12.5px] font-semibold text-secondary">
+          <div className="flex-1 truncate text-center text-[12px] font-semibold text-secondary">
             {subject || 'Message'}
           </div>
           <button

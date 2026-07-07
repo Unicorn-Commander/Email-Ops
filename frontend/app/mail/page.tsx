@@ -1123,7 +1123,7 @@ function AccountButton({
       </span>
       <span
         className={cn(
-          'shrink-0 text-[11.5px] font-semibold mono',
+          'shrink-0 text-[11px] font-semibold mono',
           unread ? 'text-accent' : 'text-tertiary',
         )}
       >
@@ -1192,7 +1192,7 @@ function ConversationList({
     <div className="flex h-full flex-col">
       <div className="sticky top-0 z-[2] flex items-center justify-between gap-2 border-b border-subtle bg-surface-base/90 px-4 py-3 backdrop-blur">
         <div className="flex min-w-0 items-baseline gap-2.5">
-          <h2 className="truncate text-[15px] font-[640] tracking-[-0.01em]">{title}</h2>
+          <h2 className="truncate text-[15px] font-semibold tracking-[-0.01em]">{title}</h2>
           {unreadCount != null && unreadCount > 0 && (
             <span className="shrink-0 text-[12px] text-tertiary">{unreadCount} unread</span>
           )}
@@ -1359,7 +1359,7 @@ function ConversationRow({
       )}
       <span
         className={cn(
-          'mt-0.5 grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full text-[12.5px] font-[640] text-white transition-opacity duration-token ease-token',
+          'mt-0.5 grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full text-[12px] font-semibold text-white transition-opacity duration-token ease-token',
           thread.unread ? 'opacity-100' : 'opacity-[0.82]',
         )}
         style={avatarHueStyle(lead?.address || thread.id)}
@@ -1377,8 +1377,8 @@ function ConversationRow({
         <span className="flex items-baseline gap-2">
           <span
             className={cn(
-              'min-w-0 flex-1 truncate text-[13.5px]',
-              thread.unread ? 'font-[660] text-primary' : 'font-medium text-secondary',
+              'min-w-0 flex-1 truncate text-[13px]',
+              thread.unread ? 'font-semibold text-primary' : 'font-medium text-secondary',
             )}
           >
             {who}
@@ -1450,7 +1450,7 @@ function Chip({
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold',
+        'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold',
         cls,
       )}
     >
@@ -1497,7 +1497,7 @@ function AccountChip({ address }: { address: string }) {
   const label = address.split('@')[0]?.slice(0, 12) || address.slice(0, 12);
   return (
     <span
-      className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] font-semibold mono"
+      className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold mono"
       style={{ backgroundColor: `hsl(${hue} 70% 50% / 0.16)`, color: `hsl(${hue} 65% 55%)` }}
       title={address}
     >
@@ -1538,7 +1538,7 @@ function EmptyList({ filter }: { filter: SegFilter }) {
           <MailIcon className="h-5 w-5" />
         )}
       </div>
-      <p className="text-[13.5px] font-[620] text-primary">{copy.t}</p>
+      <p className="text-[13px] font-semibold text-primary">{copy.t}</p>
       <p className="max-w-[240px] text-[12px] leading-5 text-tertiary">{copy.d}</p>
     </div>
   );
@@ -1704,7 +1704,7 @@ function Reader({
           >
             <ChevronLeftIcon className="h-[18px] w-[18px]" />
           </button>
-          <h1 className="flex-1 text-[19px] font-[680] leading-[1.3] tracking-[-0.015em] text-primary">
+          <h1 className="flex-1 text-[19px] font-bold leading-[1.3] tracking-[-0.015em] text-primary">
             {thread?.subject?.trim() || '(no subject)'}
           </h1>
           <div className="flex shrink-0 items-center gap-1">
@@ -1742,14 +1742,14 @@ function Reader({
         </div>
         <div className="flex items-center gap-3">
           <span
-            className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-[15px] font-[640] text-white"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-full text-[15px] font-semibold text-white"
             style={avatarHueStyle(sender?.address || threadId || 'x')}
             aria-hidden
           >
             {initials(sender?.name, sender?.address)}
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-[14px] font-[620] text-primary">
+            <span className="block truncate text-[14px] font-semibold text-primary">
               {participantLabel(sender)}
             </span>
             {sender?.address && (
@@ -1941,7 +1941,7 @@ function MessageSkeleton() {
 
 function Kbd({ children }: { children: ReactNode }) {
   return (
-    <kbd className="inline-grid h-[18px] min-w-[18px] place-items-center rounded-[5px] border border-border bg-surface-overlay px-1 text-[10.5px] leading-none text-secondary mono">
+    <kbd className="inline-grid h-[18px] min-w-[18px] place-items-center rounded-[5px] border border-border bg-surface-overlay px-1 text-[10px] leading-none text-secondary mono">
       {children}
     </kbd>
   );
@@ -1954,10 +1954,10 @@ function NoThreadSelected() {
         <MailIcon className="h-6 w-6" />
       </div>
       <div className="space-y-1">
-        <p className="text-[15px] font-[620] tracking-[-0.01em] text-primary">
+        <p className="text-[15px] font-semibold tracking-[-0.01em] text-primary">
           Select a conversation
         </p>
-        <p className="mx-auto max-w-[248px] text-[12.5px] leading-5 text-tertiary">
+        <p className="mx-auto max-w-[248px] text-[12px] leading-5 text-tertiary">
           Pick a thread to read it and reply — or let an agent draft one for you.
         </p>
       </div>

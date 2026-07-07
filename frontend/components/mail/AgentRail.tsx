@@ -224,7 +224,7 @@ export function AgentRail({
           {pendingCount > 0 && (
             <span
               className={cn(
-                'absolute -right-1 -top-1 grid h-[16px] min-w-[16px] place-items-center rounded-full bg-warning px-1 text-[9.5px] font-bold leading-none text-white eops-approval-pulse mono',
+                'absolute -right-1 -top-1 grid h-[16px] min-w-[16px] place-items-center rounded-full bg-warning px-1 text-[9px] font-bold leading-none text-white eops-approval-pulse mono',
               )}
             >
               {pendingCount > 99 ? '99+' : pendingCount}
@@ -249,7 +249,7 @@ export function AgentRail({
           <span className="grid h-6 w-6 place-items-center rounded-md bg-accent text-white">
             <RobotIcon className="h-[14px] w-[14px]" />
           </span>
-          <h3 className="flex-1 text-[13px] font-[650] tracking-[-0.01em] text-primary">Agent activity</h3>
+          <h3 className="flex-1 text-[13px] font-semibold tracking-[-0.01em] text-primary">Agent activity</h3>
           {paused ? (
             <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.07em] text-warning/90">
               <span className="h-[5px] w-[5px] rounded-full bg-warning" />
@@ -285,7 +285,7 @@ export function AgentRail({
           <FeedSkeleton />
         ) : activity.length === 0 ? (
           <div className="px-4 py-10 text-center">
-            <p className="text-[12.5px] font-medium text-secondary">
+            <p className="text-[12px] font-medium text-secondary">
               {activityOk ? 'No agent activity yet' : 'Activity unavailable'}
             </p>
             <p className="mt-1 text-[11px] leading-5 text-tertiary">
@@ -349,13 +349,13 @@ function Stat({ n, label, warn }: { n: number; label: string; warn?: boolean }) 
     <div className="flex-1 px-1 py-2 text-center">
       <div
         className={cn(
-          'text-[19px] font-[680] leading-none tracking-[-0.02em] mono',
+          'text-[19px] font-bold leading-none tracking-[-0.02em] mono',
           warn && n > 0 ? 'text-warning' : 'text-primary',
         )}
       >
         {n}
       </div>
-      <div className="mt-1.5 text-[9.5px] font-medium uppercase tracking-[0.09em] text-tertiary">
+      <div className="mt-1.5 text-[9px] font-medium uppercase tracking-[0.09em] text-tertiary">
         {label}
       </div>
     </div>
@@ -397,11 +397,11 @@ function EventRow({
         </span>
       )}
       <div className="min-w-0">
-        <p className="text-[12.5px] leading-[1.45] text-secondary">
-          <b className="font-[620] text-primary">{actor.name}</b> {meta.verb}
+        <p className="text-[12px] leading-[1.45] text-secondary">
+          <b className="font-semibold text-primary">{actor.name}</b> {meta.verb}
           {ev.detail ? <span className="text-tertiary"> — {ev.detail}</span> : null}
         </p>
-        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10.5px] text-muted">
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
           {when && <span className="mono">{when}</span>}
           {when && <span className="text-border-strong">·</span>}
           <span className="rounded bg-surface-overlay px-1.5 py-px text-tertiary mono">
@@ -413,7 +413,7 @@ function EventRow({
             <button
               type="button"
               onClick={onReview}
-              className="inline-flex h-[26px] items-center rounded-lg bg-accent px-2.5 text-[11.5px] font-semibold text-white transition-colors hover:bg-accent-hover"
+              className="inline-flex h-[26px] items-center rounded-lg bg-accent px-2.5 text-[11px] font-semibold text-white transition-colors hover:bg-accent-hover"
             >
               Review
             </button>

@@ -59,7 +59,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="space-y-1.5">
       <h3 className="text-[13px] font-semibold text-primary">{title}</h3>
-      <div className="space-y-1.5 text-[12.5px] leading-6 text-secondary">{children}</div>
+      <div className="space-y-1.5 text-[12px] leading-6 text-secondary">{children}</div>
     </section>
   );
 }

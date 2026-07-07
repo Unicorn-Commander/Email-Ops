@@ -112,7 +112,7 @@ export function MailTopBar({
         <div className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-[7px] bg-gradient-to-br from-accent to-[rgb(var(--accent-2))] text-sm font-bold text-white shadow-[0_2px_8px_-1px_rgb(var(--accent)/0.55)]">
           ◐
         </div>
-        <div className="hidden text-[14.5px] font-[640] tracking-[-0.01em] text-primary sm:block">
+        <div className="hidden text-[14px] font-semibold tracking-[-0.01em] text-primary sm:block">
           Email-Ops <span className="font-medium text-tertiary">/ Command</span>
         </div>
       </div>
@@ -148,7 +148,7 @@ export function MailTopBar({
           aria-pressed={agentsPaused}
           title={agentsPaused ? 'Resume all agents' : 'Pause all agents'}
           className={cn(
-            'hidden h-8 items-center gap-2 rounded-lg border px-3 pl-2.5 text-[12.5px] font-medium transition-colors sm:flex',
+            'hidden h-8 items-center gap-2 rounded-lg border px-3 pl-2.5 text-[12px] font-medium transition-colors sm:flex',
             agentsPaused
               ? 'border-warning/60 bg-warning/[0.08] text-warning'
               : 'border-border text-secondary hover:border-warning/60 hover:text-primary',
@@ -222,7 +222,7 @@ export function MailTopBar({
           }}
           title={`${user?.email ?? 'Sign out'} — sign out`}
           aria-label="Sign out"
-          className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-full bg-gradient-to-br from-[#f0883e] to-[#d9534f] text-[12px] font-[650] text-white"
+          className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-full bg-gradient-to-br from-[#f0883e] to-[#d9534f] text-[12px] font-semibold text-white"
         >
           {initialsOf(user)}
         </button>
