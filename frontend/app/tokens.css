@@ -2,13 +2,18 @@
 
 :root,
 :root[data-theme='dark'] {
-  --surface-base: 11 11 14;
-  --surface-raised: 19 19 24;
-  --surface-overlay: 26 26 33;
-  --surface-elevated: 32 32 42;
+  /* Surface ramp widened off pure-black: the old 11→19→26→32 steps were below
+     the perceptual threshold near black, so every raised/overlay/elevated plane
+     read as the same flat tone. These larger, lifted steps give real depth. */
+  --surface-base: 12 12 15;
+  --surface-raised: 22 22 28;
+  --surface-overlay: 30 30 38;
+  --surface-elevated: 40 40 50;
 
-  --border-subtle: 32 32 42;
-  --border: 44 44 56;
+  /* Decoupled from the surface ramp (border-subtle used to collide with
+     surface-elevated at 32 32 42, so hairlines vanished on raised surfaces). */
+  --border-subtle: 38 38 48;
+  --border: 52 52 64;
 
   --text-primary: 231 231 234;
   --text-secondary: 180 180 190;

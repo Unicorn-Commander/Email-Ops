@@ -826,7 +826,10 @@ export default function MailPage() {
 
           {/* (4) reader — the only pane shown on mobile when a thread is open. */}
           <section
-            className={cn('flex min-w-0 flex-col overflow-hidden', !threadOpen && 'max-lg:hidden')}
+            className={cn(
+              'flex min-w-0 flex-col overflow-hidden border-l border-subtle',
+              !threadOpen && 'max-lg:hidden',
+            )}
           >
             <Reader
               workspaceId={mail.workspace?.workspace_id ?? null}
@@ -1350,8 +1353,8 @@ function ConversationRow({
   return (
     <div
       className={cn(
-        'group relative flex cursor-pointer items-start gap-2.5 border-b border-subtle px-3 py-2.5 pl-3 transition-colors duration-fast ease-token',
-        active ? 'bg-surface-raised' : 'hover:bg-surface-raised/70',
+        'group relative flex cursor-pointer items-start gap-2.5 border-b border-subtle px-3 py-2.5 transition-colors duration-fast ease-token',
+        active ? 'bg-accent/[0.10]' : 'hover:bg-surface-overlay/60',
         cursor && 'ring-1 ring-inset ring-accent/50',
       )}
     >
@@ -1719,8 +1722,8 @@ function Reader({
   if (!threadId) return <NoThreadSelected />;
 
   return (
-    <div className="flex h-full flex-col bg-surface-base">
-      <div className="sticky top-0 z-[2] border-b border-subtle bg-surface-base/[0.92] px-5 py-3.5 backdrop-blur sm:px-6">
+    <div className="flex h-full flex-col bg-surface-raised">
+      <div className="sticky top-0 z-[2] border-b border-subtle bg-surface-raised/[0.92] px-5 py-3.5 backdrop-blur sm:px-6">
         <div className="mb-3 flex items-center gap-2.5">
           <button
             type="button"
