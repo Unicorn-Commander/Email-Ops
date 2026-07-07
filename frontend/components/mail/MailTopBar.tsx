@@ -10,101 +10,12 @@
  * full-bleed /mail surface, so every affordance it used to host lives here.
  */
 
-import { useEffect, useRef, useState, type RefObject } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, type RefObject } from 'react';
 import { cn } from '@/components/ui';
 import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
+import { AccountMenu } from '@/components/account/AccountMenu';
 import { useTheme } from '@/state/theme';
-import {
-  clearSession,
-  fetchProfile,
-  getStoredUser,
-  setSession,
-  getToken,
-  type EmailOpsUser,
-} from '@/lib/api';
-import {
-  SearchIcon,
-  PlusIcon,
-  SunIcon,
-  MoonIcon,
-  RobotIcon,
-  ChevronRightIcon,
-  GearIcon,
-} from './icons';
-
-function initialsOf(user: EmailOpsUser | null): string {
-  const first = user?.firstName?.trim() ?? '';
-  const last = user?.lastName?.trim() ?? '';
-  if (first || last) return ((first[0] ?? '') + (last[0] ?? '')).toUpperCase() || 'YO';
-  const handle = (user?.username || user?.email || 'You').trim();
-  const parts = handle.split(/[@\s._-]+/).filter(Boolean);
-  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-  return (parts[0]?.slice(0, 2) || 'YO').toUpperCase();
-}
-
-/**
- * The stored session only holds the token (SSO stored `null` for the user), so
- * the avatar fell back to "YO". Hydrate the real profile (name + Keycloak
- * `picture`) once on mount so existing sessions get correct initials/photo
- * without needing to sign in again.
- */
-function useHydratedUser(): EmailOpsUser | null {
-  const [user, setUser] = useState<EmailOpsUser | null>(() => getStoredUser<EmailOpsUser>());
-  const attempted = useRef(false);
-  useEffect(() => {
-    // Refresh the profile once per load until we have an actual photo URL — a
-    // cached null (from before the avatar existed, or a user with no photo) must
-    // not permanently pin the fallback. The `attempted` ref bounds it to a
-    // single fetch so a still-empty picture never loops.
-    if (attempted.current) return;
-    if (user?.picture) return;
-    const token = getToken();
-    if (!token) return;
-    attempted.current = true;
-    let alive = true;
-    fetchProfile(token)
-      .then((p) => {
-        if (!alive) return;
-        setSession(token, p);
-        setUser(p);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [user?.picture]);
-  return user;
-}
-
-/** Avatar disc — the Keycloak photo when we have one, else gradient initials. */
-function Avatar({ user, size }: { user: EmailOpsUser | null; size: number }) {
-  const cls = 'shrink-0 overflow-hidden rounded-full';
-  if (user?.picture) {
-    return (
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={user.picture}
-        alt=""
-        width={size}
-        height={size}
-        className={cn(cls, 'object-cover')}
-        style={{ width: size, height: size }}
-      />
-    );
-  }
-  return (
-    <span
-      className={cn(
-        cls,
-        'grid place-items-center bg-gradient-to-br from-[#f0883e] to-[#d9534f] font-semibold text-white',
-      )}
-      style={{ width: size, height: size, fontSize: Math.round(size * 0.4) }}
-    >
-      {initialsOf(user)}
-    </span>
-  );
-}
+import { SearchIcon, PlusIcon, SunIcon, MoonIcon, RobotIcon, ChevronRightIcon } from './icons';
 
 export function MailTopBar({
   query,
@@ -141,7 +52,6 @@ export function MailTopBar({
   onCommandPalette?: () => void;
 }) {
   const { resolved, setPref } = useTheme();
-  const user = useHydratedUser();
 
   // ⌘K / Ctrl-K opens the command palette from anywhere on the surface. (The `/`
   // shortcut still focuses the search box for a plain text search.)
@@ -284,133 +194,8 @@ export function MailTopBar({
           <span className="hidden sm:inline">Compose</span>
         </button>
 
-        <AccountMenu user={user} />
+        <AccountMenu />
       </div>
     </header>
-  );
-}
-
-function AccountMenu({ user }: { user: EmailOpsUser | null }) {
-  const router = useRouter();
-  const { resolved, setPref } = useTheme();
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
-    window.addEventListener('mousedown', onDown);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('mousedown', onDown);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
-  const name =
-    [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim() ||
-    user?.username ||
-    user?.email ||
-    'Signed in';
-
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        title={user?.email ?? 'Account'}
-        aria-label="Account menu"
-        className={cn(
-          'shrink-0 rounded-full transition-shadow',
-          open && 'ring-2 ring-accent/60 ring-offset-2 ring-offset-surface-raised',
-        )}
-      >
-        <Avatar user={user} size={30} />
-      </button>
-
-      {open && (
-        <div
-          role="menu"
-          className="eops-rise-in absolute right-0 top-[calc(100%+8px)] z-50 w-64 overflow-hidden rounded-xl border border-subtle bg-surface-overlay shadow-pop"
-        >
-          <div className="flex items-center gap-3 border-b border-subtle px-3.5 py-3">
-            <Avatar user={user} size={36} />
-            <span className="min-w-0">
-              <span className="block truncate text-[13px] font-semibold text-primary">{name}</span>
-              {user?.email && (
-                <span className="block truncate text-[12px] text-tertiary">{user.email}</span>
-              )}
-            </span>
-          </div>
-
-          <div className="p-1">
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => setPref(resolved === 'dark' ? 'light' : 'dark')}
-              className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] text-secondary transition-colors hover:bg-surface-elevated hover:text-primary"
-            >
-              {resolved === 'dark' ? (
-                <SunIcon className="h-4 w-4" />
-              ) : (
-                <MoonIcon className="h-4 w-4" />
-              )}
-              {resolved === 'dark' ? 'Light theme' : 'Dark theme'}
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setOpen(false);
-                router.push('/accounts');
-              }}
-              className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] text-secondary transition-colors hover:bg-surface-elevated hover:text-primary"
-            >
-              <GearIcon className="h-4 w-4" />
-              Accounts &amp; settings
-            </button>
-          </div>
-
-          <div className="border-t border-subtle p-1">
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                clearSession();
-                router.replace('/auth/login');
-              }}
-              className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] text-secondary transition-colors hover:bg-danger/10 hover:text-danger"
-            >
-              <SignOutIcon className="h-4 w-4" />
-              Sign out
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SignOutIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      className={className}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.75"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M15 4h3a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-3" />
-      <path d="M10 17l-5-5 5-5" />
-      <path d="M5 12h11" />
-    </svg>
   );
 }
