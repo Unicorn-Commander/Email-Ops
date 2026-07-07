@@ -235,7 +235,7 @@ export function MessageAttachments({
               className={cn(
                 'group inline-flex max-w-[14rem] items-center gap-2 rounded-token border border-subtle bg-surface-overlay/60 p-1.5 pr-2.5',
                 'text-left transition-colors duration-fast ease-token',
-                'hover:bg-surface-overlay disabled:opacity-60',
+                'hover:bg-surface-overlay disabled:opacity-50',
               )}
             >
               <AttachmentGlyph att={att} thumbUrl={thumbs.get(att.blob_id)} />
@@ -450,7 +450,7 @@ export function AttachButton({
         className={cn(
           'inline-flex items-center gap-1.5 rounded-token px-2 py-1 text-xs font-medium text-tertiary',
           'transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary',
-          'disabled:pointer-events-none disabled:opacity-40',
+          'disabled:pointer-events-none disabled:opacity-50',
           className,
         )}
         title="Attach files"

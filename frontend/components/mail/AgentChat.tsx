@@ -303,7 +303,7 @@ export function AgentChat({
             type="submit"
             disabled={busy || !input.trim()}
             aria-label="Send"
-            className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-accent text-white transition-colors hover:bg-accent-hover disabled:opacity-40"
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-accent text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
           >
             <SendSolidIcon className="h-[15px] w-[15px]" />
           </button>
@@ -481,7 +481,7 @@ function InlineActionCard({
                   disabled={state !== 'idle'}
                   onClick={() => void run('approve')}
                   className={cn(
-                    'inline-flex h-7 items-center gap-1.5 rounded-lg px-3 text-[12px] font-semibold text-white transition-colors disabled:opacity-60',
+                    'inline-flex h-7 items-center gap-1.5 rounded-lg px-3 text-[12px] font-semibold text-white transition-colors disabled:opacity-50',
                     isCleanup && cleanupVerb !== 'ARCHIVE'
                       ? 'bg-danger shadow-[0_2px_8px_-2px_rgb(var(--danger)/0.5)] hover:bg-danger/90'
                       : 'bg-accent shadow-[0_2px_8px_-2px_rgb(var(--accent)/0.5)] hover:bg-accent-hover',
@@ -498,7 +498,7 @@ function InlineActionCard({
                   type="button"
                   disabled={state !== 'idle'}
                   onClick={() => void run('discard')}
-                  className="inline-flex h-7 items-center rounded-lg border border-transparent px-2.5 text-[12px] font-semibold text-secondary transition-colors hover:text-primary disabled:opacity-60"
+                  className="inline-flex h-7 items-center rounded-lg border border-transparent px-2.5 text-[12px] font-semibold text-secondary transition-colors hover:text-primary disabled:opacity-50"
                 >
                   {state === 'discarding' ? 'Discarding…' : 'Discard'}
                 </button>

@@ -111,12 +111,19 @@ export function MailTopBar({
           aria-label="Search"
           className="min-w-0 flex-1 bg-transparent text-[13px] text-primary outline-none placeholder:text-tertiary"
         />
-        <kbd
+        <button
+          type="button"
           title="Open command menu"
-          className="hidden rounded-[5px] border border-border bg-surface-base px-1.5 py-px text-[11px] text-tertiary sm:block mono"
+          aria-label="Open command menu"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onCommandPalette?.();
+          }}
+          className="hidden cursor-pointer rounded-[5px] border border-border bg-surface-base px-1.5 py-px text-[11px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary sm:block mono"
         >
           ⌘K
-        </kbd>
+        </button>
       </label>
 
       <span className="hidden h-5 w-px shrink-0 bg-border-subtle lg:block" aria-hidden />
@@ -165,7 +172,7 @@ export function MailTopBar({
           onClick={onHelp}
           title="Help — how Email-Ops works (?)"
           aria-label="Help — how Email-Ops works"
-          className="grid h-8 w-8 place-items-center rounded-lg border border-transparent text-[15px] font-semibold text-secondary transition-colors hover:bg-surface-overlay hover:text-primary"
+          className="grid h-8 w-8 place-items-center rounded-lg border border-transparent text-[17px] font-semibold text-secondary transition-colors hover:bg-surface-overlay hover:text-primary"
         >
           ?
         </button>
@@ -188,6 +195,8 @@ export function MailTopBar({
           type="button"
           onClick={onCompose}
           disabled={!canCompose}
+          aria-label="Compose"
+          title="Compose (c)"
           className="flex h-8 items-center gap-1.5 rounded-lg bg-accent pl-2.5 pr-3.5 text-[13px] font-semibold text-white shadow-[0_2px_8px_-1px_rgb(var(--accent)/0.5)] transition-colors hover:bg-accent-hover disabled:opacity-50 disabled:shadow-none"
         >
           <PlusIcon className="h-[15px] w-[15px]" />

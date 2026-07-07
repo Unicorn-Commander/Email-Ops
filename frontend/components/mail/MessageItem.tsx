@@ -131,7 +131,7 @@ export function MessageItem({
               <span className="text-[10px] font-medium tabular-nums">{fileCount}</span>
             </span>
           )}
-          {when && <span className="shrink-0 font-mono text-[10px] text-muted">{when}</span>}
+          {when && <span className="shrink-0 text-[10px] text-muted mono">{when}</span>}
         </button>
       </li>
     );
@@ -145,19 +145,17 @@ export function MessageItem({
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full flex-wrap items-center gap-2 text-left"
+        className="-mx-2 flex w-full flex-wrap items-center gap-2 rounded-lg px-2 py-0.5 text-left transition-colors hover:bg-surface-overlay/40"
         title="Collapse message"
       >
         <span className="min-w-0 truncate text-sm font-medium text-primary">
           {participantLabel(message.from)}
         </span>
         <Badge variant={dir.tone}>{dir.label}</Badge>
-        {when && <span className="ml-auto shrink-0 font-mono text-[10px] text-muted">{when}</span>}
+        {when && <span className="ml-auto shrink-0 text-[10px] text-muted mono">{when}</span>}
       </button>
-      {toLabel && (
-        <p className="mt-0.5 truncate font-mono text-[11px] text-muted">to {toLabel}</p>
-      )}
-      {ccLabel && <p className="truncate font-mono text-[11px] text-muted">cc {ccLabel}</p>}
+      {toLabel && <p className="mt-0.5 truncate text-[11px] text-muted mono">to {toLabel}</p>}
+      {ccLabel && <p className="truncate text-[11px] text-muted mono">cc {ccLabel}</p>}
 
       <div className="eops-rise-in mt-2">
         {html ? (

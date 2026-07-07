@@ -38,6 +38,7 @@ import { Button, Skeleton, cn } from '@/components/ui';
 import { useActiveSpace } from '@/components/ActiveSpaceProvider';
 import { useUiCommands } from '@/components/UiCommandProvider';
 import { useMailboxCollapsed, useRailCollapsed } from '@/state/uiCollapse';
+import { useTheme } from '@/state/theme';
 import { useAgentInbox } from '@/components/useAgentInbox';
 import { useAgents } from '@/components/useAgents';
 import { useAgentControls } from '@/components/useAgentControls';
@@ -1232,7 +1233,7 @@ function AccountButton({
           unread ? 'text-accent' : 'text-tertiary',
         )}
       >
-        {count == null ? '—' : count > 999 ? '999+' : count || '—'}
+        {count == null ? '—' : count > 999 ? '999+' : count}
       </span>
     </button>
   );
@@ -1499,7 +1500,7 @@ function ConversationList({
               className={cn(
                 'rounded-md px-2.5 py-1 text-[12px] font-medium capitalize transition-colors',
                 filter === seg
-                  ? 'bg-surface-raised text-primary shadow-token-lg'
+                  ? 'bg-surface-raised text-primary shadow-token'
                   : 'text-tertiary hover:text-secondary',
               )}
             >
@@ -1877,12 +1878,17 @@ function Paperclip({ className }: { className?: string }) {
 }
 
 function AccountChip({ address }: { address: string }) {
+  const { resolved } = useTheme();
   const hue = addressHue(address.toLowerCase());
   const label = address.split('@')[0]?.slice(0, 12) || address.slice(0, 12);
+  // Light theme sits on a near-white surface, where a 55%-lightness hue (yellow/
+  // green/cyan especially) fails contrast — drop it to 40%. Dark theme keeps the
+  // brighter 66% so the chip stays legible on the dark tint.
+  const textL = resolved === 'light' ? 40 : 66;
   return (
     <span
       className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold mono"
-      style={{ backgroundColor: `hsl(${hue} 70% 50% / 0.16)`, color: `hsl(${hue} 65% 55%)` }}
+      style={{ backgroundColor: `hsl(${hue} 70% 50% / 0.16)`, color: `hsl(${hue} 70% ${textL}%)` }}
       title={address}
     >
       <span className="h-[7px] w-[7px] rounded-[2px]" style={{ background: `hsl(${hue} 70% 55%)` }} />
@@ -2107,6 +2113,7 @@ function Reader({
             {folder !== 'spam' && (
               <ReaderTool
                 label="Report spam"
+                danger
                 onClick={() => void runTriage('SPAM')}
                 disabled={triageBusy}
               >
@@ -2114,7 +2121,7 @@ function Reader({
               </ReaderTool>
             )}
             {folder !== 'trash' && (
-              <ReaderTool label="Trash" onClick={() => void runTriage('TRASH')} disabled={triageBusy}>
+              <ReaderTool label="Trash" danger onClick={() => void runTriage('TRASH')} disabled={triageBusy}>
                 <TrashIcon className="h-[17px] w-[17px]" />
               </ReaderTool>
             )}
@@ -2266,7 +2273,7 @@ function ReplyActionBar({
         type="button"
         disabled={!hasMessage}
         onClick={onReplyAll}
-        className="inline-flex h-9 items-center rounded-lg px-3 text-[13px] font-medium text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay hover:text-primary disabled:opacity-40"
+        className="inline-flex h-9 items-center rounded-lg px-3 text-[13px] font-medium text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay hover:text-primary disabled:opacity-50"
       >
         Reply all
       </button>
@@ -2274,7 +2281,7 @@ function ReplyActionBar({
         type="button"
         disabled={!hasMessage}
         onClick={onForward}
-        className="inline-flex h-9 items-center rounded-lg px-3 text-[13px] font-medium text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay hover:text-primary disabled:opacity-40"
+        className="inline-flex h-9 items-center rounded-lg px-3 text-[13px] font-medium text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay hover:text-primary disabled:opacity-50"
       >
         Forward
       </button>
@@ -2286,12 +2293,14 @@ function ReaderTool({
   label,
   onClick,
   accent,
+  danger,
   disabled,
   children,
 }: {
   label: string;
   onClick: () => void;
   accent?: boolean;
+  danger?: boolean;
   disabled?: boolean;
   children: ReactNode;
 }) {
@@ -2303,8 +2312,12 @@ function ReaderTool({
       title={label}
       aria-label={label}
       className={cn(
-        'grid h-8 w-8 place-items-center rounded-lg text-tertiary transition-colors disabled:opacity-40',
-        accent ? 'hover:bg-accent/12 hover:text-accent' : 'hover:bg-surface-overlay hover:text-primary',
+        'grid h-8 w-8 place-items-center rounded-lg text-tertiary transition-colors disabled:opacity-50',
+        accent
+          ? 'hover:bg-accent/12 hover:text-accent'
+          : danger
+            ? 'hover:bg-danger/10 hover:text-danger'
+            : 'hover:bg-surface-overlay hover:text-primary',
       )}
     >
       {children}

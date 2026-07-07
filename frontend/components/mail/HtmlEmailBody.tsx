@@ -25,6 +25,7 @@
 import DOMPurify from 'dompurify';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '@/components/ui';
+import { useTheme } from '@/state/theme';
 import type { MailAttachment } from '@/lib/mailApi';
 
 /** localStorage key: senders whose remote images are always shown. */
@@ -236,6 +237,11 @@ export function HtmlEmailBody({
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
+  // The frame must follow the APP theme, not the OS. Without this the iframe's
+  // `color-scheme` resolved off `prefers-color-scheme`, so an OS-dark user who
+  // set the app to light saw white-on-black email bodies over a light page.
+  const { resolved: theme } = useTheme();
+
   const sender = senderAddress?.toLowerCase() ?? null;
   const [showRemote, setShowRemote] = useState(false);
   useEffect(() => {
@@ -287,7 +293,7 @@ export function HtmlEmailBody({
     const link = tokenRgb('--accent-text', 'rgb(124 92 255)');
     const muted = tokenRgb('--text-muted', 'rgb(120 120 132)');
     const baseCss = `
-      :root { color-scheme: light dark; }
+      :root { color-scheme: ${theme}; }
       html, body { height: auto !important; min-height: 0 !important; }
       body {
         margin: 0; padding: 2px 1px;
@@ -306,7 +312,7 @@ export function HtmlEmailBody({
       ? `<div data-eops-quoted>${processed.quotedHtml}</div>`
       : '');
     return `<!doctype html><style>${baseCss}</style>${body}`;
-  }, [processed, showQuoted]);
+  }, [processed, showQuoted, theme]);
 
   // Auto-height: measure the same-origin srcDoc BODY content; track late shifts.
   // Only the body is measured — `documentElement.scrollHeight` is floored at the

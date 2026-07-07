@@ -77,7 +77,7 @@ export function AgentDraftCard({
           type="button"
           disabled={busy !== null}
           onClick={() => void run('approve', onApprove)}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accent px-3.5 text-[12px] font-semibold text-white shadow-[0_2px_8px_-2px_rgb(var(--accent)/0.5)] transition-colors hover:bg-accent-hover disabled:opacity-60"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accent px-3.5 text-[12px] font-semibold text-white shadow-[0_2px_8px_-2px_rgb(var(--accent)/0.5)] transition-colors hover:bg-accent-hover disabled:opacity-50"
         >
           <SendSolidIcon className="h-[14px] w-[14px]" />
           {busy === 'approve' ? 'Sending…' : 'Approve & send'}
@@ -86,7 +86,7 @@ export function AgentDraftCard({
           type="button"
           disabled={busy !== null}
           onClick={onEdit}
-          className="inline-flex h-8 items-center rounded-lg border border-border px-3.5 text-[12px] font-semibold text-secondary transition-colors hover:border-muted hover:text-primary disabled:opacity-60"
+          className="inline-flex h-8 items-center rounded-lg border border-border px-3.5 text-[12px] font-semibold text-secondary transition-colors hover:border-muted hover:text-primary disabled:opacity-50"
         >
           Edit
         </button>
@@ -94,7 +94,7 @@ export function AgentDraftCard({
           type="button"
           disabled={busy !== null}
           onClick={() => void run('discard', onDiscard)}
-          className="inline-flex h-8 items-center rounded-lg border border-transparent px-3.5 text-[12px] font-semibold text-secondary transition-colors hover:text-primary disabled:opacity-60"
+          className="inline-flex h-8 items-center rounded-lg border border-transparent px-3.5 text-[12px] font-semibold text-secondary transition-colors hover:text-primary disabled:opacity-50"
         >
           {busy === 'discard' ? 'Discarding…' : 'Discard'}
         </button>

@@ -296,7 +296,7 @@ export const ReplyComposer = forwardRef<
               <span className="h-1.5 w-1.5 rounded-full bg-accent/70" />
               Saved
             </span>
-            <kbd className="hidden rounded-token border border-border bg-surface-overlay px-1.5 py-0.5 font-mono text-[11px] text-tertiary sm:block">
+            <kbd className="hidden min-w-[18px] items-center justify-center rounded-[5px] border border-border bg-surface-overlay px-1.5 py-px text-[11px] leading-none text-secondary sm:inline-flex mono">
               ⌘↵
             </kbd>
             <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>

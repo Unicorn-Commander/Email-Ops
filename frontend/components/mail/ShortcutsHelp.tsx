@@ -49,7 +49,7 @@ const GROUPS: { title: string; rows: [string, string][] }[] = [
 
 function Key({ children }: { children: string }) {
   return (
-    <kbd className="rounded-token border border-border bg-surface-overlay px-1.5 py-0.5 font-mono text-[11px] text-secondary">
+    <kbd className="inline-flex min-w-[18px] items-center justify-center rounded-[5px] border border-border bg-surface-overlay px-1.5 py-px text-[11px] leading-none text-secondary mono">
       {children}
     </kbd>
   );

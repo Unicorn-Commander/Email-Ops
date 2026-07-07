@@ -85,11 +85,11 @@ export function MailIconNav({ pendingCount }: { pendingCount: number }) {
         )}
         {badge > 0 &&
           (expanded ? (
-            <span className="grid h-[18px] min-w-[18px] shrink-0 place-items-center rounded-lg bg-accent px-1.5 text-[10px] font-bold leading-none text-white mono">
+            <span className="grid h-[18px] min-w-[18px] shrink-0 place-items-center rounded-lg bg-warning px-1.5 text-[10px] font-bold leading-none text-white mono">
               {badge > 99 ? '99+' : badge}
             </span>
           ) : (
-            <span className="absolute -right-0.5 -top-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-lg border-2 border-surface-raised bg-accent px-[3px] text-[9px] font-bold leading-none text-white mono">
+            <span className="absolute -right-0.5 -top-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-lg border-2 border-surface-raised bg-warning px-[3px] text-[9px] font-bold leading-none text-white mono">
               {badge > 99 ? '99+' : badge}
             </span>
           ))}
