@@ -28,6 +28,8 @@ import {
 export abstract class ConnectedAccountsEnginePort {
   abstract isConfigured(): boolean;
 
+  abstract chat(message: string, context?: Record<string, unknown>): Promise<string | null>;
+
   abstract getInboxStats(
     provider: 'gmail' | 'microsoft',
     credentials: Record<string, unknown>,

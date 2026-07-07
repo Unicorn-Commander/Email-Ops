@@ -139,6 +139,16 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
     return this.postJson<EngineInboxStats>('/accounts/stats', { provider, credentials });
   }
 
+  /**
+   * Conversational assistant turn — forwards a user message plus a context blob
+   * (current mailbox/folder/thread digest) to the engine's LLM chat endpoint.
+   * Returns the assistant text, or null when the engine/gateway is dormant.
+   */
+  async chat(message: string, context: Record<string, unknown> = {}): Promise<string | null> {
+    const res = await this.postJson<{ response?: string }>('/ai/chat', { message, context });
+    return res?.response ?? null;
+  }
+
   async analyzeInbox(
     provider: 'gmail' | 'microsoft',
     credentials: Record<string, unknown>,

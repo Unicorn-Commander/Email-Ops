@@ -104,6 +104,23 @@ html.eops-nav-collapsed [data-app-nav] {
   animation: eops-approval-pulse 1.8s var(--ease) infinite;
 }
 
+/* Assistant "typing" dots while a chat reply is in flight. */
+@keyframes eops-typing-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+.eops-typing-dot {
+  animation: eops-typing-dot 1.1s var(--ease) infinite;
+}
+
 /* Gentle rise-in for on-demand surfaces (reply composer / action bar). Kept
    small + ease-token; auto-neutralized by the reduced-motion block below. */
 @keyframes eops-rise-in {

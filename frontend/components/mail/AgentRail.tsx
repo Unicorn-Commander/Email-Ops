@@ -24,6 +24,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { useRouter } from 'next/navigation';
 import { cn } from '@/components/ui';
 import { agentLabel } from '@/lib/agents';
+import { AgentChat } from './AgentChat';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 import {
   getAgentActivity,
@@ -116,6 +117,7 @@ export function AgentRail({
   selectedMailboxId,
   paused,
   onSetAutonomy,
+  getChatContext,
 }: {
   collapsed: boolean;
   onExpand: () => void;
@@ -127,11 +129,14 @@ export function AgentRail({
   selectedMailboxId: string | null;
   paused: boolean;
   onSetAutonomy: (agentId: string, level: AutonomyLevel) => Promise<{ ok: boolean; error?: string }>;
+  /** Light digest of the current view, evaluated at send time for the chat. */
+  getChatContext?: () => Record<string, unknown>;
 }) {
   const router = useRouter();
   const { activeWorkspace } = useActiveWorkspace();
   const workspaceId = activeWorkspace?.workspace_id ?? null;
 
+  const [mode, setMode] = useState<'chat' | 'activity'>('chat');
   const [activity, setActivity] = useState<AgentActivityView[]>([]);
   const [activityOk, setActivityOk] = useState<boolean>(true);
   const [loaded, setLoaded] = useState(false);
@@ -245,41 +250,66 @@ export function AgentRail({
   return (
     <aside className="flex h-full w-full flex-col overflow-hidden border-l border-subtle bg-surface-raised">
       <div className="border-b border-subtle px-4 pb-3 pt-3.5">
-        <div className="mb-3 flex items-center gap-2">
-          <span className="grid h-6 w-6 place-items-center rounded-md bg-accent text-white">
-            <RobotIcon className="h-[14px] w-[14px]" />
-          </span>
-          <h3 className="flex-1 text-[13px] font-semibold tracking-[-0.01em] text-primary">Agent activity</h3>
-          {paused ? (
-            <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.07em] text-warning/90">
-              <span className="h-[5px] w-[5px] rounded-full bg-warning" />
-              Paused
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.07em] text-tertiary">
-              <span className="h-[5px] w-[5px] rounded-full bg-success eops-live-pulse" />
-              Live
-            </span>
-          )}
+        <div className={cn('flex items-center gap-2', mode === 'activity' && 'mb-3')}>
+          <div className="flex flex-1 items-center gap-0.5 rounded-lg bg-surface-overlay p-0.5">
+            {(['chat', 'activity'] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setMode(m)}
+                className={cn(
+                  'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium capitalize transition-colors',
+                  mode === m
+                    ? 'bg-surface-raised text-primary shadow-token'
+                    : 'text-tertiary hover:text-secondary',
+                )}
+              >
+                {m === 'chat' ? (
+                  <RobotIcon className="h-[13px] w-[13px]" />
+                ) : (
+                  <ClockIcon className="h-[13px] w-[13px]" />
+                )}
+                {m === 'chat' ? 'Chat' : 'Activity'}
+              </button>
+            ))}
+          </div>
+          {mode === 'activity' &&
+            (paused ? (
+              <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.07em] text-warning/90">
+                <span className="h-[5px] w-[5px] rounded-full bg-warning" />
+                Paused
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.07em] text-tertiary">
+                <span className="h-[5px] w-[5px] rounded-full bg-success eops-live-pulse" />
+                Live
+              </span>
+            ))}
           <button
             type="button"
             onClick={onCollapse}
-            aria-label="Collapse agent activity"
+            aria-label="Collapse agent panel"
             title="Collapse"
             className="grid h-6 w-6 place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-primary"
           >
             <ChevronLeftIcon className="h-[15px] w-[15px] rotate-180" />
           </button>
         </div>
-        <div className="flex items-stretch rounded-[10px] border border-subtle bg-surface-base/40">
-          <Stat n={triaged} label="Triaged" />
-          <span className="my-2.5 w-px bg-border-subtle" />
-          <Stat n={sent} label="Sent" />
-          <span className="my-2.5 w-px bg-border-subtle" />
-          <Stat n={pendingCount} label="Awaiting" warn />
-        </div>
+        {mode === 'activity' && (
+          <div className="flex items-stretch rounded-[10px] border border-subtle bg-surface-base/40">
+            <Stat n={triaged} label="Triaged" />
+            <span className="my-2.5 w-px bg-border-subtle" />
+            <Stat n={sent} label="Sent" />
+            <span className="my-2.5 w-px bg-border-subtle" />
+            <Stat n={pendingCount} label="Awaiting" warn />
+          </div>
+        )}
       </div>
 
+      {mode === 'chat' ? (
+        <AgentChat getContext={getChatContext} />
+      ) : (
+        <>
       <div className="min-h-0 flex-1 overflow-y-auto py-1.5">
         {!loaded ? (
           <FeedSkeleton />
@@ -339,6 +369,8 @@ export function AgentRail({
             })}
           </div>
         </div>
+      )}
+        </>
       )}
     </aside>
   );

@@ -104,6 +104,24 @@ export async function apiPost<T = unknown>(
   return (text ? JSON.parse(text) : {}) as T;
 }
 
+export interface AssistantChatResult {
+  ok: boolean;
+  response: string;
+}
+
+/**
+ * Send a turn to the Email-Ops assistant. `context` is a light digest of what
+ * the operator is looking at (mailbox/folder/unread + a few thread subjects) so
+ * the model can ground its reply — never message bodies.
+ */
+export async function assistantChat(
+  message: string,
+  context?: Record<string, unknown>,
+  token?: string,
+): Promise<AssistantChatResult> {
+  return apiPost<AssistantChatResult>('/assistant/chat', { message, context: context ?? {} }, token);
+}
+
 /** Authenticated PATCH against the backend. Throws ApiError on non-2xx. */
 export async function apiPatch<T = unknown>(
   path: string,

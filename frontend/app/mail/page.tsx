@@ -750,6 +750,30 @@ export default function MailPage() {
   // rows are flagged unread — never show 0 next to a visibly-unread list; fall
   // back to at least the count of loaded unread threads.
   const loadedUnread = displayThreads.reduce((n, t) => n + (t.unread ? 1 : 0), 0);
+
+  // Light view digest for the agent chat — subjects/senders only, never bodies —
+  // evaluated at send time so the assistant grounds answers in the current view.
+  const getChatContext = useCallback((): Record<string, unknown> => {
+    const threads = displayThreads.slice(0, 25).map((t) => {
+      const other = t.participants.find(
+        (p) => !p.address || !selfAddresses.has(p.address.toLowerCase().trim()),
+      );
+      return {
+        from: other?.name?.trim() || other?.address || 'Unknown',
+        subject: t.subject?.trim() || '(no subject)',
+        snippet: (t.last_snippet ?? '').slice(0, 140),
+        unread: !!t.unread,
+      };
+    });
+    return {
+      mailbox: listTitle,
+      folder: mail.folder,
+      unread_count: Math.max(listUnread ?? 0, loadedUnread),
+      thread_count: displayThreads.length,
+      threads,
+    };
+  }, [displayThreads, selfAddresses, listTitle, mail.folder, listUnread, loadedUnread]);
+
   const brief: BriefData = {
     mailboxName: listTitle,
     unread: Math.max(listUnread ?? 0, loadedUnread) || null,
@@ -922,6 +946,7 @@ export default function MailPage() {
               onSetAutonomy={(agentId, level) =>
                 agents.update(agentId, { autonomy_level: level })
               }
+              getChatContext={getChatContext}
             />
           </div>
         </div>
