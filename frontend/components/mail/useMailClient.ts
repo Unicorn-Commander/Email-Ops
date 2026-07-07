@@ -680,13 +680,21 @@ export function formatWhen(iso: string | null): string | null {
   if (Number.isNaN(ts)) return null;
   const diffMs = Date.now() - ts;
   const mins = Math.round(diffMs / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
+  // Terse, Superhuman-style stamps — the list reads cleaner without "ago" on
+  // every row. Older-than-a-week collapses to a date; older-than-a-year adds it.
+  if (mins < 1) return 'now';
+  if (mins < 60) return `${mins}m`;
   const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return `${hours}h`;
   const days = Math.round(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  if (days < 7) return `${days}d`;
+  const d = new Date(ts);
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    ...(sameYear ? {} : { year: 'numeric' }),
+  });
 }
 
 /** A friendly initials/label for a participant or address. */

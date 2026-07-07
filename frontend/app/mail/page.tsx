@@ -324,6 +324,17 @@ export default function MailPage() {
   const threadMailbox =
     mail.mailboxes.find((m) => m.id === mail.selectedThreadMailboxId) ?? mail.selectedMailbox;
   const selfAddress = threadMailbox?.email_address ?? mail.composeMailbox?.email_address ?? '';
+  // Every mailbox address is "you" — used to strip the account owner out of the
+  // conversation-row sender line so the list shows the OTHER party, never yourself.
+  const selfAddresses = useMemo(
+    () =>
+      new Set(
+        mail.mailboxes
+          .map((m) => m.email_address?.toLowerCase().trim())
+          .filter(Boolean) as string[],
+      ),
+    [mail.mailboxes],
+  );
   const openDraft = draftForThread(openThreadRow);
 
   const defaultReply = useMemo(
@@ -809,6 +820,7 @@ export default function MailPage() {
               onLoadMore={mail.loadMore}
               rowRefs={rowRefs}
               draftForThread={draftForThread}
+              selfAddresses={selfAddresses}
             />
           </section>
 
@@ -1161,6 +1173,7 @@ function ConversationList({
   onLoadMore,
   rowRefs,
   draftForThread,
+  selfAddresses,
 }: {
   banner: ListBanner | null;
   error: string | null;
@@ -1185,6 +1198,7 @@ function ConversationList({
   onLoadMore: () => void;
   rowRefs: RefObject<Map<string, HTMLButtonElement>>;
   draftForThread: (thread: ThreadView | null) => AgentInboxItemView | null;
+  selfAddresses: ReadonlySet<string>;
 }) {
   const allChecked = threads.length > 0 && selected.size >= threads.length;
 
@@ -1267,6 +1281,7 @@ function ConversationList({
                 onToggle={() => onToggleSelect(t.id)}
                 onSelect={() => onSelect(t)}
                 draft={draftForThread(t)}
+                selfAddresses={selfAddresses}
                 refCb={(el) => {
                   if (el) rowRefs.current?.set(t.id, el);
                   else rowRefs.current?.delete(t.id);
@@ -1299,6 +1314,7 @@ function ConversationRow({
   onSelect,
   draft,
   refCb,
+  selfAddresses,
 }: {
   thread: ThreadView;
   active: boolean;
@@ -1311,15 +1327,25 @@ function ConversationRow({
   onSelect: () => void;
   draft: AgentInboxItemView | null;
   refCb: (el: HTMLButtonElement | null) => void;
+  selfAddresses: ReadonlySet<string>;
 }) {
   const when = useMemo(() => formatWhen(thread.last_message_at), [thread.last_message_at]);
-  const lead = thread.participants[0] ?? null;
+  // The people who AREN'T you — the list should surface the other party, never
+  // the account owner. Fall back to the raw list only for threads that are
+  // entirely self (e.g. notes-to-self) so a row never renders empty.
+  const others = useMemo(() => {
+    const others = thread.participants.filter(
+      (p) => !p.address || !selfAddresses.has(p.address.toLowerCase().trim()),
+    );
+    return others.length > 0 ? others : thread.participants;
+  }, [thread.participants, selfAddresses]);
+  const lead = others[0] ?? null;
   const who = useMemo(() => {
-    const names = thread.participants.map((p) => p.name?.trim() || p.address).filter(Boolean);
+    const names = others.map((p) => p.name?.trim() || p.address).filter(Boolean);
     if (names.length === 0) return 'No participants';
     if (names.length <= 2) return names.join(', ');
     return `${names[0]} +${names.length - 1}`;
-  }, [thread.participants]);
+  }, [others]);
 
   return (
     <div
