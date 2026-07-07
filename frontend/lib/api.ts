@@ -124,8 +124,10 @@ export async function assistantChat(
 
 /**
  * A confirm-before-anything action surfaced from a chat turn. The backend stages
- * drafts into the agent-inbox and emits them shaped for the in-chat confirm card
- * (`kind`, `item_id`, `to`, `subject`, `preview`).
+ * the action into the agent-inbox and emits it shaped for the in-chat confirm
+ * card. Two kinds: `draft` (reply/compose — carries `to`/`subject`/`preview`) and
+ * `cleanup` (Trash/Archive a group of mail — carries `action`/`provider`/`count`/
+ * `bytes`). Both carry `item_id` (the staged agent-inbox item to approve/reject).
  */
 export interface AssistantAction {
   kind?: string;
@@ -134,6 +136,15 @@ export interface AssistantAction {
   subject?: string | null;
   preview?: string | null;
   error?: string;
+  // Cleanup-only fields (kind === 'cleanup'):
+  /** Proposed verb: TRASH | ARCHIVE | DELETE. */
+  action?: string;
+  /** Connected provider the batch runs on: gmail | microsoft. */
+  provider?: string | null;
+  /** Messages the plan would affect. */
+  count?: number;
+  /** Storage the plan would free, in bytes. */
+  bytes?: number;
   [key: string]: unknown;
 }
 

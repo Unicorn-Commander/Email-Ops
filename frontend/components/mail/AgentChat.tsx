@@ -18,7 +18,7 @@ import {
   type AssistantAction,
 } from '@/lib/api';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
-import { RobotIcon, SendSolidIcon } from './icons';
+import { ArchiveIcon, RobotIcon, SendSolidIcon, TrashIcon } from './icons';
 
 /** Inline **bold** and `code` within one line → React nodes (no HTML injection). */
 function inlineMd(text: string, base: string): ReactNode[] {
@@ -179,7 +179,7 @@ export function AgentChat({
               );
             },
             onActions: (actions) => {
-              const cards = actions.filter((a) => a && a.kind === 'draft');
+              const cards = actions.filter((a) => a && (a.kind === 'draft' || a.kind === 'cleanup'));
               if (cards.length === 0) return;
               setMessages((m) => [
                 ...m,
@@ -366,11 +366,16 @@ function InlineActionCard({
   );
   const [error, setError] = useState<string | null>(null);
 
+  const isCleanup = action.kind === 'cleanup';
   const itemId = typeof action.item_id === 'string' ? action.item_id : null;
   const to = action.to ?? null;
   const subject = action.subject ?? null;
   const preview = action.preview ?? '';
   const stageFailed = Boolean(action.error) || !itemId;
+
+  // Cleanup verb → icon + accent (Archive is non-destructive; Trash/Delete remove).
+  const cleanupVerb = String(action.action ?? 'TRASH').toUpperCase();
+  const CleanupIcon = cleanupVerb === 'ARCHIVE' ? ArchiveIcon : TrashIcon;
 
   const run = async (kind: 'approve' | 'discard') => {
     if (!workspaceId || !itemId || state !== 'idle') return;
@@ -389,6 +394,25 @@ function InlineActionCard({
 
   const settled = state === 'sent' || state === 'discarded';
 
+  const headerTitle =
+    state === 'sent'
+      ? isCleanup
+        ? 'Cleanup done'
+        : 'Sent'
+      : state === 'discarded'
+        ? 'Discarded'
+        : isCleanup
+          ? 'Cleanup ready for your approval'
+          : 'Draft ready for your approval';
+
+  const approveLabel = isCleanup
+    ? state === 'sending'
+      ? 'Running…'
+      : 'Approve & run'
+    : state === 'sending'
+      ? 'Sending…'
+      : 'Approve & send';
+
   return (
     <div className="flex gap-2">
       <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full bg-accent/15 text-accent">
@@ -396,22 +420,33 @@ function InlineActionCard({
       </span>
       <div className="min-w-0 flex-1 overflow-hidden rounded-2xl rounded-tl-md border border-accent/35 bg-gradient-to-b from-accent/[0.08] to-accent/[0.02]">
         <div className="flex items-center gap-2 border-b border-accent/20 px-3 py-2">
-          <span className="text-[12px] font-semibold text-primary">
-            {state === 'sent'
-              ? 'Sent'
-              : state === 'discarded'
-                ? 'Discarded'
-                : 'Draft ready for your approval'}
-          </span>
+          {isCleanup && (
+            <CleanupIcon
+              className={cn(
+                'h-[13px] w-[13px]',
+                cleanupVerb === 'ARCHIVE' ? 'text-accent' : 'text-danger',
+              )}
+            />
+          )}
+          <span className="text-[12px] font-semibold text-primary">{headerTitle}</span>
           {state === 'sent' && <span className="ml-auto text-[13px] text-success">✓</span>}
         </div>
 
         <div className="px-3 py-2.5 text-[12px] leading-[1.55] text-secondary">
-          {(subject || to) && (
-            <p className="mb-1.5 truncate text-[10.5px] font-medium uppercase tracking-wide text-tertiary">
-              {subject || '(no subject)'}
-              {to && <span className="ml-2 normal-case text-muted mono">→ {to}</span>}
-            </p>
+          {isCleanup ? (
+            (action.count ?? 0) > 0 && (
+              <p className="mb-1.5 inline-flex items-center gap-1.5 rounded-md bg-surface-base px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-tertiary">
+                <CleanupIcon className="h-3 w-3" />
+                {cleanupVerb} · {action.count} message{action.count === 1 ? '' : 's'}
+              </p>
+            )
+          ) : (
+            (subject || to) && (
+              <p className="mb-1.5 truncate text-[10.5px] font-medium uppercase tracking-wide text-tertiary">
+                {subject || '(no subject)'}
+                {to && <span className="ml-2 normal-case text-muted mono">→ {to}</span>}
+              </p>
+            )
           )}
           <p
             className={cn(
@@ -428,7 +463,8 @@ function InlineActionCard({
             {stageFailed ? (
               <>
                 <span className="text-[11px] text-danger">
-                  {action.error ?? 'Couldn’t stage this draft.'}
+                  {action.error ??
+                    (isCleanup ? 'Couldn’t stage this cleanup.' : 'Couldn’t stage this draft.')}
                 </span>
                 <button
                   type="button"
@@ -444,10 +480,19 @@ function InlineActionCard({
                   type="button"
                   disabled={state !== 'idle'}
                   onClick={() => void run('approve')}
-                  className="inline-flex h-7 items-center gap-1.5 rounded-lg bg-accent px-3 text-[12px] font-semibold text-white shadow-[0_2px_8px_-2px_rgb(var(--accent)/0.5)] transition-colors hover:bg-accent-hover disabled:opacity-60"
+                  className={cn(
+                    'inline-flex h-7 items-center gap-1.5 rounded-lg px-3 text-[12px] font-semibold text-white transition-colors disabled:opacity-60',
+                    isCleanup && cleanupVerb !== 'ARCHIVE'
+                      ? 'bg-danger shadow-[0_2px_8px_-2px_rgb(var(--danger)/0.5)] hover:bg-danger/90'
+                      : 'bg-accent shadow-[0_2px_8px_-2px_rgb(var(--accent)/0.5)] hover:bg-accent-hover',
+                  )}
                 >
-                  <SendSolidIcon className="h-[13px] w-[13px]" />
-                  {state === 'sending' ? 'Sending…' : 'Approve & send'}
+                  {isCleanup ? (
+                    <CleanupIcon className="h-[13px] w-[13px]" />
+                  ) : (
+                    <SendSolidIcon className="h-[13px] w-[13px]" />
+                  )}
+                  {approveLabel}
                 </button>
                 <button
                   type="button"
