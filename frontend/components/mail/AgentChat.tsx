@@ -8,8 +8,15 @@
  * plain mailbox can't do: an inbox you can talk to.
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useRouter } from 'next/navigation';
 import { cn } from '@/components/ui';
-import { assistantChat, assistantChatStream } from '@/lib/api';
+import {
+  approveAgentInboxItem,
+  assistantChat,
+  assistantChatStream,
+  rejectAgentInboxItem,
+  type AssistantAction,
+} from '@/lib/api';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 import { RobotIcon, SendSolidIcon } from './icons';
 
@@ -108,10 +115,12 @@ function renderMarkdown(text: string): ReactNode {
 
 interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'action';
   text: string;
   pending?: boolean;
   error?: boolean;
+  /** For role:'action' — a staged draft the user can approve/discard inline. */
+  action?: AssistantAction;
 }
 
 const SUGGESTIONS = [
@@ -135,6 +144,7 @@ export function AgentChat({
   const [busy, setBusy] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const router = useRouter();
   const { activeWorkspace } = useActiveWorkspace();
   const workspaceId = activeWorkspace?.workspace_id ?? null;
 
@@ -167,6 +177,19 @@ export function AgentChat({
               setMessages((m) =>
                 m.map((x) => (x.id === thinking.id ? { ...x, pending: false, error: true } : x)),
               );
+            },
+            onActions: (actions) => {
+              const cards = actions.filter((a) => a && a.kind === 'draft');
+              if (cards.length === 0) return;
+              setMessages((m) => [
+                ...m,
+                ...cards.map((a) => ({
+                  id: nextId(),
+                  role: 'action' as const,
+                  text: '',
+                  action: a,
+                })),
+              ]);
             },
           });
           // Settle the bubble: drop the typing state and guard the empty-reply edge.
@@ -239,7 +262,18 @@ export function AgentChat({
             </div>
           </div>
         ) : (
-          messages.map((m) => <Bubble key={m.id} m={m} />)
+          messages.map((m) =>
+            m.role === 'action' && m.action ? (
+              <InlineActionCard
+                key={m.id}
+                action={m.action}
+                workspaceId={workspaceId}
+                onReview={() => router.push('/agent-inbox')}
+              />
+            ) : (
+              <Bubble key={m.id} m={m} />
+            ),
+          )
         )}
       </div>
 
@@ -306,6 +340,134 @@ function Bubble({ m }: { m: ChatMessage }) {
           <span className="whitespace-pre-wrap">{m.text}</span>
         ) : (
           renderMarkdown(m.text)
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The in-chat confirm card for a draft the assistant staged into the approval
+ * queue. Nothing was sent — Approve & send hands it to the send lane (via the
+ * existing agent-inbox approve endpoint), Discard rejects it. Both refresh the
+ * rail/badge by dispatching `agent-inbox:changed`, mirroring AgentDraftCard.
+ */
+function InlineActionCard({
+  action,
+  workspaceId,
+  onReview,
+}: {
+  action: AssistantAction;
+  workspaceId: string | null;
+  onReview: () => void;
+}) {
+  const [state, setState] = useState<'idle' | 'sending' | 'discarding' | 'sent' | 'discarded'>(
+    'idle',
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  const itemId = typeof action.item_id === 'string' ? action.item_id : null;
+  const to = action.to ?? null;
+  const subject = action.subject ?? null;
+  const preview = action.preview ?? '';
+  const stageFailed = Boolean(action.error) || !itemId;
+
+  const run = async (kind: 'approve' | 'discard') => {
+    if (!workspaceId || !itemId || state !== 'idle') return;
+    setState(kind === 'approve' ? 'sending' : 'discarding');
+    setError(null);
+    try {
+      if (kind === 'approve') await approveAgentInboxItem(workspaceId, itemId);
+      else await rejectAgentInboxItem(workspaceId, itemId);
+      window.dispatchEvent(new Event('agent-inbox:changed'));
+      setState(kind === 'approve' ? 'sent' : 'discarded');
+    } catch (e) {
+      setError((e as Error)?.message || 'That didn’t go through. Try again.');
+      setState('idle');
+    }
+  };
+
+  const settled = state === 'sent' || state === 'discarded';
+
+  return (
+    <div className="flex gap-2">
+      <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full bg-accent/15 text-accent">
+        <RobotIcon className="h-[13px] w-[13px]" />
+      </span>
+      <div className="min-w-0 flex-1 overflow-hidden rounded-2xl rounded-tl-md border border-accent/35 bg-gradient-to-b from-accent/[0.08] to-accent/[0.02]">
+        <div className="flex items-center gap-2 border-b border-accent/20 px-3 py-2">
+          <span className="text-[12px] font-semibold text-primary">
+            {state === 'sent'
+              ? 'Sent'
+              : state === 'discarded'
+                ? 'Discarded'
+                : 'Draft ready for your approval'}
+          </span>
+          {state === 'sent' && <span className="ml-auto text-[13px] text-success">✓</span>}
+        </div>
+
+        <div className="px-3 py-2.5 text-[12px] leading-[1.55] text-secondary">
+          {(subject || to) && (
+            <p className="mb-1.5 truncate text-[10.5px] font-medium uppercase tracking-wide text-tertiary">
+              {subject || '(no subject)'}
+              {to && <span className="ml-2 normal-case text-muted mono">→ {to}</span>}
+            </p>
+          )}
+          <p
+            className={cn(
+              'max-h-40 overflow-y-auto whitespace-pre-wrap',
+              settled && 'opacity-60',
+            )}
+          >
+            {preview}
+          </p>
+        </div>
+
+        {!settled && (
+          <div className="flex flex-wrap items-center gap-2 px-3 pb-2.5">
+            {stageFailed ? (
+              <>
+                <span className="text-[11px] text-danger">
+                  {action.error ?? 'Couldn’t stage this draft.'}
+                </span>
+                <button
+                  type="button"
+                  onClick={onReview}
+                  className="ml-auto text-[11px] font-semibold text-accent hover:underline"
+                >
+                  Open Approvals
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  disabled={state !== 'idle'}
+                  onClick={() => void run('approve')}
+                  className="inline-flex h-7 items-center gap-1.5 rounded-lg bg-accent px-3 text-[12px] font-semibold text-white shadow-[0_2px_8px_-2px_rgb(var(--accent)/0.5)] transition-colors hover:bg-accent-hover disabled:opacity-60"
+                >
+                  <SendSolidIcon className="h-[13px] w-[13px]" />
+                  {state === 'sending' ? 'Sending…' : 'Approve & send'}
+                </button>
+                <button
+                  type="button"
+                  disabled={state !== 'idle'}
+                  onClick={() => void run('discard')}
+                  className="inline-flex h-7 items-center rounded-lg border border-transparent px-2.5 text-[12px] font-semibold text-secondary transition-colors hover:text-primary disabled:opacity-60"
+                >
+                  {state === 'discarding' ? 'Discarding…' : 'Discard'}
+                </button>
+                <button
+                  type="button"
+                  onClick={onReview}
+                  className="ml-auto text-[11px] font-medium text-tertiary hover:text-secondary"
+                >
+                  Review
+                </button>
+                {error && <span className="basis-full text-[11px] text-danger">{error}</span>}
+              </>
+            )}
+          </div>
         )}
       </div>
     </div>

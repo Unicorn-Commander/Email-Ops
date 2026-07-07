@@ -13,6 +13,7 @@ import { SmsModule } from './sms/sms.module';
 import { McpModule } from './mcp/mcp.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { AgentInboxModule } from './agent-inbox/agent-inbox.module';
+import { AssistantStreamModule } from './assistant/assistant-stream.module';
 import { AgentsModule } from './agents/agents.module';
 import { EmailHealthModule } from './email-health/email-health.module';
 import { AgentControlsModule } from './agent-controls/agent-controls.module';
@@ -59,6 +60,7 @@ import { UiCommandsModule } from './ui-commands/ui-commands.module';
     // Phase 2, Part B: the agent-inbox REST surface (JWT + membership guarded),
     // delegating to the same EmailService approval flow the MCP tools use.
     AgentInboxModule,
+    AssistantStreamModule,
     // The agent registry surface (the "Agents" view + the autonomy dial): the
     // identity layer behind the approval queue. JWT + membership guarded.
     AgentsModule,

@@ -122,9 +122,18 @@ export async function assistantChat(
   return apiPost<AssistantChatResult>('/assistant/chat', { message, context: context ?? {} }, token);
 }
 
-/** A confirm-before-anything action the assistant proposes from a chat turn. */
+/**
+ * A confirm-before-anything action surfaced from a chat turn. The backend stages
+ * drafts into the agent-inbox and emits them shaped for the in-chat confirm card
+ * (`kind`, `item_id`, `to`, `subject`, `preview`).
+ */
 export interface AssistantAction {
-  type: string;
+  kind?: string;
+  item_id?: string | null;
+  to?: string | null;
+  subject?: string | null;
+  preview?: string | null;
+  error?: string;
   [key: string]: unknown;
 }
 
