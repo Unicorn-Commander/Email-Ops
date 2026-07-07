@@ -7,10 +7,103 @@
  * grounded in a light context digest of the current view. This is the thing a
  * plain mailbox can't do: an inbox you can talk to.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { cn } from '@/components/ui';
 import { assistantChat } from '@/lib/api';
 import { RobotIcon, SendSolidIcon } from './icons';
+
+/** Inline **bold** and `code` within one line → React nodes (no HTML injection). */
+function inlineMd(text: string, base: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  const re = /\*\*([^*]+)\*\*|`([^`]+)`/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let i = 0;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[1] != null) {
+      out.push(
+        <strong key={`${base}b${i}`} className="font-semibold text-primary">
+          {m[1]}
+        </strong>,
+      );
+    } else if (m[2] != null) {
+      out.push(
+        <code key={`${base}c${i}`} className="rounded bg-surface-base px-1 py-0.5 text-[12px] mono">
+          {m[2]}
+        </code>,
+      );
+    }
+    last = m.index + m[0].length;
+    i++;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+/** Minimal, safe markdown → JSX for the assistant's replies (headings, bold,
+ *  bullet and numbered lists, paragraphs). Builds React nodes, never HTML. */
+function renderMarkdown(text: string): ReactNode {
+  const lines = text.replace(/\r/g, '').split('\n');
+  const blocks: ReactNode[] = [];
+  let list: { ordered: boolean; items: string[] } | null = null;
+  let k = 0;
+  const flush = () => {
+    if (!list) return;
+    const { ordered, items } = list;
+    blocks.push(
+      ordered ? (
+        <ol key={`k${k++}`} className="ml-4 list-decimal space-y-0.5">
+          {items.map((it, ix) => (
+            <li key={ix}>{inlineMd(it, `li${k}-${ix}-`)}</li>
+          ))}
+        </ol>
+      ) : (
+        <ul key={`k${k++}`} className="ml-4 list-disc space-y-0.5">
+          {items.map((it, ix) => (
+            <li key={ix}>{inlineMd(it, `li${k}-${ix}-`)}</li>
+          ))}
+        </ul>
+      ),
+    );
+    list = null;
+  };
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) {
+      flush();
+      continue;
+    }
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    const ul = line.match(/^\s*[-*]\s+(.*)$/);
+    const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+    if (h) {
+      flush();
+      blocks.push(
+        <p key={`k${k++}`} className="mt-1.5 font-semibold text-primary first:mt-0">
+          {inlineMd(h[2], `h${k}-`)}
+        </p>,
+      );
+    } else if (ul) {
+      if (!list || list.ordered) {
+        flush();
+        list = { ordered: false, items: [] };
+      }
+      list.items.push(ul[1]);
+    } else if (ol) {
+      if (!list || !list.ordered) {
+        flush();
+        list = { ordered: true, items: [] };
+      }
+      list.items.push(ol[1]);
+    } else {
+      flush();
+      blocks.push(<p key={`k${k++}`}>{inlineMd(line, `p${k}-`)}</p>);
+    }
+  }
+  flush();
+  return <div className="space-y-1.5">{blocks}</div>;
+}
 
 interface ChatMessage {
   id: string;
@@ -173,11 +266,17 @@ function Bubble({ m }: { m: ChatMessage }) {
       </span>
       <div
         className={cn(
-          'max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tl-md px-3 py-2 text-[13px] leading-5',
+          'max-w-[85%] rounded-2xl rounded-tl-md px-3 py-2 text-[13px] leading-5',
           m.error ? 'bg-danger/10 text-danger' : 'bg-surface-overlay text-secondary',
         )}
       >
-        {m.pending ? <TypingDots /> : m.text}
+        {m.pending ? (
+          <TypingDots />
+        ) : m.error ? (
+          <span className="whitespace-pre-wrap">{m.text}</span>
+        ) : (
+          renderMarkdown(m.text)
+        )}
       </div>
     </div>
   );
