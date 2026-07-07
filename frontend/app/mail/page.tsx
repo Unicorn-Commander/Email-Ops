@@ -23,6 +23,7 @@
 
 import Link from 'next/link';
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -1152,6 +1153,25 @@ function AccountButton({
 
 type ListBanner = 'no-workspace' | 'error' | 'loading' | 'no-mailboxes' | 'no-space';
 
+/** Bucket a message time into a scannable date group label (Today / Yesterday
+ *  / This week / This month / "June 2026"). Threads arrive sorted newest-first,
+ *  so emitting a header whenever the bucket changes chunks the list in order. */
+function dateBucketKey(iso: string | null): string {
+  if (!iso) return 'Earlier';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return 'Earlier';
+  const d = new Date(t);
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfThatDay = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const diffDays = Math.round((startOfToday - startOfThatDay) / 86400000);
+  if (diffDays <= 0) return 'Today';
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays < 7) return 'This week';
+  if (diffDays < 30) return 'This month';
+  return d.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+}
+
 function ConversationList({
   banner,
   error,
@@ -1271,26 +1291,40 @@ function ConversationList({
           <EmptyList filter={filter} />
         ) : (
           <>
-            {threads.map((t) => (
-              <ConversationRow
-                key={t.id}
-                thread={t}
-                active={t.id === selectedThreadId}
-                cursor={t.id === cursorThreadId}
-                unified={unified}
-                selectable={selectable}
-                checked={selected.has(t.id)}
-                anySelected={selected.size > 0}
-                onToggle={() => onToggleSelect(t.id)}
-                onSelect={() => onSelect(t)}
-                draft={draftForThread(t)}
-                selfAddresses={selfAddresses}
-                refCb={(el) => {
-                  if (el) rowRefs.current?.set(t.id, el);
-                  else rowRefs.current?.delete(t.id);
-                }}
-              />
-            ))}
+            {(() => {
+              let prevBucket: string | null = null;
+              return threads.map((t) => {
+                const bucket = dateBucketKey(t.last_message_at);
+                const showHeader = bucket !== prevBucket;
+                prevBucket = bucket;
+                return (
+                  <Fragment key={t.id}>
+                    {showHeader && (
+                      <div className="sticky top-0 z-[1] border-b border-subtle bg-surface-base/85 px-3.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary backdrop-blur">
+                        {bucket}
+                      </div>
+                    )}
+                    <ConversationRow
+                      thread={t}
+                      active={t.id === selectedThreadId}
+                      cursor={t.id === cursorThreadId}
+                      unified={unified}
+                      selectable={selectable}
+                      checked={selected.has(t.id)}
+                      anySelected={selected.size > 0}
+                      onToggle={() => onToggleSelect(t.id)}
+                      onSelect={() => onSelect(t)}
+                      draft={draftForThread(t)}
+                      selfAddresses={selfAddresses}
+                      refCb={(el) => {
+                        if (el) rowRefs.current?.set(t.id, el);
+                        else rowRefs.current?.delete(t.id);
+                      }}
+                    />
+                  </Fragment>
+                );
+              });
+            })()}
             {hasMore && (
               <div className="p-2">
                 <Button variant="secondary" size="sm" block disabled={loadingMore} onClick={onLoadMore}>
@@ -1366,10 +1400,12 @@ function ConversationRow({
           active ? 'scale-x-100 opacity-100' : 'scale-x-0 opacity-0',
         )}
       />
+      {/* Unread rail — suppressed while active so it never stacks next to the
+          selection accent bar as two adjacent violet strips. */}
       <span
         className={cn(
           'mt-0.5 w-1 shrink-0 self-stretch rounded-[3px]',
-          thread.unread ? 'bg-accent' : 'bg-transparent',
+          thread.unread && !active ? 'bg-accent' : 'bg-transparent',
         )}
       />
       {selectable && (
@@ -1415,7 +1451,7 @@ function ConversationRow({
           {when && (
             <span
               className={cn(
-                'shrink-0 text-[11px] mono',
+                'shrink-0 text-right text-[11px] tabular-nums mono',
                 thread.unread ? 'font-medium text-secondary' : 'text-tertiary',
               )}
             >
@@ -1423,10 +1459,12 @@ function ConversationRow({
             </span>
           )}
         </span>
+        {/* Subject sits one weight-step below the sender so the two lines don't
+            both peak — sender is the loud anchor, subject the supporting line. */}
         <span
           className={cn(
             'mt-0.5 block truncate text-[13px]',
-            thread.unread ? 'font-semibold text-primary' : 'font-normal text-tertiary',
+            thread.unread ? 'font-medium text-primary' : 'font-normal text-tertiary',
           )}
         >
           {thread.subject?.trim() || '(no subject)'}
@@ -1442,12 +1480,13 @@ function ConversationRow({
           </span>
         )}
         <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          {draft && <Chip tone="agent" icon="bot" label="Draft ready" />}
-          {draft && <Chip tone="approve" icon="alert" label="Needs approval" />}
+          {/* One chip for a staged draft — "draft ready" and "needs approval"
+              are the same state, so showing both was redundant noise. */}
+          {draft && <Chip tone="agent" icon="bot" label="Draft · needs approval" />}
           {unified && thread.mailbox_address && <AccountChip address={thread.mailbox_address} />}
           {thread.has_attachments && (
-            <span className="inline-flex items-center gap-1 text-[11px] text-tertiary">
-              <Paperclip className="h-3 w-3" /> attachment
+            <span className="inline-flex items-center text-tertiary" aria-label="Has attachment">
+              <Paperclip className="h-3.5 w-3.5" />
             </span>
           )}
           {thread.message_count > 1 && (
