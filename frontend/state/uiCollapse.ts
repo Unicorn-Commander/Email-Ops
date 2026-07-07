@@ -122,6 +122,12 @@ export const RAIL_COLLAPSED_KEY = 'eops:mail:rail-collapsed';
 /** /mail right agent-activity rail collapse state. Default: OPEN (expanded). */
 export const railCollapsedStore = makeBoolStore(RAIL_COLLAPSED_KEY, false);
 
+/** localStorage key for the far-left section icon-rail expand (icons ↔ icons+labels). */
+export const SECTION_RAIL_EXPANDED_KEY = 'eops:shell:section-rail-expanded';
+
+/** Section icon-rail (MailIconNav) expand state. Default: COMPACT (icons only). */
+export const sectionRailExpandedStore = makeBoolStore(SECTION_RAIL_EXPANDED_KEY, false);
+
 /** Convenience hooks with a stable toggle callback. */
 export function useNavCollapsed(): [boolean, () => void] {
   const collapsed = navCollapsedStore.use();
@@ -139,4 +145,10 @@ export function useRailCollapsed(): [boolean, () => void] {
   const collapsed = railCollapsedStore.use();
   const toggle = useCallback(() => railCollapsedStore.toggle(), []);
   return [collapsed, toggle];
+}
+
+export function useSectionRailExpanded(): [boolean, () => void] {
+  const expanded = sectionRailExpandedStore.use();
+  const toggle = useCallback(() => sectionRailExpandedStore.toggle(), []);
+  return [expanded, toggle];
 }
