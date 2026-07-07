@@ -51,13 +51,17 @@ function initialsOf(user: EmailOpsUser | null): string {
  */
 function useHydratedUser(): EmailOpsUser | null {
   const [user, setUser] = useState<EmailOpsUser | null>(() => getStoredUser<EmailOpsUser>());
+  const attempted = useRef(false);
   useEffect(() => {
-    // Re-hydrate until the profile carries a resolved `picture` field (URL or an
-    // explicit null). Sessions stored before the photo wiring lack the key, so
-    // this picks up the avatar once without a re-login, then stops.
-    if (user && user.picture !== undefined) return;
+    // Refresh the profile once per load until we have an actual photo URL — a
+    // cached null (from before the avatar existed, or a user with no photo) must
+    // not permanently pin the fallback. The `attempted` ref bounds it to a
+    // single fetch so a still-empty picture never loops.
+    if (attempted.current) return;
+    if (user?.picture) return;
     const token = getToken();
     if (!token) return;
+    attempted.current = true;
     let alive = true;
     fetchProfile(token)
       .then((p) => {
@@ -69,7 +73,7 @@ function useHydratedUser(): EmailOpsUser | null {
     return () => {
       alive = false;
     };
-  }, [user]);
+  }, [user?.picture]);
   return user;
 }
 
