@@ -24,6 +24,14 @@ const DIRECTION_META: Record<string, { label: string; tone: BadgeVariant }> = {
   draft: { label: 'draft', tone: 'warning' },
 };
 
+/** Quiet dot tint per direction tone — lets a collapsed row show who-said-what
+ *  at a glance without competing with the sender/snippet. */
+const TONE_DOT: Partial<Record<BadgeVariant, string>> = {
+  info: 'text-info',
+  neutral: 'text-muted',
+  warning: 'text-warning',
+};
+
 function snippetOf(message: MessageView): string {
   const raw = message.preview ?? message.text_body ?? '';
   return raw.replace(/\s+/g, ' ').trim().slice(0, 140);
@@ -91,6 +99,14 @@ export function MessageItem({
           title="Expand message"
         >
           <span
+            aria-hidden="true"
+            className={cn(
+              'h-1.5 w-1.5 shrink-0 rounded-full bg-current',
+              TONE_DOT[dir.tone] ?? 'text-muted',
+            )}
+          />
+          <span className="sr-only">{dir.label}: </span>
+          <span
             className={cn(
               'w-32 shrink-0 truncate text-xs sm:w-40',
               message.is_unread ? 'font-semibold text-primary' : 'font-medium text-secondary',
@@ -102,15 +118,18 @@ export function MessageItem({
             {snippetOf(message)}
           </span>
           {fileCount > 0 && (
-            <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden="true">
-              <path
-                d="M21 12.5l-8.5 8.5a5.66 5.66 0 01-8-8l9-9a3.77 3.77 0 015.3 5.3l-9 9a1.89 1.89 0 01-2.7-2.7l8.3-8.3"
-                stroke="currentColor"
-                strokeWidth={1.6}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
+            <span className="flex shrink-0 items-center gap-0.5 text-muted" title={`${fileCount} attachment${fileCount === 1 ? '' : 's'}`}>
+              <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5" aria-hidden="true">
+                <path
+                  d="M21 12.5l-8.5 8.5a5.66 5.66 0 01-8-8l9-9a3.77 3.77 0 015.3 5.3l-9 9a1.89 1.89 0 01-2.7-2.7l8.3-8.3"
+                  stroke="currentColor"
+                  strokeWidth={1.6}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span className="text-[10px] font-medium tabular-nums">{fileCount}</span>
+            </span>
           )}
           {when && <span className="shrink-0 font-mono text-[10px] text-muted">{when}</span>}
         </button>
@@ -140,7 +159,7 @@ export function MessageItem({
       )}
       {ccLabel && <p className="truncate font-mono text-[11px] text-muted">cc {ccLabel}</p>}
 
-      <div className="mt-2">
+      <div className="eops-rise-in mt-2">
         {html ? (
           <HtmlEmailBody
             html={html}

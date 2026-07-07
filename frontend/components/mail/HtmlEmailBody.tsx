@@ -316,41 +316,62 @@ export function HtmlEmailBody({
   // (set !important in the srcDoc CSS) lets the body hug its content.
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(40);
+  // Gates the entrance: the frame mounts at a placeholder 40px and only reveals
+  // (fading + easing to real height) once the first content measurement lands,
+  // so the reader never sees the raw 40px→full snap.
+  const [measured, setMeasured] = useState(false);
+  // Held so unmount can tear down the observer + pending re-measure timers.
+  const observerRef = useRef<ResizeObserver | null>(null);
+  const timersRef = useRef<number[]>([]);
   const measure = useCallback(() => {
     const doc = iframeRef.current?.contentDocument;
     if (!doc?.body) return;
     const h = doc.body.scrollHeight;
-    if (h > 0) setHeight(Math.min(Math.max(h + 4, 24), 20000));
+    if (h > 0) {
+      setHeight(Math.min(Math.max(h + 4, 24), 20000));
+      setMeasured(true);
+    }
   }, []);
   const handleLoad = useCallback(() => {
     measure();
     const doc = iframeRef.current?.contentDocument;
     if (!doc?.body) return;
     try {
+      observerRef.current?.disconnect();
       const ro = new ResizeObserver(() => measure());
       ro.observe(doc.body);
+      observerRef.current = ro;
       doc.querySelectorAll('img').forEach((img) => img.addEventListener('load', measure));
     } catch {
       /* measurement best-effort; a fixed height still renders */
     }
     // A couple of delayed re-measures for slow-decoding images/fonts.
-    window.setTimeout(measure, 300);
-    window.setTimeout(measure, 1200);
+    timersRef.current.push(window.setTimeout(measure, 300));
+    timersRef.current.push(window.setTimeout(measure, 1200));
   }, [measure]);
+  // Tear down the observer + any pending timers when the message unmounts.
+  useEffect(() => {
+    return () => {
+      observerRef.current?.disconnect();
+      observerRef.current = null;
+      for (const t of timersRef.current) window.clearTimeout(t);
+      timersRef.current = [];
+    };
+  }, []);
 
   if (!mounted || !processed) return null;
 
   return (
     <div className={cn('min-w-0', className)}>
       {processed.blockedImages > 0 && !showRemote && (
-        <div className="mb-2 flex flex-wrap items-center gap-2 rounded-token border border-subtle bg-surface-overlay/60 px-2.5 py-1.5">
+        <div className="mb-2 flex w-full max-w-[680px] flex-wrap items-center gap-2 rounded-token border border-subtle bg-surface-overlay/60 px-2.5 py-1.5">
           <span className="text-[11px] text-tertiary">
             Remote images blocked ({processed.blockedImages})
           </span>
           <button
             type="button"
             onClick={() => setShowRemote(true)}
-            className="rounded-token px-1.5 py-0.5 text-[11px] font-medium text-accent transition-colors duration-fast ease-token hover:bg-accent/10"
+            className="rounded-token bg-accent/[0.08] px-1.5 py-0.5 text-[11px] font-medium text-accent transition-colors duration-fast ease-token hover:bg-accent/15"
           >
             Show images
           </button>
@@ -373,7 +394,7 @@ export function HtmlEmailBody({
       {/* Cap the readable body column at a comfortable ~680px measure while
           staying fluid below; the iframe stays w-full inside so the existing
           width→reflow→height measurement logic is unchanged. */}
-      <div className="w-full max-w-[680px]">
+      <div className="relative w-full max-w-[680px]">
         <iframe
           ref={iframeRef}
           title="Email content"
@@ -381,9 +402,18 @@ export function HtmlEmailBody({
           referrerPolicy="no-referrer"
           srcDoc={srcDoc}
           onLoad={handleLoad}
-          className="w-full border-0 bg-transparent"
+          className={cn(
+            'w-full border-0 bg-transparent transition-[height,opacity] duration-token ease-token',
+            !measured && 'opacity-0',
+          )}
           style={{ height: `${height}px`, colorScheme: 'auto' }}
         />
+        {!measured && (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 animate-pulse rounded-token bg-surface-overlay/40"
+          />
+        )}
       </div>
 
       {processed.quotedHtml && (
@@ -392,9 +422,26 @@ export function HtmlEmailBody({
           onClick={() => setShowQuoted((v) => !v)}
           aria-expanded={showQuoted}
           title={showQuoted ? 'Hide quoted text' : 'Show quoted text'}
-          className="mt-1 rounded-token bg-surface-overlay px-2 py-0.5 font-mono text-[11px] leading-4 text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay/80 hover:text-primary"
+          className="mt-1 inline-flex items-center gap-1 rounded-token px-1.5 py-0.5 text-[12px] text-tertiary transition-colors duration-token ease-token hover:text-secondary"
         >
-          •••
+          <svg
+            viewBox="0 0 12 12"
+            aria-hidden="true"
+            className={cn(
+              'h-3 w-3 transition-transform duration-token ease-token',
+              showQuoted && 'rotate-180',
+            )}
+          >
+            <path
+              d="M3 4.5 6 7.5 9 4.5"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          {showQuoted ? 'Hide quoted text' : 'Show quoted text'}
         </button>
       )}
     </div>

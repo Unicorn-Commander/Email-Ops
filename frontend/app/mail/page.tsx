@@ -854,7 +854,6 @@ export default function MailPage() {
               rowRefs={rowRefs}
               draftForThread={draftForThread}
               selfAddresses={selfAddresses}
-              onBulk={(a) => void runBulk(a)}
               onQuickTriage={(id, d) => void triageAndAdvance(id, d)}
               onQuickMark={(id, read) => mail.markRead([id], read)}
             />
@@ -1233,7 +1232,6 @@ function ConversationList({
   rowRefs,
   draftForThread,
   selfAddresses,
-  onBulk,
   onQuickTriage,
   onQuickMark,
 }: {
@@ -1261,7 +1259,6 @@ function ConversationList({
   rowRefs: RefObject<Map<string, HTMLButtonElement>>;
   draftForThread: (thread: ThreadView | null) => AgentInboxItemView | null;
   selfAddresses: ReadonlySet<string>;
-  onBulk: (action: BulkAction) => void;
   onQuickTriage: (id: string, disposition: 'ARCHIVE' | 'TRASH') => void;
   onQuickMark: (id: string, read: boolean) => void;
 }) {
@@ -1318,19 +1315,6 @@ function ConversationList({
               {anySelected ? `${selected.size} selected` : 'Select all'}
             </span>
           </label>
-          {anySelected && (
-            <div className="ml-auto flex items-center gap-1">
-              <BulkButton label="Archive" onClick={() => onBulk('archive')}>
-                <ArchiveIcon className="h-3.5 w-3.5" />
-              </BulkButton>
-              <BulkButton label="Trash" onClick={() => onBulk('trash')}>
-                <TrashIcon className="h-3.5 w-3.5" />
-              </BulkButton>
-              <BulkButton label="Mark read" onClick={() => onBulk('read')}>
-                <CheckSquareIcon className="h-3.5 w-3.5" />
-              </BulkButton>
-            </div>
-          )}
         </div>
       )}
 
@@ -1581,28 +1565,6 @@ function ConversationRow({
         </RowAction>
       </div>
     </div>
-  );
-}
-
-function BulkButton({
-  label,
-  onClick,
-  children,
-}: {
-  label: string;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={label}
-      aria-label={label}
-      className="grid h-7 w-7 place-items-center rounded-md text-secondary transition-colors hover:bg-surface-elevated hover:text-primary"
-    >
-      {children}
-    </button>
   );
 }
 
