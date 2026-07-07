@@ -137,6 +137,13 @@ type ApprovePrep =
   | { kind: 'null' }
   | { kind: 'result'; value: { inbox: AgentInboxView; message: MessageComposeView | null } }
   | {
+      kind: 'native-cleanup';
+      itemId: string;
+      disposition: MessageDisposition;
+      threadIds: string[];
+      draftedBy: string | null;
+    }
+  | {
       kind: 'send';
       itemId: string;
       messageId: string;
@@ -734,6 +741,50 @@ export class EmailService {
     return false;
   }
 
+  /** The James folder a disposition maps to (SPAM lives in the junk folder). */
+  private dispositionFolder(disposition: MessageDisposition): MailFolder {
+    switch (disposition) {
+      case MessageDisposition.ARCHIVE:
+        return 'archive';
+      case MessageDisposition.TRASH:
+        return 'trash';
+      case MessageDisposition.SPAM:
+        return 'spam';
+      default:
+        return 'inbox';
+    }
+  }
+
+  /**
+   * Reconcile a thread's folder placement into the ACTUAL mailbox on James (the
+   * overlay's move half). Like the read toggle, the caller path is workspace-level
+   * while JMAP thread ids are per-account — so try each readable sovereign mailbox
+   * until one owns the thread. Returns true when a real James move happened; false
+   * when no sovereign account knew it (e.g. the thread lives in a connected
+   * Gmail/M365 box — that path still only carries the overlay tag). Best-effort:
+   * never throws, so a degraded engine can't block the approval that tags the overlay.
+   */
+  async moveThreadToFolderAcrossMailboxes(
+    workspaceId: string,
+    ucUid: string | null,
+    threadId: string,
+    disposition: MessageDisposition,
+  ): Promise<boolean> {
+    const folder = this.dispositionFolder(disposition);
+    const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      this.readableMailboxes(tx, workspaceId, ucUid),
+    );
+    for (const mb of mailboxes) {
+      if (this.mailProvider.handles(mb)) continue;
+      try {
+        if (await this.stalwart.moveThreadToFolder(mb.emailAddress, threadId, folder)) return true;
+      } catch {
+        // degrade-clean: try the next mailbox
+      }
+    }
+    return false;
+  }
+
   /** Resolve a mailbox by id inside the workspace + apply the per-user HUMAN fence. */
   private async resolveMailboxForCaller(
     workspaceId: string,
@@ -1029,6 +1080,76 @@ export class EmailService {
   }
 
   /**
+   * Stage a NATIVE bulk-triage batch (Archive/Trash specific threads in the
+   * sovereign James inbox) as a PENDING CLEANUP agent-inbox item — the chat's
+   * "clean up my inbox" lane for the native mailbox (external Gmail/M365 cleanup
+   * goes through the Cleaner Engine's stageCleanupRequest instead). Nothing moves
+   * until a human approves; approval both moves the mail in James AND tags the
+   * overlay. Dedupes + caps the thread id list. Returns the staged item view (its
+   * id backs the confirm card), or null when no valid thread ids were given.
+   */
+  async stageNativeCleanup(
+    workspaceId: string,
+    ucUid: string | null,
+    disposition: MessageDisposition,
+    threadIds: string[],
+    opts?: { agentKey?: string | null },
+  ): Promise<AgentInboxView | null> {
+    const ids = Array.from(
+      new Set(threadIds.map((t) => String(t ?? '').trim()).filter(Boolean)),
+    ).slice(0, 50);
+    if (ids.length === 0) return null;
+    const folder = this.dispositionFolder(disposition);
+    const verb = disposition === MessageDisposition.TRASH ? 'Move to Trash' : 'Archive';
+    const summary = `${verb} ${ids.length} thread${ids.length === 1 ? '' : 's'} in your inbox`;
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const item = await tx.agentInboxItem.create({
+        data: {
+          workspaceId,
+          messageId: null,
+          kind: AgentInboxKind.CLEANUP,
+          payload: { native: true, action: disposition, folder, thread_ids: ids },
+          state: AgentInboxState.PENDING,
+          draftedBy: opts?.agentKey ?? 'email-ops-assistant',
+          summary,
+        },
+      });
+      return this.inboxView(item, null);
+    });
+  }
+
+  /**
+   * Execute an approved NATIVE cleanup batch OUTSIDE any tx (the JMAP moves are
+   * external calls — the §3 send-tx lesson): for each thread, move it in James to
+   * the target folder (best-effort) AND tag the disposition overlay so the reader
+   * reflects the move even when a mailbox is momentarily unreachable. Returns how
+   * many threads were moved in James (the overlay is always tagged).
+   */
+  private async runNativeCleanup(
+    workspaceId: string,
+    ucUid: string | null,
+    disposition: MessageDisposition,
+    threadIds: string[],
+  ): Promise<number> {
+    let moved = 0;
+    for (const threadId of threadIds) {
+      if (await this.moveThreadToFolderAcrossMailboxes(workspaceId, ucUid, threadId, disposition)) {
+        moved += 1;
+      }
+    }
+    await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      for (const threadId of threadIds) {
+        await tx.threadDisposition.upsert({
+          where: { workspaceId_threadId: { workspaceId, threadId } },
+          create: { workspaceId, threadId, disposition, setByUcUid: ucUid, setByAgentKey: 'email-ops-assistant' },
+          update: { disposition, setByUcUid: ucUid, setByAgentKey: 'email-ops-assistant' },
+        });
+      }
+    });
+    return moved;
+  }
+
+  /**
    * Approve a pending agent-inbox draft: PENDING → APPROVED, hand the staged
    * draft to the send lane, advance the message to queued/sent/failed. Returns
    * the updated message view. Idempotent-ish: approving a non-pending item is a
@@ -1071,6 +1192,22 @@ export class EmailService {
 
         if (item.kind === AgentInboxKind.CLEANUP) {
           const payload = this.cleanupPayload(item.payload);
+          const nativeIds = this.nativeCleanupThreadIds(payload);
+          if (nativeIds) {
+            // Native bulk-triage: defer execution to AFTER the tx — the JMAP moves
+            // are external calls and must not run inside the withWorkspace tx.
+            const disposition =
+              payload.action === MessageDisposition.TRASH
+                ? MessageDisposition.TRASH
+                : MessageDisposition.ARCHIVE;
+            return {
+              kind: 'native-cleanup',
+              itemId,
+              disposition,
+              threadIds: nativeIds,
+              draftedBy: item.draftedBy,
+            };
+          }
           const owner = await this.resolveUserByUcUid(tx, ucUid);
           if (!owner) return { kind: 'null' };
           const batchId = payload.batch_id;
@@ -1134,6 +1271,34 @@ export class EmailService {
 
     if (prep.kind === 'null') return null;
     if (prep.kind === 'result') return prep.value;
+
+    if (prep.kind === 'native-cleanup') {
+      // Execute the bulk move in James (best-effort per thread) + tag the overlay,
+      // all OUTSIDE the authorize tx, then flip the item to APPROVED + audit.
+      const moved = await this.runNativeCleanup(workspaceId, ucUid, prep.disposition, prep.threadIds);
+      return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+        const updated = await tx.agentInboxItem.update({
+          where: { id: prep.itemId },
+          data: {
+            state: AgentInboxState.APPROVED,
+            reviewedByUcUid: ucUid,
+            reviewedAt: new Date(),
+            reviewNote: note ?? null,
+          },
+        });
+        await this.recordAction(tx, workspaceId, {
+          kind: AgentActionKind.APPROVED,
+          agentKey: prep.draftedBy,
+          messageId: null,
+          actorUcUid: ucUid,
+          detail: `native cleanup ${prep.disposition}: ${moved}/${prep.threadIds.length} thread(s) moved in James`,
+        });
+        this.logger.log(
+          `agent-inbox native cleanup item ${prep.itemId} APPROVED by ${ucUid ?? '(unknown)'} — ${moved}/${prep.threadIds.length} threads moved in James`,
+        );
+        return { inbox: this.inboxView(updated, null), message: null };
+      });
+    }
 
     // PHASE 2 — hand the approved draft to the mail engine / provider, OUTSIDE the
     // tx (degrade-clean: a failed send returns accepted:false, never throws).
@@ -1717,7 +1882,19 @@ export class EmailService {
       : {};
   }
 
+  /** Threads targeted by a NATIVE bulk-triage cleanup payload (else null). */
+  private nativeCleanupThreadIds(payload: Record<string, unknown>): string[] | null {
+    if (payload.native !== true) return null;
+    const ids = payload.thread_ids;
+    return Array.isArray(ids) ? ids.map((t) => String(t)).filter(Boolean) : [];
+  }
+
   private cleanupSummary(payload: Record<string, unknown>): string | null {
+    const nativeIds = this.nativeCleanupThreadIds(payload);
+    if (nativeIds) {
+      const verb = payload.action === MessageDisposition.TRASH ? 'Move to Trash' : 'Archive';
+      return `${verb} ${nativeIds.length} thread${nativeIds.length === 1 ? '' : 's'} in your inbox`;
+    }
     const action = typeof payload.action === 'string' ? payload.action : 'cleanup';
     const provider = typeof payload.provider === 'string' ? payload.provider : '';
     const count = Array.isArray((payload.plan as Record<string, unknown> | undefined)?.safe)
@@ -1727,11 +1904,19 @@ export class EmailService {
   }
 
   private cleanupSubject(payload: Record<string, unknown>): string | null {
+    if (this.nativeCleanupThreadIds(payload)) {
+      return payload.action === MessageDisposition.TRASH ? 'Trash threads' : 'Archive threads';
+    }
     const action = typeof payload.action === 'string' ? payload.action : 'Cleanup';
     return `${action[0]?.toUpperCase() ?? 'C'}${action.slice(1)} request`;
   }
 
   private cleanupBodyPreview(payload: Record<string, unknown>): string | null {
+    const nativeIds = this.nativeCleanupThreadIds(payload);
+    if (nativeIds) {
+      const verb = payload.action === MessageDisposition.TRASH ? 'trashed' : 'archived';
+      return `${nativeIds.length} thread${nativeIds.length === 1 ? '' : 's'} will be ${verb} in your James mailbox on approval.`;
+    }
     const plan = payload.plan && typeof payload.plan === 'object' ? (payload.plan as Record<string, unknown>) : null;
     const safe = Array.isArray(plan?.safe) ? (plan?.safe as Array<Record<string, unknown>>) : [];
     const protectedCount = Array.isArray(plan?.protected) ? (plan?.protected as unknown[]).length : 0;

@@ -278,6 +278,15 @@ export class StalwartClient extends StalwartPort {
     return false;
   }
 
+  /** NOT SUPPORTED on Stalwart (JMAP folder move is a James-only surface) — degrade-clean false. */
+  async moveThreadToFolder(
+    _mailbox: string,
+    _threadId: string,
+    _folder: StalwartFolderQuery['folder'],
+  ): Promise<boolean> {
+    return false;
+  }
+
   /** NOT SUPPORTED on Stalwart (webmail-wave counts surface) — degrade-clean null. */
   async getMailboxCounts(_mailbox: string): Promise<StalwartMailboxCounts | null> {
     return null;

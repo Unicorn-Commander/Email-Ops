@@ -32,7 +32,7 @@ import { Body, Controller, Post, Res, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
 import type { Response } from 'express';
-import { AgentInboxState, CleanupActionKind, User } from '@prisma/client';
+import { AgentInboxState, CleanupActionKind, MessageDisposition, User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
 import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decorator';
@@ -62,6 +62,9 @@ class AssistantStreamBody {
 interface RawAction {
   type?: string;
   thread_id?: unknown;
+  /** Native cleanup: the thread ids (from the Inbox context) to Archive/Trash. */
+  thread_ids?: unknown;
+  action?: unknown;
   to?: unknown;
   subject?: unknown;
   body?: unknown;
@@ -218,7 +221,16 @@ export class AssistantStreamController {
     for (const a of actions.slice(0, 3)) {
       const type = String(a?.type ?? '').toLowerCase();
       if (type === 'cleanup') {
-        out.push(await this.stageCleanup(workspaceId, user, a));
+        // thread_ids present → clean the NATIVE James inbox (the threads the model
+        // picked from context); otherwise fall to the external Cleaner-Engine path.
+        const threadIds = Array.isArray(a.thread_ids)
+          ? a.thread_ids.map((t) => String(t ?? '').trim()).filter(Boolean)
+          : [];
+        out.push(
+          threadIds.length > 0
+            ? await this.stageNativeCleanup(workspaceId, user, a, threadIds)
+            : await this.stageCleanup(workspaceId, user, a),
+        );
         continue;
       }
       if (type !== 'draft_reply' && type !== 'compose') continue;
@@ -268,6 +280,61 @@ export class AssistantStreamController {
       }
     }
     return out;
+  }
+
+  /**
+   * Stage a NATIVE bulk-triage into the agent-inbox: Archive/Trash the specific
+   * threads the model picked from the Inbox context, targeting the sovereign James
+   * mailbox. Reuses EmailService.stageNativeCleanup (parks a PENDING CLEANUP item);
+   * on approval it moves the mail in James for real. Nothing moves until approved.
+   */
+  private async stageNativeCleanup(
+    workspaceId: string,
+    user: User,
+    a: RawAction,
+    threadIds: string[],
+  ): Promise<StagedCleanup> {
+    const rawAction = String(a.action ?? 'ARCHIVE').trim().toUpperCase();
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    // Native has no permanent-delete and no unsubscribe: DELETE→Trash, and
+    // anything not TRASH maps to Archive (the safe default).
+    const disposition =
+      rawAction === 'TRASH' || rawAction === 'DELETE'
+        ? MessageDisposition.TRASH
+        : MessageDisposition.ARCHIVE;
+    const shownAction = disposition === MessageDisposition.TRASH ? 'TRASH' : 'ARCHIVE';
+    const verb = disposition === MessageDisposition.TRASH ? 'Move to Trash' : 'Archive';
+    const n = threadIds.length;
+    const fail = (error: string): StagedCleanup => ({
+      kind: 'cleanup',
+      item_id: null,
+      action: shownAction,
+      provider: 'this inbox',
+      count: n,
+      bytes: 0,
+      preview: null,
+      error,
+    });
+
+    if (rawAction === 'UNSUBSCRIBE') {
+      return fail('Unsubscribe isn’t available yet — no mail was changed.');
+    }
+
+    try {
+      const view = await this.email.stageNativeCleanup(workspaceId, ucUid, disposition, threadIds);
+      if (!view) return fail('No threads to clean up.');
+      return {
+        kind: 'cleanup',
+        item_id: view.id,
+        action: shownAction,
+        provider: 'this inbox',
+        count: n,
+        bytes: 0,
+        preview: `${verb} ${n} thread${n === 1 ? '' : 's'} in your inbox. Nothing moves until you approve.`,
+      };
+    } catch {
+      return fail('Could not stage this cleanup.');
+    }
   }
 
   /**

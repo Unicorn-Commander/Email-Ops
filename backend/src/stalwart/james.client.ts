@@ -661,6 +661,42 @@ export class JamesClient extends StalwartPort {
     return !!result && (result.updated == null || Object.keys(result.updated).length > 0 || Object.keys(update).length === 0 || (result.notUpdated == null));
   }
 
+  /**
+   * Move every message in a thread into the folder for `folder` under the
+   * mailbox's own account. Resolve the target folder's JMAP mailbox id (by
+   * role), then `Email/set` each message's `mailboxIds` to exactly that folder
+   * — a real move (out of Inbox, into Archive/Trash/Junk), not just an overlay
+   * tag. Two round trips (resolve emailIds, then patch). Returns false on any
+   * degrade step (not configured / thread unknown here / no such folder / set
+   * failed) so the caller can try the next mailbox.
+   */
+  async moveThreadToFolder(
+    mailbox: string,
+    threadId: string,
+    folder: StalwartFolderQuery['folder'],
+  ): Promise<boolean> {
+    if (!this.jmapUrl) return false;
+    const role = FOLDER_ROLE[folder];
+    const targetMailboxId = await this.resolveMailboxIdForRole(mailbox, role);
+    if (!targetMailboxId) return false;
+    const idsResp = await this.jmap([['Thread/get', { ids: [threadId] }, '0']], mailbox);
+    if (!idsResp) return false;
+    const emailIds = this.named(idsResp, 'Thread/get')?.list?.[0]?.emailIds;
+    if (!Array.isArray(emailIds) || emailIds.length === 0) return false;
+    // Setting the whole `mailboxIds` map (not a `mailboxIds/<id>` patch) moves the
+    // message OUT of its current folder into exactly the target — the move we want.
+    const update: Record<string, Record<string, unknown>> = {};
+    for (const id of emailIds) {
+      if (typeof id === 'string') update[id] = { mailboxIds: { [targetMailboxId]: true } };
+    }
+    if (Object.keys(update).length === 0) return false;
+    const setResp = await this.jmap([['Email/set', { update }, '0']], mailbox);
+    if (!setResp) return false;
+    const result = this.named(setResp, 'Email/set');
+    const updatedCount = result?.updated ? Object.keys(result.updated).length : 0;
+    return updatedCount > 0;
+  }
+
   /** The Inbox unread/total counts for one mailbox (JMAP Mailbox `role: inbox`). */
   async getMailboxCounts(mailbox: string): Promise<StalwartMailboxCounts | null> {
     if (!this.jmapUrl) return null;

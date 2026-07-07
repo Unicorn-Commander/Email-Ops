@@ -85,6 +85,20 @@ export abstract class StalwartPort {
   abstract setThreadRead(mailbox: string, threadId: string, read: boolean): Promise<boolean>;
 
   /**
+   * Move every message in a thread into the folder for `folder`
+   * (archive/trash/spam→junk/inbox) under the mailbox's own account — a real
+   * JMAP `Email/set` of `mailboxIds`, so the move is reflected everywhere the
+   * mailbox is read (other clients, other devices), not just in our overlay.
+   * Returns true on success, false when not configured / the thread is unknown
+   * to this mailbox / the call fails (degrade-clean; never throws).
+   */
+  abstract moveThreadToFolder(
+    mailbox: string,
+    threadId: string,
+    folder: StalwartFolderQuery['folder'],
+  ): Promise<boolean>;
+
+  /**
    * The Inbox unread/total counts for one mailbox. Returns null when not
    * configured / unknown / the call fails — the caller renders that as a
    * zeroed, `error:true` entry rather than omitting the mailbox.
