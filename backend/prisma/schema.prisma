@@ -477,6 +477,7 @@ model User {
   username    String    @unique
   firstName   String    @default("")
   lastName    String    @default("")
+  picture     String?   // avatar URL from the Keycloak `picture` claim (suite avatar spine)
   keycloakId  String?   @unique // == uchub sub once SSO-linked; the Membership.userKey
   kcRefreshTokenEnc String?
   kcRefreshUpdatedAt DateTime?

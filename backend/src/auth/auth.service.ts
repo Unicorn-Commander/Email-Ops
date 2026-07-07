@@ -48,6 +48,12 @@ export class AuthService {
    */
   async validateKeycloakUser(keycloakId: string, profile: any): Promise<User> {
     const email: string | undefined = profile?.email;
+    // The Keycloak `picture` claim (suite avatar spine) — only trust an absolute
+    // URL, and never null out a stored photo on a login whose userinfo omits it.
+    const picture: string | null =
+      typeof profile?.picture === 'string' && /^https?:\/\//.test(profile.picture)
+        ? profile.picture
+        : null;
 
     // 1. keycloakId / sub first (the canonical, unique key).
     let user = await this.prisma.user.findUnique({ where: { keycloakId } });
@@ -112,6 +118,7 @@ export class AuthService {
           username,
           firstName: profile?.given_name || profile?.firstName || '',
           lastName: profile?.family_name || profile?.lastName || '',
+          picture,
           keycloakId,
         },
       });
@@ -124,7 +131,10 @@ export class AuthService {
       throw new UnauthorizedException('User account is inactive');
     }
 
-    await this.prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+    user = await this.prisma.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date(), ...(picture ? { picture } : {}) },
+    });
     return user;
   }
 

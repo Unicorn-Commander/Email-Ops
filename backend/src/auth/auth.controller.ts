@@ -8,6 +8,8 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '@prisma/client';
 import { MembershipService } from '../common/workspace/membership.service';
 import { listMyWorkspaces } from '../common/workspace/list-my-workspaces';
+import { KeycloakBrokerService } from './keycloak-broker.service';
+import { PrismaService } from '../prisma/prisma.service';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -16,6 +18,8 @@ export class AuthController {
     private readonly authService: AuthService,
     private readonly configService: ConfigService,
     private readonly membership: MembershipService,
+    private readonly broker: KeycloakBrokerService,
+    private readonly prisma: PrismaService,
   ) {}
 
   @Get('keycloak')
@@ -46,12 +50,25 @@ export class AuthController {
   @ApiResponse({ status: 200, description: 'Returns user profile' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   async getProfile(@CurrentUser() user: User) {
+    // Resolve the avatar photo. It's captured at login, but already-signed-in
+    // users have none stored yet — live-fetch the Keycloak `picture` claim once
+    // and cache it so the photo appears without forcing a re-login.
+    let picture = user.picture ?? null;
+    if (!picture) {
+      picture = await this.broker.getUserPicture(user).catch(() => null);
+      if (picture) {
+        await this.prisma.user
+          .update({ where: { id: user.id }, data: { picture } })
+          .catch(() => undefined);
+      }
+    }
     return {
       id: user.id,
       email: user.email,
       username: user.username,
       firstName: user.firstName,
       lastName: user.lastName,
+      picture,
       isActive: user.isActive,
       lastLoginAt: user.lastLoginAt,
       createdAt: user.createdAt,

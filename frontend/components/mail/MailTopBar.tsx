@@ -52,7 +52,10 @@ function initialsOf(user: EmailOpsUser | null): string {
 function useHydratedUser(): EmailOpsUser | null {
   const [user, setUser] = useState<EmailOpsUser | null>(() => getStoredUser<EmailOpsUser>());
   useEffect(() => {
-    if (user?.firstName || user?.picture) return;
+    // Re-hydrate until the profile carries a resolved `picture` field (URL or an
+    // explicit null). Sessions stored before the photo wiring lack the key, so
+    // this picks up the avatar once without a re-login, then stops.
+    if (user && user.picture !== undefined) return;
     const token = getToken();
     if (!token) return;
     let alive = true;
@@ -66,7 +69,7 @@ function useHydratedUser(): EmailOpsUser | null {
     return () => {
       alive = false;
     };
-  }, [user?.firstName, user?.picture]);
+  }, [user]);
   return user;
 }
 
