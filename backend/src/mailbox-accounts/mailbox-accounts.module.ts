@@ -4,8 +4,10 @@ import { WorkspaceModule } from '../common/workspace/workspace.module';
 import { ProvisioningModule } from '../provisioning/provisioning.module';
 import { MailProviderModule } from '../mail-provider/mail-provider.module';
 import { MailEngineAdminModule } from '../mail-engine-admin/mail-engine-admin.module';
+import { MailAutoconfigController } from './mail-autoconfig.controller';
 import { MailboxAccountsController } from './mailbox-accounts.controller';
 import { MailboxAccountsService } from './mailbox-accounts.service';
+import { DeviceConfigService } from './device-config.service';
 
 /**
  * Mailbox management (the net-new MailboxAccount CRUD). The controller gates
@@ -15,8 +17,8 @@ import { MailboxAccountsService } from './mailbox-accounts.service';
  */
 @Module({
   imports: [AuthModule, WorkspaceModule, ProvisioningModule, MailProviderModule, MailEngineAdminModule],
-  controllers: [MailboxAccountsController],
-  providers: [MailboxAccountsService],
+  controllers: [MailboxAccountsController, MailAutoconfigController],
+  providers: [MailboxAccountsService, DeviceConfigService],
   exports: [MailboxAccountsService],
 })
 export class MailboxAccountsModule {}

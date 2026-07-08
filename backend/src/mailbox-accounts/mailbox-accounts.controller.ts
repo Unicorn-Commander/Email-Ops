@@ -23,9 +23,12 @@ import {
   Param,
   Patch,
   Post,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
+import type { Response } from 'express';
 import { IsBoolean, IsEnum, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import { MailboxOwnerKind, User, WorkspaceRole } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -97,6 +100,67 @@ export class MailboxAccountsController {
     const mb = await this.mailboxes.getMailbox(workspaceId, ucUidOf(user as WithWorkspaceClaim), id);
     if (!mb) throw new NotFoundException('Mailbox not found in this workspace.');
     return mb;
+  }
+
+  @Get(':id/connection')
+  @ApiOperation({ summary: 'Fetch owner-scoped mail-client connection settings.' })
+  @ApiResponse({ status: 403, description: 'Mailbox is not owned by the current user.' })
+  @ApiResponse({ status: 404, description: 'No such mailbox in this workspace.' })
+  async connection(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+  ) {
+    const settings = await this.mailboxes.getOwnConnectionSettings(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      id,
+    );
+    if (!settings) throw new NotFoundException('Mailbox not found in this workspace.');
+    return settings;
+  }
+
+  @Get(':id/config.mobileconfig')
+  @ApiOperation({ summary: 'Download an owner-scoped Apple Mail configuration profile.' })
+  @ApiResponse({ status: 403, description: 'Mailbox is not owned by the current user.' })
+  @ApiResponse({ status: 404, description: 'No such mailbox in this workspace.' })
+  async mobileconfig(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Res() res: Response,
+  ) {
+    const profile = await this.mailboxes.buildOwnAppleMobileconfig(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      id,
+    );
+    if (!profile) throw new NotFoundException('Mailbox not found in this workspace.');
+    res.set({
+      'Content-Type': 'application/x-apple-aspen-config',
+      'Content-Disposition': `attachment; filename="${profile.filename}"`,
+      'Content-Length': String(Buffer.byteLength(profile.xml)),
+    });
+    res.send(profile.xml);
+  }
+
+  @Post(':id/app-password\\:reset')
+  @Throttle({ short: { ttl: 60000, limit: 3 }, long: { ttl: 3600000, limit: 12 } })
+  @ApiOperation({ summary: 'Reset and reveal the owner-scoped mail app-password once.' })
+  @ApiResponse({ status: 403, description: 'Mailbox is not owned by the current user.' })
+  @ApiResponse({ status: 404, description: 'No such mailbox in this workspace.' })
+  async resetAppPassword(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+  ) {
+    const result = await this.mailboxes.resetOwnAppPassword(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      id,
+    );
+    if (!result) throw new NotFoundException('Mailbox not found in this workspace.');
+    return result;
   }
 
   @Post()

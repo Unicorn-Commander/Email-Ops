@@ -1,5 +1,5 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger } from '@nestjs/common';
+import { ValidationPipe, Logger, RequestMethod } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
@@ -29,7 +29,13 @@ async function bootstrap() {
 
   // Global prefix
   const apiPrefix = configService.get('API_PREFIX', 'api/v1');
-  app.setGlobalPrefix(apiPrefix);
+  app.setGlobalPrefix(apiPrefix, {
+    exclude: [
+      { path: '.well-known/autoconfig/mail/config-v1.1.xml', method: RequestMethod.GET },
+      { path: 'mail/config-v1.1.xml', method: RequestMethod.GET },
+      { path: 'autodiscover/autodiscover.xml', method: RequestMethod.POST },
+    ],
+  });
 
   // Global validation pipe
   app.useGlobalPipes(
