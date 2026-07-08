@@ -85,6 +85,16 @@ export abstract class StalwartPort {
   abstract setThreadRead(mailbox: string, threadId: string, read: boolean): Promise<boolean>;
 
   /**
+   * Set/clear message keywords across every message in a thread. `seen` maps to
+   * JMAP `$seen` / IMAP \Seen; `flagged` maps to `$flagged` / IMAP \Flagged.
+   */
+  abstract setThreadFlags(
+    mailbox: string,
+    threadId: string,
+    flags: { seen?: boolean; flagged?: boolean },
+  ): Promise<boolean>;
+
+  /**
    * Move every message in a thread into the folder for `folder`
    * (archive/trash/spam→junk/inbox) under the mailbox's own account — a real
    * JMAP `Email/set` of `mailboxIds`, so the move is reflected everywhere the

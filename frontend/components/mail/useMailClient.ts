@@ -34,6 +34,7 @@ import {
   listMailMailboxes,
   listMailThreads,
   setThreadDisposition,
+  setThreadFlags,
   setThreadRead,
   type BulkAction,
   type BulkActionResponse,
@@ -155,6 +156,8 @@ export interface UseMailClient {
 
   /** Mark threads read/unread (optimistic; uses the Wave-2 read endpoint). */
   markRead: (threadIds: string[], read: boolean) => void;
+  /** Star/unstar threads (optimistic; maps to IMAP \Flagged). */
+  toggleFlag: (threadId: string, flagged: boolean) => void;
 
   /**
    * Compose a new message. Sends from `mailboxId` when given (keeps uploads and
@@ -435,6 +438,25 @@ export function useMailClient(): UseMailClient {
     [bumpUnread, guard401, disableFeature],
   );
 
+  const toggleFlag = useCallback(
+    (threadId: string, flagged: boolean) => {
+      const ws = workspaceRef.current;
+      if (!ws) return;
+      const row = threadsRef.current.find((t) => t.id === threadId);
+      const mbx = row?.mailbox_id ?? openThread?.mailboxId ?? selectedMailboxIdRef.current;
+      setThreads((prev) => prev.map((t) => (t.id === threadId ? { ...t, flagged } : t)));
+      if (openThread?.id === threadId) {
+        setMessages((prev) => prev.map((m) => ({ ...m, flagged })));
+      }
+      if (!mbx || mbx === ALL_INBOXES) return;
+      void setThreadFlags(ws.workspace_id, mbx, threadId, { flagged }).catch((err: unknown) => {
+        if (guard401(err)) return;
+        if (isMissingEndpoint(err)) disableFeature('read');
+      });
+    },
+    [openThread, guard401, disableFeature],
+  );
+
   // ── Open thread + messages ────────────────────────────────────────────────
   const selectThread = useCallback(
     (threadId: string | null, mailboxId?: string) => {
@@ -666,6 +688,7 @@ export function useMailClient(): UseMailClient {
     messagesLoad,
     messagesError,
     markRead,
+    toggleFlag,
     compose,
     reply,
     triage,

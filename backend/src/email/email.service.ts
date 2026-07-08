@@ -241,6 +241,7 @@ export class EmailService {
           subject: t.subject,
           message_count: t.messageCount,
           unread: t.unread,
+          flagged: t.flagged,
           last_message_at: t.lastMessageAt,
           last_snippet: t.lastSnippet,
           participants: t.participants.map((p) => ({ address: p.address, name: p.name })),
@@ -518,6 +519,7 @@ export class EmailService {
       subject: t.subject,
       message_count: t.messageCount,
       unread: t.unread,
+      flagged: t.flagged,
       last_message_at: t.lastMessageAt,
       last_snippet: t.lastSnippet,
       participants: t.participants.map((p) => ({ address: p.address, name: p.name })),
@@ -682,6 +684,21 @@ export class EmailService {
     }
     const updated = await this.stalwart.setThreadRead(mailbox.emailAddress, threadId, read);
     return { thread_id: threadId, read, updated };
+  }
+
+  async setThreadFlagState(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    threadId: string,
+    flags: { flagged?: boolean; seen?: boolean },
+  ): Promise<{ thread_id: string; flagged?: boolean; seen?: boolean; updated: boolean }> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) {
+      return { thread_id: threadId, ...flags, updated: false };
+    }
+    const updated = await this.stalwart.setThreadFlags(mailbox.emailAddress, threadId, flags);
+    return { thread_id: threadId, ...flags, updated };
   }
 
   /**
@@ -1881,6 +1898,7 @@ export class EmailService {
       message_id_header: m.messageIdHeader,
       references: m.references,
       is_unread: m.isUnread,
+      flagged: m.flagged,
       attachments: m.attachments.map((a) => ({
         blob_id: a.blobId,
         name: a.name,

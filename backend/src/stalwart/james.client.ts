@@ -419,6 +419,7 @@ export class JamesClient extends StalwartPort {
         subject: typeof (m as any).subject === 'string' ? (m as any).subject : null,
         messageCount: countByThread.get(threadId) ?? 1,
         unread: keywords['$seen'] !== true,
+        flagged: keywords['$flagged'] === true,
         lastMessageAt: typeof (m as any).receivedAt === 'string' ? (m as any).receivedAt : null,
         lastSnippet: typeof (m as any).preview === 'string' ? (m as any).preview : null,
         participants,
@@ -624,6 +625,7 @@ export class JamesClient extends StalwartPort {
         messageIdHeader,
         references,
         isUnread: keywords['$seen'] !== true,
+        flagged: keywords['$flagged'] === true,
         attachments,
       });
     }
@@ -659,6 +661,31 @@ export class JamesClient extends StalwartPort {
     if (!setResp) return false;
     const result = this.named(setResp, 'Email/set');
     return !!result && (result.updated == null || Object.keys(result.updated).length > 0 || Object.keys(update).length === 0 || (result.notUpdated == null));
+  }
+
+  async setThreadFlags(
+    mailbox: string,
+    threadId: string,
+    flags: { seen?: boolean; flagged?: boolean },
+  ): Promise<boolean> {
+    if (!this.jmapUrl) return false;
+    const idsResp = await this.jmap([['Thread/get', { ids: [threadId] }, '0']], mailbox);
+    if (!idsResp) return false;
+    const emailIds = this.named(idsResp, 'Thread/get')?.list?.[0]?.emailIds;
+    if (!Array.isArray(emailIds) || emailIds.length === 0) return false;
+    const patch: Record<string, boolean> = {};
+    if (flags.seen !== undefined) patch['keywords/$seen'] = flags.seen;
+    if (flags.flagged !== undefined) patch['keywords/$flagged'] = flags.flagged;
+    if (Object.keys(patch).length === 0) return false;
+    const update: Record<string, Record<string, boolean>> = {};
+    for (const id of emailIds) {
+      if (typeof id === 'string') update[id] = patch;
+    }
+    if (Object.keys(update).length === 0) return false;
+    const setResp = await this.jmap([['Email/set', { update }, '0']], mailbox);
+    if (!setResp) return false;
+    const result = this.named(setResp, 'Email/set');
+    return !!result && (result.updated == null || Object.keys(result.updated).length > 0 || result.notUpdated == null);
   }
 
   /**

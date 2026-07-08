@@ -35,6 +35,7 @@ export interface ThreadView {
   subject: string | null;
   message_count: number;
   unread: boolean;
+  flagged?: boolean;
   last_message_at: string | null;
   last_snippet: string | null;
   participants: ParticipantView[];
@@ -80,6 +81,7 @@ export interface MessageView {
   message_id_header?: string | null;
   references?: string[] | null;
   is_unread?: boolean;
+  flagged?: boolean;
   attachments?: AttachmentView[];
 }
 

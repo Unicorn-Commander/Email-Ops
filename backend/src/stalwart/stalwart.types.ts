@@ -26,6 +26,7 @@ export interface StalwartThread {
   subject: string | null;
   messageCount: number;
   unread: boolean;
+  flagged?: boolean;
   /** ISO-8601 of the most recent message in the thread. */
   lastMessageAt: string | null;
   /** A short snippet/preview of the latest message (no full body). */
@@ -80,6 +81,7 @@ export interface StalwartMessageDetail extends StalwartMessage {
   /** The References header, as a list of Message-IDs (oldest first), when available. */
   references: string[] | null;
   isUnread: boolean;
+  flagged: boolean;
   attachments: StalwartAttachment[];
 }
 

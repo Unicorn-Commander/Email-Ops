@@ -278,6 +278,14 @@ export class StalwartClient extends StalwartPort {
     return false;
   }
 
+  async setThreadFlags(
+    _mailbox: string,
+    _threadId: string,
+    _flags: { seen?: boolean; flagged?: boolean },
+  ): Promise<boolean> {
+    return false;
+  }
+
   /** NOT SUPPORTED on Stalwart (JMAP folder move is a James-only surface) — degrade-clean false. */
   async moveThreadToFolder(
     _mailbox: string,

@@ -76,6 +76,7 @@ import {
   PopOutIcon,
   PlusIcon,
   CheckSquareIcon,
+  StarIcon,
   BanIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -130,7 +131,7 @@ interface ReplySeed {
   nonce: number;
 }
 
-type SegFilter = 'all' | 'unread' | 'agent';
+type SegFilter = 'all' | 'unread' | 'starred' | 'agent';
 
 export default function MailPage() {
   const mail = useMailClient();
@@ -279,6 +280,7 @@ export default function MailPage() {
   // Segmented filter over the current list (All / Unread / Agent).
   const displayThreads = useMemo(() => {
     if (filter === 'unread') return threads.filter((t) => t.unread);
+    if (filter === 'starred') return threads.filter((t) => t.flagged);
     if (filter === 'agent') return threads.filter((t) => draftForThread(t) !== null);
     return threads;
   }, [threads, filter, draftForThread]);
@@ -910,6 +912,7 @@ export default function MailPage() {
               selfAddresses={selfAddresses}
               onQuickTriage={(id, d) => void triageAndAdvance(id, d)}
               onQuickMark={(id, read) => mail.markRead([id], read)}
+              onToggleFlag={(id, flagged) => mail.toggleFlag(id, flagged)}
             />
           </section>
 
@@ -942,6 +945,7 @@ export default function MailPage() {
               composerOpen={composerOpen}
               onCollapseComposer={() => setComposerOpen(false)}
               onPopout={() => setPopoutOpen(true)}
+              onToggleFlag={(flagged) => openThreadRow && mail.toggleFlag(openThreadRow.id, flagged)}
               draft={openDraft}
               draftAutonomyLabel={
                 openDraft ? autonomyBadgeFor(openDraft, agents.items) : ''
@@ -1451,6 +1455,7 @@ function ConversationList({
   selfAddresses,
   onQuickTriage,
   onQuickMark,
+  onToggleFlag,
 }: {
   banner: ListBanner | null;
   error: string | null;
@@ -1478,6 +1483,7 @@ function ConversationList({
   selfAddresses: ReadonlySet<string>;
   onQuickTriage: (id: string, disposition: 'ARCHIVE' | 'TRASH') => void;
   onQuickMark: (id: string, read: boolean) => void;
+  onToggleFlag: (id: string, flagged: boolean) => void;
 }) {
   const allChecked = threads.length > 0 && selected.size >= threads.length;
   const anySelected = selected.size > 0;
@@ -1492,7 +1498,7 @@ function ConversationList({
           )}
         </div>
         <div className="flex shrink-0 gap-0.5 rounded-lg bg-surface-overlay p-0.5">
-          {(['all', 'unread', 'agent'] as SegFilter[]).map((seg) => (
+          {(['all', 'unread', 'starred', 'agent'] as SegFilter[]).map((seg) => (
             <button
               key={seg}
               type="button"
@@ -1583,6 +1589,7 @@ function ConversationList({
                       selfAddresses={selfAddresses}
                       onQuickTriage={onQuickTriage}
                       onQuickMark={onQuickMark}
+                      onToggleFlag={onToggleFlag}
                       refCb={(el) => {
                         if (el) rowRefs.current?.set(t.id, el);
                         else rowRefs.current?.delete(t.id);
@@ -1621,6 +1628,7 @@ function ConversationRow({
   selfAddresses,
   onQuickTriage,
   onQuickMark,
+  onToggleFlag,
 }: {
   thread: ThreadView;
   active: boolean;
@@ -1636,6 +1644,7 @@ function ConversationRow({
   selfAddresses: ReadonlySet<string>;
   onQuickTriage: (id: string, disposition: 'ARCHIVE' | 'TRASH') => void;
   onQuickMark: (id: string, read: boolean) => void;
+  onToggleFlag: (id: string, flagged: boolean) => void;
 }) {
   const when = useMemo(() => formatWhen(thread.last_message_at), [thread.last_message_at]);
   // The people who AREN'T you — the list should surface the other party, never
@@ -1693,6 +1702,23 @@ function ConversationRow({
           />
         </span>
       )}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleFlag(thread.id, !thread.flagged);
+        }}
+        aria-label={thread.flagged ? 'Unstar conversation' : 'Star conversation'}
+        title={thread.flagged ? 'Unstar' : 'Star'}
+        className={cn(
+          'mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-md transition-colors',
+          thread.flagged
+            ? 'text-warning hover:bg-surface-overlay'
+            : 'text-muted opacity-0 hover:bg-surface-overlay hover:text-secondary group-hover:opacity-100 focus:opacity-100 max-lg:opacity-100',
+        )}
+      >
+        <StarIcon className={cn('h-4 w-4', thread.flagged && 'fill-current')} />
+      </button>
       <span
         className={cn(
           'mt-0.5 grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full text-[12px] font-semibold text-white transition-opacity duration-token ease-token',
@@ -1914,6 +1940,8 @@ function EmptyList({ filter }: { filter: SegFilter }) {
   const copy =
     filter === 'unread'
       ? { t: 'All caught up', d: 'No unread conversations in this view.' }
+      : filter === 'starred'
+        ? { t: 'No starred mail', d: 'Star conversations to keep them in this view.' }
       : filter === 'agent'
         ? { t: 'No agent drafts', d: 'When an agent stages a reply, it appears here with a violet Draft-ready tag.' }
         : { t: 'Nothing here', d: 'New mail appears here once the engine is connected.' };
@@ -1922,6 +1950,8 @@ function EmptyList({ filter }: { filter: SegFilter }) {
       <div className="grid h-12 w-12 place-items-center rounded-2xl border border-subtle bg-surface-raised text-tertiary shadow-token">
         {filter === 'agent' ? (
           <RobotIcon className="h-5 w-5" />
+        ) : filter === 'starred' ? (
+          <StarIcon className="h-5 w-5" />
         ) : filter === 'unread' ? (
           <CheckSquareIcon className="h-5 w-5" />
         ) : (
@@ -2004,6 +2034,7 @@ function Reader({
   composerOpen,
   onCollapseComposer,
   onPopout,
+  onToggleFlag,
   draft,
   draftAutonomyLabel,
   onApproveDraft,
@@ -2037,6 +2068,7 @@ function Reader({
   composerOpen: boolean;
   onCollapseComposer: () => void;
   onPopout: () => void;
+  onToggleFlag: (flagged: boolean) => void;
   draft: AgentInboxItemView | null;
   draftAutonomyLabel: string;
   onApproveDraft: () => Promise<{ ok: boolean; error?: string }>;
@@ -2100,6 +2132,13 @@ function Reader({
             {thread?.subject?.trim() || '(no subject)'}
           </h1>
           <div className="flex shrink-0 items-center gap-1">
+            <ReaderTool
+              label={thread?.flagged ? 'Unstar conversation' : 'Star conversation'}
+              accent={!!thread?.flagged}
+              onClick={() => onToggleFlag(!thread?.flagged)}
+            >
+              <StarIcon className={cn('h-[17px] w-[17px]', thread?.flagged && 'fill-current')} />
+            </ReaderTool>
             {folder !== 'inbox' && (
               <ReaderTool label="Move to inbox" onClick={() => void runTriage('INBOX')} disabled={triageBusy}>
                 <InboxTrayIcon className="h-[17px] w-[17px]" />

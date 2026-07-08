@@ -34,6 +34,7 @@ import {
   NotFoundException,
   NotImplementedException,
   Param,
+  Patch,
   Post,
   Put,
   Query,
@@ -109,6 +110,11 @@ class ComposeMailDto {
 
 class SetReadDto {
   @IsBoolean() read!: boolean;
+}
+
+class SetFlagsDto {
+  @IsOptional() @IsBoolean() flagged?: boolean;
+  @IsOptional() @IsBoolean() seen?: boolean;
 }
 
 class BulkThreadsDto {
@@ -263,6 +269,28 @@ export class MailController {
       mailboxId,
       threadId,
       body.read,
+    );
+  }
+
+  @Patch(':mailboxId/threads/:threadId/flags')
+  @ApiOperation({ summary: 'Set/clear IMAP keywords on a thread: \\Flagged and/or \\Seen.' })
+  @ApiResponse({ status: 200, description: '{ thread_id, flagged?, seen?, updated }.' })
+  async setFlags(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Param('threadId') threadId: string,
+    @Body() body: SetFlagsDto,
+  ) {
+    if (body.flagged === undefined && body.seen === undefined) {
+      throw new BadRequestException('Provide flagged and/or seen.');
+    }
+    return this.email.setThreadFlagState(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      mailboxId,
+      threadId,
+      { flagged: body.flagged, seen: body.seen },
     );
   }
 

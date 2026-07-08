@@ -65,6 +65,7 @@ export interface ThreadView {
   subject: string | null;
   message_count: number;
   unread: boolean;
+  flagged?: boolean;
   last_message_at: string | null;
   last_snippet: string | null;
   participants: MailParticipant[];
@@ -106,6 +107,7 @@ export interface MessageView {
   text_body?: string | null;
   /** Per-message unread flag (Wave 2). */
   is_unread?: boolean;
+  flagged?: boolean;
   /** Attachments (Wave 2). */
   attachments?: MailAttachment[];
 }
@@ -455,6 +457,16 @@ export async function setThreadRead(
   token?: string,
 ): Promise<unknown> {
   return apiPut(`${mailBase(workspaceId, mailboxId)}/threads/${seg(threadId)}/read`, { read }, token);
+}
+
+export async function setThreadFlags(
+  workspaceId: string,
+  mailboxId: string,
+  threadId: string,
+  body: { flagged?: boolean; seen?: boolean },
+  token?: string,
+): Promise<{ thread_id: string; flagged?: boolean; seen?: boolean; updated: boolean }> {
+  return apiPatch(`${mailBase(workspaceId, mailboxId)}/threads/${seg(threadId)}/flags`, body, token);
 }
 
 // ── Blobs (attachment download + cid inline images) ─────────────────────────

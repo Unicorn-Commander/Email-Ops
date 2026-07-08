@@ -60,6 +60,12 @@ export const CheckSquareIcon = (p: SVGProps<SVGSVGElement>) => (
   </Svg>
 );
 
+export const StarIcon = (p: SVGProps<SVGSVGElement>) => (
+  <Svg {...p}>
+    <path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3 6.4 20.2 7.5 14 3 9.6l6.2-.9L12 3Z" />
+  </Svg>
+);
+
 export const RobotIcon = (p: SVGProps<SVGSVGElement>) => (
   <Svg {...p}>
     <rect x="4" y="7" width="16" height="12" rx="2.5" />
