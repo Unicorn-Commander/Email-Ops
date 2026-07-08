@@ -374,9 +374,11 @@ export class ConnectedAccountsService {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
 
-    const batch = await this.prisma.cleanupBatch.findFirst({
-      where: { id: batchId, workspaceId, provider },
-    });
+    const batch = await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), (tx) =>
+      tx.cleanupBatch.findFirst({
+        where: { id: batchId, workspaceId, provider },
+      }),
+    );
     if (!batch) {
       throw new NotFoundException('Cleanup batch not found.');
     }
@@ -537,9 +539,11 @@ export class ConnectedAccountsService {
     user: User,
     batchId: string,
   ): Promise<CleanupExecutionResult | null> {
-    const batch = await this.prisma.cleanupBatch.findFirst({
-      where: { id: batchId, workspaceId },
-    });
+    const batch = await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), (tx) =>
+      tx.cleanupBatch.findFirst({
+        where: { id: batchId, workspaceId },
+      }),
+    );
     if (!batch) return null;
     if (batch.state !== CleanupBatchState.PENDING) {
       return this.cleanupResultFromBatch(batch);
@@ -620,20 +624,24 @@ export class ConnectedAccountsService {
   async listCleanupActivity(user: User, provider: ConnectedProvider): Promise<CleanupBatchView[]> {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
-    const rows = await this.prisma.cleanupBatch.findMany({
-      where: { workspaceId, provider },
-      orderBy: { createdAt: 'desc' },
-      take: 25,
-    });
+    const rows = await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), (tx) =>
+      tx.cleanupBatch.findMany({
+        where: { workspaceId, provider },
+        orderBy: { createdAt: 'desc' },
+        take: 25,
+      }),
+    );
     return rows.map((row) => this.batchView(row));
   }
 
   async getArchiveDownloadUrl(user: User, provider: ConnectedProvider, batchId: string): Promise<{ url: string; expires_in_seconds: number }> {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
-    const batch = await this.prisma.cleanupBatch.findFirst({
-      where: { id: batchId, workspaceId, provider },
-    });
+    const batch = await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), (tx) =>
+      tx.cleanupBatch.findFirst({
+        where: { id: batchId, workspaceId, provider },
+      }),
+    );
     if (!batch || !this.archiveLive(batch)) {
       throw new NotFoundException('Live archive not found for this batch.');
     }

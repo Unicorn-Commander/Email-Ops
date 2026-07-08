@@ -42,7 +42,14 @@ describe('ConnectedAccountsService', () => {
 
   const prisma = {
     withWorkspace: jest.fn(async (_ws: string, _uc: string | null, fn: any) => fn(tx)),
-    cleanupBatch: tx.cleanupBatch,
+    cleanupBatch: {
+      findFirst: jest.fn(async () => {
+        throw new Error('cleanupBatch.findFirst must be called through withWorkspace');
+      }),
+      findMany: jest.fn(async () => {
+        throw new Error('cleanupBatch.findMany must be called through withWorkspace');
+      }),
+    },
   } as unknown as PrismaService;
 
   const engine = {
@@ -202,7 +209,7 @@ describe('ConnectedAccountsService', () => {
   });
 
   it('undo restores from a live archive and flips state to UNDONE', async () => {
-    (prisma.cleanupBatch.findFirst as jest.Mock).mockResolvedValue({
+    (tx.cleanupBatch.findFirst as jest.Mock).mockResolvedValue({
       id: 'batch-1',
       provider: 'gmail',
       mode: 'delete',
@@ -228,6 +235,8 @@ describe('ConnectedAccountsService', () => {
     }));
     expect(res.ok).toBe(true);
     expect(res.status).toBe('undone');
+    expect(prisma.withWorkspace).toHaveBeenCalledWith('ws-1', 'kc-sub-user', expect.any(Function));
+    expect(prisma.cleanupBatch.findFirst).not.toHaveBeenCalled();
   });
 
   it('organize performs real non-destructive archive; unsubscribe remains unsupported', async () => {

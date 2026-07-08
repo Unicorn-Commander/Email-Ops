@@ -313,7 +313,9 @@ export class SmsService {
    */
   async recordInboundSms(input: InboundSmsInput): Promise<InboundSmsResult> {
     // 1. Privileged resolve: which workspace owns the line it came in on?
-    const account = await this.prisma.smsAccount.findFirst({
+    // Uses PrismaService.systemClient (ADMIN_DATABASE_URL / BYPASSRLS). The
+    // follow-on write below remains fenced by withWorkspace(account.workspaceId).
+    const account = await this.prisma.systemClient.smsAccount.findFirst({
       where: { phoneNumber: input.toPhoneNumber, active: true },
       select: { id: true, workspaceId: true },
     });

@@ -12,7 +12,40 @@ export type WorkspaceTxClient = Prisma.TransactionClient;
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);
 
+  /**
+   * BYPASSRLS system connection.
+   *
+   * This client MUST stay limited to the documented cross-tenant resolvers that
+   * have no workspace id at call time:
+   *   1. Postmark providerMessageId -> email message workspace resolver.
+   *   2. Twilio inbound toPhoneNumber -> SMS account workspace resolver.
+   *   3. Archive-retention expired cleanup batch scanner.
+   *
+   * Never use this for user-facing reads or writes. Follow-on mutations must
+   * run through withWorkspace(resolvedWorkspaceId, ...) on the normal client.
+   */
+  readonly systemClient: PrismaClient;
+
+  constructor() {
+    super();
+    const systemUrl = process.env.ADMIN_DATABASE_URL || process.env.DATABASE_URL;
+    this.systemClient = new PrismaClient(
+      systemUrl
+        ? {
+            datasources: {
+              db: { url: systemUrl },
+            },
+          }
+        : undefined,
+    );
+  }
+
   async onModuleInit() {
+    if (this.tenancyEnabled() && !process.env.ADMIN_DATABASE_URL) {
+      throw new Error(
+        'ADMIN_DATABASE_URL is required when EMAIL_OPS_TENANCY_ENABLED=true; system resolvers need a documented BYPASSRLS connection.',
+      );
+    }
     await this.$connect();
     this.logger.log('Database connected successfully');
   }
@@ -20,6 +53,21 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   async onModuleDestroy() {
     await this.$disconnect();
     this.logger.log('Database disconnected');
+  }
+
+  async $connect(): Promise<void> {
+    await super.$connect();
+    await this.systemClient.$connect();
+  }
+
+  async $disconnect(): Promise<void> {
+    await super.$disconnect();
+    await this.systemClient.$disconnect();
+  }
+
+  private tenancyEnabled(): boolean {
+    const value = (process.env.EMAIL_OPS_TENANCY_ENABLED ?? '').trim().toLowerCase();
+    return value === '1' || value === 'true' || value === 'yes' || value === 'on';
   }
 
   /**

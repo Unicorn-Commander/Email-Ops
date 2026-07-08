@@ -1473,7 +1473,10 @@ export class EmailService {
    *      run INSIDE `withWorkspace(resolvedWorkspaceId, …)`, so RLS fences them
    *      to the resolved workspace and the table's WITH CHECK guarantees the row
    *      can only land there. The privileged step never touches a writable
-   *      surface; the writable step is always RLS-scoped.
+   *      surface; the writable step is always RLS-scoped. The resolve uses
+   *      PrismaService.systemClient, the documented ADMIN_DATABASE_URL /
+   *      BYPASSRLS side-channel. Do not replace it with the runtime client:
+   *      under live NOBYPASSRLS that no-GUC read correctly returns zero rows.
    *
    * IDEMPOTENT: the event is unique on (workspaceId, provider, providerEventId).
    * A re-delivery hits the unique index and is a clean no-op ('duplicate') — no
@@ -1491,7 +1494,7 @@ export class EmailService {
     // restricted to exactly { id, workspaceId, status } — the id+workspace the
     // scoping needs, plus the current status for the monotonic-advance decision.
     // No body, no addressing, no contact — the bypass surface stays minimal.
-    const owner = await this.prisma.emailMessage.findFirst({
+    const owner = await this.prisma.systemClient.emailMessage.findFirst({
       where: { providerMessageId: input.providerMessageId },
       select: { id: true, workspaceId: true, status: true },
       orderBy: { createdAt: 'desc' },
