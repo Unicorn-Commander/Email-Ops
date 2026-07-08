@@ -903,6 +903,7 @@ export class JamesClient extends StalwartPort {
           ...(request.bcc?.length ? { Bcc: request.bcc.join(', ') } : {}),
           Subject: request.subject,
           TextBody: request.body,
+          ...(request.bodyHtml ? { HtmlBody: request.bodyHtml } : {}),
           MessageStream: 'outbound',
           ...(headers.length ? { Headers: headers } : {}),
         }),
@@ -969,6 +970,13 @@ export class JamesClient extends StalwartPort {
       bodyValues: { body: { value: request.body } },
       textBody: [{ partId: 'body', type: 'text/plain' }],
     };
+    if (request.bodyHtml) {
+      outbound.bodyValues = {
+        body: { value: request.body },
+        html: { value: request.bodyHtml },
+      };
+      outbound.htmlBody = [{ partId: 'html', type: 'text/html' }];
+    }
     if (request.cc?.length) outbound.cc = request.cc.map((email) => ({ email }));
     if (request.bcc?.length) outbound.bcc = request.bcc.map((email) => ({ email }));
     if (request.inReplyTo) outbound.inReplyTo = [request.inReplyTo.replace(/^<|>$/g, '')];

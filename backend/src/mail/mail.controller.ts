@@ -92,11 +92,19 @@ const BULK_DISPOSITION: Partial<Record<BulkThreadAction, MessageDisposition>> = 
   inbox: MessageDisposition.INBOX,
 };
 
+function normalizeComposeHtml(html: string): string {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*(['"]).*?\1/gi, '')
+    .replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '');
+}
+
 class ComposeMailDto {
   /** One address, or several comma-joined (the FE sends multi-recipient this way). */
   @IsString() @MaxLength(2000) to_address!: string;
   @IsOptional() @IsString() @MaxLength(300) subject?: string;
   @IsOptional() @IsString() @MaxLength(50000) body?: string;
+  @IsOptional() @IsString() @MaxLength(100000) body_html?: string;
   @IsOptional() @IsString() in_reply_to_thread_id?: string;
   // webmail wave — all optional (back-compat).
   @IsOptional() @IsArray() @ArrayMaxSize(50) @IsEmail({}, { each: true }) cc?: string[];
@@ -390,6 +398,7 @@ export class MailController {
       toAddresses: toAddresses.length > 1 ? toAddresses : undefined,
       subject: body.subject ?? '',
       body: body.body ?? '',
+      bodyHtml: body.body_html ? normalizeComposeHtml(body.body_html) : null,
       mode: 'send',
       inReplyToThreadId: body.in_reply_to_thread_id ?? null,
       externalSource: 'email-ops-client',

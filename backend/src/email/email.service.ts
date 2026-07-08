@@ -91,6 +91,7 @@ interface SendReq {
   toAddresses?: string[];
   subject: string;
   body: string;
+  bodyHtml?: string | null;
   inReplyToThreadId: string | null;
   transactional: boolean;
   // webmail wave: compose extension (all optional, back-compat).
@@ -1034,6 +1035,7 @@ export class EmailService {
               toAddresses: input.toAddresses?.length ? input.toAddresses : undefined,
               subject: input.subject,
               body: input.body,
+              bodyHtml: input.bodyHtml ?? null,
               inReplyToThreadId: input.inReplyToThreadId ?? null,
               transactional: mailbox?.postmarkLane ?? true,
               cc: input.cc?.length ? input.cc : undefined,
@@ -1721,6 +1723,7 @@ export class EmailService {
         toAddresses: req.toAddresses,
         subject: req.subject,
         body: req.body,
+        bodyHtml: req.bodyHtml ?? null,
         inReplyToThreadId: req.inReplyToThreadId,
         cc: req.cc,
         bcc: req.bcc,

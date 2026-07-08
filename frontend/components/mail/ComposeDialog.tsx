@@ -18,13 +18,14 @@
  * can open the composer already populated — the user still reviews and sends it.
  */
 
-import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type DragEvent } from 'react';
 import { Button, Dialog, Input, cn } from '@/components/ui';
 import { listMailSignatures, type ComposeBody, type MailSignature, type UploadedBlob } from '@/lib/mailApi';
 import type { ComposeOutcome } from './useMailClient';
 import { ComposeStatusLine, describeStatus } from './ComposeStatus';
 import { RecipientChips, isValidEmail } from './RecipientChips';
 import { AttachButton, ComposerAttachments, useAttachmentUploads } from './AttachmentList';
+import { RichTextEditor, htmlToText } from './RichTextEditor';
 
 /** Prefill for the dialog (agent `ui_compose`, or Forward with attachments). */
 export interface ComposeDialogPrefill {
@@ -42,16 +43,15 @@ function toList(v: string | string[] | undefined): string[] {
   return Array.isArray(v) ? v.filter(Boolean) : v.trim() ? [v.trim()] : [];
 }
 
-function signatureText(html: string): string {
-  if (typeof window === 'undefined') return html.replace(/<[^>]*>/g, '').trim();
-  const el = window.document.createElement('div');
-  el.innerHTML = html;
-  return (el.textContent || el.innerText || '').trim();
+function signatureBlock(sig: MailSignature): string {
+  return sig.html.trim() ? `<p>-- </p>${sig.html}` : '';
 }
 
-function signatureBlock(sig: MailSignature): string {
-  const text = signatureText(sig.html);
-  return text ? `\n\n-- \n${text}` : '';
+function plainToHtml(text: string): string {
+  return text
+    .split(/\n{2,}/)
+    .map((part) => `<p>${part.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')}</p>`)
+    .join('');
 }
 
 /** Stable key for the new-message draft body. */
@@ -104,7 +104,7 @@ export function ComposeDialog({
   workspaceId: string | null;
   mailboxId: string | null;
   onCompose: (
-    body: Pick<ComposeBody, 'to_address' | 'subject' | 'body' | 'cc' | 'bcc' | 'attachments'>,
+    body: Pick<ComposeBody, 'to_address' | 'subject' | 'body' | 'body_html' | 'cc' | 'bcc' | 'attachments'>,
   ) => Promise<ComposeOutcome>;
   /**
    * Optional prefill (e.g. an agent's `ui_compose`, or Forward). Seeds the
@@ -144,7 +144,7 @@ export function ComposeDialog({
       setBcc(initial?.bcc ?? []);
       setShowCcBcc((initial?.cc?.length ?? 0) > 0 || (initial?.bcc?.length ?? 0) > 0);
       setSubject(initial?.subject ?? '');
-      setBody(initial?.body ?? readDraft(COMPOSE_DRAFT_KEY) ?? '');
+      setBody(initial?.body ? plainToHtml(initial.body) : readDraft(COMPOSE_DRAFT_KEY) ?? '');
       setStatus(null);
       setError(null);
       setSending(false);
@@ -204,7 +204,7 @@ export function ComposeDialog({
       return;
     }
     const t = setTimeout(() => {
-      if (body.trim().length === 0) {
+      if (htmlToText(body).length === 0) {
         clearDraft(COMPOSE_DRAFT_KEY);
         setDraftSaved(false);
       } else if (writeDraft(COMPOSE_DRAFT_KEY, body)) {
@@ -238,7 +238,8 @@ export function ComposeDialog({
     const res = await onCompose({
       to_address: to.join(', '),
       subject: subject.trim() || undefined,
-      body: body.trim() || undefined,
+      body: htmlToText(body) || undefined,
+      body_html: body.trim() || undefined,
       ...(cc.length > 0 ? { cc } : {}),
       ...(bcc.length > 0 ? { bcc } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
@@ -255,14 +256,6 @@ export function ComposeDialog({
       clearDraft(COMPOSE_DRAFT_KEY);
       setDraftSaved(false);
       onClose();
-    }
-  }
-
-  function handleBodyKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    // ⌘/Ctrl + Enter submits directly (guards live inside handleSend).
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-      e.preventDefault();
-      void handleSend();
     }
   }
 
@@ -399,13 +392,11 @@ export function ComposeDialog({
         </label>
         <label className="block">
           <span className="mb-1 block text-[11px] font-medium text-tertiary">Message</span>
-          <textarea
+          <RichTextEditor
             value={body}
-            onChange={(e) => setBody(e.target.value)}
-            onKeyDown={handleBodyKeyDown}
-            rows={6}
+            onChange={setBody}
+            disabled={sending}
             placeholder="Write your message…  (drop files here to attach)"
-            className="block w-full resize-y rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40"
           />
         </label>
 

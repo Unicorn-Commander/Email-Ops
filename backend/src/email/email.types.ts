@@ -121,6 +121,7 @@ export interface ComposeInput {
   toAddresses?: string[];
   subject: string;
   body: string;
+  bodyHtml?: string | null;
   mode: 'send' | 'draft';
   inReplyToThreadId?: string | null;
   externalSource: string;

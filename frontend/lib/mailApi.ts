@@ -144,6 +144,7 @@ export interface ComposeBody {
   to_address: string;
   subject?: string;
   body?: string;
+  body_html?: string;
   in_reply_to_thread_id?: string;
   cc?: string[];
   bcc?: string[];

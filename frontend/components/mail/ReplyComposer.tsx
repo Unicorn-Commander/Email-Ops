@@ -21,7 +21,6 @@ import {
   useRef,
   useState,
   type DragEvent,
-  type KeyboardEvent,
 } from 'react';
 import { Button, Input, cn } from '@/components/ui';
 import { listMailSignatures, type ComposeBody, type MailSignature } from '@/lib/mailApi';
@@ -29,6 +28,7 @@ import type { ComposeOutcome } from './useMailClient';
 import { ComposeStatusLine, describeStatus } from './ComposeStatus';
 import { RecipientChips, isValidEmail } from './RecipientChips';
 import { AttachButton, ComposerAttachments, useAttachmentUploads } from './AttachmentList';
+import { RichTextEditor, htmlToText } from './RichTextEditor';
 import { ReplyIcon, CloseIcon } from './icons';
 
 /**
@@ -61,16 +61,8 @@ function clearDraft(key: string | null): void {
   }
 }
 
-function signatureText(html: string): string {
-  if (typeof window === 'undefined') return html.replace(/<[^>]*>/g, '').trim();
-  const el = window.document.createElement('div');
-  el.innerHTML = html;
-  return (el.textContent || el.innerText || '').trim();
-}
-
 function signatureBlock(sig: MailSignature): string {
-  const text = signatureText(sig.html);
-  return text ? `\n\n-- \n${text}` : '';
+  return sig.html.trim() ? `<p>-- </p>${sig.html}` : '';
 }
 
 export interface ReplyComposerHandle {
@@ -94,6 +86,7 @@ export const ReplyComposer = forwardRef<
       body: Pick<
         ComposeBody,
         'to_address' | 'subject' | 'body' | 'cc' | 'attachments' | 'in_reply_to'
+        | 'body_html'
       >,
     ) => Promise<ComposeOutcome>;
     /** Collapse the composer back to the compact reply action bar. */
@@ -121,9 +114,11 @@ export const ReplyComposer = forwardRef<
   const [selectedSignatureId, setSelectedSignatureId] = useState<string>('none');
   const [signatureError, setSignatureError] = useState<string | null>(null);
 
-  const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const appliedSignature = useRef<string>('');
-  useImperativeHandle(ref, () => ({ focus: () => bodyRef.current?.focus() }), []);
+  useImperativeHandle(ref, () => ({
+    focus: () => bodyRef.current?.querySelector<HTMLElement>('[contenteditable="true"]')?.focus(),
+  }), []);
 
   useEffect(() => {
     if (!workspaceId || !mailboxId) return;
@@ -171,7 +166,7 @@ export const ReplyComposer = forwardRef<
     }
     if (!draftKey) return;
     const t = setTimeout(() => {
-      if (body.trim().length === 0) {
+      if (htmlToText(body).length === 0) {
         clearDraft(draftKey);
         setDraftSaved(false);
       } else if (writeDraft(draftKey, body)) {
@@ -192,7 +187,7 @@ export const ReplyComposer = forwardRef<
 
   const invalidCount = [...to, ...cc].filter((a) => !isValidEmail(a)).length;
   const canSend =
-    to.length > 0 && invalidCount === 0 && body.trim().length > 0 && !sending && !uploads.uploading;
+    to.length > 0 && invalidCount === 0 && htmlToText(body).length > 0 && !sending && !uploads.uploading;
 
   async function handleSend() {
     if (!canSend) return;
@@ -203,7 +198,8 @@ export const ReplyComposer = forwardRef<
     const res = await onSend({
       to_address: to.join(', '),
       subject: subject.trim() || undefined,
-      body: body.trim() || undefined,
+      body: htmlToText(body) || undefined,
+      body_html: body.trim() || undefined,
       ...(cc.length > 0 ? { cc } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(inReplyTo ? { in_reply_to: inReplyTo } : {}),
@@ -221,14 +217,6 @@ export const ReplyComposer = forwardRef<
       uploads.reset();
       clearDraft(draftKey);
       setDraftSaved(false);
-    }
-  }
-
-  function handleBodyKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    // ⌘/Ctrl + Enter mirrors the Send button (guards live inside handleSend).
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-      e.preventDefault();
-      void handleSend();
     }
   }
 
@@ -322,15 +310,14 @@ export const ReplyComposer = forwardRef<
 
         <label className="block">
           <span className="mb-1 block text-[11px] font-medium text-tertiary">Message</span>
-          <textarea
-            ref={bodyRef}
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            onKeyDown={handleBodyKeyDown}
-            rows={4}
-            placeholder="Write a reply…  (drop files here to attach)"
-            className="block w-full resize-y rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40"
-          />
+          <div ref={bodyRef}>
+            <RichTextEditor
+              value={body}
+              onChange={setBody}
+              disabled={sending}
+              placeholder="Write a reply…  (drop files here to attach)"
+            />
+          </div>
         </label>
 
         {(signatures.length > 0 || signatureError) && (

@@ -362,6 +362,7 @@ export class StalwartClient extends StalwartPort {
           To: request.toAddresses?.length ? request.toAddresses.join(', ') : request.toAddress,
           Subject: request.subject,
           TextBody: request.body,
+          ...(request.bodyHtml ? { HtmlBody: request.bodyHtml } : {}),
           MessageStream: 'outbound',
         }),
       });
@@ -414,8 +415,11 @@ export class StalwartClient extends StalwartPort {
               from: [{ email: request.fromAddress, name: request.fromName ?? null }],
               to: (request.toAddresses?.length ? request.toAddresses : [request.toAddress]).map((email) => ({ email })),
               subject: request.subject,
-              bodyValues: { body: { value: request.body } },
+              bodyValues: request.bodyHtml
+                ? { body: { value: request.body }, html: { value: request.bodyHtml } }
+                : { body: { value: request.body } },
               textBody: [{ partId: 'body', type: 'text/plain' }],
+              ...(request.bodyHtml ? { htmlBody: [{ partId: 'html', type: 'text/html' }] } : {}),
             },
           },
         },

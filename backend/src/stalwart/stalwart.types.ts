@@ -147,6 +147,8 @@ export interface StalwartSendRequest {
   subject: string;
   /** Plain-text body. */
   body: string;
+  /** Optional HTML body; when present the engine sends multipart/alternative. */
+  bodyHtml?: string | null;
   /** The thread to reply within (so the engine threads the reply). */
   inReplyToThreadId?: string | null;
   /** Additional recipients (optional; back-compat when omitted). */
