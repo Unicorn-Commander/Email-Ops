@@ -235,6 +235,20 @@ export interface SaveMailSignatureBody {
   is_default?: boolean;
 }
 
+export interface MailContact {
+  id: string;
+  mailbox_account_id: string;
+  email: string;
+  display_name: string | null;
+  last_seen_at: string;
+  frequency: number;
+}
+
+export interface MailContactsResponse {
+  items: MailContact[];
+  count: number;
+}
+
 export interface MailThreadsResponse {
   threads: ThreadView[];
   count: number;
@@ -342,6 +356,18 @@ export async function deleteMailSignature(
     `${mailboxBase(workspaceId, mailboxId)}/signatures/${seg(signatureId)}`,
     token,
   );
+}
+
+export async function searchMailContacts(
+  workspaceId: string,
+  mailboxId: string,
+  q: string,
+  token?: string,
+): Promise<MailContactsResponse> {
+  const params = new URLSearchParams();
+  if (q.trim()) params.set('q', q.trim());
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  return apiGet<MailContactsResponse>(`${mailboxBase(workspaceId, mailboxId)}/contacts${qs}`, token);
 }
 
 /** Options for a thread-list read (single-mailbox or aggregate). */

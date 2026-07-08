@@ -319,7 +319,11 @@ export class EmailService {
           direction: m.direction.toLowerCase(),
         });
       }
-      return [...byId.values()];
+      const messages = [...byId.values()];
+      if (mailbox) {
+        await this.rememberContactsFromMessages(tx, workspaceId, mailbox.id, mailbox.emailAddress, messages);
+      }
+      return messages;
     });
   }
 
@@ -951,6 +955,13 @@ export class EmailService {
               summary: this.summary(input.subject, input.toAddress),
             },
           });
+          if (mailbox) {
+            await this.rememberContacts(tx, workspaceId, mailbox.id, mailbox.emailAddress, [
+              ...this.addressEntries(input.toAddresses?.length ? input.toAddresses : [input.toAddress]),
+              ...this.addressEntries(input.cc ?? []),
+              ...this.addressEntries(input.bcc ?? []),
+            ]);
+          }
           this.logger.log(
             `compose_email DRAFT staged into agent-inbox: message ${msg.id} (workspace ${workspaceId}) pending human approval`,
           );
@@ -986,6 +997,13 @@ export class EmailService {
             actorUcUid: ucUid,
           },
         });
+        if (mailbox) {
+          await this.rememberContacts(tx, workspaceId, mailbox.id, mailbox.emailAddress, [
+            ...this.addressEntries(input.toAddresses?.length ? input.toAddresses : [input.toAddress]),
+            ...this.addressEntries(input.cc ?? []),
+            ...this.addressEntries(input.bcc ?? []),
+          ]);
+        }
         return {
           send: {
             messageId: msg.id,
@@ -1774,6 +1792,76 @@ export class EmailService {
       select: { toAddress: true },
     });
     return last?.toAddress ?? null;
+  }
+
+  private addressEntries(addresses: string[]): { email: string; displayName: string | null }[] {
+    return addresses
+      .map((raw) => {
+        const match = raw.match(/^\s*(?:"?([^"<]*)"?\s*)?<([^<>\s]+@[^<>\s]+)>\s*$/);
+        const email = (match?.[2] ?? raw).trim().toLowerCase();
+        const displayName = (match?.[1] ?? '').trim() || null;
+        return { email, displayName };
+      })
+      .filter((p) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(p.email));
+  }
+
+  private async rememberContactsFromMessages(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    mailboxId: string,
+    mailboxAddress: string,
+    messages: MessageView[],
+  ): Promise<void> {
+    const entries = messages.flatMap((m) => [
+      ...(m.from ? [{ email: m.from.address, displayName: m.from.name }] : []),
+      ...m.to.map((p) => ({ email: p.address, displayName: p.name })),
+      ...(m.cc ?? []).map((p) => ({ email: p.address, displayName: p.name })),
+    ]);
+    await this.rememberContacts(tx, workspaceId, mailboxId, mailboxAddress, entries);
+  }
+
+  private async rememberContacts(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    mailboxId: string,
+    mailboxAddress: string,
+    entries: { email: string; displayName: string | null }[],
+  ): Promise<void> {
+    const own = mailboxAddress.trim().toLowerCase();
+    const now = new Date();
+    const byEmail = new Map<string, { email: string; displayName: string | null }>();
+    for (const entry of entries) {
+      const email = entry.email.trim().toLowerCase();
+      if (!email || email === own || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) continue;
+      const existing = byEmail.get(email);
+      if (!existing || (!existing.displayName && entry.displayName)) {
+        byEmail.set(email, { email, displayName: entry.displayName?.trim() || null });
+      }
+    }
+    for (const entry of byEmail.values()) {
+      await tx.mailContact.upsert({
+        where: {
+          workspaceId_mailboxAccountId_email: {
+            workspaceId,
+            mailboxAccountId: mailboxId,
+            email: entry.email,
+          },
+        },
+        create: {
+          workspaceId,
+          mailboxAccountId: mailboxId,
+          email: entry.email,
+          displayName: entry.displayName,
+          lastSeenAt: now,
+          frequency: 1,
+        },
+        update: {
+          ...(entry.displayName ? { displayName: entry.displayName } : {}),
+          lastSeenAt: now,
+          frequency: { increment: 1 },
+        },
+      });
+    }
   }
 
   /** StalwartMessageDetail -> the enriched MessageView wire shape (webmail-wave thread-detail). */

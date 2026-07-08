@@ -380,6 +380,7 @@ model Workspace {
   memberships       Membership[]
   mailboxAccounts   MailboxAccount[]
   mailSignatures    MailSignature[]
+  mailContacts      MailContact[]
   emailMessages     EmailMessage[]
   smsAccounts       SmsAccount[]
   smsMessages       SmsMessage[]
@@ -585,6 +586,7 @@ model MailboxAccount {
   agentMailboxes AgentMailbox[]
   spaceLinks     SpaceMailbox[]
   signatures     MailSignature[]
+  contacts       MailContact[]
 
   // One mailbox identity per address per workspace.
   @@unique([workspaceId, emailAddress])
@@ -617,6 +619,27 @@ model MailSignature {
   @@index([workspaceId, mailboxAccountId])
   @@index([workspaceId, mailboxAccountId, isDefault])
   @@map("mail_signatures")
+}
+
+// Workspace-scoped recipient autocomplete source, derived from mailbox history
+// and successful compose activity. One normalized email per mailbox.
+model MailContact {
+  id               String   @id @default(uuid())
+  workspaceId      String
+  mailboxAccountId String
+  email            String
+  displayName      String?
+  lastSeenAt       DateTime @default(now())
+  frequency        Int      @default(1)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, mailboxAccountId, email])
+  @@index([workspaceId, mailboxAccountId, frequency, lastSeenAt])
+  @@map("mail_contacts")
 }
 
 // ============================================================

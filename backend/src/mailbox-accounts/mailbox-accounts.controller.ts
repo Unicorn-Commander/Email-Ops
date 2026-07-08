@@ -24,6 +24,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
@@ -38,6 +39,7 @@ import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util'
 import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
 import { ProvisionDecision } from '../provisioning/provisioning-policy';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
+import { MailContactsService } from './mail-contacts.service';
 import { MailSignaturesService } from './mail-signatures.service';
 import { MailboxAccountsService } from './mailbox-accounts.service';
 import { CreateMailboxInput, UpdateMailboxInput } from './mailbox-accounts.types';
@@ -95,6 +97,7 @@ export class MailboxAccountsController {
     private readonly policy: ProvisioningPolicyService,
     private readonly mailProvider: MailProviderPort,
     private readonly signatures: MailSignaturesService,
+    private readonly contacts: MailContactsService,
   ) {}
 
   private blockIfApprovalGated(decision: ProvisionDecision, action: string): void {
@@ -129,6 +132,18 @@ export class MailboxAccountsController {
     @Param('id') id: string,
   ) {
     const items = await this.signatures.list(workspaceId, ucUidOf(user as WithWorkspaceClaim), id);
+    return { items, count: items.length };
+  }
+
+  @Get(':id/contacts')
+  @ApiOperation({ summary: 'Search mailbox contacts for recipient autocomplete.' })
+  async contactsSearch(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Query('q') q?: string,
+  ) {
+    const items = await this.contacts.search(workspaceId, ucUidOf(user as WithWorkspaceClaim), id, q ?? null);
     return { items, count: items.length };
   }
 

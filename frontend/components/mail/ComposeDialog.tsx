@@ -351,18 +351,39 @@ export function ComposeDialog({
               </button>
             )}
           </div>
-          <RecipientChips value={to} onChange={setTo} autoFocus aria-label="To" />
+          <RecipientChips
+            value={to}
+            onChange={setTo}
+            autoFocus
+            aria-label="To"
+            workspaceId={workspaceId}
+            mailboxId={mailboxId}
+          />
         </div>
 
         {showCcBcc && (
           <>
             <label className="block">
               <span className="mb-1 block text-[11px] font-medium text-tertiary">Cc</span>
-              <RecipientChips value={cc} onChange={setCc} placeholder="" aria-label="Cc" />
+              <RecipientChips
+                value={cc}
+                onChange={setCc}
+                placeholder=""
+                aria-label="Cc"
+                workspaceId={workspaceId}
+                mailboxId={mailboxId}
+              />
             </label>
             <label className="block">
               <span className="mb-1 block text-[11px] font-medium text-tertiary">Bcc</span>
-              <RecipientChips value={bcc} onChange={setBcc} placeholder="" aria-label="Bcc" />
+              <RecipientChips
+                value={bcc}
+                onChange={setBcc}
+                placeholder=""
+                aria-label="Bcc"
+                workspaceId={workspaceId}
+                mailboxId={mailboxId}
+              />
             </label>
           </>
         )}

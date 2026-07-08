@@ -287,7 +287,13 @@ export const ReplyComposer = forwardRef<
                 </button>
               )}
             </div>
-            <RecipientChips value={to} onChange={setTo} aria-label="To" />
+            <RecipientChips
+              value={to}
+              onChange={setTo}
+              aria-label="To"
+              workspaceId={workspaceId}
+              mailboxId={mailboxId}
+            />
           </div>
           <label className="block min-w-0 flex-1">
             <span className="mb-1 block text-[11px] font-medium text-tertiary">Subject</span>
@@ -303,7 +309,14 @@ export const ReplyComposer = forwardRef<
         {showCc && (
           <label className="block">
             <span className="mb-1 block text-[11px] font-medium text-tertiary">Cc</span>
-            <RecipientChips value={cc} onChange={setCc} placeholder="" aria-label="Cc" />
+            <RecipientChips
+              value={cc}
+              onChange={setCc}
+              placeholder=""
+              aria-label="Cc"
+              workspaceId={workspaceId}
+              mailboxId={mailboxId}
+            />
           </label>
         )}
 
