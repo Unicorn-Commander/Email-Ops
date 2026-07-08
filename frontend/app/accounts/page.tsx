@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import DOMPurify from 'dompurify';
 import { Button, Badge, Card, Skeleton, cn } from '@/components/ui';
 import { useConnectedAccounts } from '@/components/ConnectedAccountsProvider';
 import { useInboxStats } from '@/components/useInboxStats';
@@ -12,7 +13,17 @@ import {
   type ConnectedProvider,
   type LinkedAccountView,
 } from '@/lib/api';
-import { connectMailbox } from '@/lib/mailApi';
+import {
+  connectMailbox,
+  createMailSignature,
+  deleteMailSignature,
+  listMailMailboxes,
+  listMailSignatures,
+  setDefaultMailSignature,
+  updateMailSignature,
+  type MailSignature,
+  type MailboxPick,
+} from '@/lib/mailApi';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 
 export default function AccountsPage() {
@@ -111,7 +122,257 @@ export default function AccountsPage() {
           ))}
         </div>
       )}
+
+      {workspaceId && <SignaturesSection workspaceId={workspaceId} />}
     </div>
+  );
+}
+
+function previewHtml(html: string): string {
+  return DOMPurify.sanitize(html);
+}
+
+function SignaturesSection({ workspaceId }: { workspaceId: string }) {
+  const [mailboxes, setMailboxes] = useState<MailboxPick[]>([]);
+  const [mailboxId, setMailboxId] = useState('');
+  const [signatures, setSignatures] = useState<MailSignature[]>([]);
+  const [selectedId, setSelectedId] = useState('new');
+  const [name, setName] = useState('Default');
+  const [html, setHtml] = useState('<p>Best,<br>Your name</p>');
+  const [makeDefault, setMakeDefault] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await listMailMailboxes(workspaceId);
+        if (!alive) return;
+        setMailboxes(res.items);
+        setMailboxId((current) => current || res.items[0]?.id || '');
+      } catch (e) {
+        if (alive) setMessage(e instanceof Error ? e.message : 'Could not load mailboxes.');
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!mailboxId) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await listMailSignatures(workspaceId, mailboxId);
+        if (!alive) return;
+        setSignatures(res.items);
+        const first = res.items[0];
+        if (first) selectSignature(first, res.items);
+        else newSignature(res.items.length);
+      } catch (e) {
+        if (alive) setMessage(e instanceof Error ? e.message : 'Could not load signatures.');
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [workspaceId, mailboxId]);
+
+  function selectSignature(sig: MailSignature, all = signatures) {
+    setSelectedId(sig.id);
+    setName(sig.name);
+    setHtml(sig.html);
+    setMakeDefault(sig.is_default || all.length === 0);
+    setMessage(null);
+  }
+
+  function newSignature(count = signatures.length) {
+    setSelectedId('new');
+    setName('Default');
+    setHtml('<p>Best,<br>Your name</p>');
+    setMakeDefault(count === 0);
+    setMessage(null);
+  }
+
+  async function reload(nextSelectedId?: string) {
+    if (!mailboxId) return;
+    const res = await listMailSignatures(workspaceId, mailboxId);
+    setSignatures(res.items);
+    const next = res.items.find((s) => s.id === nextSelectedId) ?? res.items[0];
+    if (next) selectSignature(next, res.items);
+    else newSignature(0);
+  }
+
+  async function save() {
+    if (!mailboxId || !name.trim()) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const saved =
+        selectedId === 'new'
+          ? await createMailSignature(workspaceId, mailboxId, {
+              name: name.trim(),
+              html,
+              is_default: makeDefault,
+            })
+          : await updateMailSignature(workspaceId, mailboxId, selectedId, {
+              name: name.trim(),
+              html,
+              is_default: makeDefault,
+            });
+      await reload(saved.id);
+      setMessage('Signature saved.');
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : 'Could not save signature.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function makeSelectedDefault() {
+    if (!mailboxId || selectedId === 'new') return;
+    setBusy(true);
+    try {
+      const saved = await setDefaultMailSignature(workspaceId, mailboxId, selectedId);
+      await reload(saved.id);
+      setMessage('Default signature updated.');
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : 'Could not set default signature.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeSelected() {
+    if (!mailboxId || selectedId === 'new') return;
+    setBusy(true);
+    try {
+      await deleteMailSignature(workspaceId, mailboxId, selectedId);
+      await reload();
+      setMessage('Signature deleted.');
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : 'Could not delete signature.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card padded className="space-y-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-primary">Signatures</h2>
+          <p className="mt-1 text-sm text-tertiary">Compose defaults are scoped to each mailbox.</p>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <select
+            value={mailboxId}
+            onChange={(e) => setMailboxId(e.target.value)}
+            className="rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary"
+          >
+            {mailboxes.map((mb) => (
+              <option key={mb.id} value={mb.id}>
+                {mb.email_address}
+              </option>
+            ))}
+          </select>
+          <Button variant="secondary" onClick={() => newSignature()} disabled={!mailboxId || busy}>
+            New signature
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <div className="space-y-2">
+          {signatures.length === 0 ? (
+            <p className="rounded-token border border-subtle bg-surface-base p-3 text-sm text-tertiary">
+              No signatures for this mailbox yet.
+            </p>
+          ) : (
+            signatures.map((sig) => (
+              <button
+                key={sig.id}
+                type="button"
+                onClick={() => selectSignature(sig)}
+                className={cn(
+                  'w-full rounded-token border px-3 py-2 text-left text-sm transition-colors',
+                  selectedId === sig.id
+                    ? 'border-accent bg-accent/10 text-primary'
+                    : 'border-subtle bg-surface-base text-secondary hover:bg-surface-overlay',
+                )}
+              >
+                <span className="block truncate font-medium">{sig.name}</span>
+                {sig.is_default && <span className="text-[11px] text-tertiary">Default</span>}
+              </button>
+            ))
+          )}
+        </div>
+
+        <div className="grid gap-3 xl:grid-cols-2">
+          <div className="space-y-3">
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-medium text-tertiary">Name</span>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="block w-full rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-medium text-tertiary">HTML</span>
+              <textarea
+                value={html}
+                onChange={(e) => setHtml(e.target.value)}
+                rows={8}
+                className="block w-full resize-y rounded-token border border-border bg-surface-base px-3 py-2 font-mono text-xs text-primary"
+              />
+            </label>
+            <label className="flex items-center gap-2 text-sm text-secondary">
+              <input
+                type="checkbox"
+                checked={makeDefault}
+                onChange={(e) => setMakeDefault(e.target.checked)}
+              />
+              Use as default for this mailbox
+            </label>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" onClick={() => void save()} disabled={busy || !mailboxId || !name.trim()}>
+                {busy ? 'Saving...' : 'Save signature'}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => void makeSelectedDefault()}
+                disabled={busy || selectedId === 'new'}
+              >
+                Set default
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => void removeSelected()}
+                disabled={busy || selectedId === 'new'}
+              >
+                Delete
+              </Button>
+            </div>
+            {message && <p className="text-xs text-tertiary">{message}</p>}
+          </div>
+
+          <div className="rounded-token border border-subtle bg-surface-base p-4">
+            <p className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-tertiary">
+              Live preview
+            </p>
+            <div
+              className="prose prose-sm max-w-none text-primary"
+              dangerouslySetInnerHTML={{ __html: previewHtml(html) }}
+            />
+          </div>
+        </div>
+      </div>
+    </Card>
   );
 }
 

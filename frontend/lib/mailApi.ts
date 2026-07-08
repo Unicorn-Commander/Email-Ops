@@ -18,7 +18,7 @@
  * wire so the page can render the truth.
  */
 
-import { API_BASE, ApiError, apiDelete, apiGet, apiPost, apiPut, getToken } from '@/lib/api';
+import { API_BASE, ApiError, apiDelete, apiGet, apiPatch, apiPost, apiPut, getToken } from '@/lib/api';
 
 /**
  * Feature detection for the Wave-2 endpoints (aggregate / counts / read / blobs
@@ -214,6 +214,27 @@ export interface MailMailboxesResponse {
   count: number;
 }
 
+export interface MailSignature {
+  id: string;
+  mailbox_account_id: string;
+  name: string;
+  html: string;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailSignaturesResponse {
+  items: MailSignature[];
+  count: number;
+}
+
+export interface SaveMailSignatureBody {
+  name: string;
+  html: string;
+  is_default?: boolean;
+}
+
 export interface MailThreadsResponse {
   threads: ThreadView[];
   count: number;
@@ -262,6 +283,65 @@ export async function connectMailbox(
   token?: string,
 ): Promise<MailboxPick> {
   return apiPost<MailboxPick>(`/workspaces/${seg(workspaceId)}/mailboxes/connected`, body, token);
+}
+
+const mailboxBase = (workspaceId: string, mailboxId: string) =>
+  `/workspaces/${seg(workspaceId)}/mailboxes/${seg(mailboxId)}`;
+
+export async function listMailSignatures(
+  workspaceId: string,
+  mailboxId: string,
+  token?: string,
+): Promise<MailSignaturesResponse> {
+  return apiGet<MailSignaturesResponse>(`${mailboxBase(workspaceId, mailboxId)}/signatures`, token);
+}
+
+export async function createMailSignature(
+  workspaceId: string,
+  mailboxId: string,
+  body: SaveMailSignatureBody,
+  token?: string,
+): Promise<MailSignature> {
+  return apiPost<MailSignature>(`${mailboxBase(workspaceId, mailboxId)}/signatures`, body, token);
+}
+
+export async function updateMailSignature(
+  workspaceId: string,
+  mailboxId: string,
+  signatureId: string,
+  body: Partial<SaveMailSignatureBody>,
+  token?: string,
+): Promise<MailSignature> {
+  return apiPatch<MailSignature>(
+    `${mailboxBase(workspaceId, mailboxId)}/signatures/${seg(signatureId)}`,
+    body,
+    token,
+  );
+}
+
+export async function setDefaultMailSignature(
+  workspaceId: string,
+  mailboxId: string,
+  signatureId: string,
+  token?: string,
+): Promise<MailSignature> {
+  return apiPost<MailSignature>(
+    `${mailboxBase(workspaceId, mailboxId)}/signatures/${seg(signatureId)}/default`,
+    {},
+    token,
+  );
+}
+
+export async function deleteMailSignature(
+  workspaceId: string,
+  mailboxId: string,
+  signatureId: string,
+  token?: string,
+): Promise<{ removed: boolean }> {
+  return apiDelete<{ removed: boolean }>(
+    `${mailboxBase(workspaceId, mailboxId)}/signatures/${seg(signatureId)}`,
+    token,
+  );
 }
 
 /** Options for a thread-list read (single-mailbox or aggregate). */

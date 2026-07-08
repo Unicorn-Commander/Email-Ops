@@ -17,6 +17,7 @@ import {
   Body,
   ConflictException,
   Controller,
+  Delete,
   ForbiddenException,
   Get,
   NotFoundException,
@@ -37,6 +38,7 @@ import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util'
 import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
 import { ProvisionDecision } from '../provisioning/provisioning-policy';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
+import { MailSignaturesService } from './mail-signatures.service';
 import { MailboxAccountsService } from './mailbox-accounts.service';
 import { CreateMailboxInput, UpdateMailboxInput } from './mailbox-accounts.types';
 
@@ -64,6 +66,25 @@ class UpdateMailboxDto {
   @IsOptional() @IsBoolean() active?: boolean;
 }
 
+class SaveSignatureDto {
+  @IsString() @MaxLength(100) name!: string;
+  @IsString() @MaxLength(50000) html!: string;
+  @IsOptional() @IsBoolean() is_default?: boolean;
+}
+
+class UpdateSignatureDto {
+  @IsOptional() @IsString() @MaxLength(100) name?: string;
+  @IsOptional() @IsString() @MaxLength(50000) html?: string;
+  @IsOptional() @IsBoolean() is_default?: boolean;
+}
+
+function normalizeSignatureHtml(html: string): string {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*(['"]).*?\1/gi, '')
+    .replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '');
+}
+
 @ApiTags('mailboxes')
 @ApiBearerAuth()
 @Controller('workspaces/:workspaceId/mailboxes')
@@ -73,6 +94,7 @@ export class MailboxAccountsController {
     private readonly mailboxes: MailboxAccountsService,
     private readonly policy: ProvisioningPolicyService,
     private readonly mailProvider: MailProviderPort,
+    private readonly signatures: MailSignaturesService,
   ) {}
 
   private blockIfApprovalGated(decision: ProvisionDecision, action: string): void {
@@ -97,6 +119,74 @@ export class MailboxAccountsController {
     const mb = await this.mailboxes.getMailbox(workspaceId, ucUidOf(user as WithWorkspaceClaim), id);
     if (!mb) throw new NotFoundException('Mailbox not found in this workspace.');
     return mb;
+  }
+
+  @Get(':id/signatures')
+  @ApiOperation({ summary: 'List reusable compose signatures for one mailbox.' })
+  async listSignatures(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+  ) {
+    const items = await this.signatures.list(workspaceId, ucUidOf(user as WithWorkspaceClaim), id);
+    return { items, count: items.length };
+  }
+
+  @Post(':id/signatures')
+  @ApiOperation({ summary: 'Create a compose signature for one mailbox.' })
+  async createSignature(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Body() body: SaveSignatureDto,
+  ) {
+    if (!body.name.trim()) throw new BadRequestException('Signature name is required.');
+    return this.signatures.create(workspaceId, ucUidOf(user as WithWorkspaceClaim), id, {
+      name: body.name.trim(),
+      html: normalizeSignatureHtml(body.html),
+      isDefault: body.is_default,
+    });
+  }
+
+  @Patch(':id/signatures/:signatureId')
+  @ApiOperation({ summary: 'Update a compose signature for one mailbox.' })
+  async updateSignature(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Param('signatureId') signatureId: string,
+    @Body() body: UpdateSignatureDto,
+  ) {
+    if (body.name !== undefined && !body.name.trim()) {
+      throw new BadRequestException('Signature name is required.');
+    }
+    return this.signatures.update(workspaceId, ucUidOf(user as WithWorkspaceClaim), id, signatureId, {
+      ...(body.name !== undefined ? { name: body.name.trim() } : {}),
+      ...(body.html !== undefined ? { html: normalizeSignatureHtml(body.html) } : {}),
+      ...(body.is_default !== undefined ? { isDefault: body.is_default } : {}),
+    });
+  }
+
+  @Post(':id/signatures/:signatureId/default')
+  @ApiOperation({ summary: 'Make one mailbox signature the default.' })
+  async setDefaultSignature(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Param('signatureId') signatureId: string,
+  ) {
+    return this.signatures.setDefault(workspaceId, ucUidOf(user as WithWorkspaceClaim), id, signatureId);
+  }
+
+  @Delete(':id/signatures/:signatureId')
+  @ApiOperation({ summary: 'Delete a compose signature.' })
+  async deleteSignature(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Param('signatureId') signatureId: string,
+  ) {
+    return this.signatures.delete(workspaceId, ucUidOf(user as WithWorkspaceClaim), id, signatureId);
   }
 
   @Post()

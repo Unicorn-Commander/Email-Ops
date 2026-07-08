@@ -379,6 +379,7 @@ model Workspace {
   updatedAt         DateTime               @updatedAt
   memberships       Membership[]
   mailboxAccounts   MailboxAccount[]
+  mailSignatures    MailSignature[]
   emailMessages     EmailMessage[]
   smsAccounts       SmsAccount[]
   smsMessages       SmsMessage[]
@@ -583,6 +584,7 @@ model MailboxAccount {
   workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   agentMailboxes AgentMailbox[]
   spaceLinks     SpaceMailbox[]
+  signatures     MailSignature[]
 
   // One mailbox identity per address per workspace.
   @@unique([workspaceId, emailAddress])
@@ -591,6 +593,30 @@ model MailboxAccount {
   // "my inboxes" / "agent X's inboxes" / "shared boxes".
   @@index([workspaceId, ownerKind, ownerKey])
   @@map("mailbox_accounts")
+}
+
+// ============================================================
+// MAIL SIGNATURES (Email-Ops OWNS this — tenant-scoped)
+// ============================================================
+//
+// Per-mailbox reusable HTML signatures for the human mail client. RLS-fenced on
+// workspaceId and always resolved through MailboxAccount inside withWorkspace.
+model MailSignature {
+  id               String   @id @default(uuid())
+  workspaceId      String
+  mailboxAccountId String
+  name             String
+  html             String
+  isDefault        Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxAccountId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, mailboxAccountId])
+  @@index([workspaceId, mailboxAccountId, isDefault])
+  @@map("mail_signatures")
 }
 
 // ============================================================

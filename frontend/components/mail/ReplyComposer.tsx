@@ -24,7 +24,7 @@ import {
   type KeyboardEvent,
 } from 'react';
 import { Button, Input, cn } from '@/components/ui';
-import type { ComposeBody } from '@/lib/mailApi';
+import { listMailSignatures, type ComposeBody, type MailSignature } from '@/lib/mailApi';
 import type { ComposeOutcome } from './useMailClient';
 import { ComposeStatusLine, describeStatus } from './ComposeStatus';
 import { RecipientChips, isValidEmail } from './RecipientChips';
@@ -59,6 +59,18 @@ function clearDraft(key: string | null): void {
   } catch {
     /* private mode / unavailable — nothing to clean up */
   }
+}
+
+function signatureText(html: string): string {
+  if (typeof window === 'undefined') return html.replace(/<[^>]*>/g, '').trim();
+  const el = window.document.createElement('div');
+  el.innerHTML = html;
+  return (el.textContent || el.innerText || '').trim();
+}
+
+function signatureBlock(sig: MailSignature): string {
+  const text = signatureText(sig.html);
+  return text ? `\n\n-- \n${text}` : '';
 }
 
 export interface ReplyComposerHandle {
@@ -105,9 +117,49 @@ export const ReplyComposer = forwardRef<
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [draftSaved, setDraftSaved] = useState(false);
+  const [signatures, setSignatures] = useState<MailSignature[]>([]);
+  const [selectedSignatureId, setSelectedSignatureId] = useState<string>('none');
+  const [signatureError, setSignatureError] = useState<string | null>(null);
 
   const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const appliedSignature = useRef<string>('');
   useImperativeHandle(ref, () => ({ focus: () => bodyRef.current?.focus() }), []);
+
+  useEffect(() => {
+    if (!workspaceId || !mailboxId) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await listMailSignatures(workspaceId, mailboxId);
+        if (!alive) return;
+        setSignatures(res.items);
+        const def = res.items.find((s) => s.is_default);
+        if (def) {
+          setSelectedSignatureId(def.id);
+          const block = signatureBlock(def);
+          appliedSignature.current = block;
+          setBody((current) => (block && !current.endsWith(block) ? `${current}${block}` : current));
+        }
+      } catch {
+        if (alive) setSignatureError('Could not load signatures.');
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [workspaceId, mailboxId]);
+
+  function applySignature(nextId: string) {
+    setSelectedSignatureId(nextId);
+    const next = signatures.find((s) => s.id === nextId);
+    const nextBlock = next ? signatureBlock(next) : '';
+    setBody((current) => {
+      const prior = appliedSignature.current;
+      const base = prior && current.endsWith(prior) ? current.slice(0, -prior.length).replace(/\s+$/, '') : current;
+      appliedSignature.current = nextBlock;
+      return nextBlock ? `${base}${nextBlock}` : base;
+    });
+  }
 
   // Debounced autosave. Skip the first run (hydration) so we don't flash "Saved"
   // on mount, and never persist a whitespace-only draft (clear the key instead).
@@ -267,6 +319,26 @@ export const ReplyComposer = forwardRef<
             className="block w-full resize-y rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40"
           />
         </label>
+
+        {(signatures.length > 0 || signatureError) && (
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-medium text-tertiary">Signature</span>
+            <select
+              value={selectedSignatureId}
+              onChange={(e) => applySignature(e.target.value)}
+              className="block w-full rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40"
+            >
+              <option value="none">No signature</option>
+              {signatures.map((sig) => (
+                <option key={sig.id} value={sig.id}>
+                  {sig.name}
+                  {sig.is_default ? ' (default)' : ''}
+                </option>
+              ))}
+            </select>
+            {signatureError && <p className="mt-1 text-xs text-danger">{signatureError}</p>}
+          </label>
+        )}
 
         <ComposerAttachments items={uploads.items} onRemove={uploads.remove} disabled={sending} />
 
