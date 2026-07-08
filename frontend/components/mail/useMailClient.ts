@@ -27,6 +27,7 @@ import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 import {
   bulkThreadAction,
   composeMail,
+  emptyMailFolder,
   getMailCounts,
   getMailThread,
   isMissingEndpoint,
@@ -180,6 +181,8 @@ export interface UseMailClient {
 
   /** Apply one action to many threads (Wave 2 bulk endpoint), optimistically. */
   bulk: (threadIds: string[], action: BulkAction) => Promise<BulkOutcome>;
+  /** Permanently empty Trash/Spam for the selected mailbox after UI confirmation. */
+  emptyFolder: (folder: 'trash' | 'spam') => Promise<TriageOutcome>;
 }
 
 function messageOf(err: unknown, fallback: string): string {
@@ -658,6 +661,25 @@ export function useMailClient(): UseMailClient {
     [query, bumpUnread, fetchThreads, refreshCounts, guard401, disableFeature],
   );
 
+  const emptyFolder = useCallback(
+    async (target: 'trash' | 'spam'): Promise<TriageOutcome> => {
+      const ws = workspaceRef.current;
+      const mbx = selectedMailboxIdRef.current;
+      if (!ws || !mbx || mbx === ALL_INBOXES) return { ok: false, error: 'Pick one mailbox first.' };
+      try {
+        await emptyMailFolder(ws.workspace_id, mbx, target);
+        setThreads([]);
+        setOpenThread(null);
+        void fetchThreads(ws, mbx, target, query, 0, false);
+        return { ok: true };
+      } catch (err) {
+        if (guard401(err)) return { ok: false };
+        return { ok: false, error: messageOf(err, 'Could not empty this folder.') };
+      }
+    },
+    [fetchThreads, guard401, query],
+  );
+
   return {
     workspace,
     load,
@@ -693,6 +715,7 @@ export function useMailClient(): UseMailClient {
     reply,
     triage,
     bulk,
+    emptyFolder,
   };
 }
 

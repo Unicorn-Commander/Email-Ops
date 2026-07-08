@@ -807,6 +807,20 @@ export class EmailService {
     return false;
   }
 
+  async emptyMailboxFolder(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    folder: 'trash' | 'spam',
+  ): Promise<{ folder: 'trash' | 'spam'; purged: number; updated: boolean }> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) {
+      return { folder, purged: 0, updated: false };
+    }
+    const purged = await this.stalwart.emptyFolder(mailbox.emailAddress, folder);
+    return { folder, purged: purged ?? 0, updated: purged != null };
+  }
+
   /** Resolve a mailbox by id inside the workspace + apply the per-user HUMAN fence. */
   private async resolveMailboxForCaller(
     workspaceId: string,

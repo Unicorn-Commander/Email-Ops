@@ -125,6 +125,10 @@ class SetFlagsDto {
   @IsOptional() @IsBoolean() seen?: boolean;
 }
 
+class EmptyFolderDto {
+  @IsBoolean() confirm!: boolean;
+}
+
 class BulkThreadsDto {
   @IsArray() @ArrayMaxSize(200) @IsString({ each: true }) thread_ids!: string[];
   @IsIn(BULK_ACTIONS) action!: BulkThreadAction;
@@ -299,6 +303,28 @@ export class MailController {
       mailboxId,
       threadId,
       { flagged: body.flagged, seen: body.seen },
+    );
+  }
+
+  @Post(':mailboxId/folders/:folder/empty')
+  @ApiOperation({ summary: 'Permanently empty Trash or Spam/Junk after explicit confirmation.' })
+  @ApiResponse({ status: 201, description: '{ folder, purged, updated }.' })
+  async emptyFolder(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Param('folder') folder: string,
+    @Body() body: EmptyFolderDto,
+  ) {
+    if (folder !== 'trash' && folder !== 'spam') {
+      throw new BadRequestException('Only trash and spam can be emptied.');
+    }
+    if (!body.confirm) throw new BadRequestException('Confirmation is required.');
+    return this.email.emptyMailboxFolder(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      mailboxId,
+      folder,
     );
   }
 

@@ -108,6 +108,9 @@ export abstract class StalwartPort {
     folder: StalwartFolderQuery['folder'],
   ): Promise<boolean>;
 
+  /** Permanently delete every message currently in Trash or Spam/Junk. */
+  abstract emptyFolder(mailbox: string, folder: 'trash' | 'spam'): Promise<number | null>;
+
   /**
    * The Inbox unread/total counts for one mailbox. Returns null when not
    * configured / unknown / the call fails — the caller renders that as a

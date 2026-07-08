@@ -470,6 +470,15 @@ export async function setThreadFlags(
   return apiPatch(`${mailBase(workspaceId, mailboxId)}/threads/${seg(threadId)}/flags`, body, token);
 }
 
+export async function emptyMailFolder(
+  workspaceId: string,
+  mailboxId: string,
+  folder: 'trash' | 'spam',
+  token?: string,
+): Promise<{ folder: 'trash' | 'spam'; purged: number; updated: boolean }> {
+  return apiPost(`${mailBase(workspaceId, mailboxId)}/folders/${folder}/empty`, { confirm: true }, token);
+}
+
 // ── Blobs (attachment download + cid inline images) ─────────────────────────
 
 /** The API path for an attachment blob (relative to API_BASE). */

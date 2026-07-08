@@ -724,6 +724,25 @@ export class JamesClient extends StalwartPort {
     return updatedCount > 0;
   }
 
+  async emptyFolder(mailbox: string, folder: 'trash' | 'spam'): Promise<number | null> {
+    if (!this.jmapUrl) return null;
+    const role = FOLDER_ROLE[folder];
+    const mailboxId = await this.resolveMailboxIdForRole(mailbox, role);
+    if (!mailboxId) return null;
+    const queryResp = await this.jmap([
+      ['Email/query', { filter: { inMailbox: mailboxId }, limit: 1000 }, '0'],
+    ], mailbox);
+    if (!queryResp) return null;
+    const ids = this.named(queryResp, 'Email/query')?.ids;
+    if (!Array.isArray(ids)) return null;
+    const destroy = ids.filter((id): id is string => typeof id === 'string' && !!id);
+    if (destroy.length === 0) return 0;
+    const setResp = await this.jmap([['Email/set', { destroy }, '0']], mailbox);
+    if (!setResp) return null;
+    const result = this.named(setResp, 'Email/set');
+    return result?.destroyed ? Object.keys(result.destroyed).length : null;
+  }
+
   /** The Inbox unread/total counts for one mailbox (JMAP Mailbox `role: inbox`). */
   async getMailboxCounts(mailbox: string): Promise<StalwartMailboxCounts | null> {
     if (!this.jmapUrl) return null;

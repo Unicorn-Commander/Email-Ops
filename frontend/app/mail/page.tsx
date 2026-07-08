@@ -892,6 +892,7 @@ export default function MailPage() {
               unreadCount={listUnread}
               filter={filter}
               onFilter={setFilter}
+              folder={mail.folder}
               spaceName={activeSpace?.name ?? null}
               load={mail.threadsLoad}
               threads={displayThreads}
@@ -913,6 +914,18 @@ export default function MailPage() {
               onQuickTriage={(id, d) => void triageAndAdvance(id, d)}
               onQuickMark={(id, read) => mail.markRead([id], read)}
               onToggleFlag={(id, flagged) => mail.toggleFlag(id, flagged)}
+              onEmptyFolder={
+                !mail.unified && (mail.folder === 'trash' || mail.folder === 'spam')
+                  ? () => {
+                      const target = mail.folder === 'trash' ? 'trash' : 'spam';
+                      const label = target === 'trash' ? 'Trash' : 'Spam';
+                      if (!window.confirm(`Permanently delete all messages in ${label}? This cannot be undone.`)) return;
+                      void mail.emptyFolder(target).then((res) => {
+                        if (!res.ok && res.error) window.alert(res.error);
+                      });
+                    }
+                  : undefined
+              }
             />
           </section>
 
@@ -1435,6 +1448,7 @@ function ConversationList({
   unreadCount,
   filter,
   onFilter,
+  folder,
   spaceName,
   load,
   threads,
@@ -1456,6 +1470,7 @@ function ConversationList({
   onQuickTriage,
   onQuickMark,
   onToggleFlag,
+  onEmptyFolder,
 }: {
   banner: ListBanner | null;
   error: string | null;
@@ -1463,6 +1478,7 @@ function ConversationList({
   unreadCount: number | null;
   filter: SegFilter;
   onFilter: (f: SegFilter) => void;
+  folder: MailFolder;
   spaceName: string | null;
   load: Load;
   threads: ThreadView[];
@@ -1484,6 +1500,7 @@ function ConversationList({
   onQuickTriage: (id: string, disposition: 'ARCHIVE' | 'TRASH') => void;
   onQuickMark: (id: string, read: boolean) => void;
   onToggleFlag: (id: string, flagged: boolean) => void;
+  onEmptyFolder?: () => void;
 }) {
   const allChecked = threads.length > 0 && selected.size >= threads.length;
   const anySelected = selected.size > 0;
@@ -1515,6 +1532,13 @@ function ConversationList({
           ))}
         </div>
       </div>
+      {onEmptyFolder && (
+        <div className="border-b border-subtle px-4 py-2">
+          <Button variant="secondary" size="sm" onClick={onEmptyFolder}>
+            Empty {folder === 'trash' ? 'Trash' : 'Spam'}
+          </Button>
+        </div>
+      )}
 
       {selectable && threads.length > 0 && load === 'ready' && !banner && (
         <div

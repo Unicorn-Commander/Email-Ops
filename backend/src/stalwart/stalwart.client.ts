@@ -295,6 +295,10 @@ export class StalwartClient extends StalwartPort {
     return false;
   }
 
+  async emptyFolder(_mailbox: string, _folder: 'trash' | 'spam'): Promise<number | null> {
+    return null;
+  }
+
   /** NOT SUPPORTED on Stalwart (webmail-wave counts surface) — degrade-clean null. */
   async getMailboxCounts(_mailbox: string): Promise<StalwartMailboxCounts | null> {
     return null;
