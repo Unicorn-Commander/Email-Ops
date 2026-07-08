@@ -2,10 +2,17 @@ import { EmailMessageStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import {
+  StalwartBlobDownload,
+  StalwartFolderQuery,
+  StalwartFolderThreadsResult,
+  StalwartMailboxCounts,
   StalwartMessage,
+  StalwartMessageDetail,
+  StalwartMessageHeaders,
   StalwartSendRequest,
   StalwartSendResult,
   StalwartThread,
+  StalwartUploadResult,
 } from '../stalwart/stalwart.types';
 import { EmailService } from '../email/email.service';
 import { mapPostmarkRecord, PostmarkWebhookBody } from './postmark.types';
@@ -43,6 +50,33 @@ class FakeStalwart extends StalwartPort {
   }
   async listMessages(): Promise<StalwartMessage[]> {
     return [];
+  }
+  async listFolderThreads(
+    _mailbox: string,
+    _query: StalwartFolderQuery,
+  ): Promise<StalwartFolderThreadsResult> {
+    return { threads: [] };
+  }
+  async getThreadDetail(): Promise<StalwartMessageDetail[]> {
+    return [];
+  }
+  async setThreadRead(): Promise<boolean> {
+    return true;
+  }
+  async moveThreadToFolder(): Promise<boolean> {
+    return true;
+  }
+  async getMailboxCounts(): Promise<StalwartMailboxCounts | null> {
+    return null;
+  }
+  async downloadBlob(): Promise<StalwartBlobDownload | null> {
+    return null;
+  }
+  async getMessageHeaders(): Promise<StalwartMessageHeaders | null> {
+    return null;
+  }
+  async uploadBlob(): Promise<StalwartUploadResult | null> {
+    return null;
   }
   async send(
     _mailbox: string,
