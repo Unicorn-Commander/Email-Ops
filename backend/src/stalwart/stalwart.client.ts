@@ -31,6 +31,7 @@ import { ConfigService } from '@nestjs/config';
 import { StalwartPort } from './stalwart.port';
 import {
   StalwartBlobDownload,
+  StalwartDraftRequest,
   StalwartFolderQuery,
   StalwartFolderThreadsResult,
   StalwartMailboxCounts,
@@ -40,6 +41,7 @@ import {
   StalwartMessageHeaders,
   StalwartSendRequest,
   StalwartSendResult,
+  StalwartVacationState,
   StalwartThread,
   StalwartUploadResult,
 } from './stalwart.types';
@@ -297,6 +299,30 @@ export class StalwartClient extends StalwartPort {
 
   async emptyFolder(_mailbox: string, _folder: 'trash' | 'spam'): Promise<number | null> {
     return null;
+  }
+
+  async saveDraft(_mailbox: string, _draft: StalwartDraftRequest): Promise<{ id: string } | null> {
+    return null;
+  }
+
+  async updateDraft(
+    _mailbox: string,
+    _draftId: string,
+    _draft: StalwartDraftRequest,
+  ): Promise<{ id: string } | null> {
+    return null;
+  }
+
+  async deleteDraft(_mailbox: string, _draftId: string): Promise<boolean> {
+    return false;
+  }
+
+  async getVacation(_mailbox: string): Promise<StalwartVacationState | null> {
+    return null;
+  }
+
+  async setVacation(_mailbox: string, _state: StalwartVacationState): Promise<boolean> {
+    return false;
   }
 
   /** NOT SUPPORTED on Stalwart (webmail-wave counts surface) — degrade-clean null. */

@@ -5,6 +5,7 @@ import { ProvisioningModule } from '../provisioning/provisioning.module';
 import { MailProviderModule } from '../mail-provider/mail-provider.module';
 import { MailEngineAdminModule } from '../mail-engine-admin/mail-engine-admin.module';
 import { MailContactsService } from './mail-contacts.service';
+import { MailVacationService } from './mail-vacation.service';
 import { MailSignaturesService } from './mail-signatures.service';
 import { MailAutoconfigController } from './mail-autoconfig.controller';
 import { MailboxAccountsController } from './mailbox-accounts.controller';
@@ -20,7 +21,7 @@ import { DeviceConfigService } from './device-config.service';
 @Module({
   imports: [AuthModule, WorkspaceModule, ProvisioningModule, MailProviderModule, MailEngineAdminModule],
   controllers: [MailboxAccountsController, MailAutoconfigController],
-  providers: [MailboxAccountsService, MailSignaturesService, MailContactsService, DeviceConfigService],
+  providers: [MailboxAccountsService, MailSignaturesService, MailContactsService, DeviceConfigService, MailVacationService],
   exports: [MailboxAccountsService],
 })
 export class MailboxAccountsModule {}

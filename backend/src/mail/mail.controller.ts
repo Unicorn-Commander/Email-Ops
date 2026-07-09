@@ -30,6 +30,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   NotFoundException,
   NotImplementedException,
@@ -106,6 +107,7 @@ class ComposeMailDto {
   @IsOptional() @IsString() @MaxLength(50000) body?: string;
   @IsOptional() @IsString() @MaxLength(100000) body_html?: string;
   @IsOptional() @IsString() in_reply_to_thread_id?: string;
+  @IsOptional() @IsString() @MaxLength(500) draft_id?: string;
   // webmail wave — all optional (back-compat).
   @IsOptional() @IsArray() @ArrayMaxSize(50) @IsEmail({}, { each: true }) cc?: string[];
   @IsOptional() @IsArray() @ArrayMaxSize(50) @IsEmail({}, { each: true }) bcc?: string[];
@@ -132,6 +134,27 @@ class EmptyFolderDto {
 class BulkThreadsDto {
   @IsArray() @ArrayMaxSize(200) @IsString({ each: true }) thread_ids!: string[];
   @IsIn(BULK_ACTIONS) action!: BulkThreadAction;
+}
+
+function parseComposePayload(body: ComposeMailDto) {
+  const toAddresses = body.to_address
+    .split(',')
+    .map((a) => a.trim())
+    .filter(Boolean);
+  if (!toAddresses.length || toAddresses.some((a) => !ADDRESS_RE.test(a))) {
+    throw new BadRequestException('to_address must be one or more comma-separated email addresses.');
+  }
+  const attachments = (body.attachments ?? []).map((a) => {
+    if (!a || typeof a.blob_id !== 'string' || !a.blob_id.trim()) {
+      throw new BadRequestException('each attachment needs a blob_id (from POST .../attachments).');
+    }
+    return {
+      blob_id: a.blob_id,
+      name: typeof a.name === 'string' && a.name.trim() ? a.name : 'attachment',
+      type: typeof a.type === 'string' && a.type.trim() ? a.type : 'application/octet-stream',
+    };
+  });
+  return { toAddresses, attachments };
 }
 
 @ApiTags('mail')
@@ -389,6 +412,64 @@ export class MailController {
     return result;
   }
 
+  @Post(':mailboxId/drafts')
+  @ApiOperation({ summary: 'Create a persistent draft in the mailbox Drafts folder.' })
+  async createDraft(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Body() body: ComposeMailDto,
+  ) {
+    const { toAddresses, attachments } = parseComposePayload(body);
+    return this.email.saveOrUpdateDraft(workspaceId, ucUidOf(user as WithWorkspaceClaim), mailboxId, null, {
+      toAddress: toAddresses[0],
+      toAddresses: toAddresses.length > 1 ? toAddresses : undefined,
+      subject: body.subject ?? '',
+      body: body.body ?? '',
+      bodyHtml: body.body_html ? normalizeComposeHtml(body.body_html) : null,
+      cc: body.cc?.length ? body.cc : undefined,
+      bcc: body.bcc?.length ? body.bcc : undefined,
+      attachments: attachments.length
+        ? attachments.map((a) => ({ blobId: a.blob_id, name: a.name, type: a.type }))
+        : undefined,
+    });
+  }
+
+  @Put(':mailboxId/drafts/:draftId')
+  @ApiOperation({ summary: 'Update a persistent draft in the mailbox Drafts folder.' })
+  async updateDraft(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Param('draftId') draftId: string,
+    @Body() body: ComposeMailDto,
+  ) {
+    const { toAddresses, attachments } = parseComposePayload(body);
+    return this.email.saveOrUpdateDraft(workspaceId, ucUidOf(user as WithWorkspaceClaim), mailboxId, draftId, {
+      toAddress: toAddresses[0],
+      toAddresses: toAddresses.length > 1 ? toAddresses : undefined,
+      subject: body.subject ?? '',
+      body: body.body ?? '',
+      bodyHtml: body.body_html ? normalizeComposeHtml(body.body_html) : null,
+      cc: body.cc?.length ? body.cc : undefined,
+      bcc: body.bcc?.length ? body.bcc : undefined,
+      attachments: attachments.length
+        ? attachments.map((a) => ({ blobId: a.blob_id, name: a.name, type: a.type }))
+        : undefined,
+    });
+  }
+
+  @Delete(':mailboxId/drafts/:draftId')
+  @ApiOperation({ summary: 'Delete a persistent draft from the mailbox Drafts folder.' })
+  async deleteDraft(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Param('draftId') draftId: string,
+  ) {
+    return this.email.deleteDraft(workspaceId, ucUidOf(user as WithWorkspaceClaim), mailboxId, draftId);
+  }
+
   @Post(':mailboxId/compose')
   @ApiOperation({ summary: 'Send an email AS the given mailbox (reply when in_reply_to_thread_id; threading headers resolved from in_reply_to).' })
   @ApiResponse({ status: 201, description: 'The composed message (queued/sent/failed-clean).' })
@@ -398,26 +479,7 @@ export class MailController {
     @Param('mailboxId') mailboxId: string,
     @Body() body: ComposeMailDto,
   ) {
-    // The FE sends multi-recipient as ONE comma-joined to_address — split it.
-    const toAddresses = body.to_address
-      .split(',')
-      .map((a) => a.trim())
-      .filter(Boolean);
-    if (!toAddresses.length || toAddresses.some((a) => !ADDRESS_RE.test(a))) {
-      throw new BadRequestException('to_address must be one or more comma-separated email addresses.');
-    }
-    // Attachment refs arrive as loose JSON — validate the shape here (class-
-    // validator nested DTOs are not used elsewhere in this codebase).
-    const attachments = (body.attachments ?? []).map((a) => {
-      if (!a || typeof a.blob_id !== 'string' || !a.blob_id.trim()) {
-        throw new BadRequestException('each attachment needs a blob_id (from POST .../attachments).');
-      }
-      return {
-        blob_id: a.blob_id,
-        name: typeof a.name === 'string' && a.name.trim() ? a.name : 'attachment',
-        type: typeof a.type === 'string' && a.type.trim() ? a.type : 'application/octet-stream',
-      };
-    });
+    const { toAddresses, attachments } = parseComposePayload(body);
     const input: ComposeInput = {
       contactId: null,
       toAddress: toAddresses[0],
@@ -431,6 +493,7 @@ export class MailController {
       externalRef: randomUUID(),
       draftedBy: null,
       fromMailboxAccountId: mailboxId,
+      draftId: body.draft_id ?? null,
       cc: body.cc?.length ? body.cc : undefined,
       bcc: body.bcc?.length ? body.bcc : undefined,
       attachments: attachments.length ? attachments : undefined,

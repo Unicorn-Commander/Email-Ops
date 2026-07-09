@@ -6,6 +6,7 @@ import DOMPurify from 'dompurify';
 import { Button, Badge, Card, Skeleton, cn } from '@/components/ui';
 import { useConnectedAccounts } from '@/components/ConnectedAccountsProvider';
 import { useInboxStats } from '@/components/useInboxStats';
+import { RichTextEditor } from '@/components/mail/RichTextEditor';
 import { formatBytes, providerMeta, storagePercent } from '@/lib/cleaner-model';
 import {
   fetchProfile,
@@ -17,9 +18,11 @@ import {
   connectMailbox,
   createMailSignature,
   deleteMailSignature,
+  getMailVacation,
   listMailMailboxes,
   listMailSignatures,
   setDefaultMailSignature,
+  setMailVacation,
   updateMailSignature,
   type MailSignature,
   type MailboxPick,
@@ -124,6 +127,7 @@ export default function AccountsPage() {
       )}
 
       {workspaceId && <SignaturesSection workspaceId={workspaceId} />}
+      {workspaceId && <VacationSection workspaceId={workspaceId} />}
     </div>
   );
 }
@@ -374,6 +378,211 @@ function SignaturesSection({ workspaceId }: { workspaceId: string }) {
       </div>
     </Card>
   );
+}
+
+function VacationSection({ workspaceId }: { workspaceId: string }) {
+  const [mailboxes, setMailboxes] = useState<MailboxPick[]>([]);
+  const [mailboxId, setMailboxId] = useState('');
+  const [enabled, setEnabled] = useState(false);
+  const [subject, setSubject] = useState('Out of office');
+  const [bodyHtml, setBodyHtml] = useState('<p>I am away and will reply when I return.</p>');
+  const [startsAt, setStartsAt] = useState('');
+  const [endsAt, setEndsAt] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await listMailMailboxes(workspaceId);
+        if (!alive) return;
+        setMailboxes(res.items);
+        setMailboxId((current) => current || res.items[0]?.id || '');
+      } catch (e) {
+        if (alive) setMessage(e instanceof Error ? e.message : 'Could not load mailboxes.');
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!mailboxId) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const settings = await getMailVacation(workspaceId, mailboxId);
+        if (!alive) return;
+        if (!settings) {
+          setEnabled(false);
+          setSubject('Out of office');
+          setBodyHtml('<p>I am away and will reply when I return.</p>');
+          setStartsAt('');
+          setEndsAt('');
+          setMessage(null);
+          return;
+        }
+        setEnabled(settings.enabled);
+        setSubject(settings.subject);
+        setBodyHtml(settings.body_html);
+        setStartsAt(localInputValue(settings.starts_at));
+        setEndsAt(localInputValue(settings.ends_at));
+        setMessage(null);
+      } catch (e) {
+        if (alive) setMessage(e instanceof Error ? e.message : 'Could not load vacation settings.');
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [workspaceId, mailboxId]);
+
+  async function save() {
+    if (!mailboxId || !subject.trim()) return;
+    const start = startsAt ? new Date(startsAt) : null;
+    const end = endsAt ? new Date(endsAt) : null;
+    if (start && end && start > end) {
+      setMessage('Start time must be before end time.');
+      return;
+    }
+    setBusy(true);
+    setMessage(null);
+    try {
+      const saved = await setMailVacation(workspaceId, mailboxId, {
+        enabled,
+        subject: subject.trim(),
+        body_html: bodyHtml,
+        starts_at: start ? start.toISOString() : null,
+        ends_at: end ? end.toISOString() : null,
+      });
+      setEnabled(saved.enabled);
+      setSubject(saved.subject);
+      setBodyHtml(saved.body_html);
+      setStartsAt(localInputValue(saved.starts_at));
+      setEndsAt(localInputValue(saved.ends_at));
+      setMessage('Vacation responder saved.');
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : 'Could not save vacation settings.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card padded className="space-y-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-primary">Out of Office</h2>
+          <p className="mt-1 text-sm text-tertiary">
+            Vacation responses are mailbox-scoped and mirrored to the mail engine when available.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant={enabled ? 'success' : 'warning'} dot>
+            {enabled ? 'Enabled' : 'Disabled'}
+          </Badge>
+          <select
+            value={mailboxId}
+            onChange={(e) => setMailboxId(e.target.value)}
+            className="rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary"
+          >
+            {mailboxes.map((mb) => (
+              <option key={mb.id} value={mb.id}>
+                {mb.email_address}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <div className="space-y-2">
+          {mailboxes.map((mb) => (
+            <button
+              key={mb.id}
+              type="button"
+              onClick={() => setMailboxId(mb.id)}
+              className={cn(
+                'w-full rounded-token border px-3 py-2 text-left text-sm transition-colors',
+                mailboxId === mb.id
+                  ? 'border-accent bg-accent/10 text-primary'
+                  : 'border-subtle bg-surface-base text-secondary hover:bg-surface-overlay',
+              )}
+            >
+              <span className="block truncate font-medium">{mb.email_address}</span>
+              <span className="text-[11px] text-tertiary">{enabled && mailboxId === mb.id ? 'Auto-reply on' : 'Auto-reply off'}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-3">
+          <label className="flex items-center gap-2 text-sm text-secondary">
+            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+            Enable auto-reply
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-medium text-tertiary">Subject</span>
+            <input
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              className="block w-full rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary"
+              maxLength={300}
+            />
+          </label>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-medium text-tertiary">Start</span>
+              <input
+                type="datetime-local"
+                value={startsAt}
+                onChange={(e) => setStartsAt(e.target.value)}
+                className="block w-full rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[11px] font-medium text-tertiary">End</span>
+              <input
+                type="datetime-local"
+                value={endsAt}
+                onChange={(e) => setEndsAt(e.target.value)}
+                className="block w-full rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary"
+              />
+            </label>
+          </div>
+
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-medium text-tertiary">Message</span>
+            <RichTextEditor
+              value={bodyHtml}
+              onChange={setBodyHtml}
+              placeholder="Write the vacation auto-reply..."
+              className="min-h-[200px]"
+            />
+          </label>
+
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" onClick={() => void save()} disabled={busy || !mailboxId || !subject.trim()}>
+              {busy ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
+
+          {message && <p className="text-xs text-tertiary">{message}</p>}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function localInputValue(iso: string | null): string {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
 }
 
 /** Outcome of adding a connected account to the `/mail` client. */

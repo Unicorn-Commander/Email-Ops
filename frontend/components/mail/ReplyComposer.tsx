@@ -23,43 +23,19 @@ import {
   type DragEvent,
 } from 'react';
 import { Button, Input, cn } from '@/components/ui';
-import { listMailSignatures, type ComposeBody, type MailSignature } from '@/lib/mailApi';
+import {
+  createMailDraft,
+  listMailSignatures,
+  updateMailDraft,
+  type ComposeBody,
+  type MailSignature,
+} from '@/lib/mailApi';
 import type { ComposeOutcome } from './useMailClient';
 import { ComposeStatusLine, describeStatus } from './ComposeStatus';
 import { RecipientChips, isValidEmail } from './RecipientChips';
 import { AttachButton, ComposerAttachments, useAttachmentUploads } from './AttachmentList';
 import { RichTextEditor, htmlToText } from './RichTextEditor';
 import { ReplyIcon, CloseIcon } from './icons';
-
-/**
- * Draft persistence helpers — SSR- and private-mode-safe (guard `window`, swallow
- * QuotaExceeded/SecurityError). A null key disables persistence entirely.
- */
-function readDraft(key: string | null): string | null {
-  if (!key || typeof window === 'undefined') return null;
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-function writeDraft(key: string | null, value: string): boolean {
-  if (!key || typeof window === 'undefined') return false;
-  try {
-    window.localStorage.setItem(key, value);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function clearDraft(key: string | null): void {
-  if (!key || typeof window === 'undefined') return;
-  try {
-    window.localStorage.removeItem(key);
-  } catch {
-    /* private mode / unavailable — nothing to clean up */
-  }
-}
 
 function signatureBlock(sig: MailSignature): string {
   return sig.html.trim() ? `<p>-- </p>${sig.html}` : '';
@@ -85,8 +61,7 @@ export const ReplyComposer = forwardRef<
     onSend: (
       body: Pick<
         ComposeBody,
-        'to_address' | 'subject' | 'body' | 'cc' | 'attachments' | 'in_reply_to'
-        | 'body_html'
+        'to_address' | 'subject' | 'body' | 'cc' | 'attachments' | 'in_reply_to' | 'body_html' | 'draft_id'
       >,
     ) => Promise<ComposeOutcome>;
     /** Collapse the composer back to the compact reply action bar. */
@@ -96,29 +71,46 @@ export const ReplyComposer = forwardRef<
   { defaultTo, defaultCc, defaultSubject, workspaceId, mailboxId, inReplyTo, onSend, onCollapse },
   ref,
 ) {
-  // Draft is keyed on `inReplyTo` (the RFC threading anchor for this thread) —
-  // the page remounts this composer per thread, so hydrate lazily from storage.
-  const draftKey = inReplyTo ? `emailops:draft:reply:${inReplyTo}` : null;
-
   const [to, setTo] = useState<string[]>(defaultTo.filter(Boolean));
   const [cc, setCc] = useState<string[]>(defaultCc ?? []);
   const [showCc, setShowCc] = useState((defaultCc?.length ?? 0) > 0);
   const [subject, setSubject] = useState(defaultSubject);
-  const [body, setBody] = useState(() => readDraft(draftKey) ?? '');
+  const [body, setBody] = useState('');
   const [sending, setSending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [draftSaved, setDraftSaved] = useState(false);
+  const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
+  const [draftId, setDraftId] = useState<string | null>(null);
+  const [draftSaving, setDraftSaving] = useState(false);
   const [signatures, setSignatures] = useState<MailSignature[]>([]);
   const [selectedSignatureId, setSelectedSignatureId] = useState<string>('none');
   const [signatureError, setSignatureError] = useState<string | null>(null);
 
-  const bodyRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLLabelElement>(null);
   const appliedSignature = useRef<string>('');
-  useImperativeHandle(ref, () => ({
-    focus: () => bodyRef.current?.querySelector<HTMLElement>('[contenteditable="true"]')?.focus(),
-  }), []);
+  const saveTimer = useRef<number | null>(null);
+  const lastSavedSnapshot = useRef<string>('');
+  const uploads = useAttachmentUploads(workspaceId, mailboxId);
+  useEffect(() => {
+    lastSavedSnapshot.current = JSON.stringify({
+      to: defaultTo.filter(Boolean),
+      cc: defaultCc ?? [],
+      subject: defaultSubject,
+      body: '',
+      attachments: [],
+      draftId: null,
+      inReplyTo: inReplyTo ?? null,
+    });
+  }, [defaultTo, defaultCc, defaultSubject, inReplyTo]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      focus: () => bodyRef.current?.querySelector<HTMLElement>('[contenteditable="true"]')?.focus(),
+    }),
+    [],
+  );
 
   useEffect(() => {
     if (!workspaceId || !mailboxId) return;
@@ -156,38 +148,86 @@ export const ReplyComposer = forwardRef<
     });
   }
 
-  // Debounced autosave. Skip the first run (hydration) so we don't flash "Saved"
-  // on mount, and never persist a whitespace-only draft (clear the key instead).
-  const firstRun = useRef(true);
-  useEffect(() => {
-    if (firstRun.current) {
-      firstRun.current = false;
-      return;
+  function buildSnapshot(): string {
+    return JSON.stringify({
+      to,
+      cc,
+      subject,
+      body,
+      attachments: uploads.refs(),
+      draftId,
+      inReplyTo,
+    });
+  }
+
+  function hasDraftContent(): boolean {
+    return to.length > 0;
+  }
+
+  async function persistDraft(): Promise<{ draft_id: string | null; updated: boolean } | null> {
+    if (!workspaceId || !mailboxId || sending || draftSaving || !hasDraftContent()) return null;
+    const attachments = uploads.refs();
+    const payload = {
+      to_address: to.join(', '),
+      subject: subject.trim() || undefined,
+      body: htmlToText(body) || undefined,
+      body_html: body.trim() || undefined,
+      ...(cc.length > 0 ? { cc } : {}),
+      ...(attachments.length > 0 ? { attachments } : {}),
+      ...(inReplyTo ? { in_reply_to_thread_id: inReplyTo } : {}),
+      ...(draftId ? { draft_id: draftId } : {}),
+    };
+    setDraftSaving(true);
+    try {
+      const result = draftId
+        ? await updateMailDraft(workspaceId, mailboxId, draftId, payload)
+        : await createMailDraft(workspaceId, mailboxId, payload);
+      const savedDraftId = result.draft_id ?? draftId;
+      if (result.draft_id && result.draft_id !== draftId) setDraftId(result.draft_id);
+      setDraftSavedAt(new Date().toISOString());
+      lastSavedSnapshot.current = JSON.stringify({
+        to,
+        cc,
+        subject,
+        body,
+        attachments,
+        draftId: savedDraftId,
+        inReplyTo,
+      });
+      return result;
+    } catch {
+      return null;
+    } finally {
+      setDraftSaving(false);
     }
-    if (!draftKey) return;
-    const t = setTimeout(() => {
-      if (htmlToText(body).length === 0) {
-        clearDraft(draftKey);
-        setDraftSaved(false);
-      } else if (writeDraft(draftKey, body)) {
-        setDraftSaved(true);
-      }
-    }, 400);
-    return () => clearTimeout(t);
-  }, [body, draftKey]);
+  }
 
-  // Fade the "Saved" pill back out shortly after it appears.
   useEffect(() => {
-    if (!draftSaved) return;
-    const t = setTimeout(() => setDraftSaved(false), 1600);
-    return () => clearTimeout(t);
-  }, [draftSaved]);
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    const snapshot = buildSnapshot();
+    if (snapshot === lastSavedSnapshot.current) return;
+    saveTimer.current = window.setTimeout(() => {
+      void persistDraft();
+    }, 2000);
+    return () => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    };
+  }, [to, cc, subject, body, draftId, workspaceId, mailboxId, sending, draftSaving, uploads.items, inReplyTo]);
 
-  const uploads = useAttachmentUploads(workspaceId, mailboxId);
+  useEffect(() => {
+    if (!draftSavedAt) return;
+    const t = window.setTimeout(() => setDraftSavedAt(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [draftSavedAt]);
 
   const invalidCount = [...to, ...cc].filter((a) => !isValidEmail(a)).length;
   const canSend =
     to.length > 0 && invalidCount === 0 && htmlToText(body).length > 0 && !sending && !uploads.uploading;
+
+  async function saveAndCollapse() {
+    await persistDraft();
+    onCollapse?.();
+  }
 
   async function handleSend() {
     if (!canSend) return;
@@ -203,20 +243,20 @@ export const ReplyComposer = forwardRef<
       ...(cc.length > 0 ? { cc } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(inReplyTo ? { in_reply_to: inReplyTo } : {}),
+      ...(draftId ? { draft_id: draftId } : {}),
     });
     setSending(false);
     if (!res.ok) {
       setError(res.error ?? 'Could not record your reply.');
       return;
     }
-    // Truthful status. If it actually sent, clear the draft; otherwise keep it
-    // visible so nothing the user wrote is silently lost.
     setStatus(res.message?.status ?? null);
     if (describeStatus(res.message?.status).sent) {
       setBody('');
       uploads.reset();
-      clearDraft(draftKey);
-      setDraftSaved(false);
+      setDraftId(null);
+      setDraftSavedAt(null);
+      lastSavedSnapshot.current = '';
     }
   }
 
@@ -251,7 +291,7 @@ export const ReplyComposer = forwardRef<
         {onCollapse && (
           <button
             type="button"
-            onClick={onCollapse}
+            onClick={() => void saveAndCollapse()}
             aria-label="Close reply"
             title="Close reply"
             className="grid h-6 w-6 place-items-center rounded-md text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay hover:text-primary"
@@ -278,20 +318,12 @@ export const ReplyComposer = forwardRef<
             <RecipientChips
               value={to}
               onChange={setTo}
+              autoFocus
               aria-label="To"
               workspaceId={workspaceId}
               mailboxId={mailboxId}
             />
           </div>
-          <label className="block min-w-0 flex-1">
-            <span className="mb-1 block text-[11px] font-medium text-tertiary">Subject</span>
-            <Input
-              value={subject}
-              onChange={(e) => setSubject(e.target.value)}
-              placeholder="Re: …"
-              autoComplete="off"
-            />
-          </label>
         </div>
 
         {showCc && (
@@ -309,15 +341,23 @@ export const ReplyComposer = forwardRef<
         )}
 
         <label className="block">
+          <span className="mb-1 block text-[11px] font-medium text-tertiary">Subject</span>
+          <Input
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            placeholder="Subject"
+            autoComplete="off"
+          />
+        </label>
+
+        <label className="block" ref={bodyRef}>
           <span className="mb-1 block text-[11px] font-medium text-tertiary">Message</span>
-          <div ref={bodyRef}>
-            <RichTextEditor
-              value={body}
-              onChange={setBody}
-              disabled={sending}
-              placeholder="Write a reply…  (drop files here to attach)"
-            />
-          </div>
+          <RichTextEditor
+            value={body}
+            onChange={setBody}
+            disabled={sending}
+            placeholder="Write your reply…  (drop files here to attach)"
+          />
         </label>
 
         {(signatures.length > 0 || signatureError) && (
@@ -342,39 +382,47 @@ export const ReplyComposer = forwardRef<
 
         <ComposerAttachments items={uploads.items} onRemove={uploads.remove} disabled={sending} />
 
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 flex-1 items-center gap-2">
-            {uploads.supported && (
-              <AttachButton onFiles={uploads.addFiles} disabled={sending || !mailboxId} />
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            aria-live="polite"
+            className={cn(
+              'text-[11px] text-tertiary transition-opacity duration-token ease-token',
+              draftSavedAt ? 'opacity-100' : 'opacity-0',
             )}
-            {invalidCount > 0 ? (
-              <p className="text-xs text-danger">Fix or remove the red recipient chips to send.</p>
-            ) : error ? (
-              <p className="text-xs text-danger">{error}</p>
-            ) : status ? (
-              <ComposeStatusLine status={status} />
-            ) : (
-              <p className="text-[11px] text-muted">Replies thread into this conversation.</p>
-            )}
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <span
-              aria-live="polite"
-              className={cn(
-                'flex items-center gap-1 text-[11px] text-tertiary transition-opacity duration-token ease-token',
-                draftSaved ? 'opacity-100' : 'opacity-0',
-              )}
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-accent/70" />
-              Saved
-            </span>
-            <kbd className="hidden min-w-[18px] items-center justify-center rounded-[5px] border border-border bg-surface-overlay px-1.5 py-px text-[11px] leading-none text-secondary sm:inline-flex mono">
-              ⌘↵
-            </kbd>
-            <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
-              {sending ? 'Sending…' : uploads.uploading ? 'Uploading…' : 'Send reply'}
-            </Button>
-          </div>
+          >
+            {draftSavedAt
+              ? `Saved · ${new Date(draftSavedAt).toLocaleTimeString([], {
+                  hour: 'numeric',
+                  minute: '2-digit',
+                })}`
+              : 'Saved'}
+          </span>
+          {invalidCount > 0 ? (
+            <p className="text-xs text-danger">
+              {invalidCount === 1 ? 'One recipient looks invalid.' : `${invalidCount} recipients look invalid.`}{' '}
+              Fix or remove the red chips to send.
+            </p>
+          ) : error ? (
+            <p className="text-xs text-danger">{error}</p>
+          ) : status ? (
+            <ComposeStatusLine status={status} />
+          ) : null}
+        </div>
+
+        <div className="flex items-center justify-end gap-2">
+          {uploads.supported && (
+            <AttachButton
+              onFiles={uploads.addFiles}
+              disabled={sending || !mailboxId}
+              className="mr-auto"
+            />
+          )}
+          <Button variant="secondary" size="sm" disabled={sending} onClick={() => void saveAndCollapse()}>
+            Save draft & close
+          </Button>
+          <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
+            {sending ? 'Sending…' : uploads.uploading ? 'Uploading…' : 'Send'}
+          </Button>
         </div>
       </div>
     </div>

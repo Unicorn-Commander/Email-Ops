@@ -26,12 +26,13 @@ import {
   Post,
   Query,
   Res,
+  Put,
   UseGuards,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { IsBoolean, IsEnum, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsISO8601, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import { MailboxOwnerKind, User, WorkspaceRole } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
@@ -43,6 +44,7 @@ import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.s
 import { ProvisionDecision } from '../provisioning/provisioning-policy';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { MailContactsService } from './mail-contacts.service';
+import { MailVacationService } from './mail-vacation.service';
 import { MailSignaturesService } from './mail-signatures.service';
 import { MailboxAccountsService } from './mailbox-accounts.service';
 import { CreateMailboxInput, UpdateMailboxInput } from './mailbox-accounts.types';
@@ -83,11 +85,29 @@ class UpdateSignatureDto {
   @IsOptional() @IsBoolean() is_default?: boolean;
 }
 
-function normalizeSignatureHtml(html: string): string {
+class VacationSettingsDto {
+  @IsBoolean() enabled!: boolean;
+  @IsString() @MaxLength(300) subject!: string;
+  @IsString() @MaxLength(50000) body_html!: string;
+  @IsOptional() @IsISO8601() starts_at?: string | null;
+  @IsOptional() @IsISO8601() ends_at?: string | null;
+}
+
+function normalizeHtml(html: string): string {
   return html
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/\son[a-z]+\s*=\s*(['"]).*?\1/gi, '')
     .replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '');
+}
+
+function htmlToText(html: string): string {
+  return normalizeHtml(html)
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>\s*<p>/gi, '\n\n')
+    .replace(/<\/[^>]+>/g, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 @ApiTags('mailboxes')
@@ -101,6 +121,7 @@ export class MailboxAccountsController {
     private readonly mailProvider: MailProviderPort,
     private readonly signatures: MailSignaturesService,
     private readonly contacts: MailContactsService,
+    private readonly vacation: MailVacationService,
   ) {}
 
   private blockIfApprovalGated(decision: ProvisionDecision, action: string): void {
@@ -138,6 +159,16 @@ export class MailboxAccountsController {
     return { items, count: items.length };
   }
 
+  @Get(':id/vacation')
+  @ApiOperation({ summary: 'Fetch the out-of-office settings for one mailbox.' })
+  async getVacation(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+  ) {
+    return this.vacation.get(workspaceId, ucUidOf(user as WithWorkspaceClaim), id);
+  }
+
   @Get(':id/contacts')
   @ApiOperation({ summary: 'Search mailbox contacts for recipient autocomplete.' })
   async contactsSearch(
@@ -161,7 +192,7 @@ export class MailboxAccountsController {
     if (!body.name.trim()) throw new BadRequestException('Signature name is required.');
     return this.signatures.create(workspaceId, ucUidOf(user as WithWorkspaceClaim), id, {
       name: body.name.trim(),
-      html: normalizeSignatureHtml(body.html),
+      html: normalizeHtml(body.html),
       isDefault: body.is_default,
     });
   }
@@ -180,8 +211,40 @@ export class MailboxAccountsController {
     }
     return this.signatures.update(workspaceId, ucUidOf(user as WithWorkspaceClaim), id, signatureId, {
       ...(body.name !== undefined ? { name: body.name.trim() } : {}),
-      ...(body.html !== undefined ? { html: normalizeSignatureHtml(body.html) } : {}),
+      ...(body.html !== undefined ? { html: normalizeHtml(body.html) } : {}),
       ...(body.is_default !== undefined ? { isDefault: body.is_default } : {}),
+    });
+  }
+
+  @Put(':id/vacation')
+  @ApiOperation({ summary: 'Enable or disable the mailbox out-of-office auto-responder.' })
+  async setVacation(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Body() body: VacationSettingsDto,
+  ) {
+    const subject = body.subject.trim();
+    if (!subject) throw new BadRequestException('Vacation subject is required.');
+    const bodyHtml = normalizeHtml(body.body_html);
+    const startsAt = body.starts_at ? new Date(body.starts_at) : null;
+    const endsAt = body.ends_at ? new Date(body.ends_at) : null;
+    if (startsAt && Number.isNaN(startsAt.getTime())) {
+      throw new BadRequestException('starts_at must be a valid ISO date.');
+    }
+    if (endsAt && Number.isNaN(endsAt.getTime())) {
+      throw new BadRequestException('ends_at must be a valid ISO date.');
+    }
+    if (startsAt && endsAt && startsAt.getTime() > endsAt.getTime()) {
+      throw new BadRequestException('starts_at must be before or equal to ends_at.');
+    }
+    return this.vacation.upsert(workspaceId, ucUidOf(user as WithWorkspaceClaim), id, {
+      enabled: body.enabled,
+      subject,
+      bodyHtml,
+      bodyText: htmlToText(bodyHtml),
+      startsAt,
+      endsAt,
     });
   }
 

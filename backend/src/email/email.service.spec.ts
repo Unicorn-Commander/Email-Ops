@@ -3,6 +3,7 @@ import { ConnectedAccountsService } from '../connected-accounts/connected-accoun
 import { StalwartPort } from '../stalwart/stalwart.port';
 import {
   StalwartBlobDownload,
+  StalwartDraftRequest,
   StalwartFolderQuery,
   StalwartFolderThreadsResult,
   StalwartMailboxCounts,
@@ -11,6 +12,7 @@ import {
   StalwartMessageHeaders,
   StalwartSendRequest,
   StalwartSendResult,
+  StalwartVacationState,
   StalwartThread,
   StalwartUploadResult,
 } from '../stalwart/stalwart.types';
@@ -81,6 +83,25 @@ class FakeStalwart extends StalwartPort {
   }
   async downloadBlob(): Promise<StalwartBlobDownload | null> {
     return null;
+  }
+  async saveDraft(_mailbox: string, _draft: StalwartDraftRequest): Promise<{ id: string } | null> {
+    return null;
+  }
+  async updateDraft(
+    _mailbox: string,
+    _draftId: string,
+    _draft: StalwartDraftRequest,
+  ): Promise<{ id: string } | null> {
+    return null;
+  }
+  async deleteDraft(): Promise<boolean> {
+    return false;
+  }
+  async getVacation(): Promise<StalwartVacationState | null> {
+    return null;
+  }
+  async setVacation(): Promise<boolean> {
+    return false;
   }
   async getMessageHeaders(): Promise<StalwartMessageHeaders | null> {
     return null;
