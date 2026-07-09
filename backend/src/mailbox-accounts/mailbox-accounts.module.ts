@@ -4,6 +4,7 @@ import { WorkspaceModule } from '../common/workspace/workspace.module';
 import { ProvisioningModule } from '../provisioning/provisioning.module';
 import { MailProviderModule } from '../mail-provider/mail-provider.module';
 import { MailEngineAdminModule } from '../mail-engine-admin/mail-engine-admin.module';
+import { StalwartModule } from '../stalwart/stalwart.module';
 import { MailContactsService } from './mail-contacts.service';
 import { MailVacationService } from './mail-vacation.service';
 import { MailSignaturesService } from './mail-signatures.service';
@@ -19,7 +20,7 @@ import { DeviceConfigService } from './device-config.service';
  * call it. PrismaService is global.
  */
 @Module({
-  imports: [AuthModule, WorkspaceModule, ProvisioningModule, MailProviderModule, MailEngineAdminModule],
+  imports: [AuthModule, WorkspaceModule, ProvisioningModule, MailProviderModule, MailEngineAdminModule, StalwartModule],
   controllers: [MailboxAccountsController, MailAutoconfigController],
   providers: [MailboxAccountsService, MailSignaturesService, MailContactsService, DeviceConfigService, MailVacationService],
   exports: [MailboxAccountsService],
