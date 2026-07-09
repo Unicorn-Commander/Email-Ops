@@ -70,6 +70,17 @@ else
   log "off-box target not configured — local-only"
 fi
 
+# --- Genuine off-DEVICE copy: rsync to your-prod-host over Tailscale ------------------
+if [ -n "${BACKUP_OFFSITE_SSH:-}" ]; then
+  DEST="${BACKUP_OFFSITE_DIR:-/home/deploy/backups/email-ops-offsite}/${S3_PREFIX}"
+  if ssh -o BatchMode=yes -o ConnectTimeout=10 "${BACKUP_OFFSITE_SSH}" "mkdir -p ${DEST}" 2>/dev/null \
+     && rsync -aq -e "ssh -o BatchMode=yes -o ConnectTimeout=10" "${BACKUP_FILE}" "${BACKUP_OFFSITE_SSH}:${DEST}/" 2>/dev/null; then
+    log "off-device copy OK -> ${BACKUP_OFFSITE_SSH}:${DEST}/"
+  else
+    log "WARNING: off-device rsync failed (local + garage copies retained)"
+  fi
+fi
+
 DEL="$(find "${BACKUP_DIR}" -name 'emailops_*.dump' -mtime +"${RETENTION_DAYS}" -print -delete 2>/dev/null | wc -l | tr -d ' ')"
 [ "${DEL}" -gt 0 ] && log "rotated ${DEL} old dump(s)"
 log "done. $(find "${BACKUP_DIR}" -name 'emailops_*.dump' | wc -l | tr -d ' ') local dump(s) retained"
