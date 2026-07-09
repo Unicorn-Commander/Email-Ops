@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useConnectedAccounts } from '@/components/ConnectedAccountsProvider';
 import {
   Badge,
@@ -32,6 +33,7 @@ const DEFAULT_CRITERIA = {
 
 export default function CleanupPage() {
   const { activeAccount, activeProvider } = useConnectedAccounts();
+  const router = useRouter();
   const meta = providerMeta(activeProvider);
   const [criteriaQuery, setCriteriaQuery] = useState('');
   const [plan, setPlan] = useState<CleanupPlanResponse | null>(null);
@@ -256,6 +258,21 @@ export default function CleanupPage() {
           </Button>
         </div>
       </header>
+
+      {!activeAccount.linked && (
+        <Card padded className="border-warning/30 bg-warning-subtle">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="font-medium text-primary">Connect {meta.label} to start cleaning.</p>
+              <p className="mt-1 text-sm text-tertiary">
+                The cleaner runs on a linked Gmail or Microsoft&nbsp;365 mailbox. Nothing is scanned
+                until you connect that account and grant consent — your own inbox stays private.
+              </p>
+            </div>
+            <Button onClick={() => router.push('/accounts')}>Connect {meta.shortLabel}</Button>
+          </div>
+        </Card>
+      )}
 
       <Card padded>
         <div className="grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
