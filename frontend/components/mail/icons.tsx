@@ -93,6 +93,13 @@ export const GearIcon = (p: SVGProps<SVGSVGElement>) => (
   </Svg>
 );
 
+export const DeviceIcon = (p: SVGProps<SVGSVGElement>) => (
+  <Svg {...p}>
+    <rect x="7" y="2.5" width="10" height="19" rx="2" />
+    <path d="M10 5h4M11 18h2" />
+  </Svg>
+);
+
 export const SearchIcon = (p: SVGProps<SVGSVGElement>) => (
   <Svg {...p}>
     <circle cx="11" cy="11" r="7" />

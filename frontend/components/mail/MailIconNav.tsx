@@ -28,6 +28,7 @@ import {
   InboxTrayIcon,
   TrashIcon,
   GearIcon,
+  DeviceIcon,
   BarChartIcon,
   ChevronRightIcon,
 } from './icons';
@@ -50,6 +51,7 @@ const TOP: NavItem[] = [
 
 const BOTTOM: NavItem[] = [
   { href: '/cleanup', label: 'Cleanup', icon: TrashIcon },
+  { href: '/connect-device', label: 'Connect device', icon: DeviceIcon },
   { href: '/accounts', label: 'Accounts', icon: GearIcon },
 ];
 

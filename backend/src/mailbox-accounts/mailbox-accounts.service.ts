@@ -8,7 +8,15 @@
  * PROVISIONED) when the engine is live — honest while the engine is dormant.
  */
 
-import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { randomBytes } from 'crypto';
 import {
   AgentActionKind,
   MailboxAccount,
@@ -18,6 +26,7 @@ import {
 } from '@prisma/client';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
+import { DeviceConfigService, DeviceConnectionSettings, ManualClientSettings } from './device-config.service';
 import { CreateMailboxInput, MailboxView, UpdateMailboxInput } from './mailbox-accounts.types';
 
 @Injectable()
@@ -27,6 +36,7 @@ export class MailboxAccountsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly admin: MailEngineAdminPort,
+    private readonly deviceConfig: DeviceConfigService,
   ) {}
 
   /** All mailboxes in the workspace (default first, then alphabetical). */
@@ -52,6 +62,62 @@ export class MailboxAccountsService {
       const mb = await tx.mailboxAccount.findFirst({ where: { id, workspaceId } });
       return mb ? this.toViewOne(tx, mb) : null;
     });
+  }
+
+  async getOwnConnectionSettings(
+    workspaceId: string,
+    ucUid: string | null,
+    id: string,
+  ): Promise<(DeviceConnectionSettings & { manual: ManualClientSettings[] }) | null> {
+    const settings = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const mb = await tx.mailboxAccount.findFirst({ where: { id, workspaceId } });
+      if (!mb) return null;
+      this.assertOwnHumanMailbox(mb, ucUid);
+      return this.deviceConfig.buildConnectionSettings(mb);
+    });
+    return settings ? { ...settings, manual: this.deviceConfig.buildManualSettings(settings) } : null;
+  }
+
+  async buildOwnAppleMobileconfig(
+    workspaceId: string,
+    ucUid: string | null,
+    id: string,
+  ): Promise<{ email: string; filename: string; xml: string } | null> {
+    const settings = await this.getOwnConnectionSettings(workspaceId, ucUid, id);
+    if (!settings) return null;
+    const localpart = settings.email.split('@')[0]?.replace(/[^a-zA-Z0-9.-]/g, '-') || 'mailbox';
+    return {
+      email: settings.email,
+      filename: `${localpart}-fabrikam-email.mobileconfig`,
+      xml: this.deviceConfig.buildAppleMobileconfig(settings),
+    };
+  }
+
+  async resetOwnAppPassword(
+    workspaceId: string,
+    ucUid: string | null,
+    id: string,
+  ): Promise<{ password: string } | null> {
+    const password = this.generateAppPassword();
+    const email = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const mb = await tx.mailboxAccount.findFirst({ where: { id, workspaceId } });
+      if (!mb) return null;
+      this.assertOwnHumanMailbox(mb, ucUid);
+      return mb.emailAddress;
+    });
+    if (!email) return null;
+    if (!this.admin.isConfigured()) {
+      throw new ServiceUnavailableException('James WebAdmin is not configured.');
+    }
+    const result = await this.admin.ensureAccount(email, { password });
+    if (!result.provisioned) {
+      throw new ServiceUnavailableException('Could not reset the mailbox password.');
+    }
+    await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      await this.recordAction(tx, workspaceId, AgentActionKind.MAILBOX_UPDATED, ucUid, `${email} app-password reset`);
+    });
+    this.logger.log(`Mail app-password reset for ${email} by ${ucUid ?? 'unknown'}`);
+    return { password };
   }
 
   /**
@@ -268,6 +334,23 @@ export class MailboxAccountsService {
       created_at: m.createdAt?.toISOString() ?? null,
       updated_at: m.updatedAt?.toISOString() ?? null,
     };
+  }
+
+  private assertOwnHumanMailbox(mb: MailboxAccount, ucUid: string | null): void {
+    if (!ucUid || mb.ownerKind !== MailboxOwnerKind.HUMAN || mb.ownerKey !== ucUid) {
+      throw new ForbiddenException('Mailbox is not owned by the current user.');
+    }
+    const provider = (mb.provider ?? 'stalwart').toLowerCase();
+    if (provider !== 'stalwart' && provider !== 'james') {
+      throw new BadRequestException('Device setup is only available for hosted mailboxes.');
+    }
+  }
+
+  private generateAppPassword(): string {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+    const bytes = randomBytes(24);
+    const chars = Array.from(bytes, (b) => alphabet[b % alphabet.length]);
+    return `${chars.slice(0, 6).join('')}-${chars.slice(6, 12).join('')}-${chars.slice(12, 18).join('')}-${chars.slice(18, 24).join('')}`;
   }
 
   private async recordAction(

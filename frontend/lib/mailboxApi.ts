@@ -34,6 +34,7 @@ export interface MailboxView {
   owner_kind: MailboxOwnerKind;
   owner_key: string | null;
   kind: string;
+  provider?: string | null;
   provision_state: MailboxProvisionState;
   is_default: boolean;
   postmark_lane: boolean;
