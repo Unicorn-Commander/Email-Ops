@@ -380,6 +380,7 @@ model Workspace {
   memberships       Membership[]
   mailboxAccounts   MailboxAccount[]
   mailSignatures    MailSignature[]
+  mailVacationSettings MailVacationSetting[]
   mailContacts      MailContact[]
   emailMessages     EmailMessage[]
   smsAccounts       SmsAccount[]
@@ -586,6 +587,7 @@ model MailboxAccount {
   agentMailboxes AgentMailbox[]
   spaceLinks     SpaceMailbox[]
   signatures     MailSignature[]
+  mailVacationSettings MailVacationSetting[]
   contacts       MailContact[]
 
   // One mailbox identity per address per workspace.
@@ -619,6 +621,28 @@ model MailSignature {
   @@index([workspaceId, mailboxAccountId])
   @@index([workspaceId, mailboxAccountId, isDefault])
   @@map("mail_signatures")
+}
+
+// Workspace-scoped mailbox vacation/autoresponder settings.
+model MailVacationSetting {
+  id               String   @id @default(uuid())
+  workspaceId      String
+  mailboxAccountId String
+  enabled          Boolean  @default(false)
+  subject          String   @default("")
+  bodyHtml         String   @default("")
+  bodyText         String   @default("")
+  startsAt         DateTime?
+  endsAt           DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, mailboxAccountId])
+  @@index([workspaceId, mailboxAccountId])
+  @@map("mail_vacation_settings")
 }
 
 // Workspace-scoped recipient autocomplete source, derived from mailbox history

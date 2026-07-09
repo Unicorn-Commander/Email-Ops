@@ -5,6 +5,7 @@ import { ProvisioningModule } from '../provisioning/provisioning.module';
 import { MailProviderModule } from '../mail-provider/mail-provider.module';
 import { MailEngineAdminModule } from '../mail-engine-admin/mail-engine-admin.module';
 import { MailContactsService } from './mail-contacts.service';
+import { MailVacationService } from './mail-vacation.service';
 import { MailSignaturesService } from './mail-signatures.service';
 import { MailboxAccountsController } from './mailbox-accounts.controller';
 import { MailboxAccountsService } from './mailbox-accounts.service';
@@ -18,7 +19,7 @@ import { MailboxAccountsService } from './mailbox-accounts.service';
 @Module({
   imports: [AuthModule, WorkspaceModule, ProvisioningModule, MailProviderModule, MailEngineAdminModule],
   controllers: [MailboxAccountsController],
-  providers: [MailboxAccountsService, MailSignaturesService, MailContactsService],
+  providers: [MailboxAccountsService, MailSignaturesService, MailContactsService, MailVacationService],
   exports: [MailboxAccountsService],
 })
 export class MailboxAccountsModule {}
