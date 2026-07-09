@@ -281,15 +281,16 @@ class BackupManager:
 
     def verify_archive(self, bucket: str, key: str, s3_config: dict[str, str]) -> dict[str, Any]:
         """Download and verify a Garage/S3 MIME archive by manifest SHA-256."""
-        with NamedTemporaryFile(suffix=".eml.zip") as tmp:
-            self._s3_client(s3_config).download_file(bucket, key, tmp.name)
-            object_sha = hashlib.sha256()
-            with open(tmp.name, "rb") as f:
-                for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                    object_sha.update(chunk)
-            object_bytes = Path(tmp.name).stat().st_size
+        object_bytes = 0
+        try:
+            with NamedTemporaryFile(suffix=".eml.zip") as tmp:
+                self._s3_client(s3_config).download_file(bucket, key, tmp.name)
+                object_sha = hashlib.sha256()
+                with open(tmp.name, "rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        object_sha.update(chunk)
+                object_bytes = Path(tmp.name).stat().st_size
 
-            try:
                 with zipfile.ZipFile(tmp.name, "r") as archive:
                     manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
                     entries = manifest.get("messages", [])
@@ -303,13 +304,13 @@ class BackupManager:
                                 "bytes": object_bytes,
                                 "message": f"sha256 mismatch for {entry.get('id')}",
                             }
-            except Exception as e:
-                return {
-                    "success": False,
-                    "total_messages": 0,
-                    "bytes": object_bytes,
-                    "message": f"archive verification failed: {e}",
-                }
+        except Exception as e:
+            return {
+                "success": False,
+                "total_messages": 0,
+                "bytes": object_bytes,
+                "message": f"archive verification failed: {e}",
+            }
 
         return {
             "success": True,
