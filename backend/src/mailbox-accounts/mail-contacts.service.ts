@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { assertMayActThroughMailbox } from '../common/mailbox/mailbox-fence';
 
 export interface MailContactView {
   id: string;
@@ -24,9 +25,10 @@ export class MailContactsService {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const mailbox = await tx.mailboxAccount.findFirst({
         where: { id: mailboxId, workspaceId },
-        select: { id: true },
+        select: { id: true, ownerKind: true, ownerKey: true },
       });
       if (!mailbox) throw new NotFoundException('Mailbox not found in this workspace.');
+      assertMayActThroughMailbox(mailbox, ucUid);
       const rows = await tx.mailContact.findMany({
         where: {
           workspaceId,

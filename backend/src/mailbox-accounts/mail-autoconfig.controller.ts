@@ -1,6 +1,5 @@
 import { BadRequestException, Controller, Get, Header, Post, Query, Req, Res } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { SkipThrottle } from '@nestjs/throttler';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
@@ -23,7 +22,6 @@ function normalizeDomain(value: string): string | null {
 
 @ApiTags('mail-autoconfig')
 @Controller()
-@SkipThrottle({ short: true, long: true })
 export class MailAutoconfigController {
   constructor(
     private readonly deviceConfig: DeviceConfigService,

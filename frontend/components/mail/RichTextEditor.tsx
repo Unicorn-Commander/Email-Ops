@@ -1,12 +1,13 @@
 'use client';
 
 import { useEffect, useRef, type ReactNode } from 'react';
+import DOMPurify from 'dompurify';
 import { cn } from '@/components/ui';
 
 export function htmlToText(html: string): string {
   if (typeof window === 'undefined') return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
   const el = window.document.createElement('div');
-  el.innerHTML = html;
+  el.innerHTML = DOMPurify.sanitize(html);
   return (el.textContent || el.innerText || '').replace(/\n{3,}/g, '\n\n').trim();
 }
 
@@ -27,8 +28,14 @@ export function RichTextEditor({
 
   useEffect(() => {
     const el = ref.current;
-    if (!el || el.innerHTML === value) return;
-    el.innerHTML = value;
+    if (!el) return;
+    // Never inject unsanitized HTML into this contentEditable — it lives in the
+    // app origin (holds the session), so a malicious signature/draft/reply body
+    // must not be able to execute here. DOMPurify is idempotent on the browser-
+    // generated markup this editor produces, so live typing is unaffected.
+    const clean = DOMPurify.sanitize(value);
+    if (el.innerHTML === clean) return;
+    el.innerHTML = clean;
   }, [value]);
 
   function command(cmd: string, arg?: string) {

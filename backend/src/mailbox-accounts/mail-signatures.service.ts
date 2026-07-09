@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
+import { assertMayActThroughMailbox } from '../common/mailbox/mailbox-fence';
 
 export interface MailSignatureView {
   id: string;
@@ -23,7 +24,7 @@ export class MailSignaturesService {
 
   async list(workspaceId: string, ucUid: string, mailboxId: string): Promise<MailSignatureView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      await this.assertMailbox(tx, workspaceId, mailboxId);
+      await this.assertMailbox(tx, workspaceId, mailboxId, ucUid);
       const rows = await tx.mailSignature.findMany({
         where: { workspaceId, mailboxAccountId: mailboxId },
         orderBy: [{ isDefault: 'desc' }, { updatedAt: 'desc' }],
@@ -39,7 +40,7 @@ export class MailSignaturesService {
     input: SaveMailSignatureInput,
   ): Promise<MailSignatureView> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      await this.assertMailbox(tx, workspaceId, mailboxId);
+      await this.assertMailbox(tx, workspaceId, mailboxId, ucUid);
       if (input.isDefault) {
         await tx.mailSignature.updateMany({
           where: { workspaceId, mailboxAccountId: mailboxId, isDefault: true },
@@ -67,7 +68,7 @@ export class MailSignaturesService {
     input: Partial<SaveMailSignatureInput>,
   ): Promise<MailSignatureView> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      await this.assertMailbox(tx, workspaceId, mailboxId);
+      await this.assertMailbox(tx, workspaceId, mailboxId, ucUid);
       await this.assertSignature(tx, workspaceId, mailboxId, signatureId);
       if (input.isDefault) {
         await tx.mailSignature.updateMany({
@@ -94,7 +95,7 @@ export class MailSignaturesService {
     signatureId: string,
   ): Promise<MailSignatureView> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      await this.assertMailbox(tx, workspaceId, mailboxId);
+      await this.assertMailbox(tx, workspaceId, mailboxId, ucUid);
       await this.assertSignature(tx, workspaceId, mailboxId, signatureId);
       await tx.mailSignature.updateMany({
         where: { workspaceId, mailboxAccountId: mailboxId, isDefault: true },
@@ -110,16 +111,25 @@ export class MailSignaturesService {
 
   async delete(workspaceId: string, ucUid: string, mailboxId: string, signatureId: string) {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      await this.assertMailbox(tx, workspaceId, mailboxId);
+      await this.assertMailbox(tx, workspaceId, mailboxId, ucUid);
       await this.assertSignature(tx, workspaceId, mailboxId, signatureId);
       await tx.mailSignature.delete({ where: { id: signatureId } });
       return { removed: true };
     });
   }
 
-  private async assertMailbox(tx: WorkspaceTxClient, workspaceId: string, mailboxId: string) {
-    const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
+  private async assertMailbox(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    mailboxId: string,
+    ucUid: string | null,
+  ) {
+    const mailbox = await tx.mailboxAccount.findFirst({
+      where: { id: mailboxId, workspaceId },
+      select: { id: true, ownerKind: true, ownerKey: true },
+    });
     if (!mailbox) throw new NotFoundException('Mailbox not found in this workspace.');
+    assertMayActThroughMailbox(mailbox, ucUid);
   }
 
   private async assertSignature(

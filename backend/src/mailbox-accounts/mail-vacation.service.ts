@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
+import { assertMayActThroughMailbox } from '../common/mailbox/mailbox-fence';
 import { StalwartPort } from '../stalwart/stalwart.port';
 
 export interface MailVacationSettingsView {
@@ -35,7 +36,7 @@ export class MailVacationService {
 
   async get(workspaceId: string, ucUid: string, mailboxId: string): Promise<MailVacationSettingsView | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const mailbox = await this.assertMailbox(tx, workspaceId, mailboxId);
+      const mailbox = await this.assertMailbox(tx, workspaceId, mailboxId, ucUid);
       if (!mailbox) throw new NotFoundException('Mailbox not found in this workspace.');
       const row = await tx.mailVacationSetting.findFirst({
         where: { workspaceId, mailboxAccountId: mailboxId },
@@ -51,7 +52,7 @@ export class MailVacationService {
     input: SaveMailVacationInput,
   ): Promise<MailVacationSettingsView> {
     const result = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const mailbox = await this.assertMailbox(tx, workspaceId, mailboxId);
+      const mailbox = await this.assertMailbox(tx, workspaceId, mailboxId, ucUid);
       if (!mailbox) throw new NotFoundException('Mailbox not found in this workspace.');
       const row = await tx.mailVacationSetting.upsert({
         where: {
@@ -105,11 +106,18 @@ export class MailVacationService {
     }
   }
 
-  private async assertMailbox(tx: WorkspaceTxClient, workspaceId: string, mailboxId: string) {
-    return tx.mailboxAccount.findFirst({
+  private async assertMailbox(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    mailboxId: string,
+    ucUid: string | null,
+  ) {
+    const mailbox = await tx.mailboxAccount.findFirst({
       where: { id: mailboxId, workspaceId },
-      select: { emailAddress: true },
+      select: { emailAddress: true, ownerKind: true, ownerKey: true },
     });
+    if (mailbox) assertMayActThroughMailbox(mailbox, ucUid);
+    return mailbox;
   }
 }
 
