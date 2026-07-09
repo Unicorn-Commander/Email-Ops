@@ -794,18 +794,29 @@ export class JamesClient extends StalwartPort {
     const role = FOLDER_ROLE[folder];
     const mailboxId = await this.resolveMailboxIdForRole(mailbox, role);
     if (!mailboxId) return null;
-    const queryResp = await this.jmap([
-      ['Email/query', { filter: { inMailbox: mailboxId }, limit: 1000 }, '0'],
-    ], mailbox);
-    if (!queryResp) return null;
-    const ids = this.named(queryResp, 'Email/query')?.ids;
-    if (!Array.isArray(ids)) return null;
-    const destroy = ids.filter((id): id is string => typeof id === 'string' && !!id);
-    if (destroy.length === 0) return 0;
-    const setResp = await this.jmap([['Email/set', { destroy }, '0']], mailbox);
-    if (!setResp) return null;
-    const result = this.named(setResp, 'Email/set');
-    return result?.destroyed ? Object.keys(result.destroyed).length : null;
+    // Purge in batches until the folder is empty (JMAP Email/query is capped per
+    // call, so a single pass would silently leave a large Trash/Spam partly full).
+    let purged = 0;
+    let sawAny = false;
+    for (let batch = 0; batch < 100; batch += 1) {
+      const queryResp = await this.jmap([
+        ['Email/query', { filter: { inMailbox: mailboxId }, limit: 1000 }, '0'],
+      ], mailbox);
+      if (!queryResp) return sawAny ? purged : null;
+      const ids = this.named(queryResp, 'Email/query')?.ids;
+      if (!Array.isArray(ids)) return sawAny ? purged : null;
+      const destroy = ids.filter((id): id is string => typeof id === 'string' && !!id);
+      if (destroy.length === 0) break;
+      sawAny = true;
+      const setResp = await this.jmap([['Email/set', { destroy }, '0']], mailbox);
+      if (!setResp) return purged;
+      const result = this.named(setResp, 'Email/set');
+      const n = result?.destroyed ? Object.keys(result.destroyed).length : 0;
+      purged += n;
+      // Nothing actually deleted this round -> stop to avoid an infinite loop.
+      if (n === 0) break;
+    }
+    return purged;
   }
 
   async saveDraft(mailbox: string, draft: StalwartDraftRequest): Promise<{ id: string } | null> {
