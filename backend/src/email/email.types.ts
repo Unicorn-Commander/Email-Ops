@@ -75,6 +75,7 @@ export interface MessageView {
   // webmail wave — thread-detail enrichment (additive; undefined when not
   // sourced from the live JMAP/engine path, e.g. a thin local-only SoR row).
   cc?: ParticipantView[];
+  bcc?: ParticipantView[];
   /** Raw HTML body — NOT sanitized server-side; the client sanitizes on render. */
   html_body?: string | null;
   text_body?: string | null;
@@ -143,6 +144,8 @@ export interface ComposeInput {
   inReplyToMessageId?: string | null;
   /** The References header chain (oldest first). */
   references?: string[];
+  /** The server-side draft id to update/delete for persistent drafts. */
+  draftId?: string | null;
 }
 
 /** An agent-inbox item view (the approval queue surface). */

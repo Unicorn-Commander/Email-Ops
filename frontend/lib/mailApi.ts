@@ -96,6 +96,8 @@ export interface MessageView {
   to: MailParticipant[];
   /** CC recipients (Wave 2, optional on the wire). */
   cc?: MailParticipant[];
+  /** BCC recipients (Wave 2, optional on the wire). */
+  bcc?: MailParticipant[];
   subject: string | null;
   sent_at: string | null;
   preview: string | null;
@@ -146,11 +148,30 @@ export interface ComposeBody {
   body?: string;
   body_html?: string;
   in_reply_to_thread_id?: string;
+  draft_id?: string | null;
   cc?: string[];
   bcc?: string[];
   attachments?: ComposeAttachmentRef[];
   in_reply_to?: string;
   references?: string[];
+}
+
+export interface DraftSaveResponse {
+  draft_id: string | null;
+  updated: boolean;
+}
+
+export interface MailVacationSettings {
+  id: string;
+  mailbox_account_id: string;
+  enabled: boolean;
+  subject: string;
+  body_html: string;
+  body_text: string;
+  starts_at: string | null;
+  ends_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 /** A sender-policy rule targets a single ADDRESS or a whole DOMAIN. */
@@ -479,6 +500,34 @@ export async function emptyMailFolder(
   return apiPost(`${mailBase(workspaceId, mailboxId)}/folders/${folder}/empty`, { confirm: true }, token);
 }
 
+export async function createMailDraft(
+  workspaceId: string,
+  mailboxId: string,
+  body: ComposeBody,
+  token?: string,
+): Promise<DraftSaveResponse> {
+  return apiPost<DraftSaveResponse>(`${mailBase(workspaceId, mailboxId)}/drafts`, body, token);
+}
+
+export async function updateMailDraft(
+  workspaceId: string,
+  mailboxId: string,
+  draftId: string,
+  body: ComposeBody,
+  token?: string,
+): Promise<DraftSaveResponse> {
+  return apiPut<DraftSaveResponse>(`${mailBase(workspaceId, mailboxId)}/drafts/${seg(draftId)}`, body, token);
+}
+
+export async function deleteMailDraft(
+  workspaceId: string,
+  mailboxId: string,
+  draftId: string,
+  token?: string,
+): Promise<DraftSaveResponse> {
+  return apiDelete<DraftSaveResponse>(`${mailBase(workspaceId, mailboxId)}/drafts/${seg(draftId)}`, token);
+}
+
 // ── Blobs (attachment download + cid inline images) ─────────────────────────
 
 /** The API path for an attachment blob (relative to API_BASE). */
@@ -644,6 +693,29 @@ export async function setThreadDisposition(
     body,
     token,
   );
+}
+
+export async function getMailVacation(
+  workspaceId: string,
+  mailboxId: string,
+  token?: string,
+): Promise<MailVacationSettings | null> {
+  return apiGet<MailVacationSettings | null>(`${mailboxBase(workspaceId, mailboxId)}/vacation`, token);
+}
+
+export async function setMailVacation(
+  workspaceId: string,
+  mailboxId: string,
+  body: {
+    enabled: boolean;
+    subject: string;
+    body_html: string;
+    starts_at?: string | null;
+    ends_at?: string | null;
+  },
+  token?: string,
+): Promise<MailVacationSettings> {
+  return apiPut<MailVacationSettings>(`${mailboxBase(workspaceId, mailboxId)}/vacation`, body, token);
 }
 
 /** List the workspace's sender block/allow rules. */

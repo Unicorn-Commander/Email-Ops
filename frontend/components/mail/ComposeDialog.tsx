@@ -20,7 +20,14 @@
 
 import { useEffect, useRef, useState, type DragEvent } from 'react';
 import { Button, Dialog, Input, cn } from '@/components/ui';
-import { listMailSignatures, type ComposeBody, type MailSignature, type UploadedBlob } from '@/lib/mailApi';
+import {
+  createMailDraft,
+  listMailSignatures,
+  updateMailDraft,
+  type ComposeBody,
+  type MailSignature,
+  type UploadedBlob,
+} from '@/lib/mailApi';
 import type { ComposeOutcome } from './useMailClient';
 import { ComposeStatusLine, describeStatus } from './ComposeStatus';
 import { RecipientChips, isValidEmail } from './RecipientChips';
@@ -34,6 +41,8 @@ export interface ComposeDialogPrefill {
   bcc?: string[];
   subject?: string;
   body?: string;
+  bodyHtml?: string;
+  draftId?: string | null;
   /** Already-uploaded blobs to carry (Forward keeps the original's attachments). */
   attachments?: UploadedBlob[];
 }
@@ -50,41 +59,14 @@ function signatureBlock(sig: MailSignature): string {
 function plainToHtml(text: string): string {
   return text
     .split(/\n{2,}/)
-    .map((part) => `<p>${part.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>')}</p>`)
+    .map((part) =>
+      `<p>${part
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\n/g, '<br>')}</p>`,
+    )
     .join('');
-}
-
-/** Stable key for the new-message draft body. */
-const COMPOSE_DRAFT_KEY = 'emailops:draft:compose:new';
-
-/**
- * Draft persistence helpers — SSR- and private-mode-safe (guard `window`, swallow
- * QuotaExceeded/SecurityError).
- */
-function readDraft(key: string): string | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-function writeDraft(key: string, value: string): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    window.localStorage.setItem(key, value);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function clearDraft(key: string): void {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.removeItem(key);
-  } catch {
-    /* private mode / unavailable — nothing to clean up */
-  }
 }
 
 export function ComposeDialog({
@@ -104,7 +86,10 @@ export function ComposeDialog({
   workspaceId: string | null;
   mailboxId: string | null;
   onCompose: (
-    body: Pick<ComposeBody, 'to_address' | 'subject' | 'body' | 'body_html' | 'cc' | 'bcc' | 'attachments'>,
+    body: Pick<
+      ComposeBody,
+      'to_address' | 'subject' | 'body' | 'body_html' | 'cc' | 'bcc' | 'attachments' | 'draft_id'
+    >,
   ) => Promise<ComposeOutcome>;
   /**
    * Optional prefill (e.g. an agent's `ui_compose`, or Forward). Seeds the
@@ -122,7 +107,9 @@ export function ComposeDialog({
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [draftSaved, setDraftSaved] = useState(false);
+  const [draftSavedAt, setDraftSavedAt] = useState<string | null>(null);
+  const [draftId, setDraftId] = useState<string | null>(null);
+  const [draftSaving, setDraftSaving] = useState(false);
   const [signatures, setSignatures] = useState<MailSignature[]>([]);
   const [selectedSignatureId, setSelectedSignatureId] = useState<string>('none');
   const [signatureError, setSignatureError] = useState<string | null>(null);
@@ -130,33 +117,42 @@ export function ComposeDialog({
   const uploads = useAttachmentUploads(workspaceId, mailboxId);
   const { reset: resetUploads } = uploads;
   const appliedSignature = useRef<string>('');
-
-  // Skips the autosave run caused by the seed effect below, so re-opening the
-  // dialog doesn't immediately flash "Saved".
-  const skipNextAutosave = useRef(false);
+  const saveTimer = useRef<number | null>(null);
+  const lastSavedSnapshot = useRef<string>('');
 
   // Seed the fields when the dialog re-opens. An explicit prefill (Forward /
-  // agent `ui_compose`) wins; otherwise hydrate the body from the saved draft.
+  // agent `ui_compose`) wins.
   useEffect(() => {
-    if (open) {
-      setTo(toList(initial?.to));
-      setCc(initial?.cc ?? []);
-      setBcc(initial?.bcc ?? []);
-      setShowCcBcc((initial?.cc?.length ?? 0) > 0 || (initial?.bcc?.length ?? 0) > 0);
-      setSubject(initial?.subject ?? '');
-      setBody(initial?.body ? plainToHtml(initial.body) : readDraft(COMPOSE_DRAFT_KEY) ?? '');
-      setStatus(null);
-      setError(null);
-      setSending(false);
-      setDragging(false);
-      setDraftSaved(false);
-      setSignatures([]);
-      setSelectedSignatureId('none');
-      setSignatureError(null);
-      appliedSignature.current = '';
-      skipNextAutosave.current = true;
-      resetUploads(initial?.attachments);
-    }
+    if (!open) return;
+    const seededBody = initial?.bodyHtml ?? (initial?.body ? plainToHtml(initial.body) : '');
+    setTo(toList(initial?.to));
+    setCc(initial?.cc ?? []);
+    setBcc(initial?.bcc ?? []);
+    setShowCcBcc((initial?.cc?.length ?? 0) > 0 || (initial?.bcc?.length ?? 0) > 0);
+    setSubject(initial?.subject ?? '');
+    setBody(seededBody);
+    setDraftId(initial?.draftId ?? null);
+    setStatus(null);
+    setError(null);
+    setSending(false);
+    setDragging(false);
+    setDraftSavedAt(null);
+    setDraftSaving(false);
+    setSignatures([]);
+    setSelectedSignatureId('none');
+    setSignatureError(null);
+    appliedSignature.current = '';
+    lastSavedSnapshot.current = JSON.stringify({
+      to: toList(initial?.to),
+      cc: initial?.cc ?? [],
+      bcc: initial?.bcc ?? [],
+      subject: initial?.subject ?? '',
+      body: seededBody,
+      attachments: initial?.attachments ?? [],
+      draftId: initial?.draftId ?? null,
+    });
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    resetUploads(initial?.attachments);
   }, [open, initial, resetUploads]);
 
   useEffect(() => {
@@ -195,38 +191,94 @@ export function ComposeDialog({
     });
   }
 
-  // Debounced autosave of the body while the dialog is open. Never persists a
-  // whitespace-only draft (clears the key instead).
+  function buildSnapshot(): string {
+    return JSON.stringify({
+      to,
+      cc,
+      bcc,
+      subject,
+      body,
+      attachments: uploads.refs(),
+      draftId,
+    });
+  }
+
+  function hasDraftContent(): boolean {
+    return to.length > 0;
+  }
+
+  async function persistDraft(): Promise<{ draft_id: string | null; updated: boolean } | null> {
+    if (!open || !workspaceId || !mailboxId || sending || draftSaving || !hasDraftContent()) return null;
+    const attachments = uploads.refs();
+    const payload = {
+      to_address: to.join(', '),
+      subject: subject.trim() || undefined,
+      body: htmlToText(body) || undefined,
+      body_html: body.trim() || undefined,
+      ...(cc.length > 0 ? { cc } : {}),
+      ...(bcc.length > 0 ? { bcc } : {}),
+      ...(attachments.length > 0 ? { attachments } : {}),
+      ...(draftId ? { draft_id: draftId } : {}),
+    };
+    setDraftSaving(true);
+    try {
+      const result = draftId
+        ? await updateMailDraft(workspaceId, mailboxId, draftId, payload)
+        : await createMailDraft(workspaceId, mailboxId, payload);
+      const savedDraftId = result.draft_id ?? draftId;
+      if (result.draft_id && result.draft_id !== draftId) setDraftId(result.draft_id);
+      setDraftSavedAt(new Date().toISOString());
+      lastSavedSnapshot.current = JSON.stringify({
+        to,
+        cc,
+        bcc,
+        subject,
+        body,
+        attachments,
+        draftId: savedDraftId,
+      });
+      return result;
+    } catch {
+      return null;
+    } finally {
+      setDraftSaving(false);
+    }
+  }
+
+  // Debounced autosave while the dialog is open. The first render after a seed
+  // does not force a save; we only persist when the user has actually changed
+  // the snapshot.
   useEffect(() => {
     if (!open) return;
-    if (skipNextAutosave.current) {
-      skipNextAutosave.current = false;
-      return;
-    }
-    const t = setTimeout(() => {
-      if (htmlToText(body).length === 0) {
-        clearDraft(COMPOSE_DRAFT_KEY);
-        setDraftSaved(false);
-      } else if (writeDraft(COMPOSE_DRAFT_KEY, body)) {
-        setDraftSaved(true);
-      }
-    }, 400);
-    return () => clearTimeout(t);
-  }, [open, body]);
+    const snapshot = buildSnapshot();
+    if (snapshot === lastSavedSnapshot.current) return;
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      void persistDraft();
+    }, 2000);
+    return () => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    };
+  }, [open, to, cc, bcc, subject, body, draftId, workspaceId, mailboxId, sending, draftSaving, uploads.items]);
 
-  // Fade the "Saved" pill back out shortly after it appears.
   useEffect(() => {
-    if (!draftSaved) return;
-    const t = setTimeout(() => setDraftSaved(false), 1600);
-    return () => clearTimeout(t);
-  }, [draftSaved]);
+    if (!draftSavedAt) return;
+    const t = window.setTimeout(() => setDraftSavedAt(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [draftSavedAt]);
 
   const allRecipients = [...to, ...cc, ...bcc];
   const invalidCount = allRecipients.filter((a) => !isValidEmail(a)).length;
   const canSend = to.length > 0 && invalidCount === 0 && !sending && !uploads.uploading;
 
+  async function saveAndClose() {
+    await persistDraft();
+    onClose();
+  }
+
   function handleOpenChange(next: boolean) {
-    if (!next && !sending) onClose();
+    if (next || sending) return;
+    void saveAndClose();
   }
 
   async function handleSend() {
@@ -240,6 +292,7 @@ export function ComposeDialog({
       subject: subject.trim() || undefined,
       body: htmlToText(body) || undefined,
       body_html: body.trim() || undefined,
+      ...(draftId ? { draft_id: draftId } : {}),
       ...(cc.length > 0 ? { cc } : {}),
       ...(bcc.length > 0 ? { bcc } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
@@ -251,10 +304,10 @@ export function ComposeDialog({
     }
     const meta = describeStatus(res.message?.status);
     setStatus(res.message?.status ?? null);
-    // Only close on a genuine send; otherwise hold so the truthful status shows.
     if (meta.sent) {
-      clearDraft(COMPOSE_DRAFT_KEY);
-      setDraftSaved(false);
+      setDraftId(null);
+      setDraftSavedAt(null);
+      lastSavedSnapshot.current = '';
       onClose();
     }
   }
@@ -295,14 +348,19 @@ export function ComposeDialog({
             aria-live="polite"
             className={cn(
               'mr-1 flex items-center gap-1 text-[11px] text-tertiary transition-opacity duration-token ease-token',
-              draftSaved ? 'opacity-100' : 'opacity-0',
+              draftSavedAt ? 'opacity-100' : 'opacity-0',
             )}
           >
             <span className="h-1.5 w-1.5 rounded-full bg-accent/70" />
-            Draft saved
+            {draftSavedAt
+              ? `Saved · ${new Date(draftSavedAt).toLocaleTimeString([], {
+                  hour: 'numeric',
+                  minute: '2-digit',
+                })}`
+              : 'Saved'}
           </span>
-          <Button variant="secondary" size="sm" disabled={sending} onClick={() => handleOpenChange(false)}>
-            {status ? 'Close' : 'Cancel'}
+          <Button variant="secondary" size="sm" disabled={sending} onClick={() => void saveAndClose()}>
+            Save draft & close
           </Button>
           <kbd className="hidden min-w-[18px] items-center justify-center rounded-[5px] border border-border bg-surface-overlay px-1.5 py-px text-[11px] leading-none text-secondary sm:inline-flex mono">
             ⌘↵
@@ -318,6 +376,11 @@ export function ComposeDialog({
           'space-y-4 rounded-token transition-colors duration-fast ease-token',
           dragging && 'bg-accent/5 ring-2 ring-accent/40',
         )}
+        onBlurCapture={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+            void persistDraft();
+          }
+        }}
         onSubmit={(e) => {
           e.preventDefault();
           void handleSend();

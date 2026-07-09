@@ -47,7 +47,7 @@ import {
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
-import { StalwartMessageDetail, StalwartThread } from '../stalwart/stalwart.types';
+import { StalwartDraftRequest, StalwartMessageDetail, StalwartThread } from '../stalwart/stalwart.types';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import {
   AgentInboxView,
@@ -101,6 +101,17 @@ interface SendReq {
   /** The resolved Message-ID header of the message being replied to. */
   inReplyTo?: string | null;
   references?: string[];
+}
+
+interface DraftReq {
+  toAddress: string;
+  toAddresses?: string[];
+  subject: string;
+  body: string;
+  bodyHtml?: string | null;
+  cc?: string[];
+  bcc?: string[];
+  attachments?: { blobId: string; name: string; type: string }[];
 }
 
 /** The result callEngine() returns (normalized across Stalwart + provider). */
@@ -821,6 +832,51 @@ export class EmailService {
     return { folder, purged: purged ?? 0, updated: purged != null };
   }
 
+  async saveOrUpdateDraft(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    draftId: string | null,
+    payload: DraftReq,
+  ): Promise<{ draft_id: string | null; updated: boolean }> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) {
+      return { draft_id: draftId, updated: false };
+    }
+    const draft: StalwartDraftRequest = {
+      fromAddress: mailbox.emailAddress,
+      fromName: mailbox.displayName ?? null,
+      toAddress: payload.toAddress,
+      toAddresses: payload.toAddresses?.length ? payload.toAddresses : undefined,
+      subject: payload.subject,
+      body: payload.body,
+      bodyHtml: payload.bodyHtml ?? null,
+      cc: payload.cc?.length ? payload.cc : undefined,
+      bcc: payload.bcc?.length ? payload.bcc : undefined,
+      attachments: payload.attachments?.length
+        ? payload.attachments.map((a) => ({ blobId: a.blobId, name: a.name, type: a.type }))
+        : undefined,
+    };
+    const result = draftId
+      ? await this.stalwart.updateDraft(mailbox.emailAddress, draftId, draft)
+      : await this.stalwart.saveDraft(mailbox.emailAddress, draft);
+    return { draft_id: result?.id ?? draftId, updated: !!result?.id };
+  }
+
+  async deleteDraft(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    draftId: string,
+  ): Promise<{ draft_id: string; updated: boolean }> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) {
+      return { draft_id: draftId, updated: false };
+    }
+    const updated = await this.stalwart.deleteDraft(mailbox.emailAddress, draftId);
+    return { draft_id: draftId, updated };
+  }
+
   /** Resolve a mailbox by id inside the workspace + apply the per-user HUMAN fence. */
   private async resolveMailboxForCaller(
     workspaceId: string,
@@ -1091,6 +1147,16 @@ export class EmailService {
     // degrade-clean (a rejected/failed send returns accepted:false, never throws),
     // so a slow or dead provider can't roll back the committed QUEUED row.
     const result = await this.callEngine(prep.send.mailbox, prep.send.req);
+
+    if (result.accepted && input.draftId && prep.send.mailbox) {
+      try {
+        await this.deleteDraft(workspaceId, ucUid, prep.send.mailbox.id, input.draftId);
+      } catch (err) {
+        this.logger.warn(
+          `compose_email draft cleanup failed for draft ${input.draftId} after send of message ${prep.send.messageId}: ${(err as Error).message}`,
+        );
+      }
+    }
 
     // PHASE 3 — stamp the outcome onto the QUEUED row + audit an autonomous send
     // (a SHORT tx). The row is already durable; this only advances its status.
@@ -1910,6 +1976,7 @@ export class EmailService {
       preview: m.preview,
       direction: m.direction,
       cc: m.cc.map((p) => ({ address: p.address, name: p.name })),
+      bcc: m.bcc.map((p) => ({ address: p.address, name: p.name })),
       html_body: m.htmlBody,
       text_body: m.textBody,
       message_id_header: m.messageIdHeader,

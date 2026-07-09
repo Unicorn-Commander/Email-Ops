@@ -48,6 +48,7 @@ import { StalwartPort } from './stalwart.port';
 import {
   StalwartAttachment,
   StalwartBlobDownload,
+  StalwartDraftRequest,
   StalwartFolderQuery,
   StalwartFolderThreadsResult,
   StalwartMailboxCounts,
@@ -57,6 +58,7 @@ import {
   StalwartParticipant,
   StalwartSendRequest,
   StalwartSendResult,
+  StalwartVacationState,
   StalwartThread,
   StalwartUploadResult,
 } from './stalwart.types';
@@ -301,6 +303,7 @@ export class JamesClient extends StalwartPort {
         'urn:ietf:params:jmap:core',
         'urn:ietf:params:jmap:mail',
         'urn:ietf:params:jmap:submission',
+        'urn:ietf:params:jmap:vacationresponse',
       ],
       methodCalls: calls,
     };
@@ -331,6 +334,67 @@ export class JamesClient extends StalwartPort {
   private named(responses: any[], method: string): any | undefined {
     const r = responses.find((x) => Array.isArray(x) && x[0] === method);
     return Array.isArray(r) ? r[1] : undefined;
+  }
+
+  private draftCreateObject(draft: StalwartDraftRequest, draftsMailboxId: string): Record<string, unknown> {
+    const toList = draft.toAddresses?.length ? draft.toAddresses : [draft.toAddress];
+    const outbound: Record<string, unknown> = {
+      mailboxIds: { [draftsMailboxId]: true },
+      keywords: { $draft: true, $seen: true },
+      from: [{ email: draft.fromAddress, name: draft.fromName ?? null }],
+      to: toList.map((email) => ({ email })),
+      subject: draft.subject,
+      bodyValues: draft.bodyHtml
+        ? { body: { value: draft.body }, html: { value: draft.bodyHtml } }
+        : { body: { value: draft.body } },
+      textBody: [{ partId: 'body', type: 'text/plain' }],
+    };
+    if (draft.bodyHtml) {
+      outbound['htmlBody'] = [{ partId: 'html', type: 'text/html' }];
+    }
+    if (draft.cc?.length) outbound.cc = draft.cc.map((email) => ({ email }));
+    if (draft.bcc?.length) outbound.bcc = draft.bcc.map((email) => ({ email }));
+    if (draft.attachments?.length) {
+      outbound.attachments = draft.attachments.map((a) => ({
+        blobId: a.blobId,
+        type: a.type,
+        name: a.name,
+      }));
+    }
+    return outbound;
+  }
+
+  private async saveDraftRequest(
+    mailbox: string,
+    draft: StalwartDraftRequest,
+    draftId?: string,
+  ): Promise<{ id: string } | null> {
+    if (!this.jmapUrl) return null;
+    const draftsMailboxId = await this.resolveMailboxIdForRole(mailbox, 'drafts');
+    if (!draftsMailboxId) return null;
+    const create = this.draftCreateObject(draft, draftsMailboxId);
+    const responses = await this.jmap(
+      draftId
+        ? [
+            ['Email/set', { create: { draft: create }, destroy: [draftId] }, '0'],
+          ]
+        : [
+            [
+              'Email/set',
+              {
+                create: {
+                  draft: create,
+                },
+              },
+              '0',
+            ],
+          ],
+      mailbox,
+    );
+    if (!responses) return null;
+    const created = this.named(responses, 'Email/set')?.created?.draft;
+    const id = typeof created?.id === 'string' ? created.id : null;
+    return id ? { id } : null;
   }
 
   // --- mapping ------------------------------------------------------------
@@ -564,7 +628,7 @@ export class JamesClient extends StalwartPort {
         {
           '#ids': { resultOf: '0', name: 'Thread/get', path: '/list/*/emailIds' },
           properties: [
-            'id', 'threadId', 'from', 'to', 'cc', 'subject', 'receivedAt', 'preview', 'keywords',
+            'id', 'threadId', 'from', 'to', 'cc', 'bcc', 'subject', 'receivedAt', 'preview', 'keywords',
             'messageId', 'references', 'htmlBody', 'textBody', 'bodyValues', 'attachments',
           ],
           fetchHTMLBodyValues: true,
@@ -616,6 +680,7 @@ export class JamesClient extends StalwartPort {
         from: this.toParticipant(Array.isArray((m as any).from) ? (m as any).from[0] : null),
         to: this.toParticipants((m as any).to),
         cc: this.toParticipants((m as any).cc),
+        bcc: this.toParticipants((m as any).bcc),
         subject: typeof (m as any).subject === 'string' ? (m as any).subject : null,
         sentAt: typeof (m as any).receivedAt === 'string' ? (m as any).receivedAt : null,
         preview: typeof (m as any).preview === 'string' ? (m as any).preview : null,
@@ -741,6 +806,74 @@ export class JamesClient extends StalwartPort {
     if (!setResp) return null;
     const result = this.named(setResp, 'Email/set');
     return result?.destroyed ? Object.keys(result.destroyed).length : null;
+  }
+
+  async saveDraft(mailbox: string, draft: StalwartDraftRequest): Promise<{ id: string } | null> {
+    return this.saveDraftRequest(mailbox, draft);
+  }
+
+  async updateDraft(
+    mailbox: string,
+    draftId: string,
+    draft: StalwartDraftRequest,
+  ): Promise<{ id: string } | null> {
+    return this.saveDraftRequest(mailbox, draft, draftId);
+  }
+
+  async deleteDraft(mailbox: string, draftId: string): Promise<boolean> {
+    if (!this.jmapUrl) return false;
+    const setResp = await this.jmap([['Email/set', { destroy: [draftId] }, '0']], mailbox);
+    if (!setResp) return false;
+    const result = this.named(setResp, 'Email/set');
+    return !!result?.destroyed && Object.keys(result.destroyed).length > 0;
+  }
+
+  async getVacation(mailbox: string): Promise<StalwartVacationState | null> {
+    if (!this.jmapUrl) return null;
+    const responses = await this.jmap(
+      [['VacationResponse/get', { ids: ['singleton'] }, '0']],
+      mailbox,
+    );
+    if (!responses) return null;
+    const row = this.named(responses, 'VacationResponse/get')?.list?.[0];
+    if (!row || typeof row !== 'object') return null;
+    const isEnabled = (row as any).isEnabled === true;
+    return {
+      isEnabled,
+      subject: typeof (row as any).subject === 'string' ? (row as any).subject : null,
+      textBody: typeof (row as any).textBody === 'string' ? (row as any).textBody : null,
+      htmlBody: typeof (row as any).htmlBody === 'string' ? (row as any).htmlBody : null,
+      fromDate: typeof (row as any).fromDate === 'string' ? (row as any).fromDate : null,
+      toDate: typeof (row as any).toDate === 'string' ? (row as any).toDate : null,
+    };
+  }
+
+  async setVacation(mailbox: string, state: StalwartVacationState): Promise<boolean> {
+    if (!this.jmapUrl) return false;
+    const responses = await this.jmap(
+      [
+        [
+          'VacationResponse/set',
+          {
+            update: {
+              singleton: {
+                isEnabled: state.isEnabled,
+                subject: state.subject,
+                textBody: state.textBody,
+                htmlBody: state.htmlBody,
+                fromDate: state.fromDate,
+                toDate: state.toDate,
+              },
+            },
+          },
+          '0',
+        ],
+      ],
+      mailbox,
+    );
+    if (!responses) return false;
+    const updated = this.named(responses, 'VacationResponse/set')?.updated?.singleton;
+    return !!updated;
   }
 
   /** The Inbox unread/total counts for one mailbox (JMAP Mailbox `role: inbox`). */

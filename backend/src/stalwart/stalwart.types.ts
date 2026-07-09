@@ -73,6 +73,7 @@ export interface StalwartAttachment {
  */
 export interface StalwartMessageDetail extends StalwartMessage {
   cc: StalwartParticipant[];
+  bcc: StalwartParticipant[];
   /** Raw HTML body (NOT sanitized server-side — the client sanitizes on render). */
   htmlBody: string | null;
   textBody: string | null;
@@ -177,4 +178,28 @@ export interface StalwartSendResult {
   lane: 'stalwart' | 'james' | 'postmark' | null;
   /** A human reason on rejection (logged). */
   reason?: string | null;
+}
+
+/** The JMAP VacationResponse singleton state. */
+export interface StalwartVacationState {
+  isEnabled: boolean;
+  subject: string | null;
+  textBody: string | null;
+  htmlBody: string | null;
+  fromDate: string | null;
+  toDate: string | null;
+}
+
+/** A draft create/update payload in the mailbox's Drafts folder. */
+export interface StalwartDraftRequest {
+  fromAddress: string;
+  fromName?: string | null;
+  toAddress: string;
+  toAddresses?: string[];
+  subject: string;
+  body: string;
+  bodyHtml?: string | null;
+  cc?: string[];
+  bcc?: string[];
+  attachments?: { blobId: string; name: string; type: string }[];
 }

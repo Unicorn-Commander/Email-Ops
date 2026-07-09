@@ -131,6 +131,25 @@ interface ReplySeed {
   nonce: number;
 }
 
+function draftPrefillFromMessage(message: MessageView): ComposePrefill {
+  return {
+    to: message.to.map((p) => p.address),
+    cc: message.cc?.map((p) => p.address) ?? [],
+    bcc: message.bcc?.map((p) => p.address) ?? [],
+    subject: message.subject ?? '',
+    body: message.text_body ?? '',
+    bodyHtml: message.html_body ?? undefined,
+    draftId: message.id,
+    attachments:
+      message.attachments?.map((a) => ({
+        blob_id: a.blob_id,
+        name: a.name ?? 'attachment',
+        type: a.type ?? 'application/octet-stream',
+        size: a.size ?? 0,
+      })) ?? [],
+  };
+}
+
 type SegFilter = 'all' | 'unread' | 'starred' | 'agent';
 
 export default function MailPage() {
@@ -339,10 +358,26 @@ export default function MailPage() {
         mail.mailboxes
           .map((m) => m.email_address?.toLowerCase().trim())
           .filter(Boolean) as string[],
-      ),
+    ),
     [mail.mailboxes],
   );
   const openDraft = draftForThread(openThreadRow);
+  const autoOpenedDraftThread = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (mail.folder !== 'drafts' || !openThreadRow || mail.messages.length === 0) {
+      autoOpenedDraftThread.current = null;
+      return;
+    }
+    if (composeOpen) return;
+    if (autoOpenedDraftThread.current === openThreadRow.id) return;
+    const draftMessage =
+      [...mail.messages].reverse().find((m) => m.direction === 'draft') ?? mail.messages[mail.messages.length - 1];
+    if (!draftMessage) return;
+    setComposeInitial(draftPrefillFromMessage(draftMessage));
+    setComposeOpen(true);
+    autoOpenedDraftThread.current = openThreadRow.id;
+  }, [mail.folder, openThreadRow, mail.messages, composeOpen]);
 
   const defaultReply = useMemo(
     () => deriveReplyDefaults(mail.messages, openThreadRow, threadMailbox),

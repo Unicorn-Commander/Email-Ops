@@ -2,7 +2,7 @@ import { ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
-import { StalwartSendResult } from '../stalwart/stalwart.types';
+import { StalwartDraftRequest, StalwartSendResult, StalwartVacationState } from '../stalwart/stalwart.types';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { EmailService } from './email.service';
 
@@ -35,6 +35,25 @@ class FakeStalwart extends StalwartPort {
   }
   async listMessages() {
     return [];
+  }
+  async saveDraft(_mailbox: string, _draft: StalwartDraftRequest): Promise<{ id: string } | null> {
+    return null;
+  }
+  async updateDraft(
+    _mailbox: string,
+    _draftId: string,
+    _draft: StalwartDraftRequest,
+  ): Promise<{ id: string } | null> {
+    return null;
+  }
+  async deleteDraft(): Promise<boolean> {
+    return false;
+  }
+  async getVacation(): Promise<StalwartVacationState | null> {
+    return null;
+  }
+  async setVacation(): Promise<boolean> {
+    return false;
   }
   async send(): Promise<StalwartSendResult> {
     return { accepted: true, providerMessageId: 'x', threadId: 't1', lane: 'stalwart', reason: null };

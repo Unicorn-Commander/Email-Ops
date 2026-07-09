@@ -33,6 +33,8 @@ import {
   StalwartMessageHeaders,
   StalwartSendRequest,
   StalwartSendResult,
+  StalwartDraftRequest,
+  StalwartVacationState,
   StalwartThread,
   StalwartUploadResult,
 } from './stalwart.types';
@@ -110,6 +112,25 @@ export abstract class StalwartPort {
 
   /** Permanently delete every message currently in Trash or Spam/Junk. */
   abstract emptyFolder(mailbox: string, folder: 'trash' | 'spam'): Promise<number | null>;
+
+  /** Create a draft in the mailbox's Drafts folder. */
+  abstract saveDraft(mailbox: string, draft: StalwartDraftRequest): Promise<{ id: string } | null>;
+
+  /** Replace an existing draft with a new copy. */
+  abstract updateDraft(
+    mailbox: string,
+    draftId: string,
+    draft: StalwartDraftRequest,
+  ): Promise<{ id: string } | null>;
+
+  /** Delete one draft copy from the Drafts folder. */
+  abstract deleteDraft(mailbox: string, draftId: string): Promise<boolean>;
+
+  /** Read the mailbox's VacationResponse singleton state. */
+  abstract getVacation(mailbox: string): Promise<StalwartVacationState | null>;
+
+  /** Update the mailbox's VacationResponse singleton state. */
+  abstract setVacation(mailbox: string, state: StalwartVacationState): Promise<boolean>;
 
   /**
    * The Inbox unread/total counts for one mailbox. Returns null when not
