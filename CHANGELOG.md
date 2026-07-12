@@ -3,6 +3,50 @@
 All notable changes to Email-Ops. Dates are the deploy date to the internal line
 of record (`email-ops.magicunicorn.dev`).
 
+## [0.5.0] — 2026-07-12
+
+Production readiness + operational hardening: a **gated production line** on
+`email-ops.unicorncommander.ai`, **off-device backups**, proven **archive-and-purge
+durability**, and the **connected-account cleaning** path diagnosed and fixed.
+
+### Added
+- **Production stack (gated).** `email-ops.unicorncommander.ai` stood up as project
+  `email-ops-prod` (own Postgres, engine, backend, frontend; own Garage prod bucket
+  + scoped key; dedicated `uc-customers` Keycloak realm). Launch is gated —
+  `UC_ENTITLEMENT_MODE=enforce` + empty access list — so nobody is in without an
+  out-of-band grant. RLS verified enforcing (21 FORCE tables, app role reads 0
+  tenant rows). Flip steps in `infrastructure/PROD-FLIP-RUNBOOK.md`.
+- **Off-device backups.** `scripts/backup.sh <internal|prod>` (logical `pg_dump` as
+  the owner role, `pg_restore --list`-verified, 14-day rotation) and
+  `scripts/james-backup.sh` (the James mail store) now rsync nightly to **your-prod-host**
+  over Tailscale — a genuinely different machine (the Garage "off-box" target runs
+  on your-host itself). Cron 02:45 / 02:50 / 02:55.
+- **Cleanup empty-state CTA.** The Cleanup page now shows an actionable **Connect**
+  button routing to Accounts when no provider is linked (was dead text).
+
+### Fixed
+- **Archive verify fails cleanly.** `verify_archive` left the S3 download outside its
+  try/except, so a missing/unreadable object raised a 500 instead of returning
+  `{success:false}`. Backend already fails closed (purge needs `verified===true`), so
+  never data-loss — but the engine now returns a clean result. Proven end-to-end
+  against live Garage: create → verify → restore (byte-identical) → purge → gone.
+- **Gmail connected-account token no longer dies after ~1 hour.** Connected-account
+  cleaning uses **Keycloak-brokered** provider tokens; the `uchub` Google IdP was
+  missing offline access, so its token expired hourly with no refresh (Microsoft had
+  `offline_access` + `prompt=consent` and worked). Google IdP now carries
+  `offlineAccess=true` + `prompt=consent`. **Google + Microsoft IdPs mirrored into
+  the `uc-customers` realm** for prod parity (mail scopes + offline + store-token).
+
+### Operator notes
+- To activate Gmail cleaning: re-link Google at `/accounts` (Reconnect Google) to
+  mint the durable token. Microsoft already works.
+- Prod cleaning additionally needs the broker redirect URIs added to the Google
+  (project `69011395859`) and Azure (app `77d288a0`) OAuth apps:
+  `…/realms/uc-customers/broker/{google,microsoft}/endpoint`.
+- Known gaps (not built): no first-class Help section; the in-app AgentChat cannot
+  drive the UI (the `ui_*` command bus is MCP-only); no James/JMAP cleaning provider
+  (only Gmail/M365 mailboxes are cleanable today).
+
 ## [0.4.0] — 2026-07-07
 
 The **Agent Email Command Center** release: the `/mail` surface becomes a
