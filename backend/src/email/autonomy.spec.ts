@@ -19,15 +19,41 @@ describe('decideComposeMode', () => {
     recipientPolicy,
   });
 
-  it('honors the requested mode for an UNREGISTERED agent (legacy — no enforcement)', () => {
-    expect(decideComposeMode({ requestedMode: 'send', agent: null, toAddress: 'x@y.com' })).toEqual({
-      mode: 'send',
-      coerced: false,
-      reason: 'unregistered-agent',
+  it('honors a send for an UNREGISTERED but TRUSTED source (human web client / known federation)', () => {
+    expect(
+      decideComposeMode({
+        requestedMode: 'send',
+        agent: null,
+        toAddress: 'x@y.com',
+        trustedUnregisteredSend: true,
+      }),
+    ).toEqual({ mode: 'send', coerced: false, reason: 'unregistered-trusted-source' });
+  });
+
+  it('FAIL-SAFES an UNREGISTERED + UNTRUSTED send → draft (prompt-injection / spoofed source)', () => {
+    const d = decideComposeMode({
+      requestedMode: 'send',
+      agent: null,
+      toAddress: 'x@y.com',
+      // trustedUnregisteredSend omitted → defaults to false (the safe default).
     });
-    expect(decideComposeMode({ requestedMode: 'draft', agent: null, toAddress: 'x@y.com' }).mode).toBe(
-      'draft',
-    );
+    expect(d.mode).toBe('draft');
+    expect(d.coerced).toBe(true);
+    expect(d.reason).toBe('unregistered-untrusted-source-fail-safe');
+  });
+
+  it('always stages a requested draft for an unregistered source (trusted or not)', () => {
+    expect(
+      decideComposeMode({ requestedMode: 'draft', agent: null, toAddress: 'x@y.com' }).mode,
+    ).toBe('draft');
+    expect(
+      decideComposeMode({
+        requestedMode: 'draft',
+        agent: null,
+        toAddress: 'x@y.com',
+        trustedUnregisteredSend: true,
+      }).reason,
+    ).toBe('requested-draft');
   });
 
   it('always honors a requested draft, even for an L2 agent', () => {

@@ -725,7 +725,9 @@ export class JamesClient extends StalwartPort {
     const setResp = await this.jmap([['Email/set', { update }, '0']], mailbox);
     if (!setResp) return false;
     const result = this.named(setResp, 'Email/set');
-    return !!result && (result.updated == null || Object.keys(result.updated).length > 0 || Object.keys(update).length === 0 || (result.notUpdated == null));
+    // Honest success = at least one email actually flipped (mirrors moveThreadToFolder).
+    const updatedCount = result?.updated ? Object.keys(result.updated).length : 0;
+    return updatedCount > 0;
   }
 
   async setThreadFlags(
@@ -750,7 +752,8 @@ export class JamesClient extends StalwartPort {
     const setResp = await this.jmap([['Email/set', { update }, '0']], mailbox);
     if (!setResp) return false;
     const result = this.named(setResp, 'Email/set');
-    return !!result && (result.updated == null || Object.keys(result.updated).length > 0 || result.notUpdated == null);
+    const updatedCount = result?.updated ? Object.keys(result.updated).length : 0;
+    return updatedCount > 0;
   }
 
   /**
@@ -1126,7 +1129,29 @@ export class JamesClient extends StalwartPort {
       };
     }
     const toList = request.toAddresses?.length ? request.toAddresses : [request.toAddress];
+
+    // RFC 8621 §4.6: every Email MUST belong to ≥1 mailbox on create — James
+    // REJECTS a create with no mailboxIds. Stage the outbound message in Drafts
+    // ($draft), submit it, then move it to Sent on success via
+    // onSuccessUpdateEmail (below). This un-breaks every JMAP send (the only lane
+    // for attachments) AND populates the Sent folder that IMAP/JMAP clients read.
+    const sentMailboxId = await this.resolveMailboxIdForRole(request.fromAddress, 'sent');
+    const draftsMailboxId = await this.resolveMailboxIdForRole(request.fromAddress, 'drafts');
+    const stageMailboxId =
+      draftsMailboxId ?? sentMailboxId ?? (await this.resolveMailboxIdForRole(request.fromAddress, 'inbox'));
+    if (!stageMailboxId) {
+      return {
+        accepted: false,
+        providerMessageId: null,
+        threadId: request.inReplyToThreadId ?? null,
+        lane: 'james',
+        reason: 'no James mailbox to stage the outbound message',
+      };
+    }
+    const stagedInDrafts = stageMailboxId === draftsMailboxId;
     const outbound: Record<string, unknown> = {
+      mailboxIds: { [stageMailboxId]: true },
+      keywords: stagedInDrafts ? { $draft: true, $seen: true } : { $seen: true },
       from: [{ email: request.fromAddress, name: request.fromName ?? null }],
       to: toList.map((email) => ({ email })),
       subject: request.subject,
@@ -1153,13 +1178,24 @@ export class JamesClient extends StalwartPort {
         name: a.name,
       }));
     }
+    // On successful submission, move the message out of Drafts into Sent and drop
+    // the $draft keyword (onSuccessUpdateEmail patches the Email the submission
+    // sent). Only when we staged in Drafts AND a distinct Sent mailbox exists.
+    const submissionArgs: Record<string, unknown> = {
+      create: { sub: { emailId: '#outbound', identityId: identity.id } },
+    };
+    if (stagedInDrafts && sentMailboxId && sentMailboxId !== stageMailboxId) {
+      submissionArgs.onSuccessUpdateEmail = {
+        '#sub': {
+          'keywords/$draft': null,
+          [`mailboxIds/${stageMailboxId}`]: null,
+          [`mailboxIds/${sentMailboxId}`]: true,
+        },
+      };
+    }
     const responses = await this.jmap([
       ['Email/set', { create: { outbound } }, '0'],
-      [
-        'EmailSubmission/set',
-        { create: { sub: { emailId: '#outbound', identityId: identity.id } } },
-        '1',
-      ],
+      ['EmailSubmission/set', submissionArgs, '1'],
     ], request.fromAddress);
     if (!responses) {
       return {

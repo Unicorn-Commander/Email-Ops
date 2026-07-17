@@ -77,11 +77,19 @@ function getRules(): { rules: AccessRule[]; source: string } {
   if (cachedRules !== null && cachedSource !== null) {
     return { rules: cachedRules, source: cachedSource };
   }
-  const raw = process.env.EMAIL_OPS_ACCESS_LIST?.trim();
+  const rawEnv = process.env.EMAIL_OPS_ACCESS_LIST;
+  const raw = rawEnv?.trim();
   if (raw) {
     cachedRules = parseAccessList(raw);
     cachedSource = 'env:EMAIL_OPS_ACCESS_LIST';
+  } else if (rawEnv !== undefined) {
+    // Explicitly SET but empty ("") = the deliberate gated-launch lever: DENY ALL.
+    // Do NOT fall back to the legacy owner map (the prod misfire the audit found —
+    // an empty prod access-list must let nobody in, not silently re-admit owners).
+    cachedRules = [];
+    cachedSource = 'explicit-empty EMAIL_OPS_ACCESS_LIST (deny-all)';
   } else {
+    // Truly UNSET (dev convenience only) → legacy fallback, loudly surfaced.
     cachedRules = LEGACY_FALLBACK;
     cachedSource = 'legacy fallback (EMAIL_OPS_ACCESS_LIST not set)';
   }

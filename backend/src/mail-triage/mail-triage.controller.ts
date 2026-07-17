@@ -21,9 +21,9 @@ import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membersh
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decorator';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
-import { DispositionService } from './disposition.service';
 import { SenderPolicyService } from './sender-policy.service';
 import { SenderPolicyView } from './mail-triage.types';
+import { EmailService } from '../email/email.service';
 
 class SetDispositionDto {
   @IsEnum(MessageDisposition) disposition!: MessageDisposition;
@@ -47,8 +47,8 @@ class SetSenderPolicyDto {
 @UseGuards(JwtAuthGuard, WorkspaceMembershipGuard)
 export class MailTriageController {
   constructor(
-    private readonly disposition: DispositionService,
     private readonly senderPolicy: SenderPolicyService,
+    private readonly email: EmailService,
   ) {}
 
   @Put('threads/:threadId/disposition')
@@ -61,7 +61,9 @@ export class MailTriageController {
     @Body() body: SetDispositionDto,
   ) {
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
-    const view = await this.disposition.setDisposition(workspaceId, ucUid, threadId, body.disposition);
+    // Reconcile the REAL mailbox on James (move) AND tag the overlay, so the
+    // manual triage sticks instead of reappearing on the next live refetch.
+    const view = await this.email.applyThreadDisposition(workspaceId, ucUid, threadId, body.disposition);
 
     let senderRule: SenderPolicyView | null = null;
     if (body.sender_address && (body.block_sender || body.trust_sender)) {

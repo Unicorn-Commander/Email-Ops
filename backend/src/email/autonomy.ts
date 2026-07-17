@@ -6,9 +6,14 @@
  * needs: given an agent-initiated compose, what is the EFFECTIVE mode — send now,
  * or stage a draft for human approval?
  *
- * The rule is deliberately conservative + opt-in, so wiring it into the shared
- * compose path can never make an existing flow LESS safe:
- *   - unregistered agent (null)   → honor the requested mode (legacy; no gate).
+ * The rule is deliberately conservative, so wiring it into the shared compose
+ * path can never make an existing flow LESS safe:
+ *   - unregistered + TRUSTED source + 'send' → honored (the human web client and
+ *                                   known first-party federation partners).
+ *   - unregistered + UNTRUSTED source + 'send' → coerced to 'draft' (FAIL-SAFE:
+ *                                   a prompt-injected or spoofed automation that
+ *                                   claims an unknown provenance can NOT send
+ *                                   autonomously — it stages for human approval).
  *   - requested 'draft'           → always honored (staging is never less safe).
  *   - registered L0 / L1 + 'send' → coerced to 'draft' (a human approves the send).
  *   - registered L2 + 'send'      → allowed, UNLESS the recipient policy requires
@@ -74,10 +79,26 @@ export function decideComposeMode(args: {
   requestedMode: 'send' | 'draft';
   agent: AutonomyAgent | null;
   toAddress: string;
+  /**
+   * Is the (unregistered) provenance a TRUSTED first-party source — the human web
+   * client or a known federation partner? Only consulted when `agent` is null.
+   * false (the default for any unknown/attacker-controlled source) fail-safes a
+   * requested 'send' to a staged 'draft'. Ignored for registered agents.
+   */
+  trustedUnregisteredSend?: boolean;
 }): ComposeModeDecision {
-  const { requestedMode, agent, toAddress } = args;
+  const { requestedMode, agent, toAddress, trustedUnregisteredSend = false } = args;
 
-  if (!agent) return { mode: requestedMode, coerced: false, reason: 'unregistered-agent' };
+  if (!agent) {
+    // Unregistered provenance. Draft requests always stage. A 'send' is honored
+    // ONLY from a trusted first-party source; an unknown source is fail-safed to
+    // a draft so prompt-injection / a spoofed external_source cannot auto-send.
+    if (requestedMode === 'draft') return { mode: 'draft', coerced: false, reason: 'requested-draft' };
+    if (trustedUnregisteredSend) {
+      return { mode: 'send', coerced: false, reason: 'unregistered-trusted-source' };
+    }
+    return { mode: 'draft', coerced: true, reason: 'unregistered-untrusted-source-fail-safe' };
+  }
   if (requestedMode === 'draft') return { mode: 'draft', coerced: false, reason: 'requested-draft' };
 
   if (agent.autonomyLevel !== AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT) {

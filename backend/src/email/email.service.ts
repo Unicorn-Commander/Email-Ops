@@ -64,6 +64,7 @@ import {
   ThreadView,
 } from './email.types';
 import { shouldAdvanceStatus } from './message-status';
+import { DispositionView } from '../mail-triage/mail-triage.types';
 import { decideComposeMode } from './autonomy';
 import { mapWithConcurrency, withTimeout } from '../common/async/concurrency';
 
@@ -168,6 +169,19 @@ type ApprovePrep =
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
+
+  /**
+   * Provenance sources trusted to send WITHOUT a registered agent: the human web
+   * client and known first-party federation partners. Any other unregistered
+   * source that requests 'send' is fail-safed to a staged draft (see autonomy.ts).
+   * Override/extend via EMAIL_OPS_TRUSTED_COMPOSE_SOURCES (comma-separated).
+   */
+  private readonly trustedComposeSources = new Set(
+    (process.env.EMAIL_OPS_TRUSTED_COMPOSE_SOURCES ?? 'email-ops-client,customer-ops')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
 
   constructor(
     private readonly prisma: PrismaService,
@@ -393,9 +407,10 @@ export class EmailService {
 
       // A search or any page beyond the first is answered purely from the live
       // result — correct paging/filtering needs the engine's own position+text
-      // semantics, which the local-only supplement below doesn't have.
+      // semantics, which the local-only supplement below doesn't have. Still
+      // overlay-filter it so a triaged-out thread never shows in the wrong folder.
       if ((query && query.trim()) || offset > 0) {
-        return live;
+        return this.overlayFilterThreads(tx, workspaceId, live, folder);
       }
 
       // The message scope per folder. Disposition folders look at every thread
@@ -495,9 +510,12 @@ export class EmailService {
       const byId = new Map<string, ThreadView>();
       for (const t of live) byId.set(t.id, t);
       for (const t of localThreads) if (!byId.has(t.id)) byId.set(t.id, t);
-      return [...byId.values()]
-        .sort((a, b) => this.threadTime(b) - this.threadTime(a))
-        .slice(0, limit);
+      const merged = [...byId.values()].sort((a, b) => this.threadTime(b) - this.threadTime(a));
+      // Overlay-filter the LIVE half too: a thread just archived/trashed must not
+      // reappear in the inbox from the live JMAP result before James finishes the
+      // move (the "triage undoes itself" bug). The overlay is view-authoritative.
+      const filtered = await this.overlayFilterThreads(tx, workspaceId, merged, folder);
+      return filtered.slice(0, limit);
     });
   }
 
@@ -818,6 +836,81 @@ export class EmailService {
     return false;
   }
 
+  /**
+   * Apply a MANUAL thread disposition (reader / bulk-bar Archive・Trash・Spam・
+   * Inbox) so the triage is REAL, not just an overlay tag: reconcile the actual
+   * mailbox on James (Email/set move) AND write the overlay in one step. Without
+   * the move, the thread stays in James's inbox and reappears on the next live
+   * refetch (the "triage undoes itself" bug). Best-effort move (never throws); the
+   * overlay is always written so the view is correct even if the engine is briefly
+   * unreachable. External (Gmail/M365) threads carry only the overlay today — the
+   * provider-side sync-back is a follow-up.
+   */
+  async applyThreadDisposition(
+    workspaceId: string,
+    ucUid: string | null,
+    threadId: string,
+    disposition: MessageDisposition,
+    opts?: { agentKey?: string | null },
+  ): Promise<DispositionView & { moved: boolean }> {
+    const moved = await this.moveThreadToFolderAcrossMailboxes(
+      workspaceId,
+      ucUid,
+      threadId,
+      disposition,
+    );
+    const row = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      tx.threadDisposition.upsert({
+        where: { workspaceId_threadId: { workspaceId, threadId } },
+        create: {
+          workspaceId,
+          threadId,
+          disposition,
+          setByUcUid: ucUid,
+          setByAgentKey: opts?.agentKey ?? null,
+        },
+        update: { disposition, setByUcUid: ucUid, setByAgentKey: opts?.agentKey ?? null },
+      }),
+    );
+    return {
+      thread_id: row.threadId,
+      disposition: row.disposition,
+      set_by_uc_uid: row.setByUcUid,
+      set_by_agent_key: row.setByAgentKey,
+      updated_at: row.updatedAt.toISOString(),
+      moved,
+    };
+  }
+
+  /**
+   * Drop threads that have been triaged OUT of the requested folder per the
+   * overlay — applied to the live JMAP result too, so a thread the user just
+   * archived does not flash back into the inbox while James finishes the move.
+   * The overlay is authoritative for the VIEW. Sent/Drafts are direction-derived,
+   * never disposition-filtered.
+   */
+  private async overlayFilterThreads(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    threads: ThreadView[],
+    folder: MailFolder,
+  ): Promise<ThreadView[]> {
+    if (folder === 'sent' || folder === 'drafts' || threads.length === 0) return threads;
+    const rows = await tx.threadDisposition.findMany({
+      where: { workspaceId, threadId: { in: threads.map((t) => t.id) } },
+    });
+    const by = new Map(rows.map((r) => [r.threadId, r.disposition]));
+    const want =
+      folder === 'archive'
+        ? MessageDisposition.ARCHIVE
+        : folder === 'spam'
+          ? MessageDisposition.SPAM
+          : folder === 'trash'
+            ? MessageDisposition.TRASH
+            : MessageDisposition.INBOX;
+    return threads.filter((t) => (by.get(t.id) ?? MessageDisposition.INBOX) === want);
+  }
+
   async emptyMailboxFolder(
     workspaceId: string,
     ucUid: string | null,
@@ -993,12 +1086,18 @@ export class EmailService {
         const fromAddress = mailbox?.emailAddress ?? null;
 
         // Enforce the autonomy dial — gate send-vs-draft by the agent's level +
-        // recipient policy. Opt-in + conservative: an UNREGISTERED agent keeps the
-        // legacy behavior, and the decision only ever makes a send MORE gated.
+        // recipient policy. Conservative: the decision only ever makes a send MORE
+        // gated. For an UNREGISTERED provenance, a 'send' is honored only from a
+        // TRUSTED first-party source (the human web client + known federation
+        // partners); an unknown/attacker-controlled source is fail-safed to a
+        // staged draft so prompt-injection can't drive an autonomous send.
+        const trustedUnregisteredSend =
+          !agent && (agentKey == null || this.trustedComposeSources.has(agentKey));
         const decision = decideComposeMode({
           requestedMode: input.mode === 'draft' ? 'draft' : 'send',
           agent,
           toAddress: input.toAddress,
+          trustedUnregisteredSend,
         });
         const mode = decision.mode === 'draft' ? EmailMode.DRAFT : EmailMode.SEND;
         if (decision.coerced) {
@@ -1188,9 +1287,14 @@ export class EmailService {
   ): Promise<AgentInboxView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const items = await tx.agentInboxItem.findMany({
-        where: state ? { state } : { state: AgentInboxState.PENDING },
+        // Explicit workspaceId predicate (defense-in-depth: the real fence when
+        // RLS is inert under the owner role) + a bound so this hot path — drained
+        // on every agent-inbox view and assistant stream — can never turn into an
+        // unbounded cross-tenant scan.
+        where: { workspaceId, ...(state ? { state } : { state: AgentInboxState.PENDING }) },
         orderBy: { createdAt: 'desc' },
         include: { message: true },
+        take: 200,
       });
       return items.map((it) => this.inboxView(it, it.message));
     });

@@ -290,6 +290,26 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       expect(stalwart.sendCalls).toHaveLength(1);
     });
 
+    it('FAIL-SAFES an UNREGISTERED + UNTRUSTED source send → staged draft (injection guard)', async () => {
+      // A source that is neither a registered agent nor on the trusted allowlist
+      // (email-ops-client / customer-ops) — i.e. what a prompt-injected or spoofed
+      // MCP compose would look like. It must NOT send; it stages for approval.
+      const untrusted = `spoofed-source-${Date.now()}`;
+      const result = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'victim@acme.test',
+        subject: 'Injected send attempt',
+        body: 'Should never leave without a human.',
+        mode: 'send',
+        externalSource: untrusted,
+        externalRef: `inj-${Date.now()}`,
+      });
+      expect(result).toMatchObject({ status: 'pending_approval', mode: 'draft' });
+      expect(stalwart.sendCalls).toHaveLength(0);
+      const item = await prisma.agentInboxItem.findUnique({ where: { messageId: result.id } });
+      expect(item?.state).toBe('PENDING');
+    });
+
     it('coerces an L2 agent send to an EXTERNAL recipient when its policy requires approval', async () => {
       const key = `l2-policy-${Date.now()}`;
       await prisma.agent.create({

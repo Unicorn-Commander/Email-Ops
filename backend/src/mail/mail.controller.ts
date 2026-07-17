@@ -63,7 +63,6 @@ import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membersh
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decorator';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
-import { DispositionService } from '../mail-triage/disposition.service';
 import { EmailService } from '../email/email.service';
 import { BulkThreadAction, ComposeInput, MailFolder } from '../email/email.types';
 
@@ -162,10 +161,7 @@ function parseComposePayload(body: ComposeMailDto) {
 @Controller('workspaces/:workspaceId/mail')
 @UseGuards(JwtAuthGuard, WorkspaceMembershipGuard)
 export class MailController {
-  constructor(
-    private readonly email: EmailService,
-    private readonly disposition: DispositionService,
-  ) {}
+  constructor(private readonly email: EmailService) {}
 
   // Static routes FIRST so ':mailboxId' can never shadow them.
 
@@ -221,8 +217,9 @@ export class MailController {
       body.thread_ids.map(async (threadId) => {
         if (target) {
           // archive/trash/spam/inbox — the EXACT same disposition logic as the
-          // single-thread PUT .../disposition route.
-          await this.disposition.setDisposition(workspaceId, ucUid, threadId, target);
+          // single-thread PUT .../disposition route: reconcile the real James
+          // mailbox AND tag the overlay, so bulk triage doesn't undo itself.
+          await this.email.applyThreadDisposition(workspaceId, ucUid, threadId, target);
           return true;
         }
         // read/unread — the same $seen keyword logic as PUT .../threads/:id/read,

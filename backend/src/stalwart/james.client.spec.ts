@@ -146,6 +146,9 @@ describe('JamesClient', () => {
             ],
           });
         }
+        if (body.methodCalls.some((c: any[]) => c[0] === 'Mailbox/query')) {
+          return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-sent-1'] }, '0']] });
+        }
         return jsonResponse({
           methodResponses: [['Email/set', { created: { outbound: { id: 'em-1', threadId: 'th-1' } } }, '0']],
         });
@@ -166,6 +169,12 @@ describe('JamesClient', () => {
       expect(accountIdOf(fetchSpy, 'Identity/get')).toBe('acct-sales');
       expect(accountIdOf(fetchSpy, 'Email/set')).toBe('acct-sales');
       expect(accountIdOf(fetchSpy, 'EmailSubmission/set')).toBe('acct-sales');
+      // The outbound Email/set MUST carry mailboxIds (RFC 8621 — James rejects a
+      // create with none); this is the regression guard for the send-lane fix.
+      const emailSet = JSON.parse(
+        fetchSpy.mock.calls.find(([, i]: any) => i?.body && JSON.parse(i.body).methodCalls.some((c: any[]) => c[0] === 'Email/set'))[1].body,
+      ).methodCalls.find((c: any[]) => c[0] === 'Email/set')[1];
+      expect(emailSet.create.outbound.mailboxIds).toEqual({ 'mbx-sent-1': true });
     });
 
   });
@@ -479,6 +488,9 @@ describe('JamesClient', () => {
             methodResponses: [['Identity/get', { list: [{ id: 'ident-1', email: 'sales@unicorncommander.ai' }] }, '0']],
           });
         }
+        if (body.methodCalls.some((c: any[]) => c[0] === 'Mailbox/query')) {
+          return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-sent-1'] }, '0']] });
+        }
         return jsonResponse({
           methodResponses: [['Email/set', { created: { outbound: { id: 'em-att-1', threadId: 'th-att-1' } } }, '0']],
         });
@@ -583,6 +595,9 @@ describe('JamesClient', () => {
           return jsonResponse({
             methodResponses: [['Identity/get', { list: [{ id: 'ident-1', email: 'sales@unicorncommander.ai' }] }, '0']],
           });
+        }
+        if (body.methodCalls.some((c: any[]) => c[0] === 'Mailbox/query')) {
+          return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-sent-1'] }, '0']] });
         }
         return jsonResponse({
           methodResponses: [['Email/set', { created: { outbound: { id: 'em-multi', threadId: 'th-multi' } } }, '0']],
