@@ -234,7 +234,7 @@ describe('JamesClient', () => {
       expect(result.threads[0]).toMatchObject({ id: 'th-1', unread: true, hasAttachments: true });
 
       // The role resolved is 'archive' (the folder->role map), and the Email/query
-      // filter combines inMailbox with the text search — real filtering.
+      // filter combines the text search with inMailbox (search-v2 builder) — real filtering.
       const roleCall = JSON.parse(fetchSpy.mock.calls.find(([, init]: any) => {
         if (!init?.body) return false;
         const b = JSON.parse(init.body);
@@ -249,10 +249,52 @@ describe('JamesClient', () => {
       })[1].body).methodCalls.find((c: any[]) => c[0] === 'Email/query')[1];
       expect(queryCall.filter).toEqual({
         operator: 'AND',
-        conditions: [{ inMailbox: 'mbx-archive-1' }, { text: 'invoice' }],
+        conditions: [{ text: 'invoice' }, { inMailbox: 'mbx-archive-1' }],
       });
       expect(queryCall.position).toBe(0);
       expect(queryCall.limit).toBe(20);
+    });
+
+    it('search-v2: parses operators (from:/subject:/has:attachment) into the JMAP filter', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        const methods = JSON.parse((init as RequestInit).body as string).methodCalls.map(
+          (c: any[]) => c[0],
+        );
+        if (methods.length === 1 && methods[0] === 'Mailbox/query') {
+          return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-inbox-1'] }, '0']] });
+        }
+        return jsonResponse({
+          methodResponses: [
+            ['Email/query', { ids: [], total: 0 }, '0'],
+            ['Email/get', { list: [] }, '1'],
+            ['Thread/get', { list: [] }, '2'],
+          ],
+        });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+      await client.listFolderThreads('sales@unicorncommander.ai', {
+        folder: 'inbox',
+        limit: 20,
+        offset: 0,
+        query: 'from:alice@acme.test has:attachment invoice',
+      });
+      const queryCall = JSON.parse(
+        fetchSpy.mock.calls.find(([, init]: any) => {
+          if (!init?.body) return false;
+          return JSON.parse(init.body).methodCalls.some((c: any[]) => c[0] === 'Email/query');
+        })[1].body,
+      ).methodCalls.find((c: any[]) => c[0] === 'Email/query')[1];
+      expect(queryCall.filter).toEqual({
+        operator: 'AND',
+        conditions: [
+          { text: 'invoice' },
+          { from: 'alice@acme.test' },
+          { hasAttachment: true },
+          { inMailbox: 'mbx-inbox-1' },
+        ],
+      });
     });
 
     it('listFolderThreads degrades to { threads: [] } when the folder role has no Mailbox', async () => {

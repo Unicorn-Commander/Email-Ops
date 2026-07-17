@@ -45,6 +45,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { StalwartPort } from './stalwart.port';
+import { parseSearchQuery, buildJmapFilter } from './search-query';
 import {
   StalwartAttachment,
   StalwartBlobDownload,
@@ -549,10 +550,11 @@ export class JamesClient extends StalwartPort {
     const mailboxId = await this.resolveMailboxIdForRole(mailbox, role);
     if (!mailboxId) return { threads: [] };
 
-    const filter =
-      query.query && query.query.trim()
-        ? { operator: 'AND', conditions: [{ inMailbox: mailboxId }, { text: query.query.trim() }] }
-        : { inMailbox: mailboxId };
+    // Search v2: parse Gmail-style operators (from:/to:/subject:/has:attachment/
+    // before:/after:) out of the query and build the JMAP filter, AND-ed with the
+    // folder mailbox. Plain text and an empty query both fall through correctly
+    // (buildJmapFilter → { inMailbox } when nothing else parses).
+    const filter = buildJmapFilter(parseSearchQuery(query.query), mailboxId);
 
     const responses = await this.jmap([
       [
