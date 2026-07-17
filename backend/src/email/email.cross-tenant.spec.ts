@@ -28,6 +28,9 @@ const fakeMailProvider = {
 const DB_URL = TEST_DATABASE_URL;
 
 class FakeStalwart extends StalwartPort {
+  async pollInbound(): Promise<null> {
+    return null;
+  }
   isConfigured(): boolean {
     return true;
   }

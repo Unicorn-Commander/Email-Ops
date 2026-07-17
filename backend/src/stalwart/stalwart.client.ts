@@ -373,6 +373,12 @@ export class StalwartClient extends StalwartPort {
     };
   }
 
+  // Inbound polling is a James/JMAP-only capability; the legacy Stalwart adapter
+  // never participates (degrade-clean → null).
+  async pollInbound(): Promise<null> {
+    return null;
+  }
+
   private async sendViaPostmark(request: StalwartSendRequest): Promise<StalwartSendResult> {
     const token = this.postmarkToken!;
     const fromHeader = request.fromName

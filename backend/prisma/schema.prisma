@@ -580,6 +580,11 @@ model MailboxAccount {
   ownerKey       String?
   kind           String                @default("shared")
   provisionState MailboxProvisionState @default(REGISTERED)
+  // The inbound watcher's high-water mark for this (sovereign) mailbox: the ISO
+  // receivedAt of the newest inbox message already seen. NULL until the watcher
+  // first baselines it; only advances. Sovereign mailboxes only (external boxes
+  // are polled via their provider). See backend/src/inbound/.
+  inboundCursor  String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

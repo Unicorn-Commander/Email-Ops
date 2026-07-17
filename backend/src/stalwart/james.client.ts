@@ -62,6 +62,7 @@ import {
   StalwartVacationState,
   StalwartThread,
   StalwartUploadResult,
+  InboundPollResult,
 } from './stalwart.types';
 
 /** The client mail folder → the JMAP Mailbox `role` it lives under on James. */
@@ -1218,5 +1219,59 @@ export class JamesClient extends StalwartPort {
       lane: 'james',
       reason: providerMessageId == null ? 'james submission returned no id' : null,
     };
+  }
+
+  async pollInbound(mailbox: string, sinceIso: string | null): Promise<InboundPollResult | null> {
+    if (!this.jmapUrl) return null;
+    const inboxId = await this.resolveMailboxIdForRole(mailbox, 'inbox');
+    if (!inboxId) return null;
+    // Newest inbox messages first; one Email/get for the fields the classifier needs.
+    const responses = await this.jmap(
+      [
+        [
+          'Email/query',
+          {
+            filter: { inMailbox: inboxId },
+            sort: [{ property: 'receivedAt', isAscending: false }],
+            limit: 50,
+          },
+          '0',
+        ],
+        [
+          'Email/get',
+          {
+            '#ids': { resultOf: '0', name: 'Email/query', path: '/ids' },
+            properties: ['id', 'threadId', 'subject', 'from', 'receivedAt'],
+          },
+          '1',
+        ],
+      ],
+      mailbox,
+    );
+    if (!responses) return null;
+    const list = this.named(responses, 'Email/get')?.list;
+    if (!Array.isArray(list)) return null;
+
+    const refs = list
+      .map((m: any) => ({
+        threadId: typeof m?.threadId === 'string' ? m.threadId : '',
+        fromAddress:
+          Array.isArray(m?.from) && m.from[0]?.email ? String(m.from[0].email) : null,
+        subject: typeof m?.subject === 'string' ? m.subject : null,
+        receivedAt: typeof m?.receivedAt === 'string' ? m.receivedAt : '',
+      }))
+      .filter((r) => r.threadId && r.receivedAt);
+
+    // JMAP receivedAt is UTC ISO-8601 ('…Z') → lexical compare == chronological.
+    const maxCursor = refs.reduce((mx, r) => (r.receivedAt > mx ? r.receivedAt : mx), sinceIso ?? '');
+
+    // First poll baselines: capture the cursor, process no backlog.
+    if (sinceIso == null) {
+      return { cursor: maxCursor || null, newMessages: [] };
+    }
+    const newMessages = refs
+      .filter((r) => r.receivedAt > sinceIso)
+      .sort((a, b) => (a.receivedAt < b.receivedAt ? -1 : a.receivedAt > b.receivedAt ? 1 : 0));
+    return { cursor: maxCursor || sinceIso, newMessages };
   }
 }

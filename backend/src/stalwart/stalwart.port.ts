@@ -37,6 +37,7 @@ import {
   StalwartVacationState,
   StalwartThread,
   StalwartUploadResult,
+  InboundPollResult,
 } from './stalwart.types';
 
 export abstract class StalwartPort {
@@ -181,4 +182,13 @@ export abstract class StalwartPort {
     request: StalwartSendRequest,
     transactional: boolean,
   ): Promise<StalwartSendResult>;
+
+  /**
+   * Poll a sovereign mailbox's INBOX for messages that arrived after `sinceIso`
+   * (the persisted high-water mark). First poll (sinceIso null) baselines: returns
+   * the current cursor + an EMPTY list (never reprocesses the backlog). The inbound
+   * watcher classifies each returned message + advances the stored cursor.
+   * Degrade-clean → null (not configured / thread unknown / failed call).
+   */
+  abstract pollInbound(mailbox: string, sinceIso: string | null): Promise<InboundPollResult | null>;
 }

@@ -52,6 +52,9 @@ const DB_URL = TEST_DATABASE_URL;
 
 // A configurable fake mail engine.
 class FakeStalwart extends StalwartPort {
+  async pollInbound(): Promise<null> {
+    return null;
+  }
   public sendCalls: Array<{ req: StalwartSendRequest; transactional: boolean }> = [];
   public threads: StalwartThread[] = [];
   public messages: StalwartMessage[] = [];

@@ -255,6 +255,77 @@ describe('JamesClient', () => {
       expect(queryCall.limit).toBe(20);
     });
 
+    it('pollInbound baselines on the first poll (captures cursor, returns no backlog)', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        const methods = JSON.parse((init as RequestInit).body as string).methodCalls.map((c: any[]) => c[0]);
+        if (methods.length === 1 && methods[0] === 'Mailbox/query') {
+          return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-inbox-1'] }, '0']] });
+        }
+        return jsonResponse({
+          methodResponses: [
+            ['Email/query', { ids: ['e1'], total: 1 }, '0'],
+            [
+              'Email/get',
+              { list: [{ id: 'e1', threadId: 'th-1', subject: 'Hello', from: [{ email: 'a@acme.test' }], receivedAt: '2026-02-01T00:00:00Z' }] },
+              '1',
+            ],
+          ],
+        });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+      const res = await client.pollInbound('sales@unicorncommander.ai', null);
+      expect(res).toEqual({ cursor: '2026-02-01T00:00:00Z', newMessages: [] });
+    });
+
+    it('pollInbound returns only messages newer than the cursor, oldest-first', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        const methods = JSON.parse((init as RequestInit).body as string).methodCalls.map((c: any[]) => c[0]);
+        if (methods.length === 1 && methods[0] === 'Mailbox/query') {
+          return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-inbox-1'] }, '0']] });
+        }
+        return jsonResponse({
+          methodResponses: [
+            ['Email/query', { ids: ['e3', 'e2', 'e1'], total: 3 }, '0'],
+            [
+              'Email/get',
+              {
+                list: [
+                  { id: 'e3', threadId: 'th-3', subject: 'C', from: [{ email: 'c@x.test' }], receivedAt: '2026-02-03T00:00:00Z' },
+                  { id: 'e2', threadId: 'th-2', subject: 'B', from: [{ email: 'b@x.test' }], receivedAt: '2026-02-02T00:00:00Z' },
+                  { id: 'e1', threadId: 'th-1', subject: 'A', from: [{ email: 'a@x.test' }], receivedAt: '2026-02-01T00:00:00Z' },
+                ],
+              },
+              '1',
+            ],
+          ],
+        });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+      const res = await client.pollInbound('sales@unicorncommander.ai', '2026-02-01T00:00:00Z');
+      expect(res?.cursor).toBe('2026-02-03T00:00:00Z');
+      expect(res?.newMessages.map((m) => m.threadId)).toEqual(['th-2', 'th-3']); // oldest-first, excludes the cursor msg
+      expect(res?.newMessages[0]).toEqual({
+        threadId: 'th-2',
+        fromAddress: 'b@x.test',
+        subject: 'B',
+        receivedAt: '2026-02-02T00:00:00Z',
+      });
+    });
+
+    it('pollInbound degrades to null when the inbox role has no mailbox', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        return jsonResponse({ methodResponses: [['Mailbox/query', { ids: [] }, '0']] });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+      expect(await client.pollInbound('sales@unicorncommander.ai', null)).toBeNull();
+    });
+
     it('search-v2: parses operators (from:/subject:/has:attachment) into the JMAP filter', async () => {
       const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
         if (String(url).endsWith('/session')) return jsonResponse(SESSION);

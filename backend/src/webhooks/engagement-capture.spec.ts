@@ -46,6 +46,9 @@ import { mapPostmarkRecord, PostmarkWebhookBody } from './postmark.types';
 const DB_URL = TEST_DATABASE_URL;
 
 class FakeStalwart extends StalwartPort {
+  async pollInbound(): Promise<null> {
+    return null;
+  }
   public acceptSend = true;
   isConfigured(): boolean {
     return true;

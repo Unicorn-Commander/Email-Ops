@@ -52,6 +52,9 @@ const externalProvider = {
 } as unknown as MailProviderPort;
 
 class FakeStalwart extends StalwartPort {
+  async pollInbound(): Promise<null> {
+    return null;
+  }
   isConfigured(): boolean {
     return true;
   }

@@ -203,3 +203,22 @@ export interface StalwartDraftRequest {
   bcc?: string[];
   attachments?: { blobId: string; name: string; type: string }[];
 }
+
+/** One newly-arrived inbound message the watcher must classify. */
+export interface InboundMessageRef {
+  threadId: string;
+  fromAddress: string | null;
+  subject: string | null;
+  receivedAt: string; // ISO
+}
+
+/**
+ * The result of one inbound poll of a sovereign mailbox: the advanced cursor (ISO
+ * receivedAt high-water mark to persist) + the messages newer than the prior
+ * cursor. First poll (sinceIso null) BASELINES — returns the current cursor with
+ * an EMPTY list (no backlog reprocessing). Degrade-clean → null.
+ */
+export interface InboundPollResult {
+  cursor: string | null;
+  newMessages: InboundMessageRef[];
+}
