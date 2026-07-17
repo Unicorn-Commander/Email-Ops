@@ -55,6 +55,13 @@ export const ALL_INBOXES = '__all_inboxes__';
 /** Page size for thread lists (also the load-more step). */
 const PAGE_SIZE = 50;
 
+/**
+ * New-mail arrival poll cadence (ms). The poll is visibility-gated: the interval
+ * only fetches while the tab is visible, and refetches immediately on focus /
+ * visibilitychange so a user sitting on the inbox actually sees new mail land.
+ */
+const INBOX_POLL_MS = 30_000;
+
 /** Three-state discriminator shared by every pane (suite pattern). */
 export type Load = 'loading' | 'ready' | 'error';
 
@@ -135,6 +142,13 @@ export interface UseMailClient {
   threadsLoad: Load;
   threadsError: string | null;
   refreshThreads: () => void;
+  /**
+   * Silently refetch the current list + unread counts (the manual Refresh
+   * button). Never blanks the list or trips the error state; `refreshing`
+   * drives the button's spinner while it's in flight.
+   */
+  refresh: () => void;
+  refreshing: boolean;
   /** Offset paging: whether another page may exist, and the loader. */
   hasMore: boolean;
   loadingMore: boolean;
@@ -220,6 +234,7 @@ export function useMailClient(): UseMailClient {
   const [threadsError, setThreadsError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const [counts, setCounts] = useState<MailboxCounts[] | null>(null);
 
@@ -245,6 +260,13 @@ export function useMailClient(): UseMailClient {
   folderRef.current = folder;
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
+  const queryRef = useRef(query);
+  queryRef.current = query;
+  // Read the current in-flight/list state from the poll without re-arming it.
+  const threadsLoadRef = useRef(threadsLoad);
+  threadsLoadRef.current = threadsLoad;
+  const loadingMoreRef = useRef(loadingMore);
+  loadingMoreRef.current = loadingMore;
 
   // A 401 anywhere means the session lapsed — bounce to login (suite pattern).
   const guard401 = useCallback(
@@ -344,12 +366,15 @@ export function useMailClient(): UseMailClient {
       q: string,
       offset: number,
       append: boolean,
+      // Silent = background poll / manual Refresh: keep the current list visible
+      // (no skeleton) and never surface a transient failure as an error state.
+      silent = false,
     ) => {
       const req = ++threadReqRef.current;
       if (append) {
         setLoadingMore(true);
       } else {
-        setThreadsLoad('loading');
+        if (!silent) setThreadsLoad('loading');
         setLoadingMore(false); // a fresh list supersedes any in-flight load-more
       }
       try {
@@ -376,6 +401,10 @@ export function useMailClient(): UseMailClient {
           setSelectedMailboxId(mailboxesRef.current[0]?.id ?? null);
           return;
         }
+        // A background/manual refresh must never blow a working list into an
+        // error state on a transient failure — keep what we have; the next tick
+        // (or the reader's own Retry) recovers.
+        if (silent) return;
         setThreadsError(messageOf(err, 'Could not load this mailbox.'));
         setThreadsLoad('error');
       } finally {
@@ -410,6 +439,66 @@ export function useMailClient(): UseMailClient {
     if (!ws || !mbx || loadingMore) return;
     void fetchThreads(ws, mbx, folderRef.current, query, threadsRef.current.length, true);
   }, [query, loadingMore, fetchThreads]);
+
+  // ── New-mail arrival: manual Refresh + visibility-gated background poll ─────
+  // Both take a SILENT fetch (no skeleton, no error-state on a transient blip)
+  // so the user's scroll / selection / open thread are never reset — the list is
+  // replaced in place exactly like the existing refresh, plus a counts refresh.
+  const refreshingRef = useRef(false);
+  const refresh = useCallback(() => {
+    const ws = workspaceRef.current;
+    const mbx = selectedMailboxIdRef.current;
+    if (!ws || !mbx || refreshingRef.current) return;
+    refreshingRef.current = true;
+    setRefreshing(true);
+    const done = fetchThreads(ws, mbx, folderRef.current, queryRef.current, 0, false, true);
+    refreshCounts();
+    void Promise.resolve(done).finally(() => {
+      refreshingRef.current = false;
+      setRefreshing(false);
+    });
+  }, [fetchThreads, refreshCounts]);
+
+  const pollingRef = useRef(false);
+  const pollRefresh = useCallback(() => {
+    // Idle-friendly: never touch the network while the tab is hidden.
+    if (document.visibilityState !== 'visible') return;
+    const ws = workspaceRef.current;
+    const mbx = selectedMailboxIdRef.current;
+    if (!ws || !mbx) return;
+    // Skip if anything is already in flight (initial load, paging, or a prior poll).
+    if (pollingRef.current || threadsLoadRef.current === 'loading' || loadingMoreRef.current) return;
+    pollingRef.current = true;
+    const done = fetchThreads(ws, mbx, folderRef.current, queryRef.current, 0, false, true);
+    refreshCounts();
+    void Promise.resolve(done).finally(() => {
+      pollingRef.current = false;
+    });
+  }, [fetchThreads, refreshCounts]);
+
+  // Point the interval at the latest poll logic without re-arming the timer on
+  // every render (the useInterval ref pattern).
+  const pollRef = useRef(pollRefresh);
+  pollRef.current = pollRefresh;
+
+  useEffect(() => {
+    const tick = () => pollRef.current();
+    const id = window.setInterval(() => {
+      // Guard here too so a hidden tab does zero work between visibility events.
+      if (document.visibilityState === 'visible') tick();
+    }, INBOX_POLL_MS);
+    // Coming back to the tab (focus or unhide) refetches immediately.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') tick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', tick);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', tick);
+    };
+  }, []);
 
   // ── Read / unread marking (Wave 2, optimistic) ────────────────────────────
   const markRead = useCallback(
@@ -700,6 +789,8 @@ export function useMailClient(): UseMailClient {
     threadsLoad,
     threadsError,
     refreshThreads,
+    refresh,
+    refreshing,
     hasMore,
     loadingMore,
     loadMore,

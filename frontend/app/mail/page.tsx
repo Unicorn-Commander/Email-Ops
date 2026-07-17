@@ -792,6 +792,15 @@ export default function MailPage() {
   // back to at least the count of loaded unread threads.
   const loadedUnread = displayThreads.reduce((n, t) => n + (t.unread ? 1 : 0), 0);
 
+  // Reflect the mailbox's inbox-unread count in the browser tab title so a
+  // backgrounded tab surfaces new mail (Gmail-style). On the inbox we take the
+  // Stalwart-lag-safe max the rest of the surface uses; other folders show the
+  // mailbox's inbox-unread from the counts endpoint. 0 unread → no prefix.
+  const titleUnread = Math.max(listUnread ?? 0, mail.folder === 'inbox' ? loadedUnread : 0);
+  useEffect(() => {
+    document.title = titleUnread > 0 ? `(${titleUnread}) Email-Ops` : 'Email-Ops';
+  }, [titleUnread]);
+
   // Light view digest for the agent chat — subjects/senders only, never bodies —
   // evaluated at send time so the assistant grounds answers in the current view.
   const getChatContext = useCallback((): Record<string, unknown> => {
@@ -855,6 +864,8 @@ export default function MailPage() {
         agentsPaused={agentsPaused}
         onTogglePause={() => setPaused(!agentsPaused)}
         activeAgentCount={activeAgentCount}
+        onRefresh={mail.refresh}
+        refreshing={mail.refreshing}
         onCompose={openCompose}
         canCompose={canCompose}
         onHelp={() => setHelpOpen(true)}
