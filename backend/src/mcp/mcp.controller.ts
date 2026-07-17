@@ -9,7 +9,6 @@
  */
 
 import { All, Controller, Logger, Req, Res, UseGuards } from '@nestjs/common';
-import { SkipThrottle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Request, Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -18,9 +17,9 @@ import { User } from '@prisma/client';
 
 @ApiTags('mcp')
 @ApiBearerAuth()
-// Bare @SkipThrottle() is a no-op against the named throttlers in app.module,
-// so spell them out for v5.
-@SkipThrottle({ short: true, long: true })
+// The global ThrottlerModule (short: 20/60s, long: 200/hr — app.module) applies to
+// this MCP HTTP surface: agents/federation calls are rate-limited like any other
+// authenticated route. (Previously @SkipThrottle exempted it — a DoS/abuse gap.)
 @Controller('mcp')
 export class McpController {
   private readonly logger = new Logger(McpController.name);

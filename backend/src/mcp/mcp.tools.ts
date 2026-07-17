@@ -40,6 +40,7 @@ import { listMyWorkspaces, MyWorkspace } from '../common/workspace/list-my-works
 import { tenancyEnabled } from '../common/workspace/feature-flags';
 import { entitlementsOf, ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { EmailService } from '../email/email.service';
+import { MailFolder } from '../email/email.types';
 import { checkComposeEntitlement } from '../email/entitlement';
 import { AgentsService } from '../agents/agents.service';
 import { EmailHealthService } from '../email-health/email-health.service';
@@ -297,6 +298,134 @@ export class EmailOpsTools {
       externalRef: args.external_ref,
       draftedBy: args.external_source,
     });
+  }
+
+  // ── Mail read plane (agent list/search/read + read-state/bulk triage) ──
+  // The agents' READ surface over their OWN mailboxes — thin wrappers over the
+  // EXACT EmailService/DispositionService methods the human mail BFF
+  // (mail.controller.ts) uses, so there is ONE implementation, ONE RLS path, and
+  // the SAME degrade-clean contract (reads → [] when the engine is dormant, never
+  // a 500). Reads are member-level (resolve-and-authorize the workspace); set_read
+  // + bulk_disposition are member-level writes. The per-mailbox owner fence
+  // (EmailService.mayActThroughMailbox) is preserved for external mailboxes — no
+  // cross-tenant read is introduced.
+
+  /** List a mailbox's threads for a folder — or the UNIFIED inbox when no mailbox_id. */
+  async listThreads(
+    user: User,
+    args: {
+      workspace_id?: string;
+      mailbox_id?: string;
+      folder?: string;
+      q?: string;
+      limit?: number;
+      offset?: number;
+    },
+  ): Promise<{ threads: unknown[]; count: number; folder: MailFolder }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    const folder = (args.folder ?? 'inbox') as MailFolder;
+    const q = args.q?.trim() ? args.q : null;
+    const threads = args.mailbox_id
+      ? await this.email.listMailboxInbox(
+          workspaceId,
+          ucUid,
+          args.mailbox_id,
+          args.limit,
+          folder,
+          q,
+          args.offset,
+        )
+      : await this.email.listAggregateInbox(workspaceId, ucUid, folder, args.limit, q, args.offset);
+    return { threads, count: threads.length, folder };
+  }
+
+  /** Full thread messages WITH bodies (name a mailbox → live engine detail / external provider). */
+  async getThread(
+    user: User,
+    args: { workspace_id?: string; thread_id: string; mailbox_id?: string },
+  ): Promise<{ messages: unknown[]; count: number }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const messages = await this.email.listThreadMessages(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.thread_id,
+      args.mailbox_id,
+    );
+    return { messages, count: messages.length };
+  }
+
+  /** Full-text search over a mailbox (or the unified inbox), reusing the engine's `q` path. */
+  async searchMail(
+    user: User,
+    args: {
+      workspace_id?: string;
+      mailbox_id?: string;
+      q: string;
+      folder?: string;
+      limit?: number;
+      offset?: number;
+    },
+  ): Promise<{ threads: unknown[]; count: number; q: string }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    const folder = (args.folder ?? 'inbox') as MailFolder;
+    const threads = args.mailbox_id
+      ? await this.email.listMailboxInbox(
+          workspaceId,
+          ucUid,
+          args.mailbox_id,
+          args.limit,
+          folder,
+          args.q,
+          args.offset,
+        )
+      : await this.email.listAggregateInbox(workspaceId, ucUid, folder, args.limit, args.q, args.offset);
+    return { threads, count: threads.length, q: args.q };
+  }
+
+  /** Mark a thread read/unread — per-mailbox when mailbox_id is given, else across the workspace. */
+  async setRead(
+    user: User,
+    args: { workspace_id?: string; thread_id: string; read: boolean; mailbox_id?: string },
+  ): Promise<{ thread_id: string; read: boolean; updated: boolean }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    if (args.mailbox_id) {
+      return this.email.setThreadReadState(workspaceId, ucUid, args.mailbox_id, args.thread_id, args.read);
+    }
+    const updated = await this.email.setThreadReadAcrossMailboxes(
+      workspaceId,
+      ucUid,
+      args.thread_id,
+      args.read,
+    );
+    return { thread_id: args.thread_id, read: args.read, updated };
+  }
+
+  /** Bulk-triage a SET of threads into a folder (the REST bulk-disposition path). */
+  async bulkDisposition(
+    user: User,
+    args: { workspace_id?: string; thread_ids: string[]; disposition: string },
+  ): Promise<{ succeeded: string[]; failed: string[] }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    const target = args.disposition as MessageDisposition;
+    const succeeded: string[] = [];
+    const failed: string[] = [];
+    // Per-thread isolation: one failing thread never fails the batch (mirrors the
+    // mail.controller bulk route exactly — the SAME DispositionService.setDisposition).
+    const settled = await Promise.allSettled(
+      args.thread_ids.map((threadId) =>
+        this.disposition.setDisposition(workspaceId, ucUid, threadId, target, { agentKey: null }),
+      ),
+    );
+    settled.forEach((r, i) => {
+      const id = args.thread_ids[i];
+      if (r.status === 'fulfilled') succeeded.push(id);
+      else failed.push(id);
+    });
+    return { succeeded, failed };
   }
 
   // ── agent-inbox approval tools ─────────────────────────────────────────

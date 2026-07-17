@@ -2,7 +2,7 @@
   "$schema": "https://brigade.unicorncommander.ai/.well-known/mcps-schema-v1.json",
   "name": "Email-Ops",
   "version": "0.1.0",
-  "description": "Privacy-first email cockpit: connected mailboxes, threads, the agent-inbox approval surface, mail triage, conversational provisioning, the Cleaner engine, and an agent-controls-the-UI (AG-UI) surface \u2014 over the Stalwart mail engine.",
+  "description": "Privacy-first email cockpit: connected mailboxes, threads, the agent-inbox approval surface, mail triage, conversational provisioning, the Cleaner engine, and an agent-controls-the-UI (AG-UI) surface \u2014 over the Apache James mail engine.",
   "mcp_endpoint": "https://email-ops.magicunicorn.dev/api/v1/mcp",
   "tool_namespace": "emailops",
   "auth": {
@@ -260,7 +260,7 @@
     },
     {
       "name": "list_threads_with_contact",
-      "description": "List the mailbox THREADS with a customer\u2019s contact (the customer-360 email history). Federated from the Stalwart mailbox + the workspace\u2019s own outbound SoR rows, deduped by thread. Read-only / viewer-level \u2014 does NOT require the dual SKU. Returns { threads: [...] }.",
+      "description": "List the mailbox THREADS with a customer\u2019s contact (the customer-360 email history). Federated from the Apache James mailbox + the workspace\u2019s own outbound SoR rows, deduped by thread. Read-only / viewer-level \u2014 does NOT require the dual SKU. Returns { threads: [...] }.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -285,7 +285,7 @@
     },
     {
       "name": "list_thread_messages",
-      "description": "List the MESSAGES in one thread, bodies as PREVIEWS only (the full message lives in Stalwart). Read-only / viewer-level. Returns { messages: [...] }.",
+      "description": "List the MESSAGES in one thread, bodies as PREVIEWS only (the full message lives in Apache James). Read-only / viewer-level. Returns { messages: [...] }.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -310,7 +310,7 @@
     },
     {
       "name": "compose_email",
-      "description": "Compose an outbound email to a customer\u2019s contact. mode=send queues delivery now (Stalwart, or Postmark for the transactional high-rep lane); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves \u2014 the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires BOTH customer-ops and email-ops entitlements. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created.",
+      "description": "Compose an outbound email to a customer\u2019s contact. mode=send queues delivery now (Apache James, or Postmark for the transactional high-rep lane); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves \u2014 the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires BOTH customer-ops and email-ops entitlements. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -371,6 +371,205 @@
         "write:email"
       ],
       "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "list_threads",
+      "description": "List the THREADS in a mailbox folder (inbox/archive/spam/trash/sent/drafts). Pass mailbox_id for one mailbox; omit it for the unified inbox across every mailbox the caller can read (each thread then carries mailbox_id + mailbox_address). Optional q (full-text), limit (max 200, default 50), offset (paging). Read-only / member-level. Returns { threads, count, folder } - an empty list when the mail engine is dormant (never a 500).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string"
+          },
+          "folder": {
+            "type": "string",
+            "enum": [
+              "inbox",
+              "archive",
+              "spam",
+              "trash",
+              "sent",
+              "drafts"
+            ]
+          },
+          "q": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "get_thread",
+      "description": "Return the full MESSAGES in one thread WITH bodies (text + HTML), cc/bcc, threading headers, read/flag state, and attachments when the engine serves them. Pass mailbox_id to read an external (Gmail/Microsoft) thread through its provider or to force the live engine detail; omit it to read the workspace default mailbox. Read-only / member-level. Returns { messages, count }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mailbox_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "search_mail",
+      "description": "Full-text SEARCH a mailbox folder by query string q (subject/body/participants, via the engine's own search). Pass mailbox_id for one mailbox; omit it to search across every readable mailbox (unified). Optional folder (default inbox), limit (max 200, default 50), offset. Read-only / member-level. Returns { threads, count, q } - an empty list when the engine is dormant.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string"
+          },
+          "q": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "folder": {
+            "type": "string",
+            "enum": [
+              "inbox",
+              "archive",
+              "spam",
+              "trash",
+              "sent",
+              "drafts"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "set_read",
+      "description": "Set or clear the read ($seen) state on every message in a thread. Pass mailbox_id to target one mailbox; omit it to apply across the workspace's sovereign mailboxes (the bulk path). Member-level write; runs AS the calling user. Returns { thread_id, read, updated } - updated:false when the engine could not apply it (e.g. dormant, or an external provider mailbox).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "read": {
+            "type": "boolean"
+          },
+          "mailbox_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "read"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "bulk_disposition",
+      "description": "Move a SET of threads into a folder in one call: ARCHIVE, TRASH, SPAM, or INBOX (un-triage) - the same disposition overlay the single-thread set_disposition writes. Per-thread isolation: one failing thread never fails the batch. Member-level write; runs AS the calling user. Returns { succeeded, failed } (thread ids). Up to 200 thread_ids per call.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "thread_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 200
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "INBOX",
+              "ARCHIVE",
+              "TRASH",
+              "SPAM"
+            ]
+          }
+        },
+        "required": [
+          "thread_ids",
+          "disposition"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:triage"
+      ],
+      "tier_required": "free",
       "read_only": false
     },
     {

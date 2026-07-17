@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { MCP_MANIFEST_CATALOG } from './mcp-manifest.catalog';
 
 /**
  * Drift + validity guard for the Brigade federation manifest.
@@ -52,6 +53,14 @@ describe('Brigade federation manifest (.well-known/mcps.json)', () => {
     expect(manifestTools).toEqual(
       expect.arrayContaining(['ui_navigate', 'ui_open_thread', 'ui_compose', 'ui_switch_space', 'ui_notify']),
     );
+  });
+
+  it('bundles a backend catalog copy that is identical to the static manifest (no drift)', () => {
+    // The backend image ships only dist/ (no frontend static file), so the per-env
+    // manifest route (mcp-manifest.controller.ts) serves the bundled
+    // MCP_MANIFEST_CATALOG. It MUST stay byte-for-byte equivalent to the canonical
+    // static manifest — the controller overrides ONLY mcp_endpoint at request time.
+    expect(MCP_MANIFEST_CATALOG).toEqual(manifest);
   });
 
   it('gives every tool the per-tool fields the gateway validator requires', () => {
