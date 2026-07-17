@@ -102,6 +102,20 @@ export interface StalwartFolderThreadsResult {
   total?: number;
 }
 
+/**
+ * A JMAP Mailbox surfaced as a user-facing folder/label. `role` is non-null for
+ * the system folders (inbox/sent/archive/trash/junk/drafts) and null for a
+ * user-created custom folder — the distinction the folder CRUD enforces (a role
+ * folder is never renamed away or destroyed).
+ */
+export interface StalwartMailFolder {
+  id: string;
+  name: string;
+  role: string | null;
+  parentId: string | null;
+  unread?: number;
+}
+
 /** The inbox unread/total counts for one mailbox (JMAP Mailbox `role: inbox`). */
 export interface StalwartMailboxCounts {
   inboxUnread: number;

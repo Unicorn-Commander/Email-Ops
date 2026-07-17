@@ -52,6 +52,7 @@ import {
   StalwartDraftRequest,
   StalwartFolderQuery,
   StalwartFolderThreadsResult,
+  StalwartMailFolder,
   StalwartMailboxCounts,
   StalwartMessage,
   StalwartMessageDetail,
@@ -1219,6 +1220,74 @@ export class JamesClient extends StalwartPort {
       lane: 'james',
       reason: providerMessageId == null ? 'james submission returned no id' : null,
     };
+  }
+
+  /** Every folder under the mailbox's account (JMAP `Mailbox/get` all ids). */
+  async listFolders(mailbox: string): Promise<StalwartMailFolder[]> {
+    if (!this.jmapUrl) return [];
+    const responses = await this.jmap([
+      ['Mailbox/get', { ids: null, properties: ['id', 'name', 'role', 'parentId', 'unreadEmails'] }, '0'],
+    ], mailbox);
+    if (!responses) return [];
+    const list = this.named(responses, 'Mailbox/get')?.list;
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((m): m is Record<string, unknown> => !!m && typeof m === 'object' && typeof (m as any).id === 'string')
+      .map((m) => ({
+        id: m.id as string,
+        name: typeof m.name === 'string' ? m.name : '',
+        role: typeof m.role === 'string' ? m.role : null,
+        parentId: typeof m.parentId === 'string' ? m.parentId : null,
+        unread: typeof m.unreadEmails === 'number' ? m.unreadEmails : undefined,
+      }));
+  }
+
+  /** Create a user folder (`role: null` Mailbox). Returns the new id, or null. */
+  async createFolder(mailbox: string, name: string, parentId?: string | null): Promise<{ id: string } | null> {
+    if (!this.jmapUrl) return null;
+    const create: Record<string, unknown> = { name, role: null };
+    if (parentId) create.parentId = parentId;
+    const responses = await this.jmap([
+      ['Mailbox/set', { create: { newFolder: create } }, '0'],
+    ], mailbox);
+    if (!responses) return null;
+    const created = this.named(responses, 'Mailbox/set')?.created?.newFolder;
+    const id = typeof created?.id === 'string' ? created.id : null;
+    return id ? { id } : null;
+  }
+
+  /** Rename a folder. True iff the engine reports the id updated. */
+  async renameFolder(mailbox: string, folderId: string, name: string): Promise<boolean> {
+    if (!this.jmapUrl) return false;
+    const responses = await this.jmap([
+      ['Mailbox/set', { update: { [folderId]: { name } } }, '0'],
+    ], mailbox);
+    if (!responses) return false;
+    const updated = this.named(responses, 'Mailbox/set')?.updated;
+    return !!updated && Object.prototype.hasOwnProperty.call(updated, folderId);
+  }
+
+  /**
+   * Destroy a USER folder. First reads the target's role; REFUSES a role
+   * (system) folder — Inbox/Sent/Archive/Trash/Junk/Drafts are never deletable.
+   */
+  async deleteFolder(mailbox: string, folderId: string): Promise<boolean> {
+    if (!this.jmapUrl) return false;
+    const probe = await this.jmap([
+      ['Mailbox/get', { ids: [folderId], properties: ['id', 'role'] }, '0'],
+    ], mailbox);
+    if (!probe) return false;
+    const list = this.named(probe, 'Mailbox/get')?.list;
+    const target = Array.isArray(list) ? list[0] : undefined;
+    if (!target || typeof target.id !== 'string') return false;
+    // Never delete a system/role folder.
+    if (target.role != null) return false;
+    const responses = await this.jmap([
+      ['Mailbox/set', { destroy: [folderId] }, '0'],
+    ], mailbox);
+    if (!responses) return false;
+    const destroyed = this.named(responses, 'Mailbox/set')?.destroyed;
+    return Array.isArray(destroyed) && destroyed.includes(folderId);
   }
 
   async pollInbound(mailbox: string, sinceIso: string | null): Promise<InboundPollResult | null> {

@@ -27,6 +27,7 @@ import {
   StalwartBlobDownload,
   StalwartFolderQuery,
   StalwartFolderThreadsResult,
+  StalwartMailFolder,
   StalwartMailboxCounts,
   StalwartMessage,
   StalwartMessageDetail,
@@ -182,6 +183,34 @@ export abstract class StalwartPort {
     request: StalwartSendRequest,
     transactional: boolean,
   ): Promise<StalwartSendResult>;
+
+  /**
+   * List every folder (JMAP Mailbox) under the mailbox's own account — system
+   * role folders AND user-created custom folders — for the folder rail /
+   * move-to menu. Returns [] when not configured / the call fails.
+   */
+  abstract listFolders(mailbox: string): Promise<StalwartMailFolder[]>;
+
+  /**
+   * Create a user folder (a `role: null` Mailbox) named `name`, optionally
+   * nested under `parentId`. Returns the created folder's id, or null when not
+   * configured / the create fails (degrade-clean; never throws).
+   */
+  abstract createFolder(mailbox: string, name: string, parentId?: string | null): Promise<{ id: string } | null>;
+
+  /**
+   * Rename a folder. Returns true iff the engine reports the id updated; false
+   * when not configured / the id is unknown / the call fails.
+   */
+  abstract renameFolder(mailbox: string, folderId: string, name: string): Promise<boolean>;
+
+  /**
+   * Destroy a USER folder. REFUSES (returns false, issues no destroy) when the
+   * target has a non-null role — a system folder (Inbox/Sent/Archive/Trash/
+   * Junk/Drafts) is never deletable. False also when not configured / unknown /
+   * the call fails.
+   */
+  abstract deleteFolder(mailbox: string, folderId: string): Promise<boolean>;
 
   /**
    * Poll a sovereign mailbox's INBOX for messages that arrived after `sinceIso`

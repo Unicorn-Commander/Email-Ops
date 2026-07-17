@@ -373,6 +373,21 @@ export class StalwartClient extends StalwartPort {
     };
   }
 
+  // Folder CRUD is a James/JMAP-only capability; the legacy Stalwart adapter
+  // never participates (degrade-clean → []/null/false).
+  async listFolders(): Promise<never[]> {
+    return [];
+  }
+  async createFolder(): Promise<null> {
+    return null;
+  }
+  async renameFolder(): Promise<boolean> {
+    return false;
+  }
+  async deleteFolder(): Promise<boolean> {
+    return false;
+  }
+
   // Inbound polling is a James/JMAP-only capability; the legacy Stalwart adapter
   // never participates (degrade-clean → null).
   async pollInbound(): Promise<null> {

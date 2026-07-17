@@ -49,6 +49,18 @@ class FakeStalwart extends StalwartPort {
   async pollInbound(): Promise<null> {
     return null;
   }
+  async listFolders(): Promise<never[]> {
+    return [];
+  }
+  async createFolder(): Promise<null> {
+    return null;
+  }
+  async renameFolder(): Promise<boolean> {
+    return false;
+  }
+  async deleteFolder(): Promise<boolean> {
+    return false;
+  }
   public acceptSend = true;
   isConfigured(): boolean {
     return true;
