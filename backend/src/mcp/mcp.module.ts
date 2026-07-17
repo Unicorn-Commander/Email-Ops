@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { McpController } from './mcp.controller';
+import { McpManifestController } from './mcp-manifest.controller';
 import { McpService } from './mcp.service';
 import { AuthModule } from '../auth/auth.module';
 import { WorkspaceModule } from '../common/workspace/workspace.module';
@@ -39,7 +40,11 @@ import { MailEngineAdminModule } from '../mail-engine-admin/mail-engine-admin.mo
     // mail-engine admin MCP tools can manage domains, accounts, and quotas.
     MailEngineAdminModule,
   ],
-  controllers: [McpController],
+  // McpManifestController is the PUBLIC per-environment federation-manifest route
+  // (mcp_endpoint derived from the host / PUBLIC_BASE_URL) — fixes prod advertising
+  // the dogfood endpoint. No JWT (discovery must be fetchable); serves the bundled
+  // MCP_MANIFEST_CATALOG, needs no injected services.
+  controllers: [McpController, McpManifestController],
   providers: [McpService],
 })
 export class McpModule {}

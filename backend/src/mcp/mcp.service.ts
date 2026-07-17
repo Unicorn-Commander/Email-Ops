@@ -34,6 +34,8 @@ import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
+const MAIL_FOLDER = z.enum(['inbox', 'archive', 'spam', 'trash', 'sent', 'drafts']);
+const DISPOSITION = z.enum(['INBOX', 'ARCHIVE', 'TRASH', 'SPAM']);
 
 @Injectable()
 export class McpService {
@@ -71,13 +73,13 @@ export class McpService {
       {
         capabilities: { tools: {} },
         instructions:
-          'Email-Ops MCP server — the mailbox / thread surface (over the Stalwart ' +
+          'Email-Ops MCP server — the mailbox / thread surface (over the Apache James ' +
           'mail server) + the agent-inbox approval surface of the Unicorn Commander ' +
           'suite. Foundation tools check service health and list the caller’s ' +
           'workspaces. The contract tools let a cockpit (e.g. Customer-Ops) federate ' +
           'mailboxes by workspace: list the threads with a contact, list a thread’s ' +
           'messages (previews only), and compose an outbound email — mode=send queues ' +
-          'delivery now (Stalwart/Postmark), mode=draft stages it into the AGENT ' +
+          'delivery now (Apache James/Postmark), mode=draft stages it into the AGENT ' +
           'INBOX for a human to approve before it leaves. compose_email is idempotent ' +
           'on (workspace_id, external_source, external_ref) and requires BOTH ' +
           'customer-ops and email-ops entitlements; reading threads is viewer-level. ' +
@@ -89,7 +91,7 @@ export class McpService {
           'is read-only preview, while clean_trash / clean_delete / organize_messages / ' +
           'unsubscribe_sender stage a pending agent-inbox request instead of executing ' +
           'immediately; a human approval runs the batch. Email-Ops owns the mailboxes, ' +
-          'threads, and agent inbox; it federates the Stalwart and Cleaner engines and never ' +
+          'threads, and agent inbox; it federates the Apache James and Cleaner engines and never ' +
           'reinvents either service.',
       },
     );
@@ -272,7 +274,7 @@ export class McpService {
         title: 'List threads with a contact',
         description:
           'List the mailbox THREADS with a customer’s contact (the customer-360 email ' +
-          'history). Federated from the Stalwart mailbox + the workspace’s own outbound ' +
+          'history). Federated from the Apache James mailbox + the workspace’s own outbound ' +
           'SoR rows, deduped by thread. Read-only / viewer-level — does NOT require the ' +
           'dual SKU. Returns { threads: [...] }.',
         inputSchema: {
@@ -289,7 +291,7 @@ export class McpService {
         title: 'List thread messages',
         description:
           'List the MESSAGES in one thread, bodies as PREVIEWS only (the full message ' +
-          'lives in Stalwart). Read-only / viewer-level. Returns { messages: [...] }.',
+          'lives in Apache James). Read-only / viewer-level. Returns { messages: [...] }.',
         inputSchema: {
           workspace_id: z.string().optional(),
           thread_id: z.string(),
@@ -304,7 +306,7 @@ export class McpService {
         title: 'Compose an outbound email',
         description:
           'Compose an outbound email to a customer’s contact. mode=send queues delivery ' +
-          'now (Stalwart, or Postmark for the transactional high-rep lane); mode=draft ' +
+          'now (Apache James, or Postmark for the transactional high-rep lane); mode=draft ' +
           'stages it into the AGENT INBOX approval surface (a human approves before it ' +
           'leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, ' +
           'external_source, external_ref): a repeat returns the EXISTING message and ' +
@@ -324,6 +326,116 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await tools.composeEmail(user, args)),
+    );
+
+    // ── Mail read plane (agent list/search/read + read-state/bulk triage) ──
+    // The agents' READ surface over their own mailboxes: list/search threads, read
+    // a thread's full messages, mark read/unread, and bulk-triage into folders.
+    // Thin wrappers over the SAME EmailService/DispositionService methods the human
+    // mail BFF uses — one RLS path, degrade-clean (reads → [] when the engine is
+    // dormant). Reads are read_only; set_read + bulk_disposition are member writes.
+
+    server.registerTool(
+      'list_threads',
+      {
+        title: 'List mailbox threads',
+        description:
+          'List the THREADS in a mailbox folder (inbox/archive/spam/trash/sent/drafts). ' +
+          'Pass mailbox_id for ONE mailbox; omit it for the UNIFIED inbox across every ' +
+          'mailbox the caller can read (each thread then carries mailbox_id + ' +
+          'mailbox_address). Optional q (full-text), limit (≤200, default 50), offset ' +
+          '(paging). Read-only / member-level. Returns { threads, count, folder } — an ' +
+          'empty list when the mail engine is dormant (never a 500).',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().optional(),
+          folder: MAIL_FOLDER.optional(),
+          q: z.string().max(500).optional(),
+          limit: z.number().int().min(1).max(200).optional(),
+          offset: z.number().int().min(0).optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.listThreads(user, args ?? {})),
+    );
+
+    server.registerTool(
+      'get_thread',
+      {
+        title: 'Get a thread with bodies',
+        description:
+          'Return the full MESSAGES in one thread WITH bodies (text + HTML), cc/bcc, ' +
+          'threading headers, read/flag state, and attachments when the engine serves ' +
+          'them. Pass mailbox_id to read an external (Gmail/Microsoft) thread through its ' +
+          'provider or to force the live engine detail; omit it to read the workspace ' +
+          'default mailbox. Read-only / member-level. Returns { messages, count }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          thread_id: z.string().min(1),
+          mailbox_id: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.getThread(user, args)),
+    );
+
+    server.registerTool(
+      'search_mail',
+      {
+        title: 'Search mail',
+        description:
+          'Full-text SEARCH a mailbox folder by query string q (subject/body/participants, ' +
+          'via the engine’s own search). Pass mailbox_id for ONE mailbox; omit it to search ' +
+          'across every readable mailbox (unified). Optional folder (default inbox), limit ' +
+          '(≤200, default 50), offset. Read-only / member-level. Returns { threads, count, ' +
+          'q } — an empty list when the engine is dormant.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().optional(),
+          q: z.string().min(1).max(500),
+          folder: MAIL_FOLDER.optional(),
+          limit: z.number().int().min(1).max(200).optional(),
+          offset: z.number().int().min(0).optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.searchMail(user, args)),
+    );
+
+    server.registerTool(
+      'set_read',
+      {
+        title: 'Mark a thread read/unread',
+        description:
+          'Set or clear the read ($seen) state on every message in a thread. Pass ' +
+          'mailbox_id to target ONE mailbox; omit it to apply across the workspace’s ' +
+          'sovereign mailboxes (the bulk path). Member-level write; runs AS the calling ' +
+          'user. Returns { thread_id, read, updated } — updated:false when the engine ' +
+          'could not apply it (e.g. dormant, or an external provider mailbox).',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          thread_id: z.string().min(1),
+          read: z.boolean(),
+          mailbox_id: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.setRead(user, args)),
+    );
+
+    server.registerTool(
+      'bulk_disposition',
+      {
+        title: 'Bulk-triage threads into a folder',
+        description:
+          'Move a SET of threads into a folder in one call: ARCHIVE, TRASH, SPAM, or INBOX ' +
+          '(un-triage) — the SAME disposition overlay the single-thread set_disposition ' +
+          'writes. Per-thread isolation: one failing thread never fails the batch. ' +
+          'Member-level write; runs AS the calling user. Returns { succeeded, failed } ' +
+          '(thread ids). Up to 200 thread_ids per call.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          thread_ids: z.array(z.string().min(1)).min(1).max(200),
+          disposition: DISPOSITION,
+        },
+      },
+      async (args: any) => wrap(await tools.bulkDisposition(user, args)),
     );
 
     // ── Connected-accounts / Cleaner Engine tools ──
