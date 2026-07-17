@@ -3,6 +3,20 @@
 All notable changes to Email-Ops. Dates are the deploy date to the internal line
 of record (`email-ops.magicunicorn.dev`).
 
+## [0.6.0] — 2026-07-17
+
+Wave 1 - Truth & safety: copy-truth documentation sweep + login copy updates.
+
+### Added
+- **Real triage moves mail.** Triage now moves threads in James (not overlay-only) and no longer reappears on refetch.
+- **JMAP send lane.** Sets required `mailboxIds` and saves a copy to Sent.
+- **Autonomy fail-safe.** Blocks unregistered/untrusted senders from auto-sending; stages a draft instead.
+- **Five new MCP read tools.** `list_threads`, `get_thread`, `search_mail`, `set_read`, `bulk_disposition`.
+- **New-mail poll + Refresh.** Added a Refresh button and unread count in the tab title.
+- **Self-hosted fonts and favicon.**
+- **Frontend security headers.** CSP, HSTS, X-Frame-Options.
+- **Hermetic test split + CI.** Unit/integration test split and a Forgejo Actions CI pipeline.
+
 ## [0.5.0] — 2026-07-12
 
 Production readiness + operational hardening: a **gated production line** on

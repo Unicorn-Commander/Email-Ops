@@ -13,12 +13,12 @@ export default function Login() {
           </div>
           <div>
             <p className="text-sm font-semibold text-primary">Email-Ops</p>
-            <p className="text-xs text-tertiary">Cleaner cockpit</p>
+            <p className="text-xs text-tertiary">Email-Ops</p>
           </div>
         </div>
         <Badge variant="protected">privacy-first</Badge>
         <h1 className="mt-4 text-3xl font-semibold tracking-[-0.02em] text-primary">
-          Sign in to control the cleaner.
+          Sign in to your inbox.
         </h1>
         <p className="mt-3 text-sm leading-6 text-tertiary">
           Broker consent is explicit. The cockpit scans headers and metadata only until you review a
