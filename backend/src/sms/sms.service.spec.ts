@@ -1,5 +1,6 @@
 import { AgentAutonomyLevel } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { TEST_DATABASE_URL } from '../../test/test-db';
 import { TwilioPort } from '../twilio/twilio.port';
 import { TwilioSendRequest, TwilioSendResult } from '../twilio/twilio.types';
 import { SmsService } from './sms.service';
@@ -15,7 +16,9 @@ import { SmsService } from './sms.service';
  * tests connect as the owner (RLS inert under FORCE+BYPASS for owner) — the
  * separate prisma/rls-acceptance.sql proves the fence under email_ops_app.
  */
-const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
+// Integration DB URL (verify Postgres). Overridable via TEST_DATABASE_URL (CI service container);
+// defaults to the historical verify DB so local runs are unchanged.
+const DB_URL = TEST_DATABASE_URL;
 
 class FakeTwilio extends TwilioPort {
   public calls: TwilioSendRequest[] = [];

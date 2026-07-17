@@ -5,6 +5,9 @@ import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.s
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { MailboxAccountsController } from './mailbox-accounts.controller';
 import { MailboxAccountsService } from './mailbox-accounts.service';
+import { MailSignaturesService } from './mail-signatures.service';
+import { MailContactsService } from './mail-contacts.service';
+import { MailVacationService } from './mail-vacation.service';
 
 describe('MailboxAccountsController (device connection)', () => {
   const WS = '0190a000-7e57-7000-8000-00000000c001';
@@ -36,6 +39,9 @@ describe('MailboxAccountsController (device connection)', () => {
       mailboxesMock as unknown as MailboxAccountsService,
       {} as ProvisioningPolicyService,
       {} as MailProviderPort,
+      {} as MailSignaturesService,
+      {} as MailContactsService,
+      {} as MailVacationService,
     );
   }
 

@@ -1,0 +1,141 @@
+# Email-Ops CI — Forgejo Actions (GitHub-Actions-compatible).
+#
+# One workflow, three parallel jobs:
+#   backend   npm ci -> prisma generate -> lint -> tsc --noEmit
+#             -> test:unit (hermetic, NO db) -> migrate deploy -> test:integration (pg)
+#   engine    pip install .[dev] -> pytest (FastAPI TestClient, in-process)
+#   frontend  npm ci -> lint -> next build
+#
+# Runner notes (see also the lane report):
+#   * `runs-on: ubuntu-latest` must match a label your Forgejo runner advertises;
+#     rename if your instance uses a different label (e.g. `docker`, `ubuntu-22.04`).
+#   * The backend integration job reaches Postgres at 127.0.0.1:55444 — the exact
+#     historical verify-DB endpoint — so BOTH the env-driven specs (TEST_DATABASE_URL)
+#     and the two email.service specs a parallel lane still owns (which hardcode
+#     127.0.0.1:55444) converge on one database. This assumes the runner exposes
+#     service ports on the job's localhost (GitHub-Actions port-mapping semantics /
+#     host-executed act_runner). If your runner isolates jobs on a container network,
+#     services are reached by their label host instead — point TEST_DATABASE_URL +
+#     DATABASE_URL at `postgres:5432` AND ensure the email specs are converted first.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (lint · tsc · unit · integration+pg)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: verify
+          POSTGRES_DB: emailops
+        ports:
+          # Map the service to the historical verify-DB port so hardcoded specs work.
+          - 55444:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d emailops"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # Identical to the local-dev default in backend/test/test-db.ts, so CI
+      # behaves exactly like a local verify-DB run.
+      TEST_DATABASE_URL: postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prisma generate
+        run: npx prisma generate
+
+      # Non-fatal: the backend carries a large pre-existing lint/prettier backlog
+      # (hundreds of issues) that is out of scope for this CI lane. Lint output is
+      # surfaced but does not block. Flip `continue-on-error` off once the backlog
+      # is cleared so lint becomes an enforcing gate.
+      - name: Lint (non-blocking)
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Typecheck (tsc --noEmit)
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Unit tests (hermetic — NO database)
+        run: npm run test:unit
+
+      - name: Apply schema to the CI Postgres (prisma migrate deploy)
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public
+
+      - name: Integration tests (against the Postgres service)
+        run: npm run test:integration
+
+  engine:
+    name: Cleaner Engine (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cleaner-engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: cleaner-engine/pyproject.toml
+
+      - name: Install dependencies (+ dev extras)
+        run: pip install ".[dev]"
+
+      - name: Pytest
+        run: pytest -q
+
+  frontend:
+    name: Frontend (lint · build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Non-fatal: the frontend has no eslint config/dependency yet, so
+      # `next lint` is best-effort. `next build` (below) is the real gate.
+      - name: Lint (non-blocking)
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Build
+        run: npm run build

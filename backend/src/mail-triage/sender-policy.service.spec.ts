@@ -1,5 +1,6 @@
 import { SenderPolicyKind, SenderPolicyScope } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { TEST_DATABASE_URL } from '../../test/test-db';
 import { SenderPolicyService } from './sender-policy.service';
 
 /**
@@ -7,7 +8,9 @@ import { SenderPolicyService } from './sender-policy.service';
  * (scope, pattern), normalizes domains, evaluates address-over-domain, and is
  * workspace-isolated via the explicit predicate.
  */
-const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
+// Integration DB URL (verify Postgres). Overridable via TEST_DATABASE_URL (CI service container);
+// defaults to the historical verify DB so local runs are unchanged.
+const DB_URL = TEST_DATABASE_URL;
 
 describe('SenderPolicyService (integration)', () => {
   let prisma: PrismaService;

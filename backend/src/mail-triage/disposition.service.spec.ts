@@ -1,5 +1,6 @@
 import { MessageDisposition } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { TEST_DATABASE_URL } from '../../test/test-db';
 import { DispositionService } from './disposition.service';
 
 /**
@@ -8,7 +9,9 @@ import { DispositionService } from './disposition.service';
  * workspace-isolated via the explicit predicate (RLS is inert under the owner
  * role today, so the predicate is the real fence — the hardening-pass lesson).
  */
-const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
+// Integration DB URL (verify Postgres). Overridable via TEST_DATABASE_URL (CI service container);
+// defaults to the historical verify DB so local runs are unchanged.
+const DB_URL = TEST_DATABASE_URL;
 
 describe('DispositionService (integration)', () => {
   let prisma: PrismaService;

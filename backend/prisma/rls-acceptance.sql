@@ -32,7 +32,8 @@ BEGIN
       ('sms_accounts'), ('sms_messages'), ('agents'), ('agent_mailboxes'),
       ('agent_action_events'), ('provisioning_policies'),
       ('mailbox_provisioning_requests'), ('cleanup_batches'), ('spaces'),
-      ('space_mailboxes'), ('space_agents'), ('ui_commands')
+      ('space_mailboxes'), ('space_agents'), ('ui_commands'),
+      ('mail_contacts'), ('mail_signatures'), ('mail_vacation_settings')
   )
   SELECT string_agg(f.relname, ', ' ORDER BY f.relname) INTO missing
   FROM fenced f
@@ -56,7 +57,8 @@ BEGIN
       'sms_accounts', 'sms_messages', 'agents', 'agent_mailboxes',
       'agent_action_events', 'provisioning_policies',
       'mailbox_provisioning_requests', 'cleanup_batches', 'spaces',
-      'space_mailboxes', 'space_agents', 'ui_commands'
+      'space_mailboxes', 'space_agents', 'ui_commands',
+      'mail_contacts', 'mail_signatures', 'mail_vacation_settings'
     ])
   LOOP
     EXECUTE format('SELECT count(*) FROM %I', tbl) INTO n;

@@ -3,6 +3,7 @@ import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MembershipStatus, User, WorkspaceRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { TEST_DATABASE_URL } from '../../test/test-db';
 import { MembershipService } from '../common/workspace/membership.service';
 import { WorkspacesService } from './workspaces.service';
 
@@ -16,7 +17,9 @@ import { WorkspacesService } from './workspaces.service';
  * stranded with zero active owners. All test orgs use a `BTest …` name (slug
  * `btest-…`) and all test users an `@btest.test` email so cleanup is total.
  */
-const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
+// Integration DB URL (verify Postgres). Overridable via TEST_DATABASE_URL (CI service container);
+// defaults to the historical verify DB so local runs are unchanged.
+const DB_URL = TEST_DATABASE_URL;
 
 describe('WorkspacesService — multi-org RBAC + invitations (integration)', () => {
   let prisma: PrismaService;
