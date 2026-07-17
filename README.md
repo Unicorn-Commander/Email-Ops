@@ -2,6 +2,8 @@
 
 The **mailbox / thread surface + agent-inbox** of the Unicorn Commander suite.
 
+**v0.6.0 — LIVE (Wave 1 shipped):** Real triage moves mail in James, JMAP send lane saves copies, security headers, and Forgejo CI.
+
 Email-Ops is the app that **fronts the Apache James mail server** (JMAP) for mailbox state + threads, and owns the **agent inbox** — the human-in-the-loop approval queue for agent-drafted mail. It is the system-of-record for every mailbox, thread, and outbound message it initiated. Transactional outbound routes via **Postmark** (the high-rep deliverability lane); the mailbox read/move path is **Apache James 3.9** (the live MX — James replaced Stalwart in the P-00106 migration; the internal `stalwart/` module name is legacy). (`SUITE-ARCHITECTURE-MAP.md` §2/§3.)
 
 **Golden rule:** *federate the engine, don't reinvent a mail server.* A cockpit (e.g. Customer-Ops) federates Email-Ops over MCP **by `workspace_id`** — it never runs a mail server, never stores a message body, never copies a thread.
