@@ -3,6 +3,7 @@ import { UnauthorizedException } from '@nestjs/common';
 import { User } from '@prisma/client';
 import { AuthService } from './auth.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { TEST_DATABASE_URL } from '../../test/test-db';
 
 /**
  * Identity-resolution locks for the SSO/federation auth path (SUITE-IDENTITY §D1/§D6).
@@ -19,7 +20,9 @@ import { PrismaService } from '../prisma/prisma.service';
  *
  * All DB rows use an `@itest.test` email + `kc-i-…` sub so cleanup is total.
  */
-const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
+// Integration DB URL (verify Postgres). Overridable via TEST_DATABASE_URL (CI service container);
+// defaults to the historical verify DB so local runs are unchanged.
+const DB_URL = TEST_DATABASE_URL;
 
 describe('AuthService.validateKeycloakUser — identity resolution (integration)', () => {
   let prisma: PrismaService;

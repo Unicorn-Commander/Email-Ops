@@ -1,5 +1,6 @@
 import { MailboxAccessLevel } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { TEST_DATABASE_URL } from '../../test/test-db';
 import { AgentsService } from './agents.service';
 
 /**
@@ -9,7 +10,9 @@ import { AgentsService } from './agents.service';
  * repoints the cache to another sendable binding. Distinct workspace so it runs
  * safely in parallel with the other integration specs.
  */
-const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
+// Integration DB URL (verify Postgres). Overridable via TEST_DATABASE_URL (CI service container);
+// defaults to the historical verify DB so local runs are unchanged.
+const DB_URL = TEST_DATABASE_URL;
 
 describe('AgentsService — multi-mailbox bindings (integration)', () => {
   let prisma: PrismaService;

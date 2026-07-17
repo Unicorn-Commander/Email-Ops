@@ -1,5 +1,6 @@
 import { ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { TEST_DATABASE_URL } from '../../test/test-db';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { StalwartDraftRequest, StalwartSendResult, StalwartVacationState } from '../stalwart/stalwart.types';
@@ -18,7 +19,9 @@ import { EmailService } from './email.service';
  * The fake provider HANDLES gmail and returns a sentinel, so a regression that
  * dropped the fence would leak it (and these tests would fail loudly).
  */
-const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
+// Integration DB URL (verify Postgres). Overridable via TEST_DATABASE_URL (CI service container);
+// defaults to the historical verify DB so local runs are unchanged.
+const DB_URL = TEST_DATABASE_URL;
 
 const SENTINEL = {
   id: 'g-t1',

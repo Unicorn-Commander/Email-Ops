@@ -20,6 +20,7 @@ describe('MailTriageController (delegation)', () => {
       username: 'aaron',
       firstName: 'Aaron',
       lastName: 'S',
+      picture: null,
       keycloakId: 'kc-aaron',
       kcRefreshTokenEnc: null,
       kcRefreshUpdatedAt: null,

@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { UiCommandKind, User } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { TEST_DATABASE_URL } from '../../test/test-db';
 import { MembershipService } from '../common/workspace/membership.service';
 import { UiCommandService } from './ui-commands.service';
 import { UiControlTools } from '../mcp/mcp.tools';
@@ -14,7 +15,9 @@ import { UiControlTools } from '../mcp/mcp.tools';
  * stale (>5min) commands are never replayed; and the UiControlTools tool path
  * resolves the workspace + acting ucUid and enqueues the right kind + payload.
  */
-const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
+// Integration DB URL (verify Postgres). Overridable via TEST_DATABASE_URL (CI service container);
+// defaults to the historical verify DB so local runs are unchanged.
+const DB_URL = TEST_DATABASE_URL;
 
 describe('UiCommandService + UiControlTools (integration)', () => {
   let prisma: PrismaService;

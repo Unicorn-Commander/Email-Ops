@@ -21,6 +21,7 @@ describe('AgentsController (delegation + RBAC gate)', () => {
       username: 'aaron',
       firstName: 'Aaron',
       lastName: 'S',
+      picture: null,
       keycloakId: 'kc-sub-aaron',
       kcRefreshTokenEnc: null,
       kcRefreshUpdatedAt: null,
