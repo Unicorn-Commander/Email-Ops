@@ -1265,9 +1265,12 @@ export class JamesClient extends StalwartPort {
     // JMAP receivedAt is UTC ISO-8601 ('…Z') → lexical compare == chronological.
     const maxCursor = refs.reduce((mx, r) => (r.receivedAt > mx ? r.receivedAt : mx), sinceIso ?? '');
 
-    // First poll baselines: capture the cursor, process no backlog.
+    // First poll baselines: capture the cursor, process no backlog. An EMPTY inbox
+    // has no message receivedAt to anchor on — stamp NOW so the cursor is non-null
+    // and the very next arrival is treated as new (else an empty mailbox would
+    // re-baseline forever and never classify its first message).
     if (sinceIso == null) {
-      return { cursor: maxCursor || null, newMessages: [] };
+      return { cursor: maxCursor || new Date().toISOString(), newMessages: [] };
     }
     const newMessages = refs
       .filter((r) => r.receivedAt > sinceIso)

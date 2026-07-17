@@ -279,6 +279,27 @@ describe('JamesClient', () => {
       expect(res).toEqual({ cursor: '2026-02-01T00:00:00Z', newMessages: [] });
     });
 
+    it('pollInbound baselines an EMPTY inbox to a non-null cursor (so the first arrival is classified)', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        const methods = JSON.parse((init as RequestInit).body as string).methodCalls.map((c: any[]) => c[0]);
+        if (methods.length === 1 && methods[0] === 'Mailbox/query') {
+          return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-inbox-1'] }, '0']] });
+        }
+        return jsonResponse({
+          methodResponses: [
+            ['Email/query', { ids: [], total: 0 }, '0'],
+            ['Email/get', { list: [] }, '1'],
+          ],
+        });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+      const res = await client.pollInbound('sales@unicorncommander.ai', null);
+      expect(res?.newMessages).toEqual([]);
+      expect(res?.cursor).toMatch(/^\d{4}-\d{2}-\d{2}T/); // a real ISO timestamp, not null
+    });
+
     it('pollInbound returns only messages newer than the cursor, oldest-first', async () => {
       const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
         if (String(url).endsWith('/session')) return jsonResponse(SESSION);
