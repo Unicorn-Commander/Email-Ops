@@ -1,8 +1,8 @@
 import { NotFoundException } from '@nestjs/common';
 import { MessageDisposition, SenderPolicyKind, SenderPolicyScope, User } from '@prisma/client';
 import { WithWorkspaceClaim } from '../common/workspace/workspace.util';
-import { DispositionService } from './disposition.service';
 import { SenderPolicyService } from './sender-policy.service';
+import { EmailService } from '../email/email.service';
 import { MailTriageController } from './mail-triage.controller';
 
 /**
@@ -35,29 +35,36 @@ describe('MailTriageController (delegation)', () => {
     return u as User;
   }
 
+  // The controller now reconciles the REAL James mailbox via
+  // EmailService.applyThreadDisposition (move + overlay) instead of an
+  // overlay-only DispositionService.setDisposition.
   function make(
-    disposition: Partial<jest.Mocked<DispositionService>>,
+    email: Partial<jest.Mocked<EmailService>>,
     senderPolicy: Partial<jest.Mocked<SenderPolicyService>>,
   ) {
     return new MailTriageController(
-      disposition as unknown as DispositionService,
       senderPolicy as unknown as SenderPolicyService,
+      email as unknown as EmailService,
     );
   }
 
-  it('PUT disposition delegates to setDisposition with the resolved workspace + sub', async () => {
-    const setDisposition = jest.fn().mockResolvedValue({ thread_id: 't1', disposition: 'ARCHIVE' });
-    const out = await make({ setDisposition }, {}).setDisposition(WS, user(), 't1', {
+  it('PUT disposition delegates to applyThreadDisposition (real move + overlay) with the resolved workspace + sub', async () => {
+    const applyThreadDisposition = jest
+      .fn()
+      .mockResolvedValue({ thread_id: 't1', disposition: 'ARCHIVE', moved: true });
+    const out = await make({ applyThreadDisposition }, {}).setDisposition(WS, user(), 't1', {
       disposition: MessageDisposition.ARCHIVE,
     } as never);
-    expect(setDisposition).toHaveBeenCalledWith(WS, 'kc-aaron', 't1', MessageDisposition.ARCHIVE);
+    expect(applyThreadDisposition).toHaveBeenCalledWith(WS, 'kc-aaron', 't1', MessageDisposition.ARCHIVE);
     expect(out.sender_policy).toBeNull();
   });
 
   it('mark SPAM + block_sender fires BOTH the disposition and a BLOCK sender rule', async () => {
-    const setDisposition = jest.fn().mockResolvedValue({ thread_id: 't1', disposition: 'SPAM' });
+    const applyThreadDisposition = jest
+      .fn()
+      .mockResolvedValue({ thread_id: 't1', disposition: 'SPAM', moved: true });
     const set = jest.fn().mockResolvedValue({ id: 'r1', kind: 'BLOCK' });
-    const out = await make({ setDisposition }, { set }).setDisposition(WS, user(), 't1', {
+    const out = await make({ applyThreadDisposition }, { set }).setDisposition(WS, user(), 't1', {
       disposition: MessageDisposition.SPAM,
       block_sender: true,
       sender_address: 'Spammer@Evil.com',
@@ -75,9 +82,11 @@ describe('MailTriageController (delegation)', () => {
   });
 
   it('does NOT touch sender policy when no sender_address is given', async () => {
-    const setDisposition = jest.fn().mockResolvedValue({ thread_id: 't1', disposition: 'TRASH' });
+    const applyThreadDisposition = jest
+      .fn()
+      .mockResolvedValue({ thread_id: 't1', disposition: 'TRASH', moved: false });
     const set = jest.fn();
-    await make({ setDisposition }, { set }).setDisposition(WS, user(), 't1', {
+    await make({ applyThreadDisposition }, { set }).setDisposition(WS, user(), 't1', {
       disposition: MessageDisposition.TRASH,
       block_sender: true, // no sender_address → no-op
     } as never);

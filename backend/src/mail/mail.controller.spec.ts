@@ -1,7 +1,6 @@
 import { BadRequestException, NotFoundException, NotImplementedException } from '@nestjs/common';
 import { MessageDisposition, User } from '@prisma/client';
 import { WithWorkspaceClaim } from '../common/workspace/workspace.util';
-import { DispositionService } from '../mail-triage/disposition.service';
 import { EmailService } from '../email/email.service';
 import { MailController } from './mail.controller';
 
@@ -37,11 +36,8 @@ describe('MailController (webmail wave)', () => {
     return u as User;
   }
 
-  function make(email: Partial<jest.Mocked<EmailService>>, disposition: Partial<jest.Mocked<DispositionService>> = {}) {
-    return new MailController(
-      email as unknown as EmailService,
-      disposition as unknown as DispositionService,
-    );
+  function make(email: Partial<jest.Mocked<EmailService>>) {
+    return new MailController(email as unknown as EmailService);
   }
 
   it('GET :mailboxId/threads passes q + offset (and clamps limit) through to the service', async () => {
@@ -79,23 +75,25 @@ describe('MailController (webmail wave)', () => {
   });
 
   describe('POST threads/bulk', () => {
-    it('disposition actions reuse DispositionService per thread and return succeeded ids', async () => {
-      const setDisposition = jest.fn().mockResolvedValue({ thread_id: 'x', disposition: 'ARCHIVE' });
-      const out = await make({}, { setDisposition }).bulk(WS, user(), {
+    it('disposition actions reconcile James per thread (applyThreadDisposition) and return succeeded ids', async () => {
+      const applyThreadDisposition = jest
+        .fn()
+        .mockResolvedValue({ thread_id: 'x', disposition: 'ARCHIVE', moved: true });
+      const out = await make({ applyThreadDisposition }).bulk(WS, user(), {
         thread_ids: ['t1', 't2'],
         action: 'archive',
       });
-      expect(setDisposition).toHaveBeenCalledTimes(2);
-      expect(setDisposition).toHaveBeenCalledWith(WS, 'kc-aaron', 't1', MessageDisposition.ARCHIVE);
+      expect(applyThreadDisposition).toHaveBeenCalledTimes(2);
+      expect(applyThreadDisposition).toHaveBeenCalledWith(WS, 'kc-aaron', 't1', MessageDisposition.ARCHIVE);
       expect(out).toEqual({ succeeded: ['t1', 't2'], failed: [] });
     });
 
     it('one failing thread lands in failed[] without failing the batch', async () => {
-      const setDisposition = jest
+      const applyThreadDisposition = jest
         .fn()
-        .mockResolvedValueOnce({ thread_id: 't1' })
+        .mockResolvedValueOnce({ thread_id: 't1', disposition: 'TRASH', moved: true })
         .mockRejectedValueOnce(new Error('boom'));
-      const out = await make({}, { setDisposition }).bulk(WS, user(), {
+      const out = await make({ applyThreadDisposition }).bulk(WS, user(), {
         thread_ids: ['t1', 't2'],
         action: 'trash',
       });

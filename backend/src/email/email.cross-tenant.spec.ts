@@ -5,6 +5,7 @@ import { StalwartPort } from '../stalwart/stalwart.port';
 import { StalwartDraftRequest, StalwartSendResult, StalwartVacationState } from '../stalwart/stalwart.types';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { EmailService } from './email.service';
+import { TEST_DATABASE_URL } from '../../test/test-db';
 
 /** A sovereign-only fake provider: handles() false → the Stalwart path is used. */
 const fakeMailProvider = {
@@ -24,7 +25,7 @@ const fakeMailProvider = {
  *   - send-identity spoofing: composeEmail must refuse to send AS a HUMAN mailbox
  *     the caller doesn't own.
  */
-const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
+const DB_URL = TEST_DATABASE_URL;
 
 class FakeStalwart extends StalwartPort {
   isConfigured(): boolean {

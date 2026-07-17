@@ -18,6 +18,7 @@ import {
 } from '../stalwart/stalwart.types';
 import { EmailService } from './email.service';
 import { AgentAutonomyLevel } from '@prisma/client';
+import { TEST_DATABASE_URL } from '../../test/test-db';
 
 /**
  * EmailService is the Email-Ops SoR + the EmailOpsPort contract + the agent-inbox
@@ -47,7 +48,7 @@ import { AgentAutonomyLevel } from '@prisma/client';
  * the NOBYPASSRLS email_ops_app role.
  */
 
-const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
+const DB_URL = TEST_DATABASE_URL;
 
 // A configurable fake mail engine.
 class FakeStalwart extends StalwartPort {
