@@ -17,8 +17,8 @@ https://email-ops.magicunicorn.dev/api/v1/mcp
   `POST`/`GET`/`DELETE` on `/api/v1/mcp`.
 - **Stateless:** each request re-authenticates and mints a per-request server
   scoped to the caller; the client supplies its own session framing.
-- Rate-limiting is skipped on this route (agent traffic), but auth + the
-  workspace membership gate + the compose entitlement are always enforced.
+- Rate-limiting **applies** to this route (the global throttler), alongside auth,
+  the workspace membership gate, and the compose entitlement.
 
 ## Authentication
 
