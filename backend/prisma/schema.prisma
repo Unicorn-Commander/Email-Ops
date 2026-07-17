@@ -382,6 +382,7 @@ model Workspace {
   mailSignatures    MailSignature[]
   mailVacationSettings MailVacationSetting[]
   mailContacts      MailContact[]
+  mailDomains       MailDomain[]
   emailMessages     EmailMessage[]
   smsAccounts       SmsAccount[]
   smsMessages       SmsMessage[]
@@ -830,6 +831,29 @@ model SenderPolicy {
   @@unique([workspaceId, scope, pattern])
   @@index([workspaceId, kind])
   @@map("sender_policies")
+}
+
+// ============================================================
+// MAIL DOMAIN (Email-Ops OWNS this — tenant-scoped engine binding)
+// ============================================================
+//
+// The control-plane ownership boundary for the shared mail engine. A domain is
+// globally unique, so it can be bound to exactly one workspace. Every access is
+// also RLS-fenced on workspaceId; the global unique constraint is used only to
+// reject a competing claim, never to read the other workspace's row.
+model MailDomain {
+  id          String   @id @default(uuid())
+  workspaceId String
+  domain      String
+  verified    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([domain])
+  @@index([workspaceId])
+  @@map("mail_domains")
 }
 
 // ============================================================

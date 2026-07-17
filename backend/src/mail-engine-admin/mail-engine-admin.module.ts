@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MailEngineAdminPort } from './mail-engine-admin.port';
 import { JamesAdminClient } from './james-admin.client';
+import { MailDomainService } from './mail-domain.service';
 
 /**
  * The mail-engine ADMIN (provisioning / control-plane) seam. Binds the
@@ -11,7 +12,7 @@ import { JamesAdminClient } from './james-admin.client';
  * REGISTERED), so this module is always safe to import.
  */
 @Module({
-  providers: [{ provide: MailEngineAdminPort, useClass: JamesAdminClient }],
-  exports: [MailEngineAdminPort],
+  providers: [MailDomainService, { provide: MailEngineAdminPort, useClass: JamesAdminClient }],
+  exports: [MailDomainService, MailEngineAdminPort],
 })
 export class MailEngineAdminModule {}

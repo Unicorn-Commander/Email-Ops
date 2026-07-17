@@ -58,8 +58,9 @@ export abstract class MailEngineAdminPort {
    * Mint (or confirm) a real engine account for `address`: ensures the domain
    * exists, creates the login (with `password`, or a generated one when null and
    * auth is delegated to OIDC), ensures the standard mailboxes, and applies the
-   * optional size quota. Idempotent — re-running a provisioned address is a no-op
-   * that still reports `provisioned:true`.
+   * size quota (5 GiB by default; explicit null opts out of quota application).
+   * Idempotent — re-running a provisioned address is a no-op that still reports
+   * `provisioned:true`.
    */
   abstract ensureAccount(
     address: string,

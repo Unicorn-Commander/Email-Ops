@@ -31,6 +31,7 @@ import { DispositionService } from '../mail-triage/disposition.service';
 import { SenderPolicyService } from '../mail-triage/sender-policy.service';
 import { UiCommandService } from '../ui-commands/ui-commands.service';
 import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
+import { MailDomainService } from '../mail-engine-admin/mail-domain.service';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
@@ -53,6 +54,7 @@ export class McpService {
     private readonly senderPolicy: SenderPolicyService,
     private readonly uiCommands: UiCommandService,
     private readonly admin: MailEngineAdminPort,
+    private readonly mailDomains: MailDomainService,
   ) {}
 
   /**
@@ -106,6 +108,7 @@ export class McpService {
       this.disposition,
       this.senderPolicy,
       this.admin,
+      this.mailDomains,
     );
     const connectedTools = new ConnectedAccountsTools(this.membership, this.connectedAccounts);
     const uiTools = new UiControlTools(this.membership, this.uiCommands);
@@ -633,8 +636,9 @@ export class McpService {
       {
         title: 'List mail engine domains',
         description:
-          'List the domains the sovereign mail engine (Apache James) currently serves. ' +
-          'Read-only / member-level. Returns { domains: [{ domain }] } or ' +
+          'List only the caller workspace’s bound domains that the sovereign mail engine ' +
+          '(Apache James) currently serves. Read-only / member-level. Returns ' +
+          '{ domains: [{ domain }] } or ' +
           '{ status:"engine_not_configured" } when no WebAdmin endpoint is wired.',
         inputSchema: {
           workspace_id: z.string().optional(),
@@ -648,8 +652,8 @@ export class McpService {
       {
         title: 'List mail engine accounts',
         description:
-          'List the accounts (mailbox logins) the mail engine hosts. Read-only / ' +
-          'member-level. Returns { accounts: [{ address }] } or ' +
+          'List only engine accounts (mailbox logins) under the caller workspace’s bound ' +
+          'domains. Read-only / member-level. Returns { accounts: [{ address }] } or ' +
           '{ status:"engine_not_configured" } when no WebAdmin endpoint is wired.',
         inputSchema: {
           workspace_id: z.string().optional(),
@@ -663,8 +667,9 @@ export class McpService {
       {
         title: 'Ensure a domain on the mail engine',
         description:
-          'Add a domain to the mail engine if it is not already served (idempotent). ' +
-          'OWNER-only — returns { status:"forbidden" } for any lower role. ' +
+          'Claim a domain for the caller workspace, then add it to the mail engine if it ' +
+          'is not already served (idempotent). A domain claimed by another workspace ' +
+          'returns a conflict. OWNER-only — returns { status:"forbidden" } for any lower role. ' +
           'Returns { status:"ok"|"failed"|"engine_not_configured", result }.',
         inputSchema: {
           workspace_id: z.string().optional(),
@@ -680,6 +685,7 @@ export class McpService {
         title: 'Remove a domain from the mail engine',
         description:
           'Remove a domain from the mail engine (idempotent). OWNER-only. ' +
+          'The domain must already be bound to the caller workspace. ' +
           'Call only when you are certain no active accounts remain under this domain. ' +
           'Returns { status:"ok"|"failed"|"engine_not_configured", result }.',
         inputSchema: {
@@ -696,13 +702,14 @@ export class McpService {
         title: 'Set mailbox storage quota',
         description:
           'Set (or clear) the storage quota for an engine mailbox account. OWNER-only. ' +
-          'quota_bytes: positive integer in bytes (e.g. 5368709120 = 5 GiB); pass null ' +
+          'The address domain must be bound to the caller workspace. ' +
+          'quota_bytes defaults to 5368709120 bytes (5 GiB); pass null ' +
           'to remove the quota limit entirely. Returns ' +
           '{ status:"ok"|"failed"|"engine_not_configured", result }.',
         inputSchema: {
           workspace_id: z.string().optional(),
           address: z.string().email(),
-          quota_bytes: z.number().int().nonnegative().nullable(),
+          quota_bytes: z.number().int().nonnegative().nullable().optional(),
         },
       },
       async (args: any) => wrap(await tools.setMailboxQuota(user, args)),
@@ -714,6 +721,7 @@ export class McpService {
         title: 'Remove engine mailbox account',
         description:
           'Remove the mail-server account for an address (idempotent). OWNER-only. ' +
+          'The address domain must be bound to the caller workspace. ' +
           'Tears down the engine login and storage ONLY — does NOT delete the SoR ' +
           'MailboxAccount row or stored message records. Use for clean-ups after the ' +
           'SoR row has already been deleted or when re-provisioning from scratch. ' +

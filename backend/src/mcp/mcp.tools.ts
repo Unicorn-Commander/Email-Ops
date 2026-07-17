@@ -57,6 +57,8 @@ import {
 } from '../connected-accounts/connected-accounts.types';
 import { UiCommandService } from '../ui-commands/ui-commands.service';
 import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
+import { MailDomainService } from '../mail-engine-admin/mail-domain.service';
+import { DEFAULT_MAILBOX_QUOTA_BYTES } from '../mail-engine-admin/mail-engine-admin.constants';
 
 export class EmailOpsTools {
   constructor(
@@ -69,6 +71,7 @@ export class EmailOpsTools {
     private readonly disposition: DispositionService,
     private readonly senderPolicy: SenderPolicyService,
     private readonly admin: MailEngineAdminPort,
+    private readonly mailDomains: MailDomainService,
   ) {}
 
   /** Health/info — safe for any authenticated caller. */
@@ -484,28 +487,50 @@ export class EmailOpsTools {
   // Read tools are member-level (resolve-and-authorize the workspace).
   // Write tools are OWNER-only — the role is re-derived server-side via
   // resolveWithRole; when tenancy is OFF the single-tenant operator always
-  // carries OWNER. All degrade-clean: engine_not_configured when no admin
-  // endpoint is wired; never throw.
+  // carries OWNER. Engine access remains degrade-clean when no admin endpoint
+  // is wired; tenant-boundary violations fail closed before any engine call.
 
-  /** List the domains the mail engine currently serves (member-level read). */
+  /** List engine domains bound to this workspace (member-level read). */
   async listMailDomains(
     user: User,
     args: { workspace_id?: string },
   ): Promise<{ domains: unknown[] } | { status: string }> {
-    await this.resolve(user, args.workspace_id);
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const bindings = await this.mailDomains.listDomains(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+    );
     if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
-    const domains = await this.admin.listDomains();
+    const owned = new Set(bindings.map((binding) => binding.domain));
+    const domains = (await this.admin.listDomains()).filter((item) => {
+      try {
+        return owned.has(this.mailDomains.canonicalDomain(item.domain));
+      } catch {
+        return false;
+      }
+    });
     return { domains };
   }
 
-  /** List the engine-hosted accounts (member-level read). */
+  /** List engine-hosted accounts under this workspace's bound domains. */
   async listMailAccounts(
     user: User,
     args: { workspace_id?: string },
   ): Promise<{ accounts: unknown[] } | { status: string }> {
-    await this.resolve(user, args.workspace_id);
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const bindings = await this.mailDomains.listDomains(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+    );
     if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
-    const accounts = await this.admin.listAccounts();
+    const owned = new Set(bindings.map((binding) => binding.domain));
+    const accounts = (await this.admin.listAccounts()).filter((item) => {
+      try {
+        return owned.has(this.mailDomains.domainOf(item.address));
+      } catch {
+        return false;
+      }
+    });
     return { accounts };
   }
 
@@ -514,13 +539,18 @@ export class EmailOpsTools {
     user: User,
     args: { workspace_id?: string; domain: string },
   ): Promise<{ status: string; result?: unknown }> {
-    const { role } = await this.membership.resolveWithRole(
+    const { workspaceId, role } = await this.membership.resolveWithRole(
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
     if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    const binding = await this.mailDomains.bindDomain(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.domain,
+    );
     if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
-    const result = await this.admin.ensureDomain(args.domain);
+    const result = await this.admin.ensureDomain(binding.domain);
     return { status: result.provisioned ? 'ok' : 'failed', result };
   }
 
@@ -529,28 +559,40 @@ export class EmailOpsTools {
     user: User,
     args: { workspace_id?: string; domain: string },
   ): Promise<{ status: string; result?: unknown }> {
-    const { role } = await this.membership.resolveWithRole(
+    const { workspaceId, role } = await this.membership.resolveWithRole(
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
     if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    const binding = await this.mailDomains.assertWorkspaceOwnsDomain(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.domain,
+    );
     if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
-    const result = await this.admin.removeDomain(args.domain);
+    const result = await this.admin.removeDomain(binding.domain);
     return { status: result.provisioned ? 'ok' : 'failed', result };
   }
 
   /** Set a per-account storage quota in bytes (OWNER-only; pass null to clear). */
   async setMailboxQuota(
     user: User,
-    args: { workspace_id?: string; address: string; quota_bytes: number | null },
+    args: { workspace_id?: string; address: string; quota_bytes?: number | null },
   ): Promise<{ status: string; result?: unknown }> {
-    const { role } = await this.membership.resolveWithRole(
+    const { workspaceId, role } = await this.membership.resolveWithRole(
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
     if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    await this.mailDomains.assertWorkspaceOwnsDomain(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      this.mailDomains.domainOf(args.address),
+    );
     if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
-    const result = await this.admin.setQuota(args.address, args.quota_bytes ?? null);
+    const quotaBytes =
+      args.quota_bytes === undefined ? DEFAULT_MAILBOX_QUOTA_BYTES : args.quota_bytes;
+    const result = await this.admin.setQuota(args.address, quotaBytes);
     return { status: result.provisioned ? 'ok' : 'failed', result };
   }
 
@@ -565,11 +607,16 @@ export class EmailOpsTools {
     user: User,
     args: { workspace_id?: string; address: string },
   ): Promise<{ status: string; result?: unknown }> {
-    const { role } = await this.membership.resolveWithRole(
+    const { workspaceId, role } = await this.membership.resolveWithRole(
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
     if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    await this.mailDomains.assertWorkspaceOwnsDomain(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      this.mailDomains.domainOf(args.address),
+    );
     if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
     const result = await this.admin.removeAccount(args.address);
     return { status: result.provisioned ? 'ok' : 'failed', result };

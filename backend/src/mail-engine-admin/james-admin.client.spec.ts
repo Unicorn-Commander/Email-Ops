@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { JamesAdminClient } from './james-admin.client';
+import { DEFAULT_MAILBOX_QUOTA_BYTES } from './mail-engine-admin.constants';
 
 /**
  * JamesAdminClient is the degrade-clean mail-engine ADMIN adapter (James
@@ -96,6 +97,21 @@ describe('JamesAdminClient', () => {
       // quota applied as a raw integer body
       const quotaCall = calls.find((c) => /\/quota\/users\/.+\/size$/.test(c.url));
       expect(quotaCall!.init.body).toBe('1073741824');
+    });
+
+    it('ensureAccount applies the 5 GiB default quota when none is specified', async () => {
+      const fetchSpy = jest.fn().mockResolvedValue(statusResponse(204));
+      global.fetch = fetchSpy as any;
+      const client = new JamesAdminClient(makeConfig(CONFIGURED));
+
+      await expect(client.ensureAccount('alice@acme.test')).resolves.toMatchObject({
+        provisioned: true,
+      });
+
+      const quotaCall = fetchSpy.mock.calls.find((call) =>
+        /\/quota\/users\/.+\/size$/.test(call[0] as string),
+      );
+      expect(quotaCall?.[1].body).toBe(String(DEFAULT_MAILBOX_QUOTA_BYTES));
     });
 
     it('listDomains maps the string array', async () => {

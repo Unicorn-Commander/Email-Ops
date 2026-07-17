@@ -28,6 +28,7 @@ import {
   EngineProvisionResult,
   MailEngineAdminPort,
 } from './mail-engine-admin.port';
+import { DEFAULT_MAILBOX_QUOTA_BYTES } from './mail-engine-admin.constants';
 
 /** The standard mailboxes minted on a fresh account (parity with the suite UI). */
 const STANDARD_MAILBOXES = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Archive', 'Spam'];
@@ -197,8 +198,10 @@ export class JamesAdminClient extends MailEngineAdminPort {
       await this.req('PUT', `/users/${this.seg(address)}/mailboxes/${this.seg(mb)}`);
     }
 
-    if (opts?.quotaBytes != null) {
-      await this.setQuota(address, opts.quotaBytes);
+    const quotaBytes =
+      opts?.quotaBytes === undefined ? DEFAULT_MAILBOX_QUOTA_BYTES : opts.quotaBytes;
+    if (quotaBytes != null) {
+      await this.setQuota(address, quotaBytes);
     }
     return { provisioned: true, reason: null };
   }
