@@ -15,7 +15,15 @@ import { cn } from '@/components/ui';
 import { WorkspaceSwitcher } from '@/components/WorkspaceSwitcher';
 import { AccountMenu } from '@/components/account/AccountMenu';
 import { useTheme } from '@/state/theme';
-import { SearchIcon, PlusIcon, SunIcon, MoonIcon, RobotIcon, ChevronRightIcon } from './icons';
+import {
+  SearchIcon,
+  PlusIcon,
+  SunIcon,
+  MoonIcon,
+  RobotIcon,
+  RefreshIcon,
+  ChevronRightIcon,
+} from './icons';
 
 export function MailTopBar({
   query,
@@ -28,6 +36,8 @@ export function MailTopBar({
   agentsPaused,
   onTogglePause,
   activeAgentCount,
+  onRefresh,
+  refreshing,
   onCompose,
   canCompose,
   onHelp,
@@ -44,6 +54,10 @@ export function MailTopBar({
   onTogglePause: () => void;
   /** How many active agents there are (null = unknown → generic label). */
   activeAgentCount: number | null;
+  /** Refetch the current mailbox view + counts (new-mail arrival). */
+  onRefresh: () => void;
+  /** True while a refresh is in flight — spins the icon. */
+  refreshing: boolean;
   onCompose: () => void;
   canCompose: boolean;
   /** Open the command-center Help dialog (the same one the `?` key opens). */
@@ -165,6 +179,16 @@ export function MailTopBar({
           )}
         >
           <RobotIcon className="h-[17px] w-[17px]" />
+        </button>
+
+        <button
+          type="button"
+          onClick={onRefresh}
+          aria-label="Refresh"
+          title="Refresh mail"
+          className="grid h-8 w-8 place-items-center rounded-lg border border-transparent text-secondary transition-colors hover:bg-surface-overlay hover:text-primary"
+        >
+          <RefreshIcon className={cn('h-[17px] w-[17px]', refreshing && 'animate-spin')} />
         </button>
 
         <button
