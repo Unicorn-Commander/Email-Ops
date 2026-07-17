@@ -717,6 +717,14 @@ model EmailMessage {
   // received mail is in `preview`; full received bodies stay in Stalwart.
   body              String?
   preview           String?
+  // The FULL composed payload, persisted so an APPROVED staged draft sends EXACTLY
+  // what the approver reviewed. Before this, cc/bcc/html/attachments were dropped
+  // on approve (the approval-fidelity fix). Empty arrays / null when not applicable.
+  toAddresses       String[]
+  ccAddresses       String[]
+  bccAddresses      String[]
+  bodyHtml          String?
+  attachments       Json?
   // Inbound spam classification stamped by the SpamPort once the mail engine
   // produces a verdict (e.g. an rspamd/SpamAssassin score + a normalized verdict
   // 'clean'|'spam'|'unsure'). NULL until the engine is live (honest — no fiction

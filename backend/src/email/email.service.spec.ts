@@ -527,6 +527,36 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       expect(msg?.providerMessageId).toBe('prov-1');
     });
 
+    it('APPROVE sends EXACTLY what was staged — cc/bcc/html/attachments survive (approval-fidelity)', async () => {
+      const ref = `fidelity-${Date.now()}`;
+      const draft = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'primary@acme.test',
+        toAddresses: ['primary@acme.test', 'second@acme.test'],
+        cc: ['cc1@acme.test'],
+        bcc: ['bcc1@acme.test'],
+        subject: 'Full payload',
+        body: 'plain body',
+        bodyHtml: '<p>rich body</p>',
+        attachments: [{ blobId: 'blob-9', name: 'deck.pdf', type: 'application/pdf' }],
+        mode: 'draft',
+        externalSource: 'customer-ops',
+        externalRef: ref,
+      });
+      const item = await prisma.agentInboxItem.findUniqueOrThrow({ where: { messageId: draft.id } });
+
+      await service.approveAgentInboxItem(WS, 'uc-approver', item.id, 'ship it');
+      expect(stalwart.sendCalls).toHaveLength(1);
+      const sent = stalwart.sendCalls[0].req;
+      // The approved send carries the FULL payload the approver reviewed — not a
+      // stripped plain-text-only version.
+      expect(sent.toAddresses).toEqual(['primary@acme.test', 'second@acme.test']);
+      expect(sent.cc).toEqual(['cc1@acme.test']);
+      expect(sent.bcc).toEqual(['bcc1@acme.test']);
+      expect(sent.bodyHtml).toBe('<p>rich body</p>');
+      expect(sent.attachments).toEqual([{ blobId: 'blob-9', name: 'deck.pdf', type: 'application/pdf' }]);
+    });
+
     it('REJECT marks the message REJECTED and never sends', async () => {
       const ref = `rej-${Date.now()}`;
       const draft = await service.composeEmail(WS, UC_UID, {

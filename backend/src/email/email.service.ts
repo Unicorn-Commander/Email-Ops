@@ -911,6 +911,30 @@ export class EmailService {
     return threads.filter((t) => (by.get(t.id) ?? MessageDisposition.INBOX) === want);
   }
 
+  /**
+   * Parse the JSON attachments persisted on a staged draft back into the send
+   * lane's `{ blobId, name, type }[]` shape — so an approved draft re-sends the
+   * exact attachments the approver reviewed. Tolerant: garbage → undefined.
+   */
+  private parseStoredAttachments(
+    raw: Prisma.JsonValue | null | undefined,
+  ): { blobId: string; name: string; type: string }[] | undefined {
+    if (!Array.isArray(raw)) return undefined;
+    const out: { blobId: string; name: string; type: string }[] = [];
+    for (const item of raw) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const a = item as Record<string, unknown>;
+      const blobId = String(a.blobId ?? '');
+      if (!blobId) continue;
+      out.push({
+        blobId,
+        name: String(a.name ?? ''),
+        type: String(a.type ?? 'application/octet-stream'),
+      });
+    }
+    return out.length ? out : undefined;
+  }
+
   async emptyMailboxFolder(
     workspaceId: string,
     ucUid: string | null,
@@ -1130,6 +1154,14 @@ export class EmailService {
               subject: input.subject,
               body: input.body,
               preview: this.snippet(input.body),
+              // Persist the FULL payload so approval sends exactly what was reviewed.
+              toAddresses: input.toAddresses?.length ? input.toAddresses : [],
+              ccAddresses: input.cc ?? [],
+              bccAddresses: input.bcc ?? [],
+              bodyHtml: input.bodyHtml ?? null,
+              attachments: input.attachments?.length
+                ? (input.attachments as unknown as Prisma.InputJsonValue)
+                : Prisma.DbNull,
               actorUcUid: ucUid,
             },
           });
@@ -1181,6 +1213,13 @@ export class EmailService {
             subject: input.subject,
             body: input.body,
             preview: this.snippet(input.body),
+            toAddresses: input.toAddresses?.length ? input.toAddresses : [],
+            ccAddresses: input.cc ?? [],
+            bccAddresses: input.bcc ?? [],
+            bodyHtml: input.bodyHtml ?? null,
+            attachments: input.attachments?.length
+              ? (input.attachments as unknown as Prisma.InputJsonValue)
+              : Prisma.DbNull,
             actorUcUid: ucUid,
           },
         });
@@ -1481,8 +1520,16 @@ export class EmailService {
             fromAddress: item.message.fromAddress ?? mailbox?.emailAddress ?? item.message.toAddress!,
             fromName: mailbox?.displayName ?? null,
             toAddress: item.message.toAddress!,
+            // Rebuild the FULL payload the approver reviewed — cc/bcc/multi-recipient/
+            // html/attachments were persisted at stage time (the approval-fidelity fix);
+            // sending without them would deliver less than was approved.
+            toAddresses: item.message.toAddresses?.length ? item.message.toAddresses : undefined,
+            cc: item.message.ccAddresses?.length ? item.message.ccAddresses : undefined,
+            bcc: item.message.bccAddresses?.length ? item.message.bccAddresses : undefined,
             subject: item.message.subject ?? '',
             body: item.message.body ?? '',
+            bodyHtml: item.message.bodyHtml ?? null,
+            attachments: this.parseStoredAttachments(item.message.attachments),
             inReplyToThreadId: item.message.inReplyToThreadId ?? null,
             transactional: mailbox?.postmarkLane ?? true,
           },
