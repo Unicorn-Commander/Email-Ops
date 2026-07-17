@@ -431,6 +431,70 @@ export class EmailOpsTools {
     return { succeeded, failed };
   }
 
+  // ── custom folders / labels (per-mailbox, James JMAP) ──────────────────
+  // Thin wrappers over the SAME EmailService folder methods the human mail BFF
+  // uses — one RLS path, degrade-clean. A folder is a per-mailbox object, so
+  // every tool takes a mailbox_id.
+
+  /** List a mailbox's folders (system role + custom) — the agent's folder rail. */
+  async listFolders(
+    user: User,
+    args: { workspace_id?: string; mailbox_id: string },
+  ): Promise<{ folders: unknown[]; count: number }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const folders = await this.email.listMailboxFolders(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.mailbox_id,
+    );
+    return { folders, count: folders.length };
+  }
+
+  /** Create a custom folder (optionally nested under parent_id). */
+  async createFolder(
+    user: User,
+    args: { workspace_id?: string; mailbox_id: string; name: string; parent_id?: string },
+  ): Promise<{ id: string | null; created: boolean }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const created = await this.email.createMailboxFolder(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.mailbox_id,
+      args.name,
+      args.parent_id?.trim() || null,
+    );
+    return { id: created?.id ?? null, created: !!created };
+  }
+
+  /** Rename a custom folder. */
+  async renameFolder(
+    user: User,
+    args: { workspace_id?: string; mailbox_id: string; folder_id: string; name: string },
+  ): Promise<{ updated: boolean }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.email.renameMailboxFolder(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.mailbox_id,
+      args.folder_id,
+      args.name,
+    );
+  }
+
+  /** Delete a CUSTOM folder — a system/role folder is refused (deleted:false). */
+  async deleteFolder(
+    user: User,
+    args: { workspace_id?: string; mailbox_id: string; folder_id: string },
+  ): Promise<{ deleted: boolean }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.email.deleteMailboxFolder(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.mailbox_id,
+      args.folder_id,
+    );
+  }
+
   // ── agent-inbox approval tools ─────────────────────────────────────────
 
   async listAgentInbox(

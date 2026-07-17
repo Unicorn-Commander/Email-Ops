@@ -130,6 +130,16 @@ class EmptyFolderDto {
   @IsBoolean() confirm!: boolean;
 }
 
+class CreateFolderDto {
+  @IsString() @MaxLength(200) name!: string;
+  /** Optional parent folder id, to nest the new folder. */
+  @IsOptional() @IsString() @MaxLength(500) parent_id?: string;
+}
+
+class RenameFolderDto {
+  @IsString() @MaxLength(200) name!: string;
+}
+
 class BulkThreadsDto {
   @IsArray() @ArrayMaxSize(200) @IsString({ each: true }) thread_ids!: string[];
   @IsIn(BULK_ACTIONS) action!: BulkThreadAction;
@@ -345,6 +355,87 @@ export class MailController {
       ucUidOf(user as WithWorkspaceClaim),
       mailboxId,
       folder,
+    );
+  }
+
+  @Get(':mailboxId/folders')
+  @ApiOperation({ summary: 'List every folder (system role + custom) under the mailbox — the folder rail / move-to menu.' })
+  @ApiResponse({ status: 200, description: '{ folders: [{ id, name, role, parentId, unread? }] }. [] when the engine is dormant or external.' })
+  async listFolders(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+  ) {
+    const folders = await this.email.listMailboxFolders(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      mailboxId,
+    );
+    return { folders, count: folders.length };
+  }
+
+  @Post(':mailboxId/folders')
+  @ApiOperation({ summary: 'Create a custom folder (optionally nested under parent_id).' })
+  @ApiResponse({ status: 201, description: '{ id } of the new folder.' })
+  @ApiResponse({ status: 501, description: 'The mail engine cannot create folders (dormant or external mailbox).' })
+  async createFolder(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Body() body: CreateFolderDto,
+  ) {
+    const name = body.name.trim();
+    if (!name) throw new BadRequestException('Folder name is required.');
+    const created = await this.email.createMailboxFolder(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      mailboxId,
+      name,
+      body.parent_id?.trim() || null,
+    );
+    if (!created) {
+      throw new NotImplementedException(
+        'The mail engine cannot create folders right now (dormant or external mailbox).',
+      );
+    }
+    return created;
+  }
+
+  @Patch(':mailboxId/folders/:folderId')
+  @ApiOperation({ summary: 'Rename a custom folder.' })
+  @ApiResponse({ status: 200, description: '{ updated } — updated:false = the engine could not apply it.' })
+  async renameFolder(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Param('folderId') folderId: string,
+    @Body() body: RenameFolderDto,
+  ) {
+    const name = body.name.trim();
+    if (!name) throw new BadRequestException('Folder name is required.');
+    return this.email.renameMailboxFolder(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      mailboxId,
+      folderId,
+      name,
+    );
+  }
+
+  @Delete(':mailboxId/folders/:folderId')
+  @ApiOperation({ summary: 'Delete a CUSTOM folder. System/role folders (Inbox/Sent/Archive/Trash/Junk/Drafts) are never deletable.' })
+  @ApiResponse({ status: 200, description: '{ deleted } — deleted:false = a role folder was refused, or it is unknown/external/dormant.' })
+  async deleteFolder(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Param('folderId') folderId: string,
+  ) {
+    return this.email.deleteMailboxFolder(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      mailboxId,
+      folderId,
     );
   }
 

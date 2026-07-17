@@ -441,6 +441,80 @@ export class McpService {
       async (args: any) => wrap(await tools.bulkDisposition(user, args)),
     );
 
+    // ── Custom folders / labels (per-mailbox, James JMAP) ──
+    // The agent's folder rail: list, create, rename, delete custom folders.
+    // Member-level; degrade-clean (dormant/external mailbox → []/false).
+
+    server.registerTool(
+      'list_folders',
+      {
+        title: 'List mailbox folders',
+        description:
+          'List every folder in a mailbox — the system role folders (Inbox/Sent/Archive/' +
+          'Trash/Junk/Drafts, role non-null) AND user-created custom folders (role null). ' +
+          'Read-only / member-level. Returns { folders: [{ id, name, role, parentId, ' +
+          'unread? }], count } — an empty list when the engine is dormant or the mailbox is ' +
+          'external.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await tools.listFolders(user, args)),
+    );
+
+    server.registerTool(
+      'create_folder',
+      {
+        title: 'Create a custom folder',
+        description:
+          'Create a custom folder in a mailbox, optionally nested under parent_id. ' +
+          'Member-level write. Returns { id, created } — created:false when the engine ' +
+          'is dormant or the mailbox is external (no throw).',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          name: z.string().min(1).max(200),
+          parent_id: z.string().max(500).optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.createFolder(user, args)),
+    );
+
+    server.registerTool(
+      'rename_folder',
+      {
+        title: 'Rename a custom folder',
+        description:
+          'Rename a folder by id. Member-level write. Returns { updated } — updated:false ' +
+          'when the id is unknown, the engine is dormant, or the mailbox is external.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          folder_id: z.string().min(1),
+          name: z.string().min(1).max(200),
+        },
+      },
+      async (args: any) => wrap(await tools.renameFolder(user, args)),
+    );
+
+    server.registerTool(
+      'delete_folder',
+      {
+        title: 'Delete a custom folder',
+        description:
+          'Delete a CUSTOM folder by id. A system/role folder (Inbox/Sent/Archive/Trash/' +
+          'Junk/Drafts) is NEVER deletable — the engine refuses it. Member-level write. ' +
+          'Returns { deleted } — deleted:false when refused, unknown, dormant, or external.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          folder_id: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await tools.deleteFolder(user, args)),
+    );
+
     // ── Connected-accounts / Cleaner Engine tools ──
 
     server.registerTool(

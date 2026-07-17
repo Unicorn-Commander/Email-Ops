@@ -588,6 +588,136 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
       "read_only": false
     },
     {
+      "name": "list_folders",
+      "description": "List every folder in a mailbox - the system role folders (Inbox/Sent/Archive/Trash/Junk/Drafts, role non-null) AND user-created custom folders (role null). Read-only / member-level. Returns { folders: [{ id, name, role, parentId, unread? }], count } - an empty list when the engine is dormant or the mailbox is external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "create_folder",
+      "description": "Create a custom folder in a mailbox, optionally nested under parent_id. Member-level write; runs AS the calling user. Returns { id, created } - created:false when the engine is dormant or the mailbox is external (never a 500).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "parent_id": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "name"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:triage"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "rename_folder",
+      "description": "Rename a custom folder by id. Member-level write; runs AS the calling user. Returns { updated } - updated:false when the id is unknown, the engine is dormant, or the mailbox is external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "folder_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "folder_id",
+          "name"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:triage"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "delete_folder",
+      "description": "Delete a CUSTOM folder by id. A system/role folder (Inbox/Sent/Archive/Trash/Junk/Drafts) is NEVER deletable - the engine refuses it. Member-level write; runs AS the calling user. Returns { deleted } - deleted:false when refused, unknown, dormant, or external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "folder_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "folder_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:triage"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
       "name": "list_connected_accounts",
       "description": "List whether the caller has linked Gmail or Microsoft in Keycloak. Viewer-level; no SKU gate. Returns { accounts: [{ provider, linked }] }.",
       "input_schema": {

@@ -47,7 +47,7 @@ import {
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
-import { StalwartDraftRequest, StalwartMessageDetail, StalwartThread } from '../stalwart/stalwart.types';
+import { StalwartDraftRequest, StalwartMailFolder, StalwartMessageDetail, StalwartThread } from '../stalwart/stalwart.types';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import {
   AgentInboxView,
@@ -947,6 +947,64 @@ export class EmailService {
     }
     const purged = await this.stalwart.emptyFolder(mailbox.emailAddress, folder);
     return { folder, purged: purged ?? 0, updated: purged != null };
+  }
+
+  // --- custom folders / labels (James JMAP Mailbox CRUD) ------------------
+  // All folder ops are James-only + workspace-scoped: resolve the mailbox for
+  // the caller, refuse an external-provider (Gmail/M365) mailbox, then delegate
+  // to the engine. Degrade-clean throughout (unresolved/dormant → []/null/false).
+
+  /** Every folder (system role + custom) under one workspace mailbox. */
+  async listMailboxFolders(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+  ): Promise<StalwartMailFolder[]> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) return [];
+    return this.stalwart.listFolders(mailbox.emailAddress);
+  }
+
+  /** Create a custom folder under one workspace mailbox. */
+  async createMailboxFolder(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    name: string,
+    parentId: string | null,
+  ): Promise<{ id: string } | null> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) return null;
+    return this.stalwart.createFolder(mailbox.emailAddress, name, parentId);
+  }
+
+  /** Rename a custom folder. `updated:false` when the engine could not apply it. */
+  async renameMailboxFolder(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    folderId: string,
+    name: string,
+  ): Promise<{ updated: boolean }> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) return { updated: false };
+    return { updated: await this.stalwart.renameFolder(mailbox.emailAddress, folderId, name) };
+  }
+
+  /**
+   * Delete a custom folder. `deleted:false` when the engine refused it — a
+   * system/role folder is inviolable (the engine layer enforces that), or the
+   * folder is unknown / the mailbox is external / the engine is dormant.
+   */
+  async deleteMailboxFolder(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    folderId: string,
+  ): Promise<{ deleted: boolean }> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) return { deleted: false };
+    return { deleted: await this.stalwart.deleteFolder(mailbox.emailAddress, folderId) };
   }
 
   async saveOrUpdateDraft(
