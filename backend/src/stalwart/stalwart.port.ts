@@ -112,6 +112,20 @@ export abstract class StalwartPort {
     folder: StalwartFolderQuery['folder'],
   ): Promise<boolean>;
 
+  /**
+   * Move every message in a thread into an ARBITRARY target folder by its JMAP
+   * mailbox id (a custom folder) — the move-to-folder verb for user folders,
+   * distinct from the role-based moveThreadToFolder. Validates the target is a
+   * real mailbox in this account first (never moves into an unknown/foreign id).
+   * Returns true on success, false when not configured / the target is unknown /
+   * the thread is unknown / the call fails (degrade-clean; never throws).
+   */
+  abstract moveThreadToMailbox(
+    mailbox: string,
+    threadId: string,
+    targetMailboxId: string,
+  ): Promise<boolean>;
+
   /** Permanently delete every message currently in Trash or Spam/Junk. */
   abstract emptyFolder(mailbox: string, folder: 'trash' | 'spam'): Promise<number | null>;
 

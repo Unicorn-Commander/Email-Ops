@@ -31,6 +31,9 @@ class FakeStalwart extends StalwartPort {
   async pollInbound(): Promise<null> {
     return null;
   }
+  async moveThreadToMailbox(): Promise<boolean> {
+    return false;
+  }
   async listFolders(): Promise<never[]> {
     return [];
   }

@@ -230,3 +230,112 @@ describe('JamesClient folder CRUD', () => {
     });
   });
 });
+
+describe('JamesClient moveThreadToMailbox (move into a custom folder)', () => {
+  const origFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = origFetch;
+    jest.restoreAllMocks();
+  });
+
+  it('degrades to false with NO fetch when unconfigured', async () => {
+    const fetchSpy = jest.fn();
+    global.fetch = fetchSpy as any;
+    const client = new JamesClient(makeConfig({}));
+    await expect(client.moveThreadToMailbox(MBX, 'th-1', 'mbx-proj')).resolves.toBe(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('validates the target exists, then sets mailboxIds to exactly the target on every message', async () => {
+    const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+      const methods = JSON.parse((init!.body as string)).methodCalls.map((c: any[]) => c[0]);
+      if (methods.includes('Mailbox/get')) {
+        return jsonResponse({ methodResponses: [['Mailbox/get', { list: [{ id: 'mbx-proj' }] }, '0']] });
+      }
+      if (methods.includes('Thread/get')) {
+        return jsonResponse({ methodResponses: [['Thread/get', { list: [{ id: 'th-1', emailIds: ['em-1', 'em-2'] }] }, '0']] });
+      }
+      return jsonResponse({ methodResponses: [['Email/set', { updated: { 'em-1': null, 'em-2': null } }, '0']] });
+    });
+    global.fetch = fetchSpy as any;
+    const client = new JamesClient(makeConfig(CONFIGURED));
+
+    await expect(client.moveThreadToMailbox(MBX, 'th-1', 'mbx-proj')).resolves.toBe(true);
+    const setBody = fetchSpy.mock.calls.find(([, i]: any) => i?.body && JSON.parse(i.body).methodCalls.some((c: any[]) => c[0] === 'Email/set'));
+    const update = JSON.parse(setBody![1].body as string).methodCalls.find((c: any[]) => c[0] === 'Email/set')[1].update;
+    expect(update).toEqual({
+      'em-1': { mailboxIds: { 'mbx-proj': true } },
+      'em-2': { mailboxIds: { 'mbx-proj': true } },
+    });
+  });
+
+  it('REFUSES an unknown target — returns false and issues no Email/set', async () => {
+    const fetchSpy = jest.fn().mockImplementation(async (url: string) => {
+      if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+      // Target probe returns nothing → the id is not a real mailbox in this account.
+      return jsonResponse({ methodResponses: [['Mailbox/get', { list: [] }, '0']] });
+    });
+    global.fetch = fetchSpy as any;
+    const client = new JamesClient(makeConfig(CONFIGURED));
+
+    await expect(client.moveThreadToMailbox(MBX, 'th-1', 'ghost')).resolves.toBe(false);
+    const sawEmailSet = fetchSpy.mock.calls.some(([, i]: any) => i?.body && JSON.parse(i.body).methodCalls.some((c: any[]) => c[0] === 'Email/set'));
+    expect(sawEmailSet).toBe(false);
+  });
+
+  it('is false when the thread has no messages (nothing to move)', async () => {
+    const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+      const methods = JSON.parse((init!.body as string)).methodCalls.map((c: any[]) => c[0]);
+      if (methods.includes('Mailbox/get')) {
+        return jsonResponse({ methodResponses: [['Mailbox/get', { list: [{ id: 'mbx-proj' }] }, '0']] });
+      }
+      return jsonResponse({ methodResponses: [['Thread/get', { list: [{ id: 'th-1', emailIds: [] }] }, '0']] });
+    });
+    global.fetch = fetchSpy as any;
+    const client = new JamesClient(makeConfig(CONFIGURED));
+    await expect(client.moveThreadToMailbox(MBX, 'th-1', 'mbx-proj')).resolves.toBe(false);
+  });
+});
+
+describe('JamesClient listFolderThreads with an explicit custom-folder id', () => {
+  const origFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = origFetch;
+    jest.restoreAllMocks();
+  });
+
+  it('scopes the Email/query straight to the custom mailbox id (no role Mailbox/query)', async () => {
+    const fetchSpy = jest.fn().mockImplementation(async (url: string) => {
+      if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+      return jsonResponse({
+        methodResponses: [
+          ['Email/query', { ids: ['em-1'], total: 1 }, '0'],
+          ['Email/get', { list: [{ id: 'em-1', threadId: 'th-1', subject: 'In Projects', from: [{ email: 'a@x.test' }], receivedAt: '2026-07-17T00:00:00Z', keywords: { $seen: true } }] }, '1'],
+          ['Thread/get', { list: [{ id: 'th-1', emailIds: ['em-1'] }] }, '2'],
+        ],
+      });
+    });
+    global.fetch = fetchSpy as any;
+    const client = new JamesClient(makeConfig(CONFIGURED));
+
+    const result = await client.listFolderThreads('hq@unicorncommander.ai', {
+      folder: 'inbox',
+      limit: 50,
+      offset: 0,
+      query: null,
+      mailboxId: 'mbx-proj',
+    });
+    expect(result.threads.map((t) => t.id)).toEqual(['th-1']);
+    // The role path was skipped — no Mailbox/query was posted at all.
+    const postedMethodNames = fetchSpy.mock.calls
+      .filter(([u]: any) => !String(u).endsWith('/session'))
+      .flatMap(([, i]: any) => JSON.parse(i.body).methodCalls.map((c: any[]) => c[0]));
+    expect(postedMethodNames).not.toContain('Mailbox/query');
+    // The Email/query filter is scoped to the given custom mailbox id.
+    const queryArgs = JSON.parse(fetchSpy.mock.calls.find(([u]: any) => !String(u).endsWith('/session'))![1].body as string)
+      .methodCalls.find((c: any[]) => c[0] === 'Email/query')[1];
+    expect(queryArgs.filter.inMailbox).toBe('mbx-proj');
+  });
+});

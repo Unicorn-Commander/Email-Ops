@@ -373,8 +373,11 @@ export class StalwartClient extends StalwartPort {
     };
   }
 
-  // Folder CRUD is a James/JMAP-only capability; the legacy Stalwart adapter
-  // never participates (degrade-clean → []/null/false).
+  // Folder CRUD + custom-folder move are James/JMAP-only capabilities; the
+  // legacy Stalwart adapter never participates (degrade-clean → []/null/false).
+  async moveThreadToMailbox(): Promise<boolean> {
+    return false;
+  }
   async listFolders(): Promise<never[]> {
     return [];
   }

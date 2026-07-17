@@ -548,8 +548,12 @@ export class JamesClient extends StalwartPort {
    */
   async listFolderThreads(mailbox: string, query: StalwartFolderQuery): Promise<StalwartFolderThreadsResult> {
     if (!this.jmapUrl) return { threads: [] };
-    const role = FOLDER_ROLE[query.folder] ?? 'inbox';
-    const mailboxId = await this.resolveMailboxIdForRole(mailbox, role);
+    // A custom-folder id (query.mailboxId) overrides the role — the query is
+    // scoped straight to that mailbox. A foreign id yields an empty (account-
+    // scoped) result rather than leaking, so no extra validation is needed here.
+    const mailboxId = query.mailboxId
+      ? query.mailboxId
+      : await this.resolveMailboxIdForRole(mailbox, FOLDER_ROLE[query.folder] ?? 'inbox');
     if (!mailboxId) return { threads: [] };
 
     // Search v2: parse Gmail-style operators (from:/to:/subject:/has:attachment/
@@ -784,6 +788,35 @@ export class JamesClient extends StalwartPort {
     if (!Array.isArray(emailIds) || emailIds.length === 0) return false;
     // Setting the whole `mailboxIds` map (not a `mailboxIds/<id>` patch) moves the
     // message OUT of its current folder into exactly the target — the move we want.
+    const update: Record<string, Record<string, unknown>> = {};
+    for (const id of emailIds) {
+      if (typeof id === 'string') update[id] = { mailboxIds: { [targetMailboxId]: true } };
+    }
+    if (Object.keys(update).length === 0) return false;
+    const setResp = await this.jmap([['Email/set', { update }, '0']], mailbox);
+    if (!setResp) return false;
+    const result = this.named(setResp, 'Email/set');
+    const updatedCount = result?.updated ? Object.keys(result.updated).length : 0;
+    return updatedCount > 0;
+  }
+
+  /** Move a thread into a CUSTOM folder by JMAP mailbox id (validates the target exists). */
+  async moveThreadToMailbox(mailbox: string, threadId: string, targetMailboxId: string): Promise<boolean> {
+    if (!this.jmapUrl) return false;
+    // The target must be a real mailbox in THIS account — never move into an
+    // unknown or foreign id (which JMAP would otherwise silently accept/refuse).
+    const probe = await this.jmap([
+      ['Mailbox/get', { ids: [targetMailboxId], properties: ['id'] }, '0'],
+    ], mailbox);
+    if (!probe) return false;
+    const exists = this.named(probe, 'Mailbox/get')?.list?.[0]?.id === targetMailboxId;
+    if (!exists) return false;
+    const idsResp = await this.jmap([['Thread/get', { ids: [threadId] }, '0']], mailbox);
+    if (!idsResp) return false;
+    const emailIds = this.named(idsResp, 'Thread/get')?.list?.[0]?.emailIds;
+    if (!Array.isArray(emailIds) || emailIds.length === 0) return false;
+    // Set the whole mailboxIds map (not a patch) → the message leaves its current
+    // folder for exactly the target, mirroring moveThreadToFolder's mechanics.
     const update: Record<string, Record<string, unknown>> = {};
     for (const id of emailIds) {
       if (typeof id === 'string') update[id] = { mailboxIds: { [targetMailboxId]: true } };

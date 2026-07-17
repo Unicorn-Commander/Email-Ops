@@ -718,6 +718,42 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
       "read_only": false
     },
     {
+      "name": "move_to_folder",
+      "description": "Move a thread INTO a custom folder by folder_id (from list_folders). The custom-folder counterpart to bulk_disposition (which reaches only the system folders). Member-level write; runs AS the calling user. Returns { moved } - moved:false when the target/thread is unknown, the mailbox is external, or the engine is dormant.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "folder_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "thread_id",
+          "folder_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:triage"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
       "name": "list_connected_accounts",
       "description": "List whether the caller has linked Gmail or Microsoft in Keycloak. Viewer-level; no SKU gate. Returns { accounts: [{ provider, linked }] }.",
       "input_schema": {

@@ -536,6 +536,7 @@ export class EmailService {
     limit: number,
     offset: number,
     query?: string | null,
+    mailboxId?: string | null,
   ): Promise<ThreadView[]> {
     if (!this.stalwart.isConfigured()) return [];
     const { threads } = await this.stalwart.listFolderThreads(address, {
@@ -543,6 +544,8 @@ export class EmailService {
       limit,
       offset,
       query: query ?? null,
+      // A custom-folder id scopes the query straight to that mailbox (folder ignored).
+      mailboxId: mailboxId ?? null,
     });
     return threads.map((t) => ({
       id: t.id,
@@ -1005,6 +1008,42 @@ export class EmailService {
     const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
     if (!mailbox || this.mailProvider.handles(mailbox)) return { deleted: false };
     return { deleted: await this.stalwart.deleteFolder(mailbox.emailAddress, folderId) };
+  }
+
+  /**
+   * The live threads INSIDE a custom folder (by JMAP mailbox id). Custom folders
+   * carry no disposition overlay + no local SoR rows, so this is a pure live-JMAP
+   * read (no merge, no overlay-filter) — [] when dormant/external/unknown.
+   */
+  async listCustomFolderThreads(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    folderId: string,
+    limit: number,
+    query: string | null,
+    offset: number,
+  ): Promise<ThreadView[]> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) return [];
+    return this.liveFolderThreads(mailbox.emailAddress, 'inbox', limit, offset, query, folderId);
+  }
+
+  /**
+   * Move a thread INTO a custom folder (arbitrary JMAP mailbox id). The engine
+   * validates the target belongs to the account. `moved:false` when refused /
+   * unknown / external / dormant.
+   */
+  async moveThreadToCustomFolder(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    threadId: string,
+    targetFolderId: string,
+  ): Promise<{ moved: boolean }> {
+    const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || this.mailProvider.handles(mailbox)) return { moved: false };
+    return { moved: await this.stalwart.moveThreadToMailbox(mailbox.emailAddress, threadId, targetFolderId) };
   }
 
   async saveOrUpdateDraft(

@@ -93,6 +93,12 @@ export interface StalwartFolderQuery {
   offset: number;
   /** Full-text search (JMAP Email/query `text` filter). Omitted/empty = no filter. */
   query?: string | null;
+  /**
+   * A CUSTOM folder's JMAP mailbox id. When set it overrides `folder` — the
+   * query is scoped to this mailbox directly (used to list a user-created
+   * folder, which has no `role` to resolve).
+   */
+  mailboxId?: string | null;
 }
 
 /** The result of a folder-scoped, paged, (optionally) searched thread listing. */

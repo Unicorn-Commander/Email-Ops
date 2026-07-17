@@ -515,6 +515,25 @@ export class McpService {
       async (args: any) => wrap(await tools.deleteFolder(user, args)),
     );
 
+    server.registerTool(
+      'move_to_folder',
+      {
+        title: 'Move a thread into a custom folder',
+        description:
+          'Move a thread INTO a custom folder by folder_id (from list_folders). This is ' +
+          'the custom-folder counterpart to bulk_disposition (which reaches only the ' +
+          'system folders). Member-level write. Returns { moved } — moved:false when the ' +
+          'target/thread is unknown, the mailbox is external, or the engine is dormant.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          thread_id: z.string().min(1),
+          folder_id: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await tools.moveToFolder(user, args)),
+    );
+
     // ── Connected-accounts / Cleaner Engine tools ──
 
     server.registerTool(

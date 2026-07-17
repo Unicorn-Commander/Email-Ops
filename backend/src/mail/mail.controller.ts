@@ -140,6 +140,11 @@ class RenameFolderDto {
   @IsString() @MaxLength(200) name!: string;
 }
 
+class MoveThreadDto {
+  /** The target CUSTOM folder's JMAP mailbox id (from GET .../folders). */
+  @IsString() @MaxLength(500) folder_id!: string;
+}
+
 class BulkThreadsDto {
   @IsArray() @ArrayMaxSize(200) @IsString({ each: true }) thread_ids!: string[];
   @IsIn(BULK_ACTIONS) action!: BulkThreadAction;
@@ -314,6 +319,27 @@ export class MailController {
     );
   }
 
+  @Put(':mailboxId/threads/:threadId/move')
+  @ApiOperation({ summary: 'Move a thread INTO a custom folder (by folder_id from GET .../folders).' })
+  @ApiResponse({ status: 200, description: '{ moved } — moved:false = unknown target/thread, external mailbox, or dormant engine.' })
+  async moveThread(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Param('threadId') threadId: string,
+    @Body() body: MoveThreadDto,
+  ) {
+    const folderId = body.folder_id.trim();
+    if (!folderId) throw new BadRequestException('folder_id is required.');
+    return this.email.moveThreadToCustomFolder(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      mailboxId,
+      threadId,
+      folderId,
+    );
+  }
+
   @Patch(':mailboxId/threads/:threadId/flags')
   @ApiOperation({ summary: 'Set/clear IMAP keywords on a thread: \\Flagged and/or \\Seen.' })
   @ApiResponse({ status: 200, description: '{ thread_id, flagged?, seen?, updated }.' })
@@ -399,6 +425,30 @@ export class MailController {
       );
     }
     return created;
+  }
+
+  @Get(':mailboxId/folders/:folderId/threads')
+  @ApiOperation({ summary: "A custom folder's threads (live JMAP; q = full-text search, offset = paging)." })
+  @ApiResponse({ status: 200, description: 'The threads + count. [] when the engine is dormant or the mailbox is external.' })
+  async customFolderThreads(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Param('folderId') folderId: string,
+    @Query('limit') limitRaw?: string,
+    @Query('q') q?: string,
+    @Query('offset') offsetRaw?: string,
+  ) {
+    const threads = await this.email.listCustomFolderThreads(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      mailboxId,
+      folderId,
+      parseLimit(limitRaw),
+      q ?? null,
+      parseOffset(offsetRaw),
+    );
+    return { threads, count: threads.length };
   }
 
   @Patch(':mailboxId/folders/:folderId')

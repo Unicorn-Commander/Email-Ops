@@ -495,6 +495,21 @@ export class EmailOpsTools {
     );
   }
 
+  /** Move a thread INTO a custom folder (by folder_id). Member-level write. */
+  async moveToFolder(
+    user: User,
+    args: { workspace_id?: string; mailbox_id: string; thread_id: string; folder_id: string },
+  ): Promise<{ moved: boolean }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.email.moveThreadToCustomFolder(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.mailbox_id,
+      args.thread_id,
+      args.folder_id,
+    );
+  }
+
   // ── agent-inbox approval tools ─────────────────────────────────────────
 
   async listAgentInbox(
