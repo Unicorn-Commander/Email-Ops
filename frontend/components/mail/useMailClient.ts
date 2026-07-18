@@ -40,6 +40,7 @@ import {
   listMailThreads,
   moveThreadToCustomFolder,
   renameMailFolder,
+  snoozeThread,
   setThreadDisposition,
   setThreadFlags,
   setThreadRead,
@@ -235,6 +236,8 @@ export interface UseMailClient {
   moveThreadToFolder: (threadId: string, folderId: string) => Promise<TriageOutcome>;
   /** Move a whole check-selection into a custom folder (per-thread, reconciled). */
   moveThreadsToFolder: (threadIds: string[], folderId: string) => Promise<TriageOutcome>;
+  /** Snooze a thread out of the inbox until a chosen time (sovereign mailboxes only). */
+  snoozeThreadUntil: (threadId: string, until: Date) => Promise<TriageOutcome>;
 }
 
 function messageOf(err: unknown, fallback: string): string {
@@ -702,6 +705,39 @@ export function useMailClient(): UseMailClient {
     [refreshFolders, refreshCounts, fetchThreads, guard401],
   );
 
+  const snoozeThreadUntil = useCallback(
+    async (threadId: string, until: Date): Promise<TriageOutcome> => {
+      const ws = workspaceRef.current;
+      const row = threadsRef.current.find((t) => t.id === threadId);
+      const mbx = row?.mailbox_id ?? openThreadRef.current?.mailboxId ?? selectedMailboxIdRef.current;
+      if (!ws || !mbx || mbx === ALL_INBOXES) return { ok: false, error: 'Pick one mailbox first.' };
+      const before = threadsRef.current;
+      const prevOpen = openThreadRef.current;
+      // Optimistic: snoozing hides the thread out of the current list now.
+      setThreads((prev) => prev.filter((t) => t.id !== threadId));
+      setOpenThread((prev) => (prev?.id === threadId ? null : prev));
+      const rollback = () => {
+        setThreads(before);
+        if (prevOpen?.id === threadId) setOpenThread(prevOpen);
+      };
+      try {
+        const res = await snoozeThread(ws.workspace_id, mbx, threadId, until.toISOString());
+        if (!res.snoozed) {
+          rollback();
+          return { ok: false, error: 'Snooze is unavailable for this mailbox.' };
+        }
+        refreshCounts();
+        return { ok: true };
+      } catch (err) {
+        rollback();
+        if (guard401(err)) return { ok: false, error: 'Session expired.' };
+        if (isMissingEndpoint(err)) return { ok: false, error: 'Snooze is not available here.' };
+        return { ok: false, error: messageOf(err, 'Could not snooze this conversation.') };
+      }
+    },
+    [refreshCounts, guard401],
+  );
+
   // ── New-mail arrival: manual Refresh + visibility-gated background poll ─────
   // Both take a SILENT fetch (no skeleton, no error-state on a transient blip)
   // so the user's scroll / selection / open thread are never reset — the list is
@@ -1085,6 +1121,7 @@ export function useMailClient(): UseMailClient {
     deleteFolder,
     moveThreadToFolder,
     moveThreadsToFolder,
+    snoozeThreadUntil,
   };
 }
 

@@ -85,6 +85,7 @@ import {
   FolderIcon,
   PencilIcon,
   CloseIcon,
+  ClockIcon,
 } from '@/components/mail/icons';
 import type {
   BulkAction,
@@ -1045,6 +1046,14 @@ export default function MailPage() {
               onTriage={triageAndAdvance}
               onMoveToFolder={mail.moveThreadToFolder}
               customFolders={mail.customFolders}
+              onSnooze={mail.snoozeThreadUntil}
+              snoozeEnabled={
+                !mail.unified &&
+                !!mail.selectedMailbox &&
+                mail.foldersSupported &&
+                mail.selectedMailbox.provider !== 'gmail' &&
+                mail.selectedMailbox.provider !== 'microsoft'
+              }
               onReload={reloadOpenThread}
               replySeed={activeSeed}
               replyRef={replyRef}
@@ -2489,6 +2498,93 @@ function MoveToFolderControl({
   );
 }
 
+/** Snooze presets relative to now — only future times, terse labels. */
+function snoozePresets(now = new Date()): { label: string; until: Date }[] {
+  const atHour = (base: Date, h: number) => {
+    const d = new Date(base);
+    d.setHours(h, 0, 0, 0);
+    return d;
+  };
+  const addDays = (base: Date, n: number) => {
+    const d = new Date(base);
+    d.setDate(d.getDate() + n);
+    return d;
+  };
+  const dow = now.getDay(); // 0 Sun … 6 Sat
+  const daysToSat = (6 - dow + 7) % 7 || 7;
+  const daysToMon = (1 - dow + 7) % 7 || 7;
+  return [
+    { label: 'Later today', until: new Date(now.getTime() + 3 * 3600 * 1000) },
+    { label: 'Tomorrow', until: atHour(addDays(now, 1), 9) },
+    { label: 'This weekend', until: atHour(addDays(now, daysToSat), 9) },
+    { label: 'Next week', until: atHour(addDays(now, daysToMon), 9) },
+  ].filter((p) => p.until.getTime() > now.getTime() + 60_000);
+}
+
+function formatSnoozeWhen(d: Date): string {
+  return d.toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+}
+
+/**
+ * Reader snooze menu — hide the open thread until a chosen time (the scheduler
+ * restores it to Inbox then). Presets for now; a custom picker is a follow-up.
+ * Closes on pick / outside-click / Escape.
+ */
+function SnoozeControl({
+  onSnooze,
+  disabled,
+}: {
+  onSnooze: (until: Date) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  const presets = useMemo(() => (open ? snoozePresets() : []), [open]);
+  return (
+    <div ref={ref} className="relative">
+      <ReaderTool label="Snooze" onClick={() => setOpen((v) => !v)} disabled={disabled}>
+        <ClockIcon className="h-[17px] w-[17px]" />
+      </ReaderTool>
+      {open && (
+        <div className="absolute right-0 top-full z-30 mt-1 w-60 rounded-lg border border-subtle bg-surface-overlay p-1 shadow-xl">
+          <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary">
+            Snooze until
+          </p>
+          {presets.map((p) => (
+            <button
+              key={p.label}
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                onSnooze(p.until);
+              }}
+              className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-secondary transition-colors hover:bg-surface-elevated hover:text-primary"
+            >
+              <span>{p.label}</span>
+              <span className="mono text-[11px] text-muted">{formatSnoozeWhen(p.until)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Reader({
   workspaceId,
   mailbox,
@@ -2503,6 +2599,8 @@ function Reader({
   onTriage,
   onMoveToFolder,
   customFolders,
+  onSnooze,
+  snoozeEnabled,
   onReload,
   replySeed,
   replyRef,
@@ -2539,6 +2637,10 @@ function Reader({
   /** Move the open thread into a custom folder (empty list => the control self-hides). */
   onMoveToFolder: (threadId: string, folderId: string) => Promise<TriageOutcome>;
   customFolders: MailFolderView[];
+  /** Snooze the open thread out of the inbox until a chosen time. */
+  onSnooze: (threadId: string, until: Date) => Promise<TriageOutcome>;
+  /** Whether snooze is available for this mailbox (sovereign James, not external). */
+  snoozeEnabled: boolean;
   /** Re-run the open thread's messages fetch (reader error-retry). */
   onReload: () => void;
   replySeed: ReplySeed;
@@ -2653,6 +2755,14 @@ function Reader({
                 if (threadId) void onMoveToFolder(threadId, folderId);
               }}
             />
+            {snoozeEnabled && (
+              <SnoozeControl
+                disabled={triageBusy}
+                onSnooze={(until) => {
+                  if (threadId) void onSnooze(threadId, until);
+                }}
+              />
+            )}
             {/* Divide destructive triage from safe compose actions. */}
             <span aria-hidden className="mx-0.5 h-5 w-px bg-border-subtle" />
             <ReaderTool label="Reply" onClick={onFocusReply}>

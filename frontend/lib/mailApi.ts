@@ -873,3 +873,128 @@ export async function moveThreadToCustomFolder(
     token,
   );
 }
+
+// ── Snooze + send-later (Fleet A) — sovereign James mailboxes only ────────────
+
+export interface SnoozedThreadView {
+  id: string;
+  mailbox_id: string;
+  thread_id: string;
+  snooze_until: string;
+  state: string;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface ScheduledSendPayloadView {
+  toAddress: string;
+  subject: string;
+  body: string;
+  bodyHtml?: string | null;
+}
+
+export interface ScheduledSendView {
+  id: string;
+  mailbox_id: string;
+  payload: ScheduledSendPayloadView;
+  send_at: string;
+  state: string;
+  created_by: string | null;
+  created_at: string;
+  sent_at: string | null;
+}
+
+/**
+ * Snooze a thread until `until` (ISO). `snoozed:false` = dormant/external/refused
+ * — surface it, don't fake success. The engine hides the thread out of Inbox now
+ * and the scheduler restores it at the chosen time.
+ */
+export async function snoozeThread(
+  workspaceId: string,
+  mailboxId: string,
+  threadId: string,
+  until: string,
+  token?: string,
+): Promise<{ snoozed: boolean; item: SnoozedThreadView | null }> {
+  return apiPut<{ snoozed: boolean; item: SnoozedThreadView | null }>(
+    `${mailBase(workspaceId, mailboxId)}/threads/${seg(threadId)}/snooze`,
+    { until },
+    token,
+  );
+}
+
+/** Cancel an active snooze and restore the thread to Inbox. `unsnoozed:false` = nothing active/refused. */
+export async function unsnoozeThread(
+  workspaceId: string,
+  mailboxId: string,
+  threadId: string,
+  token?: string,
+): Promise<{ unsnoozed: boolean }> {
+  return apiDelete<{ unsnoozed: boolean }>(
+    `${mailBase(workspaceId, mailboxId)}/threads/${seg(threadId)}/snooze`,
+    token,
+  );
+}
+
+/** Active snoozed threads for one mailbox (empty when dormant/external). */
+export async function listSnoozed(
+  workspaceId: string,
+  mailboxId: string,
+  token?: string,
+): Promise<{ snoozed: SnoozedThreadView[]; count: number }> {
+  return apiGet<{ snoozed: SnoozedThreadView[]; count: number }>(
+    `${mailBase(workspaceId, mailboxId)}/snoozed`,
+    token,
+  );
+}
+
+export interface ScheduleSendBody {
+  to_address: string;
+  subject?: string;
+  body?: string;
+  body_html?: string;
+  send_at: string;
+  to_addresses?: string[];
+  cc?: string[];
+  bcc?: string[];
+  in_reply_to_thread_id?: string;
+}
+
+/** Schedule an outbound email to leave at `send_at`. `scheduled:false` = dormant/external/refused. */
+export async function scheduleSend(
+  workspaceId: string,
+  mailboxId: string,
+  body: ScheduleSendBody,
+  token?: string,
+): Promise<{ scheduled: boolean; item: ScheduledSendView | null }> {
+  return apiPost<{ scheduled: boolean; item: ScheduledSendView | null }>(
+    `${mailBase(workspaceId, mailboxId)}/scheduled-sends`,
+    body,
+    token,
+  );
+}
+
+/** Cancel a pending scheduled send. `cancelled:false` = already sent/cancelled/unknown. */
+export async function cancelScheduledSend(
+  workspaceId: string,
+  mailboxId: string,
+  id: string,
+  token?: string,
+): Promise<{ cancelled: boolean }> {
+  return apiDelete<{ cancelled: boolean }>(
+    `${mailBase(workspaceId, mailboxId)}/scheduled-sends/${seg(id)}`,
+    token,
+  );
+}
+
+/** Pending scheduled sends for one mailbox (empty when dormant/external). */
+export async function listScheduledSends(
+  workspaceId: string,
+  mailboxId: string,
+  token?: string,
+): Promise<{ scheduled_sends: ScheduledSendView[]; count: number }> {
+  return apiGet<{ scheduled_sends: ScheduledSendView[]; count: number }>(
+    `${mailBase(workspaceId, mailboxId)}/scheduled-sends`,
+    token,
+  );
+}
