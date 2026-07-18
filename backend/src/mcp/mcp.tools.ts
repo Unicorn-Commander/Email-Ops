@@ -59,6 +59,8 @@ import { UiCommandService } from '../ui-commands/ui-commands.service';
 import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
 import { MailDomainService } from '../mail-engine-admin/mail-domain.service';
 import { DEFAULT_MAILBOX_QUOTA_BYTES } from '../mail-engine-admin/mail-engine-admin.constants';
+import { SchedulingService } from '../scheduling/scheduling.service';
+import { AgentViewService } from '../agent-view/agent-view.service';
 
 export class EmailOpsTools {
   constructor(
@@ -959,5 +961,154 @@ export class UiControlTools {
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
     const { id } = await this.uiCommands.enqueue(workspaceId, ucUid, kind, payload);
     return { enqueued: true, command_id: id, kind: kind.toLowerCase() };
+  }
+}
+
+/**
+ * SchedulingTools — the snooze / send-later surface, giving an agent the SAME
+ * powers the human has over the REST routes in scheduling.controller.ts. Each
+ * tool runs AS the calling user: the membership gate resolves + authorizes the
+ * workspace, then the SAME SchedulingService the REST controller uses does the
+ * work (one implementation, one RLS path). Degrade-clean: snoozed:false /
+ * scheduled:false / [] when the sovereign mailbox is dormant or external — never
+ * a 500. The per-mailbox sovereign-owner fence lives inside SchedulingService.
+ */
+export class SchedulingTools {
+  constructor(
+    private readonly membership: MembershipService,
+    private readonly scheduling: SchedulingService,
+  ) {}
+
+  /** Snooze a thread out of Inbox until a chosen time (the scheduler wakes it). */
+  async snoozeThread(
+    user: User,
+    args: { workspace_id?: string; mailbox_id: string; thread_id: string; until: string },
+  ): Promise<{ snoozed: boolean; item: unknown }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.scheduling.snoozeThread(user, {
+      workspaceId,
+      mailboxId: args.mailbox_id,
+      threadId: args.thread_id,
+      until: new Date(args.until),
+    });
+  }
+
+  /** Cancel an active snooze and restore the thread to Inbox. */
+  async unsnoozeThread(
+    user: User,
+    args: { workspace_id?: string; mailbox_id: string; thread_id: string },
+  ): Promise<{ unsnoozed: boolean }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.scheduling.unsnoozeThread(user, {
+      workspaceId,
+      mailboxId: args.mailbox_id,
+      threadId: args.thread_id,
+    });
+  }
+
+  /** List the active snoozed threads for one sovereign mailbox. */
+  async listSnoozed(
+    user: User,
+    args: { workspace_id?: string; mailbox_id: string },
+  ): Promise<{ snoozed: unknown[]; count: number }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const snoozed = await this.scheduling.listSnoozed(user, workspaceId, args.mailbox_id);
+    return { snoozed, count: snoozed.length };
+  }
+
+  /** Schedule an outbound email to send later from one sovereign mailbox. */
+  async scheduleSend(
+    user: User,
+    args: {
+      workspace_id?: string;
+      mailbox_id: string;
+      to_address: string;
+      subject?: string;
+      body?: string;
+      body_html?: string;
+      to_addresses?: string[];
+      cc?: string[];
+      bcc?: string[];
+      in_reply_to_thread_id?: string;
+      send_at: string;
+    },
+  ): Promise<{ scheduled: boolean; item: unknown }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.scheduling.scheduleSend(user, {
+      workspaceId,
+      mailboxId: args.mailbox_id,
+      payload: {
+        toAddress: args.to_address,
+        subject: args.subject ?? '',
+        body: args.body ?? '',
+        bodyHtml: args.body_html ?? null,
+        toAddresses: args.to_addresses,
+        cc: args.cc,
+        bcc: args.bcc,
+        inReplyToThreadId: args.in_reply_to_thread_id ?? null,
+      },
+      sendAt: new Date(args.send_at),
+    });
+  }
+
+  /** Cancel a pending scheduled send by id. */
+  async cancelScheduledSend(
+    user: User,
+    args: { workspace_id?: string; id: string },
+  ): Promise<{ cancelled: boolean }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.scheduling.cancelScheduledSend(user, workspaceId, args.id);
+  }
+
+  /** List the pending scheduled sends for one sovereign mailbox. */
+  async listScheduledSends(
+    user: User,
+    args: { workspace_id?: string; mailbox_id: string },
+  ): Promise<{ scheduled_sends: unknown[]; count: number }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const scheduled_sends = await this.scheduling.listScheduledSends(user, workspaceId, args.mailbox_id);
+    return { scheduled_sends, count: scheduled_sends.length };
+  }
+
+  private async resolve(user: User, requested?: string): Promise<string> {
+    return this.membership.resolveAndAuthorize(user, requested ?? null);
+  }
+}
+
+/**
+ * AgentViewTools — the per-agent mailbox surface, giving an agent the SAME
+ * roster + drill-in the human has over the REST routes in
+ * agent-view.controller.ts. Runs AS the calling user: the membership gate
+ * authorizes the workspace, then the SAME AgentViewService the REST controller
+ * uses composes the view (one RLS path). Read-only.
+ */
+export class AgentViewTools {
+  constructor(
+    private readonly membership: MembershipService,
+    private readonly agentView: AgentViewService,
+  ) {}
+
+  /** The lightweight per-agent mailbox roster (address, unread, pending). */
+  async listAgentMailboxes(user: User, args: { workspace_id?: string }): Promise<unknown> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.agentView.listAgentMailboxes(user, workspaceId);
+  }
+
+  /** One agent's mailbox world: mailbox, recent threads, approval queue, stats. */
+  async getAgentMailbox(
+    user: User,
+    args: { workspace_id?: string; agent_id: string; thread_limit?: number },
+  ): Promise<unknown> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const view = await this.agentView.getAgentMailbox(user, {
+      workspaceId,
+      agentId: args.agent_id,
+      threadLimit: args.thread_limit,
+    });
+    return view ?? { status: 'not_found', reason: 'agent not found in this workspace' };
+  }
+
+  private async resolve(user: User, requested?: string): Promise<string> {
+    return this.membership.resolveAndAuthorize(user, requested ?? null);
   }
 }

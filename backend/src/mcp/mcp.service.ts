@@ -22,7 +22,13 @@ import { z } from 'zod';
 import { MembershipService } from '../common/workspace/membership.service';
 import { EmailService } from '../email/email.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
-import { ConnectedAccountsTools, EmailOpsTools, UiControlTools } from './mcp.tools';
+import {
+  AgentViewTools,
+  ConnectedAccountsTools,
+  EmailOpsTools,
+  SchedulingTools,
+  UiControlTools,
+} from './mcp.tools';
 import { AgentsService } from '../agents/agents.service';
 import { EmailHealthService } from '../email-health/email-health.service';
 import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
@@ -32,6 +38,8 @@ import { SenderPolicyService } from '../mail-triage/sender-policy.service';
 import { UiCommandService } from '../ui-commands/ui-commands.service';
 import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
 import { MailDomainService } from '../mail-engine-admin/mail-domain.service';
+import { SchedulingService } from '../scheduling/scheduling.service';
+import { AgentViewService } from '../agent-view/agent-view.service';
 import { enforceMcpToolScope, McpToolName, PatTaggedIdentity } from './mcp-scopes';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
@@ -56,6 +64,8 @@ export class McpService {
     private readonly uiCommands: UiCommandService,
     private readonly admin: MailEngineAdminPort,
     private readonly mailDomains: MailDomainService,
+    private readonly scheduling: SchedulingService,
+    private readonly agentView: AgentViewService,
   ) {}
 
   /**
@@ -126,6 +136,8 @@ export class McpService {
     );
     const connectedTools = new ConnectedAccountsTools(this.membership, this.connectedAccounts);
     const uiTools = new UiControlTools(this.membership, this.uiCommands);
+    const schedulingTools = new SchedulingTools(this.membership, this.scheduling);
+    const agentViewTools = new AgentViewTools(this.membership, this.agentView);
 
     // ── Foundation tools ──
 
@@ -942,6 +954,161 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await uiTools.notify(user, args)),
+    );
+
+    // ── Scheduling (snooze / send-later) ──
+    // The agent analogue of the human snooze + send-later REST routes
+    // (scheduling.controller.ts). Thin wrappers over the SAME SchedulingService;
+    // member-level, runs AS the caller, degrade-clean (false/[] when the sovereign
+    // mailbox is dormant or external). Reads are read_only; the rest are writes.
+
+    registerTool(
+      'snooze_thread',
+      {
+        title: 'Snooze a thread until a time',
+        description:
+          'Snooze a thread in a sovereign mailbox until a chosen time (ISO 8601 until): it ' +
+          'leaves the Inbox now and the scheduler wakes it back to Inbox at that time. ' +
+          'Member-level write; runs AS the calling user. Returns { snoozed, item } — ' +
+          'snoozed:false when the mailbox is dormant or external, or the move was refused.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          thread_id: z.string().min(1),
+          until: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await schedulingTools.snoozeThread(user, args)),
+    );
+
+    registerTool(
+      'unsnooze_thread',
+      {
+        title: 'Cancel a thread snooze',
+        description:
+          'Cancel an active snooze and restore the thread to Inbox immediately. Member-level ' +
+          'write; runs AS the calling user. Returns { unsnoozed } — unsnoozed:false when no ' +
+          'active snooze matches the thread or the mailbox is dormant or external.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          thread_id: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await schedulingTools.unsnoozeThread(user, args)),
+    );
+
+    registerTool(
+      'list_snoozed',
+      {
+        title: 'List snoozed threads',
+        description:
+          'List the active snoozed threads for one sovereign mailbox, each with its wake ' +
+          'time. Read-only / member-level. Returns { snoozed, count } — an empty list when ' +
+          'the mailbox is dormant or external.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await schedulingTools.listSnoozed(user, args)),
+    );
+
+    registerTool(
+      'schedule_send',
+      {
+        title: 'Schedule an email to send later',
+        description:
+          'Schedule an outbound email to send later (ISO 8601 send_at) from one sovereign ' +
+          'mailbox. The scheduler fires it at send_at through the same send lane compose_email ' +
+          'uses, idempotent on the scheduled-send id so a retry never doubles. Member-level ' +
+          'write; runs AS the calling user. Returns { scheduled, item } — scheduled:false when ' +
+          'the mailbox is dormant or external.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          to_address: z.string().min(1).max(320),
+          subject: z.string().max(500).optional(),
+          body: z.string().max(100000).optional(),
+          body_html: z.string().max(100000).optional(),
+          to_addresses: z.array(z.string()).max(50).optional(),
+          cc: z.array(z.string()).max(50).optional(),
+          bcc: z.array(z.string()).max(50).optional(),
+          in_reply_to_thread_id: z.string().max(500).optional(),
+          send_at: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await schedulingTools.scheduleSend(user, args)),
+    );
+
+    registerTool(
+      'cancel_scheduled_send',
+      {
+        title: 'Cancel a scheduled send',
+        description:
+          'Cancel a pending scheduled send by id before it fires. Member-level write; runs AS ' +
+          'the calling user. Returns { cancelled } — cancelled:false when the id is unknown, ' +
+          'already sent or cancelled, or the owning mailbox is not actionable.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          id: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await schedulingTools.cancelScheduledSend(user, args)),
+    );
+
+    registerTool(
+      'list_scheduled_sends',
+      {
+        title: 'List scheduled sends',
+        description:
+          'List the pending (and in-flight) scheduled sends for one sovereign mailbox, each ' +
+          'with its send time and payload. Read-only / member-level. Returns ' +
+          '{ scheduled_sends, count } — an empty list when the mailbox is dormant or external.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await schedulingTools.listScheduledSends(user, args)),
+    );
+
+    // ── Agent-view (per-agent mailbox) ──
+    // The agent analogue of the per-agent mailbox REST routes
+    // (agent-view.controller.ts): the roster + one agent's mailbox world. Read-only,
+    // member-level, over the SAME AgentViewService the human cockpit uses.
+
+    registerTool(
+      'list_agent_mailboxes',
+      {
+        title: 'List per-agent mailboxes',
+        description:
+          'List the workspace’s agents with their mailbox address, unread count, and ' +
+          'pending-approval count — the lightweight roster behind the agent-world switcher. ' +
+          'Read-only / member-level. Returns { items, count }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await agentViewTools.listAgentMailboxes(user, args ?? {})),
+    );
+
+    registerTool(
+      'get_agent_mailbox',
+      {
+        title: 'Get one agent’s mailbox',
+        description:
+          'Return one agent’s mailbox world: its mailbox, recent inbox threads (up to ' +
+          'thread_limit, default 25, max 100), its pending agent-inbox drafts + state counts, ' +
+          'and mailbox stats. Read-only / member-level. Returns the composed view, or ' +
+          '{ status:"not_found" } when no such agent exists in this workspace.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          agent_id: z.string().min(1),
+          thread_limit: z.number().int().min(1).max(100).optional(),
+        },
+      },
+      async (args: any) => wrap(await agentViewTools.getAgentMailbox(user, args)),
     );
 
     return server;

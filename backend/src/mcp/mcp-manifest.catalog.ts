@@ -1421,6 +1421,275 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
       ],
       "tier_required": "enterprise",
       "read_only": false
+    },
+    {
+      "name": "snooze_thread",
+      "description": "Snooze a thread in a sovereign mailbox until a chosen time (ISO 8601 until): it leaves the Inbox now and the scheduler wakes it back to Inbox at that time. Member-level write; runs AS the calling user. Returns { snoozed, item } - snoozed:false when the mailbox is dormant or external, or the move was refused.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "until": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "thread_id",
+          "until"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "unsnooze_thread",
+      "description": "Cancel an active snooze and restore the thread to Inbox immediately. Member-level write; runs AS the calling user. Returns { unsnoozed } - unsnoozed:false when no active snooze matches the thread or the mailbox is dormant or external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "thread_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "list_snoozed",
+      "description": "List the active snoozed threads for one sovereign mailbox, each with its wake time. Read-only / member-level. Returns { snoozed, count } - an empty list when the mailbox is dormant or external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "schedule_send",
+      "description": "Schedule an outbound email to send later (ISO 8601 send_at) from one sovereign mailbox. The scheduler fires it at send_at through the same send lane compose_email uses, idempotent on the scheduled-send id so a retry never doubles. Member-level write; runs AS the calling user. Returns { scheduled, item } - scheduled:false when the mailbox is dormant or external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "to_address": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 320
+          },
+          "subject": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 100000
+          },
+          "body_html": {
+            "type": "string",
+            "maxLength": 100000
+          },
+          "to_addresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50
+          },
+          "bcc": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50
+          },
+          "in_reply_to_thread_id": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "send_at": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "to_address",
+          "send_at"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:email"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "cancel_scheduled_send",
+      "description": "Cancel a pending scheduled send by id before it fires. Member-level write; runs AS the calling user. Returns { cancelled } - cancelled:false when the id is unknown, already sent or cancelled, or the owning mailbox is not actionable.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "list_scheduled_sends",
+      "description": "List the pending (and in-flight) scheduled sends for one sovereign mailbox, each with its send time and payload. Read-only / member-level. Returns { scheduled_sends, count } - an empty list when the mailbox is dormant or external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "list_agent_mailboxes",
+      "description": "List the workspace's agents with their mailbox address, unread count, and pending-approval count - the lightweight roster behind the agent-world switcher. Read-only / member-level. Returns { items, count }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:agents"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "get_agent_mailbox",
+      "description": "Return one agent's mailbox world: its mailbox, recent inbox threads (up to thread_limit, default 25, max 100), its pending agent-inbox drafts plus state counts, and mailbox stats. Read-only / member-level. Returns the composed view, or { status: not_found } when no such agent exists in this workspace.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "thread_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:agents"
+      ],
+      "tier_required": "pro",
+      "read_only": true
     }
   ],
   "resources": [],

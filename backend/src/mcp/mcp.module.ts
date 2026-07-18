@@ -13,6 +13,8 @@ import { MailboxAccountsModule } from '../mailbox-accounts/mailbox-accounts.modu
 import { MailTriageModule } from '../mail-triage/mail-triage.module';
 import { UiCommandsModule } from '../ui-commands/ui-commands.module';
 import { MailEngineAdminModule } from '../mail-engine-admin/mail-engine-admin.module';
+import { SchedulingModule } from '../scheduling/scheduling.module';
+import { AgentViewModule } from '../agent-view/agent-view.module';
 
 @Module({
   // EmailModule exports EmailService so the contract MCP tools run the SAME SoR
@@ -39,6 +41,11 @@ import { MailEngineAdminModule } from '../mail-engine-admin/mail-engine-admin.mo
     // MailEngineAdminModule binds MailEngineAdminPort (JamesAdminClient) so the
     // mail-engine admin MCP tools can manage domains, accounts, and quotas.
     MailEngineAdminModule,
+    // SchedulingModule + AgentViewModule export SchedulingService + AgentViewService
+    // so the snooze / send-later / per-agent-mailbox MCP tools call the SAME services
+    // the human REST routes use (one implementation, one RLS path).
+    SchedulingModule,
+    AgentViewModule,
   ],
   // McpManifestController is the PUBLIC per-environment federation-manifest route
   // (mcp_endpoint derived from the host / PUBLIC_BASE_URL) — fixes prod advertising

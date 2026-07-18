@@ -45,7 +45,7 @@ describe('MCP PAT scope enforcement', () => {
 
   it('allows a grandfathered wildcard PAT to invoke every registered tool', () => {
     const toolNames = Object.keys(MCP_TOOL_SCOPES) as McpToolName[];
-    expect(toolNames).toHaveLength(44);
+    expect(toolNames).toHaveLength(52);
     for (const toolName of toolNames) {
       expect(() => enforceMcpToolScope(pat(['*']), toolName, NOW)).not.toThrow();
     }
