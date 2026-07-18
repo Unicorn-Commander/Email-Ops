@@ -283,13 +283,25 @@ describe('buildJmapFilter', () => {
         { cc: 'manager@example.com' },
         { subject: 'order' },
         { hasAttachment: true },
-        { isUnread: true },
-        { isStarred: true },
+        { notKeyword: '$seen' },
+        { hasKeyword: '$flagged' },
         { before: '2024-03-01T00:00:00Z' },
         { after: '2024-01-01T00:00:00Z' },
         { inMailbox: 'inbox-id' },
       ],
     });
+  });
+
+  it('maps is:unread to the JMAP notKeyword $seen filter', () => {
+    expect(buildJmapFilter({ text: '', isUnread: true })).toEqual({ notKeyword: '$seen' });
+  });
+
+  it('maps is:read to the JMAP hasKeyword $seen filter', () => {
+    expect(buildJmapFilter({ text: '', isRead: true })).toEqual({ hasKeyword: '$seen' });
+  });
+
+  it('maps is:starred to the JMAP hasKeyword $flagged filter', () => {
+    expect(buildJmapFilter({ text: '', isStarred: true })).toEqual({ hasKeyword: '$flagged' });
   });
 
   it('handles unknown key:value as free text', () => {

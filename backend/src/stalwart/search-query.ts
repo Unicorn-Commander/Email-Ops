@@ -131,9 +131,13 @@ export function buildJmapFilter(
   if (parsed.cc) conditions.push({ cc: parsed.cc });
   if (parsed.subject) conditions.push({ subject: parsed.subject });
   if (parsed.hasAttachment) conditions.push({ hasAttachment: true });
-  if (parsed.isUnread) conditions.push({ isUnread: true });
-  if (parsed.isRead) conditions.push({ isRead: true });
-  if (parsed.isStarred) conditions.push({ isStarred: true });
+  // Read/flag state is a JMAP keyword filter, NOT a bare FilterCondition prop:
+  // RFC 8621 has no `isUnread`/`isStarred` — James stores `$seen`/`$flagged`
+  // (see james.client: `keywords['$seen']`, `keywords/$flagged`). Map to the
+  // standard hasKeyword/notKeyword so the server actually filters.
+  if (parsed.isUnread) conditions.push({ notKeyword: '$seen' });
+  if (parsed.isRead) conditions.push({ hasKeyword: '$seen' });
+  if (parsed.isStarred) conditions.push({ hasKeyword: '$flagged' });
   if (parsed.before) conditions.push({ before: parsed.before + 'T00:00:00Z' });
   if (parsed.after) conditions.push({ after: parsed.after + 'T00:00:00Z' });
   if (inMailboxId) conditions.push({ inMailbox: inMailboxId });
