@@ -82,11 +82,15 @@ import {
   ChevronRightIcon,
   SlidersIcon,
   RobotIcon,
+  FolderIcon,
+  PencilIcon,
+  CloseIcon,
 } from '@/components/mail/icons';
 import type {
   BulkAction,
   MailboxPick,
   MailFolder,
+  MailFolderView,
   MessageView,
   ThreadView,
   UploadedBlob,
@@ -920,6 +924,19 @@ export default function MailPage() {
                 pendingCount={inbox.pendingCount}
                 onManageSenders={() => setSendersOpen(true)}
                 onCollapse={toggleFolders}
+                foldersEnabled={
+                  !mail.unified &&
+                  !!mail.selectedMailbox &&
+                  mail.foldersSupported &&
+                  mail.selectedMailbox.provider !== 'gmail' &&
+                  mail.selectedMailbox.provider !== 'microsoft'
+                }
+                customFolders={mail.customFolders}
+                activeCustomFolderId={mail.activeCustomFolderId}
+                onSelectCustomFolder={mail.selectCustomFolder}
+                onCreateFolder={mail.createFolder}
+                onRenameFolder={mail.renameFolder}
+                onDeleteFolder={mail.deleteFolder}
               />
             )}
           </div>
@@ -1114,6 +1131,225 @@ function avatarHueStyle(seed: string): CSSProperties {
   return { background: `linear-gradient(140deg, hsl(${h} 70% 56%), hsl(${h} 62% 45%))` };
 }
 
+type FolderActionResult = { ok: boolean; error?: string };
+
+/**
+ * The custom-folders block in the expanded folder rail: list + create + rename +
+ * delete + select. The page renders it ONLY for a single sovereign (James)
+ * mailbox. Folders are a HUMAN action, so this stays on the neutral accent/surface
+ * tokens — never the agent-violet signal — and every write reports the truthful
+ * backend status (a create/rename/delete that could not apply surfaces inline,
+ * never a fake success).
+ */
+function CustomFoldersSection({
+  folders,
+  activeId,
+  onSelect,
+  onCreate,
+  onRename,
+  onDelete,
+}: {
+  folders: MailFolderView[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  onCreate: (name: string) => Promise<FolderActionResult>;
+  onRename: (id: string, name: string) => Promise<FolderActionResult>;
+  onDelete: (id: string) => Promise<FolderActionResult>;
+}) {
+  const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const inputCls =
+    'w-full rounded-md border border-subtle bg-surface-base px-2 py-1 text-[13px] text-primary outline-none transition-colors focus:border-accent disabled:opacity-60';
+
+  const closeCreate = () => {
+    setCreating(false);
+    setDraft('');
+    setError(null);
+  };
+  const submitCreate = async () => {
+    const name = draft.trim();
+    if (!name || busy) return;
+    setBusy(true);
+    setError(null);
+    const res = await onCreate(name);
+    setBusy(false);
+    if (res.ok) closeCreate();
+    else setError(res.error ?? 'Could not create the folder.');
+  };
+  const closeRename = () => {
+    setRenamingId(null);
+    setRenameDraft('');
+  };
+  const submitRename = async (id: string) => {
+    const name = renameDraft.trim();
+    if (!name || busy) return;
+    setBusy(true);
+    setError(null);
+    const res = await onRename(id, name);
+    setBusy(false);
+    if (res.ok) closeRename();
+    else setError(res.error ?? 'Could not rename the folder.');
+  };
+  const submitDelete = async (id: string) => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    const res = await onDelete(id);
+    setBusy(false);
+    setConfirmDeleteId(null);
+    if (!res.ok) setError(res.error ?? 'Could not delete the folder.');
+  };
+
+  return (
+    <>
+      <div className="mt-1 flex items-center justify-between px-3.5 pb-1 pt-2">
+        <h3 className="text-[11px] font-semibold uppercase tracking-[0.09em] text-tertiary">
+          Custom folders
+        </h3>
+        <button
+          type="button"
+          onClick={() => (creating ? closeCreate() : setCreating(true))}
+          aria-label={creating ? 'Cancel new folder' : 'New folder'}
+          title={creating ? 'Cancel' : 'New folder'}
+          className="grid h-[20px] w-[20px] place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+        >
+          {creating ? <CloseIcon className="h-3.5 w-3.5" /> : <PlusIcon className="h-3.5 w-3.5" />}
+        </button>
+      </div>
+
+      {creating && (
+        <div className="mx-2 mb-1">
+          <input
+            autoFocus
+            value={draft}
+            disabled={busy}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void submitCreate();
+              if (e.key === 'Escape') closeCreate();
+            }}
+            placeholder="Folder name"
+            aria-label="New folder name"
+            className={inputCls}
+          />
+        </div>
+      )}
+
+      {folders.map((f) => {
+        const active = f.id === activeId;
+        if (renamingId === f.id) {
+          return (
+            <div key={f.id} className="mx-2 my-px">
+              <input
+                autoFocus
+                value={renameDraft}
+                disabled={busy}
+                onChange={(e) => setRenameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void submitRename(f.id);
+                  if (e.key === 'Escape') closeRename();
+                }}
+                onBlur={closeRename}
+                aria-label={`Rename ${f.name}`}
+                className={inputCls}
+              />
+            </div>
+          );
+        }
+        const confirming = confirmDeleteId === f.id;
+        const unread = f.unread != null && f.unread > 0 ? f.unread : null;
+        return (
+          <div
+            key={f.id}
+            className={cn(
+              'group mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 transition-colors',
+              active
+                ? 'bg-surface-elevated text-primary'
+                : 'text-secondary hover:bg-surface-overlay',
+            )}
+          >
+            <button
+              type="button"
+              onClick={() => onSelect(f.id)}
+              aria-current={active}
+              className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+            >
+              <FolderIcon
+                className={cn('h-4 w-4 shrink-0', active ? 'text-accent' : 'text-tertiary')}
+              />
+              <span className="flex-1 truncate text-[13px]">{f.name}</span>
+            </button>
+            {confirming ? (
+              <span className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => void submitDelete(f.id)}
+                  disabled={busy}
+                  className="rounded px-1 text-[11px] font-semibold text-danger hover:underline"
+                >
+                  Delete
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteId(null)}
+                  className="rounded px-1 text-[11px] text-tertiary hover:text-secondary"
+                >
+                  Cancel
+                </button>
+              </span>
+            ) : (
+              <>
+                {unread != null && (
+                  <span className="shrink-0 rounded-full bg-accent/[0.14] px-1.5 py-px text-[11px] font-semibold text-accent mono group-hover:hidden">
+                    {unread > 999 ? '999+' : unread}
+                  </span>
+                )}
+                <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRenamingId(f.id);
+                      setRenameDraft(f.name);
+                      setConfirmDeleteId(null);
+                    }}
+                    aria-label={`Rename ${f.name}`}
+                    title="Rename"
+                    className="grid h-[22px] w-[22px] place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+                  >
+                    <PencilIcon className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteId(f.id)}
+                    aria-label={`Delete ${f.name}`}
+                    title="Delete"
+                    className="grid h-[22px] w-[22px] place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-danger"
+                  >
+                    <TrashIcon className="h-3.5 w-3.5" />
+                  </button>
+                </span>
+              </>
+            )}
+          </div>
+        );
+      })}
+
+      {!creating && folders.length === 0 && (
+        <p className="mx-3.5 my-1 text-[12px] leading-5 text-tertiary">
+          No folders yet — create one to file mail.
+        </p>
+      )}
+      {error && <p className="mx-3.5 my-1 text-[11px] leading-4 text-danger">{error}</p>}
+    </>
+  );
+}
+
 function FoldersColumn({
   mailboxes,
   selectedId,
@@ -1126,6 +1362,13 @@ function FoldersColumn({
   pendingCount,
   onManageSenders,
   onCollapse,
+  foldersEnabled,
+  customFolders,
+  activeCustomFolderId,
+  onSelectCustomFolder,
+  onCreateFolder,
+  onRenameFolder,
+  onDeleteFolder,
 }: {
   mailboxes: MailboxPick[];
   selectedId: string | null;
@@ -1138,6 +1381,14 @@ function FoldersColumn({
   pendingCount: number;
   onManageSenders: () => void;
   onCollapse: () => void;
+  /** True only for a single selected sovereign (James) mailbox — gates the custom-folder UI. */
+  foldersEnabled: boolean;
+  customFolders: MailFolderView[];
+  activeCustomFolderId: string | null;
+  onSelectCustomFolder: (id: string) => void;
+  onCreateFolder: (name: string) => Promise<FolderActionResult>;
+  onRenameFolder: (id: string, name: string) => Promise<FolderActionResult>;
+  onDeleteFolder: (id: string) => Promise<FolderActionResult>;
 }) {
   return (
     <aside className="flex h-full w-[236px] flex-col overflow-y-auto border-r border-subtle bg-surface-raised">
@@ -1208,7 +1459,8 @@ function FoldersColumn({
       </Link>
       {FOLDERS.map((f) => {
         const Glyph = FOLDER_GLYPH[f.id];
-        const active = f.id === folder;
+        // A live custom folder owns the active highlight; de-select the system row.
+        const active = f.id === folder && !activeCustomFolderId;
         return (
           <button
             key={f.id}
@@ -1227,6 +1479,20 @@ function FoldersColumn({
           </button>
         );
       })}
+
+      {foldersEnabled && (
+        <>
+          <div className="mx-3.5 my-2 h-px bg-border-subtle" />
+          <CustomFoldersSection
+            folders={customFolders}
+            activeId={activeCustomFolderId}
+            onSelect={onSelectCustomFolder}
+            onCreate={onCreateFolder}
+            onRename={onRenameFolder}
+            onDelete={onDeleteFolder}
+          />
+        </>
+      )}
 
       <div className="flex-1" />
       <div className="border-t border-subtle p-2">

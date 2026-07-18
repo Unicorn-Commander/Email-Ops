@@ -27,13 +27,19 @@ import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 import {
   bulkThreadAction,
   composeMail,
+  createMailFolder,
+  deleteMailFolder,
   emptyMailFolder,
   getMailCounts,
   getMailThread,
   isMissingEndpoint,
   listAggregateThreads,
+  listCustomFolderThreads,
+  listMailFolders,
   listMailMailboxes,
   listMailThreads,
+  moveThreadToCustomFolder,
+  renameMailFolder,
   setThreadDisposition,
   setThreadFlags,
   setThreadRead,
@@ -43,6 +49,7 @@ import {
   type MailboxCounts,
   type MailboxPick,
   type MailFolder,
+  type MailFolderView,
   type MessageComposeView,
   type MessageView,
   type ThreadDisposition,
@@ -197,6 +204,35 @@ export interface UseMailClient {
   bulk: (threadIds: string[], action: BulkAction) => Promise<BulkOutcome>;
   /** Permanently empty Trash/Spam for the selected mailbox after UI confirmation. */
   emptyFolder: (folder: 'trash' | 'spam') => Promise<TriageOutcome>;
+
+  // ── Custom folders / labels (Wave 3) ───────────────────────────────────────
+  /**
+   * Whether the folders feature is deployed (a 404/501 from the folders route
+   * flips this off and the rail hides — like the Wave-2 feature flags).
+   */
+  foldersSupported: boolean;
+  /**
+   * The selected sovereign mailbox's CUSTOM folders (role === null). Empty for
+   * the unified list, external (gmail/microsoft) mailboxes, or a dormant engine.
+   */
+  customFolders: MailFolderView[];
+  /** The custom folder whose threads the list is showing (null = a system folder). */
+  activeCustomFolderId: string | null;
+  /** The resolved active custom folder (null when a system folder is shown). */
+  activeCustomFolder: MailFolderView | null;
+  /** Show a custom folder's threads (swaps the list source; closes any open thread). */
+  selectCustomFolder: (folderId: string) => void;
+  /** Create a custom folder on the selected sovereign mailbox, then refresh the rail. */
+  createFolder: (name: string) => Promise<TriageOutcome>;
+  /** Rename a custom folder (optimistic; rolls back + reports on updated:false). */
+  renameFolder: (folderId: string, name: string) => Promise<TriageOutcome>;
+  /** Delete a custom folder (never a system/role folder; rolls back on deleted:false). */
+  deleteFolder: (folderId: string) => Promise<TriageOutcome>;
+  /**
+   * Move a thread INTO a custom folder (optimistic removal from the current list;
+   * truthful rollback + error on moved:false so nothing fakes success).
+   */
+  moveThreadToFolder: (threadId: string, folderId: string) => Promise<TriageOutcome>;
 }
 
 function messageOf(err: unknown, fallback: string): string {
@@ -228,6 +264,12 @@ export function useMailClient(): UseMailClient {
   const [selectedMailboxId, setSelectedMailboxId] = useState<string | null>(null);
   const [folder, setFolder] = useState<MailFolder>('inbox');
   const [query, setQueryState] = useState('');
+
+  // Custom folders (Wave 3): the sovereign mailbox's role-null folders, plus the
+  // active one (when the list is showing a custom folder rather than a system one).
+  const [customFolders, setCustomFolders] = useState<MailFolderView[]>([]);
+  const [activeCustomFolderId, setActiveCustomFolderId] = useState<string | null>(null);
+  const [foldersSupported, setFoldersSupported] = useState(true);
 
   const [threads, setThreads] = useState<ThreadView[]>([]);
   const [threadsLoad, setThreadsLoad] = useState<Load>('loading');
@@ -262,6 +304,13 @@ export function useMailClient(): UseMailClient {
   workspaceRef.current = workspace;
   const queryRef = useRef(query);
   queryRef.current = query;
+  // Custom-folder refs so the thread fetch + stable callbacks read the live view.
+  const activeCustomFolderIdRef = useRef(activeCustomFolderId);
+  activeCustomFolderIdRef.current = activeCustomFolderId;
+  const customFoldersRef = useRef(customFolders);
+  customFoldersRef.current = customFolders;
+  const foldersSupportedRef = useRef(foldersSupported);
+  foldersSupportedRef.current = foldersSupported;
   // Read the current in-flight/list state from the poll without re-arming it.
   const threadsLoadRef = useRef(threadsLoad);
   threadsLoadRef.current = threadsLoad;
@@ -379,10 +428,18 @@ export function useMailClient(): UseMailClient {
       }
       try {
         const opts = { folder: f, limit: PAGE_SIZE, q: q || undefined, offset: offset || undefined };
+        // A live custom folder overrides the system folder as the list source.
+        const customId = activeCustomFolderIdRef.current;
         const res =
           mailboxId === ALL_INBOXES
             ? await listAggregateThreads(ws.workspace_id, opts)
-            : await listMailThreads(ws.workspace_id, mailboxId, opts);
+            : customId
+              ? await listCustomFolderThreads(ws.workspace_id, mailboxId, customId, {
+                  limit: PAGE_SIZE,
+                  q: q || undefined,
+                  offset: offset || undefined,
+                })
+              : await listMailThreads(ws.workspace_id, mailboxId, opts);
         if (req !== threadReqRef.current) return; // superseded
         setThreads((prev) => {
           if (!append) return res.threads;
@@ -421,11 +478,11 @@ export function useMailClient(): UseMailClient {
       setThreadsLoad(workspace && !selectedMailboxId ? 'ready' : 'loading');
       return;
     }
-    // Changing mailbox / folder / query closes any open thread.
+    // Changing mailbox / folder / custom folder / query closes any open thread.
     setOpenThread(null);
     setMessages([]);
     void fetchThreads(workspace, selectedMailboxId, folder, query, 0, false);
-  }, [workspace, selectedMailboxId, folder, query, fetchThreads]);
+  }, [workspace, selectedMailboxId, folder, activeCustomFolderId, query, fetchThreads]);
 
   const refreshThreads = useCallback(() => {
     const ws = workspaceRef.current;
@@ -439,6 +496,153 @@ export function useMailClient(): UseMailClient {
     if (!ws || !mbx || loadingMore) return;
     void fetchThreads(ws, mbx, folderRef.current, query, threadsRef.current.length, true);
   }, [query, loadingMore, fetchThreads]);
+
+  // ── Custom folders / labels (Wave 3) ───────────────────────────────────────
+  // Custom folders exist only on a single SOVEREIGN (stalwart) mailbox. The
+  // rail hides for the unified list, external accounts, or a dormant engine —
+  // and self-heals to hidden if the folders route 404/501s (feature-detect).
+  const refreshFolders = useCallback(() => {
+    const ws = workspaceRef.current;
+    const mbxId = selectedMailboxIdRef.current;
+    if (!ws || !mbxId || mbxId === ALL_INBOXES || !foldersSupportedRef.current) {
+      setCustomFolders([]);
+      return;
+    }
+    const mbx = mailboxesRef.current.find((m) => m.id === mbxId);
+    // Only sovereign mailboxes have custom folders; skip gmail/microsoft.
+    if (mbx && (mbx.provider === 'gmail' || mbx.provider === 'microsoft')) {
+      setCustomFolders([]);
+      return;
+    }
+    void (async () => {
+      try {
+        const res = await listMailFolders(ws.workspace_id, mbxId);
+        if (selectedMailboxIdRef.current !== mbxId) return; // selection moved on
+        setCustomFolders(res.folders.filter((f) => f.role === null));
+      } catch (err) {
+        if (guard401(err)) return;
+        if (isMissingEndpoint(err)) {
+          setFoldersSupported(false);
+          setCustomFolders([]);
+          return;
+        }
+        // Transient failure: keep whatever folders we had — never toast on this.
+      }
+    })();
+  }, [guard401]);
+
+  // Refresh the rail whenever the selected mailbox (or workspace) changes.
+  useEffect(() => {
+    refreshFolders();
+  }, [selectedMailboxId, workspace, refreshFolders]);
+
+  const selectCustomFolder = useCallback((folderId: string) => {
+    // The list effect (keyed on activeCustomFolderId) closes the open thread + refetches.
+    setActiveCustomFolderId(folderId);
+  }, []);
+
+  const createFolder = useCallback(
+    async (name: string): Promise<TriageOutcome> => {
+      const ws = workspaceRef.current;
+      const mbx = selectedMailboxIdRef.current;
+      const clean = name.trim();
+      if (!ws || !mbx || mbx === ALL_INBOXES) return { ok: false, error: 'Pick one mailbox first.' };
+      if (!clean) return { ok: false, error: 'Give the folder a name.' };
+      try {
+        await createMailFolder(ws.workspace_id, mbx, clean);
+        refreshFolders();
+        return { ok: true };
+      } catch (err) {
+        if (guard401(err)) return { ok: false, error: 'Session expired.' };
+        if (isMissingEndpoint(err)) return { ok: false, error: 'This mailbox can’t create folders.' };
+        return { ok: false, error: messageOf(err, 'Could not create the folder.') };
+      }
+    },
+    [refreshFolders, guard401],
+  );
+
+  const renameFolder = useCallback(
+    async (folderId: string, name: string): Promise<TriageOutcome> => {
+      const ws = workspaceRef.current;
+      const mbx = selectedMailboxIdRef.current;
+      const clean = name.trim();
+      if (!ws || !mbx || mbx === ALL_INBOXES) return { ok: false, error: 'Pick one mailbox first.' };
+      if (!clean) return { ok: false, error: 'Give the folder a name.' };
+      const before = customFoldersRef.current;
+      // Optimistic rename; roll back if the engine could not apply it.
+      setCustomFolders((prev) => prev.map((f) => (f.id === folderId ? { ...f, name: clean } : f)));
+      try {
+        const res = await renameMailFolder(ws.workspace_id, mbx, folderId, clean);
+        if (!res.updated) {
+          setCustomFolders(before);
+          return { ok: false, error: 'Could not rename that folder.' };
+        }
+        return { ok: true };
+      } catch (err) {
+        setCustomFolders(before);
+        if (guard401(err)) return { ok: false, error: 'Session expired.' };
+        return { ok: false, error: messageOf(err, 'Could not rename the folder.') };
+      }
+    },
+    [guard401],
+  );
+
+  const deleteFolder = useCallback(
+    async (folderId: string): Promise<TriageOutcome> => {
+      const ws = workspaceRef.current;
+      const mbx = selectedMailboxIdRef.current;
+      if (!ws || !mbx || mbx === ALL_INBOXES) return { ok: false, error: 'Pick one mailbox first.' };
+      const before = customFoldersRef.current;
+      // Optimistic removal; if we were viewing it, fall back to the inbox.
+      setCustomFolders((prev) => prev.filter((f) => f.id !== folderId));
+      if (activeCustomFolderIdRef.current === folderId) {
+        setActiveCustomFolderId(null);
+        setFolder('inbox');
+      }
+      try {
+        const res = await deleteMailFolder(ws.workspace_id, mbx, folderId);
+        if (!res.deleted) {
+          setCustomFolders(before);
+          return { ok: false, error: 'That folder could not be deleted.' };
+        }
+        return { ok: true };
+      } catch (err) {
+        setCustomFolders(before);
+        if (guard401(err)) return { ok: false, error: 'Session expired.' };
+        return { ok: false, error: messageOf(err, 'Could not delete the folder.') };
+      }
+    },
+    [guard401],
+  );
+
+  const moveThreadToFolder = useCallback(
+    async (threadId: string, folderId: string): Promise<TriageOutcome> => {
+      const ws = workspaceRef.current;
+      const row = threadsRef.current.find((t) => t.id === threadId);
+      const mbx = row?.mailbox_id ?? openThread?.mailboxId ?? selectedMailboxIdRef.current;
+      if (!ws || !mbx || mbx === ALL_INBOXES) return { ok: false, error: 'Pick one mailbox first.' };
+      const before = threadsRef.current;
+      // Optimistic: pull the thread out of the current list immediately.
+      setThreads((prev) => prev.filter((t) => t.id !== threadId));
+      setOpenThread((prev) => (prev?.id === threadId ? null : prev));
+      try {
+        const res = await moveThreadToCustomFolder(ws.workspace_id, mbx, threadId, folderId);
+        if (!res.moved) {
+          setThreads(before); // truthful rollback — nothing actually moved
+          return { ok: false, error: 'That folder is unavailable for this mailbox.' };
+        }
+        refreshFolders(); // the target folder's unread badge changed
+        refreshCounts();
+        return { ok: true };
+      } catch (err) {
+        setThreads(before);
+        if (guard401(err)) return { ok: false, error: 'Session expired.' };
+        if (isMissingEndpoint(err)) return { ok: false, error: 'Folders are not available here.' };
+        return { ok: false, error: messageOf(err, 'Could not move this conversation.') };
+      }
+    },
+    [openThread, refreshFolders, refreshCounts, guard401],
+  );
 
   // ── New-mail arrival: manual Refresh + visibility-gated background poll ─────
   // Both take a SILENT fetch (no skeleton, no error-state on a transient blip)
@@ -807,6 +1011,15 @@ export function useMailClient(): UseMailClient {
     triage,
     bulk,
     emptyFolder,
+    foldersSupported,
+    customFolders,
+    activeCustomFolderId,
+    activeCustomFolder: customFolders.find((f) => f.id === activeCustomFolderId) ?? null,
+    selectCustomFolder,
+    createFolder,
+    renameFolder,
+    deleteFolder,
+    moveThreadToFolder,
   };
 }
 

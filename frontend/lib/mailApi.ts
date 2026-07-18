@@ -746,3 +746,130 @@ export async function removeSenderPolicy(
     token,
   );
 }
+
+// ── Custom folders / labels (Wave 3) ─────────────────────────────────────────
+//
+// Only sovereign (stalwart) mailboxes have custom folders; external Gmail/M365
+// accounts return []/false and creates come back 501. A 404/501 from the list
+// route means the whole feature isn't deployed — callers feature-detect with
+// `isMissingEndpoint` and hide the rail rather than erroring.
+
+/**
+ * One folder under a mailbox. `role` NON-null = a SYSTEM folder
+ * (inbox/sent/archive/trash/junk/drafts, already shown as the hardcoded rail);
+ * `role === null` = a CUSTOM folder (the ones this feature surfaces).
+ */
+export interface MailFolderView {
+  id: string;
+  name: string;
+  role: string | null;
+  parentId: string | null;
+  unread?: number;
+}
+
+export interface MailFoldersResponse {
+  folders: MailFolderView[];
+  count: number;
+}
+
+/** List every folder (system role + custom) under a mailbox — the rail + move menu. */
+export async function listMailFolders(
+  workspaceId: string,
+  mailboxId: string,
+  token?: string,
+): Promise<MailFoldersResponse> {
+  return apiGet<MailFoldersResponse>(`${mailBase(workspaceId, mailboxId)}/folders`, token);
+}
+
+/**
+ * Create a custom folder (optionally nested under `parentId`). Returns the new
+ * folder's id. A 501 (`isMissingEndpoint`) means the engine is dormant or the
+ * mailbox is external — the caller surfaces that as "can't create here", not a crash.
+ */
+export async function createMailFolder(
+  workspaceId: string,
+  mailboxId: string,
+  name: string,
+  parentId?: string | null,
+  token?: string,
+): Promise<{ id: string }> {
+  return apiPost<{ id: string }>(
+    `${mailBase(workspaceId, mailboxId)}/folders`,
+    { name, parent_id: parentId ?? undefined },
+    token,
+  );
+}
+
+/** Rename a custom folder. `updated:false` = the engine could not apply it (surface it, don't fake success). */
+export async function renameMailFolder(
+  workspaceId: string,
+  mailboxId: string,
+  folderId: string,
+  name: string,
+  token?: string,
+): Promise<{ updated: boolean }> {
+  return apiPatch<{ updated: boolean }>(
+    `${mailBase(workspaceId, mailboxId)}/folders/${seg(folderId)}`,
+    { name },
+    token,
+  );
+}
+
+/**
+ * Delete a CUSTOM folder. `deleted:false` = a system/role folder was refused
+ * (they are inviolable), or the folder is unknown / external / dormant.
+ */
+export async function deleteMailFolder(
+  workspaceId: string,
+  mailboxId: string,
+  folderId: string,
+  token?: string,
+): Promise<{ deleted: boolean }> {
+  return apiDelete<{ deleted: boolean }>(
+    `${mailBase(workspaceId, mailboxId)}/folders/${seg(folderId)}`,
+    token,
+  );
+}
+
+/** Options for reading the threads inside a custom folder (same knobs as the mailbox list). */
+export interface ListCustomFolderThreadsOpts {
+  limit?: number;
+  q?: string;
+  offset?: number;
+}
+
+/**
+ * The live threads INSIDE a custom folder, in the SAME `ThreadView` shape the
+ * mailbox thread list renders — so selecting a folder just swaps the list source.
+ */
+export async function listCustomFolderThreads(
+  workspaceId: string,
+  mailboxId: string,
+  folderId: string,
+  opts: ListCustomFolderThreadsOpts = {},
+  token?: string,
+): Promise<MailThreadsResponse> {
+  const params = new URLSearchParams();
+  params.set('limit', String(opts.limit ?? 50));
+  if (opts.q?.trim()) params.set('q', opts.q.trim());
+  if (opts.offset) params.set('offset', String(opts.offset));
+  return apiGet<MailThreadsResponse>(
+    `${mailBase(workspaceId, mailboxId)}/folders/${seg(folderId)}/threads?${params.toString()}`,
+    token,
+  );
+}
+
+/** Move a thread INTO a custom folder. `moved:false` = unknown target/thread, external, or dormant. */
+export async function moveThreadToCustomFolder(
+  workspaceId: string,
+  mailboxId: string,
+  threadId: string,
+  folderId: string,
+  token?: string,
+): Promise<{ moved: boolean }> {
+  return apiPut<{ moved: boolean }>(
+    `${mailBase(workspaceId, mailboxId)}/threads/${seg(threadId)}/move`,
+    { folder_id: folderId },
+    token,
+  );
+}
