@@ -45,10 +45,17 @@ describe('MCP PAT scope enforcement', () => {
 
   it('allows a grandfathered wildcard PAT to invoke every registered tool', () => {
     const toolNames = Object.keys(MCP_TOOL_SCOPES) as McpToolName[];
-    expect(toolNames).toHaveLength(52);
+    expect(toolNames).toHaveLength(56);
     for (const toolName of toolNames) {
       expect(() => enforceMcpToolScope(pat(['*']), toolName, NOW)).not.toThrow();
     }
+  });
+
+  it('tags the mail-rules tools like the snooze/scheduled precedent (list read, CUD write)', () => {
+    expect(MCP_TOOL_SCOPES.list_mail_rules).toBe('mail:read');
+    expect(MCP_TOOL_SCOPES.create_mail_rule).toBe('mail:write');
+    expect(MCP_TOOL_SCOPES.update_mail_rule).toBe('mail:write');
+    expect(MCP_TOOL_SCOPES.delete_mail_rule).toBe('mail:write');
   });
 
   it('does not scope-check a JWT identity', () => {

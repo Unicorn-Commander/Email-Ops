@@ -41,6 +41,8 @@ import {
   moveThreadToCustomFolder,
   renameMailFolder,
   scheduleSend as apiScheduleSend,
+  cancelScheduledSend as apiCancelScheduledSend,
+  getScheduledSend as apiGetScheduledSend,
   snoozeThread,
   setThreadDisposition,
   setThreadFlags,
@@ -239,15 +241,37 @@ export interface UseMailClient {
   moveThreadsToFolder: (threadIds: string[], folderId: string) => Promise<TriageOutcome>;
   /** Snooze a thread out of the inbox until a chosen time (sovereign mailboxes only). */
   snoozeThreadUntil: (threadId: string, until: Date) => Promise<TriageOutcome>;
-  /** Schedule the composed message to leave at a future time (sovereign mailboxes only). */
+  /** Schedule the composed message to leave at a future time (sovereign mailboxes only).
+   *  On success carries the scheduled item's id + resolved mailbox so the caller
+   *  (send-later UI, undo-send bar) can cancel or verify it. */
   scheduleSend: (
     body: Pick<
       ComposeBody,
-      'to_address' | 'subject' | 'body' | 'body_html' | 'cc' | 'bcc' | 'attachments' | 'draft_id'
+      | 'to_address'
+      | 'subject'
+      | 'body'
+      | 'body_html'
+      | 'cc'
+      | 'bcc'
+      | 'attachments'
+      | 'draft_id'
+      | 'in_reply_to_thread_id'
+      | 'in_reply_to'
+      | 'references'
     >,
     sendAt: Date,
     mailboxId?: string,
-  ) => Promise<TriageOutcome>;
+  ) => Promise<TriageOutcome & { id?: string; mailboxId?: string; ambiguous?: boolean }>;
+  /** Cancel a pending scheduled send. `cancelled:false` = it already left (or was cancelled). */
+  cancelScheduledSend: (
+    id: string,
+    mailboxId: string,
+  ) => Promise<TriageOutcome & { cancelled?: boolean }>;
+  /** Truthful post-window verdict for the undo-send bar. Null = unknown — give up quietly. */
+  getScheduledSendState: (
+    id: string,
+    mailboxId: string,
+  ) => Promise<'pending' | 'claimed' | 'sent' | 'cancelled' | 'failed' | null>;
 }
 
 function messageOf(err: unknown, fallback: string): string {
@@ -755,11 +779,21 @@ export function useMailClient(): UseMailClient {
     async (
       body: Pick<
         ComposeBody,
-        'to_address' | 'subject' | 'body' | 'body_html' | 'cc' | 'bcc' | 'attachments' | 'draft_id'
+        | 'to_address'
+        | 'subject'
+        | 'body'
+        | 'body_html'
+        | 'cc'
+        | 'bcc'
+        | 'attachments'
+        | 'draft_id'
+        | 'in_reply_to_thread_id'
+        | 'in_reply_to'
+        | 'references'
       >,
       sendAt: Date,
       mailboxId?: string,
-    ): Promise<TriageOutcome> => {
+    ): Promise<TriageOutcome & { id?: string; mailboxId?: string; ambiguous?: boolean }> => {
       const ws = workspaceRef.current;
       // Schedule from the given mailbox, else the selected sovereign one, else the
       // first — never the unified sentinel (send-later is a single-mailbox verb).
@@ -785,17 +819,69 @@ export function useMailClient(): UseMailClient {
           // Forward the draft id so the scheduled send deletes it at fire time
           // (parity with the immediate-send lane) — no orphaned "sent" draft.
           ...(body.draft_id ? { draft_id: body.draft_id } : {}),
+          // Threading passthrough: a scheduled/undo-window REPLY must land in its
+          // thread exactly like an immediate reply would.
+          ...(body.in_reply_to_thread_id ? { in_reply_to_thread_id: body.in_reply_to_thread_id } : {}),
+          ...(body.in_reply_to ? { in_reply_to: body.in_reply_to } : {}),
+          ...(body.references?.length ? { references: body.references } : {}),
         });
         // Truthful: a dormant/external mailbox returns scheduled:false — surface it.
         if (!res.scheduled) return { ok: false, error: 'Send later is unavailable for this mailbox.' };
-        return { ok: true };
+        return { ok: true, id: res.item?.id, mailboxId: mbxId };
       } catch (err) {
         if (guard401(err)) return { ok: false, error: 'Session expired.' };
         if (isMissingEndpoint(err)) return { ok: false, error: 'Send later is not available here.' };
-        return { ok: false, error: messageOf(err, 'Could not schedule this message.') };
+        // A non-HTTP failure (network drop, timeout) is AMBIGUOUS — the server
+        // may have committed the schedule. Callers must NOT fall back to an
+        // immediate send on this, or the message can go out twice.
+        const ambiguous = !(err instanceof ApiError);
+        return { ok: false, ambiguous, error: messageOf(err, 'Could not schedule this message.') };
       }
     },
     [guard401],
+  );
+
+  const cancelScheduledSend = useCallback(
+    async (id: string, mailboxId: string): Promise<TriageOutcome & { cancelled?: boolean }> => {
+      const ws = workspaceRef.current;
+      if (!ws) return { ok: false, error: 'No workspace.' };
+      try {
+        const res = await apiCancelScheduledSend(ws.workspace_id, mailboxId, id);
+        // cancelled:false is a VALID outcome (the send already left) — the caller
+        // decides how to message it; ok reflects the call, not the race.
+        return { ok: true, cancelled: res.cancelled };
+      } catch (err) {
+        if (guard401(err)) return { ok: false, error: 'Session expired.' };
+        return { ok: false, error: messageOf(err, 'Could not cancel this send.') };
+      }
+    },
+    [guard401],
+  );
+
+  const getScheduledSendState = useCallback(
+    async (
+      id: string,
+      mailboxId: string,
+    ): Promise<'pending' | 'claimed' | 'sent' | 'cancelled' | 'failed' | null> => {
+      const ws = workspaceRef.current;
+      if (!ws) return null;
+      try {
+        const res = await apiGetScheduledSend(ws.workspace_id, mailboxId, id);
+        const state = (res.item?.state ?? '').toLowerCase();
+        return state === 'pending' ||
+          state === 'claimed' ||
+          state === 'sent' ||
+          state === 'cancelled' ||
+          state === 'failed'
+          ? state
+          : null;
+      } catch {
+        // Degrade quietly (older backend without the GET-one route, transient
+        // network) — the undo bar simply skips its verdict rather than erroring.
+        return null;
+      }
+    },
+    [],
   );
 
   // ── New-mail arrival: manual Refresh + visibility-gated background poll ─────
@@ -1183,6 +1269,8 @@ export function useMailClient(): UseMailClient {
     moveThreadsToFolder,
     snoozeThreadUntil,
     scheduleSend,
+    cancelScheduledSend,
+    getScheduledSendState,
   };
 }
 

@@ -228,6 +228,10 @@ export interface StalwartDraftRequest {
 export interface InboundMessageRef {
   threadId: string;
   fromAddress: string | null;
+  /** Every address on the To header (rules evaluate 'to' conditions against
+   *  these — the REAL recipients, not the polled mailbox's own address).
+   *  Optional for older fakes/engines; absent = header unknown. */
+  toAddresses?: string[];
   subject: string | null;
   receivedAt: string; // ISO
 }

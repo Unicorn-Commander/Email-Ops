@@ -1675,6 +1675,161 @@
       ],
       "tier_required": "pro",
       "read_only": true
+    },
+    {
+      "name": "list_mail_rules",
+      "description": "List one mailbox's inbound mail rules, priority ascending: each rule's name, enabled state, priority, match tree, ordered actions, and hit stats. Read-only / member-level. Returns { rules, count }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "create_mail_rule",
+      "description": "Create an inbound rule on one mailbox: a name, a match tree ({ all / any } groups of { field, op, value } conditions over from/to/subject/fromDomain), and an ordered actions list (MOVE_TO_FOLDER/ARCHIVE/TRASH/MARK_READ/STOP). priority auto-assigns past the current max when omitted. The service validates match + actions exactly as on REST - a bad payload is refused, never stored raw. Member-level write; runs AS the calling user. Returns the created rule.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "match": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "actions": {
+            "type": "array",
+            "items": {}
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "priority": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "name",
+          "match",
+          "actions"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "update_mail_rule",
+      "description": "Update any subset of an inbound rule's fields (name, enabled, priority, match, actions); provided fields are re-validated exactly as on create. Member-level write; runs AS the calling user. Returns the updated rule, or { status: not_found } when the rule is not in this workspace + mailbox.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rule_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "match": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "actions": {
+            "type": "array",
+            "items": {}
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "priority": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "rule_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "delete_mail_rule",
+      "description": "Delete an inbound rule from one mailbox. Member-level write; runs AS the calling user. Returns { ok:true }, or { ok:false, reason } when the rule is not in this workspace + mailbox.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rule_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "rule_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
     }
   ],
   "resources": [],

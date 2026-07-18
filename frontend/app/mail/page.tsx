@@ -49,6 +49,7 @@ import {
   formatWhen,
   participantLabel,
   useMailClient,
+  type ComposeOutcome,
   type Load,
   type TriageOutcome,
   type UseMailClient,
@@ -91,6 +92,7 @@ import {
 } from '@/components/mail/icons';
 import type {
   BulkAction,
+  ComposeBody,
   MailboxPick,
   MailFolder,
   MailFolderView,
@@ -98,6 +100,19 @@ import type {
   ThreadView,
   UploadedBlob,
 } from '@/lib/mailApi';
+import { UndoSendBar, readUndoSeconds, type UndoEntry } from '@/components/mail/UndoSendBar';
+import { useDesktopNotifications } from '@/components/mail/useDesktopNotifications';
+import { MailSettingsDialog } from '@/components/mail/MailSettingsDialog';
+import { RulesDialog } from '@/components/mail/RulesDialog';
+
+/** Funnel glyph for the Rules entries (matches the stroke language of icons.tsx). */
+function FunnelIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} className={className} aria-hidden>
+      <path d="M3 5h18l-7 8v5l-4 2v-7L3 5Z" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
 /** The folder tabs, in display order. */
 const FOLDERS: { id: MailFolder; label: string }[] = [
@@ -136,6 +151,13 @@ interface ReplySeed {
   subject: string;
   inReplyTo: string | null;
   nonce: number;
+}
+
+/** One-line label for the undo-send bar: "To alice@acme.com — Quarterly numbers". */
+function undoSummary(body: ComposeBody): string {
+  const to = body.to_address || body.cc?.[0] || '';
+  const subj = body.subject?.trim() || '(no subject)';
+  return to ? `To ${to} — ${subj}` : subj;
 }
 
 function draftPrefillFromMessage(message: MessageView): ComposePrefill {
@@ -177,6 +199,10 @@ export default function MailPage() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [popoutOpen, setPopoutOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [undoEntry, setUndoEntry] = useState<UndoEntry | null>(null);
+  const undoKeyRef = useRef(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [rulesOpen, setRulesOpen] = useState(false);
   const [filter, setFilter] = useState<SegFilter>('all');
 
   // Chrome collapse state (reused folders store + new rail store).
@@ -567,6 +593,8 @@ export default function MailPage() {
       !sendersOpen &&
       !snoozedOpen &&
       !scheduledOpen &&
+      !rulesOpen &&
+      !settingsOpen &&
       !helpOpen &&
       !popoutOpen &&
       !paletteOpen,
@@ -594,6 +622,10 @@ export default function MailPage() {
   const reloadOpenThread = useCallback(() => {
     if (selectedThreadId) selectThread(selectedThreadId, selectedThreadMailboxId ?? undefined);
   }, [selectThread, selectedThreadId, selectedThreadMailboxId]);
+  // Undo-send closures outlive renders — always call the LATEST reload (the one
+  // captured at send time may point at a since-closed thread).
+  const reloadOpenThreadRef = useRef(reloadOpenThread);
+  reloadOpenThreadRef.current = reloadOpenThread;
 
   // A single selected sovereign (stalwart) mailbox is the context for snooze,
   // send-later, and their management views. Null in unified mode / external accounts;
@@ -606,6 +638,138 @@ export default function MailPage() {
       ? mail.selectedMailbox
       : null;
   const canSchedule = !!sovereignMailbox;
+
+  // ── Undo-send: on sovereign mailboxes a "send" becomes a scheduled send due in
+  // a few seconds, recallable from the UndoSendBar. Everywhere the schedule lane
+  // is unavailable (external accounts, unified mode, window set to 0, older
+  // backend) it falls back to the immediate lane — undo never blocks a send. ──
+  const restoreComposer = useCallback((body: ComposeBody) => {
+    setComposeInitial({
+      // to_address is the composer's comma-joined list — split it back so each
+      // recipient restores as its own chip, not one giant chip.
+      to: body.to_address
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+      cc: body.cc,
+      bcc: body.bcc,
+      subject: body.subject,
+      body: body.body,
+      bodyHtml: body.body_html,
+      draftId: body.draft_id ?? null,
+      // The blob refs are what matter; size is unknown post-hoc (display-only).
+      attachments: body.attachments?.map((a) => ({ ...a, size: 0 })),
+      thread_id: body.in_reply_to_thread_id,
+    });
+    setComposeOpen(true);
+  }, []);
+
+  const {
+    compose: mailCompose,
+    reply: mailReply,
+    scheduleSend: mailScheduleSend,
+    cancelScheduledSend: mailCancelScheduled,
+    getScheduledSendState: mailScheduledState,
+    refresh: mailRefresh,
+  } = mail;
+
+  const sendWithUndo = useCallback(
+    async (body: ComposeBody, mailboxId?: string): Promise<ComposeOutcome> => {
+      const secs = readUndoSeconds();
+      if (!canSchedule || secs <= 0) return mailCompose(body, mailboxId);
+      const sendAt = new Date(Date.now() + secs * 1000);
+      const res = await mailScheduleSend(body, sendAt, mailboxId);
+      if (!res.ok || !res.id || !res.mailboxId) {
+        // AMBIGUOUS failure (network drop mid-request): the schedule may have
+        // committed server-side — an immediate-send fallback could double-send.
+        // Surface it instead; the Scheduled view holds the truth.
+        if (res.ok === false && res.ambiguous) {
+          return {
+            ok: false,
+            error:
+              "Couldn't confirm the send — check the Scheduled view before trying again.",
+          };
+        }
+        // DEFINITE refusal (dormant/external/validation) — send the normal way.
+        return mailCompose(body, mailboxId);
+      }
+      const sid = res.id;
+      const smbx = res.mailboxId;
+      setUndoEntry({
+        key: ++undoKeyRef.current,
+        summary: undoSummary(body),
+        expiresAt: sendAt.getTime(),
+        undo: async () => {
+          let c = await mailCancelScheduled(sid, smbx);
+          if (!c.ok) c = await mailCancelScheduled(sid, smbx); // one retry on transport error
+          if (c.ok && c.cancelled) {
+            restoreComposer(body);
+            return 'restored';
+          }
+          return 'too-late'; // the worker already claimed/sent it — verify instead
+        },
+        sendNow: async () => {
+          const c = await mailCancelScheduled(sid, smbx);
+          if (!c.ok || !c.cancelled) return 'raced';
+          // Send through the SAME mailbox the schedule targeted — the selection
+          // may have moved since.
+          const out = await mailCompose(body, smbx);
+          // ok merely means recorded — only a non-failed status is a real send.
+          return out.ok && out.message?.status !== 'failed' ? 'sent' : 'failed';
+        },
+        verify: async () => {
+          const state = await mailScheduledState(sid, smbx);
+          if (state === 'sent') {
+            // The message left AFTER the list last refreshed — pull it in so a
+            // scheduled reply shows up in its thread like an immediate one.
+            void mailRefresh();
+            reloadOpenThreadRef.current();
+          }
+          return state;
+        },
+        restore: () => restoreComposer(body),
+      });
+      return { ok: true };
+    },
+    [canSchedule, mailCompose, mailScheduleSend, mailCancelScheduled, mailScheduledState, mailRefresh, restoreComposer],
+  );
+
+  // Reply lane: thread the reply explicitly so the scheduled copy lands in its
+  // conversation exactly like an immediate reply would.
+  const replyViaUndo = useCallback(
+    async (body: Omit<ComposeBody, 'in_reply_to_thread_id'>): Promise<ComposeOutcome> => {
+      const row = openThreadRow;
+      if (!row) return mailReply(body); // the hook resolves the open thread itself
+      return sendWithUndo({ ...body, in_reply_to_thread_id: row.id }, row.mailbox_id ?? undefined);
+    },
+    [openThreadRow, mailReply, sendWithUndo],
+  );
+
+  // ── Desktop notifications: opt-in poll of ONE real mailbox (never the unified
+  // sentinel) — in unified mode fall back to the first human mailbox. ──
+  const notifMailbox = mail.unified
+    ? mail.mailboxes.find((m) => m.owner_kind === 'HUMAN') ?? mail.mailboxes[0] ?? null
+    : mail.selectedMailbox;
+  const desktopNotifications = useDesktopNotifications({
+    workspaceId: mail.workspace?.workspace_id ?? null,
+    mailboxId: notifMailbox?.id ?? null,
+    mailboxLabel: notifMailbox?.email_address,
+    onOpenThread: (threadId) => selectThread(threadId, notifMailbox?.id),
+  });
+  const {
+    supported: notificationsSupported,
+    enabled: notificationsEnabled,
+    permission: notificationsPermission,
+    setEnabled: setNotificationsEnabled,
+  } = desktopNotifications;
+
+  // The Rules dialog is only meaningful on a sovereign mailbox. If that context
+  // evaporates while (or after) it's open — mailbox switch, account refresh —
+  // drop the latched open state so it can't pop back unexpectedly later.
+  const rulesContextGone = !sovereignMailbox && rulesOpen;
+  useEffect(() => {
+    if (rulesContextGone) setRulesOpen(false);
+  }, [rulesContextGone]);
 
   // ── ⌘K command palette actions (built from the real handlers) ───────────────
   const { selectFolder, customFolders: cmdCustomFolders, moveThreadToFolder: cmdMoveToFolder } = mail;
@@ -702,7 +866,33 @@ export default function MailPage() {
           keywords: 'scheduled send later outbox queued pending',
           run: () => setScheduledOpen(true),
         },
+        {
+          id: 'view:rules',
+          label: 'Rules',
+          group: 'Actions',
+          icon: <FunnelIcon />,
+          keywords: 'rules filters automation file sort auto-archive',
+          run: () => setRulesOpen(true),
+        },
       );
+    }
+    list.push({
+      id: 'view:mail-settings',
+      label: 'Mail settings',
+      group: 'Actions',
+      keywords: 'settings preferences notifications undo send window',
+      run: () => setSettingsOpen(true),
+    });
+    if (notificationsSupported && notificationsPermission !== 'denied') {
+      list.push({
+        id: 'action:toggle-desktop-notifications',
+        label: notificationsEnabled
+          ? 'Disable desktop notifications'
+          : 'Enable desktop notifications',
+        group: 'Actions',
+        keywords: 'notify alerts ping new mail desktop notifications',
+        run: () => void setNotificationsEnabled(!notificationsEnabled),
+      });
     }
     if (selectedThreadId) {
       list.push(
@@ -819,6 +1009,10 @@ export default function MailPage() {
     cmdCustomFolders,
     cmdMoveToFolder,
     canSchedule,
+    notificationsSupported,
+    notificationsPermission,
+    notificationsEnabled,
+    setNotificationsEnabled,
   ]);
 
   const canCompose =
@@ -983,6 +1177,7 @@ export default function MailPage() {
                 schedulingEnabled={canSchedule}
                 onOpenSnoozed={() => setSnoozedOpen(true)}
                 onOpenScheduled={() => setScheduledOpen(true)}
+                onOpenRules={() => setRulesOpen(true)}
               />
             ) : (
               <FoldersColumn
@@ -1019,6 +1214,7 @@ export default function MailPage() {
                 schedulingEnabled={canSchedule}
                 onOpenSnoozed={() => setSnoozedOpen(true)}
                 onOpenScheduled={() => setScheduledOpen(true)}
+                onOpenRules={() => setRulesOpen(true)}
               />
             )}
           </div>
@@ -1091,7 +1287,7 @@ export default function MailPage() {
               messages={mail.messages}
               folder={mail.folder}
               onBack={() => selectThread(null)}
-              onReply={mail.reply}
+              onReply={replyViaUndo}
               onTriage={triageAndAdvance}
               onMoveToFolder={mail.moveThreadToFolder}
               customFolders={mail.customFolders}
@@ -1174,7 +1370,7 @@ export default function MailPage() {
         workspaceId={mail.workspace?.workspace_id ?? null}
         mailboxId={mail.composeMailbox?.id ?? null}
         onCompose={(b) =>
-          mail.compose(
+          sendWithUndo(
             composeInitial?.thread_id
               ? { ...b, in_reply_to_thread_id: composeInitial.thread_id }
               : b,
@@ -1182,7 +1378,17 @@ export default function MailPage() {
           )
         }
         canSchedule={canSchedule}
-        onScheduleSend={(b, at) => mail.scheduleSend(b, at, mail.composeMailbox?.id)}
+        onScheduleSend={(b, at) =>
+          mail.scheduleSend(
+            // Keep the reply context on the explicit send-later lane too — a
+            // scheduled reply must thread like an immediate one.
+            composeInitial?.thread_id
+              ? { ...b, in_reply_to_thread_id: composeInitial.thread_id }
+              : b,
+            at,
+            mail.composeMailbox?.id,
+          )
+        }
         initial={composeInitial}
       />
 
@@ -1210,6 +1416,29 @@ export default function MailPage() {
       <ShortcutsHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
 
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} actions={commandActions} />
+
+      <UndoSendBar
+        entry={undoEntry}
+        onDone={(k) => setUndoEntry((prev) => (prev?.key === k ? null : prev))}
+        raised={selected.size > 0}
+      />
+
+      <MailSettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        notifications={desktopNotifications}
+      />
+
+      <RulesDialog
+        open={rulesOpen && !!sovereignMailbox}
+        onClose={() => setRulesOpen(false)}
+        workspaceId={mail.workspace?.workspace_id ?? ''}
+        mailboxId={sovereignMailbox?.id ?? ''}
+        mailboxLabel={
+          sovereignMailbox?.display_name || sovereignMailbox?.email_address || 'this mailbox'
+        }
+        folders={mail.customFolders.map((f) => ({ id: f.id, name: f.name }))}
+      />
 
       <MessagePopout
         open={popoutOpen && threadOpen}
@@ -1485,6 +1714,7 @@ function FoldersColumn({
   schedulingEnabled,
   onOpenSnoozed,
   onOpenScheduled,
+  onOpenRules,
 }: {
   mailboxes: MailboxPick[];
   selectedId: string | null;
@@ -1505,10 +1735,11 @@ function FoldersColumn({
   onCreateFolder: (name: string) => Promise<FolderActionResult>;
   onRenameFolder: (id: string, name: string) => Promise<FolderActionResult>;
   onDeleteFolder: (id: string) => Promise<FolderActionResult>;
-  /** Sovereign-mailbox only: gates the Snoozed / Scheduled entries. */
+  /** Sovereign-mailbox only: gates the Snoozed / Scheduled / Rules entries. */
   schedulingEnabled: boolean;
   onOpenSnoozed: () => void;
   onOpenScheduled: () => void;
+  onOpenRules: () => void;
 }) {
   return (
     <aside className="flex h-full w-[236px] flex-col overflow-y-auto border-r border-subtle bg-surface-raised">
@@ -1618,6 +1849,14 @@ function FoldersColumn({
           >
             <SendIcon className="h-4 w-4 shrink-0 text-tertiary" />
             <span className="flex-1 text-[13px]">Scheduled</span>
+          </button>
+          <button
+            type="button"
+            onClick={onOpenRules}
+            className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
+          >
+            <FunnelIcon className="h-4 w-4 shrink-0 text-tertiary" />
+            <span className="flex-1 text-[13px]">Rules</span>
           </button>
         </>
       )}
@@ -1734,6 +1973,7 @@ function FoldersRail({
   schedulingEnabled,
   onOpenSnoozed,
   onOpenScheduled,
+  onOpenRules,
 }: {
   mailboxes: MailboxPick[];
   selectedId: string | null;
@@ -1751,6 +1991,7 @@ function FoldersRail({
   schedulingEnabled: boolean;
   onOpenSnoozed: () => void;
   onOpenScheduled: () => void;
+  onOpenRules: () => void;
 }) {
   return (
     <aside className="flex h-full w-[56px] flex-col items-center gap-1 overflow-y-auto overflow-x-visible border-r border-subtle bg-surface-raised py-2.5">
@@ -1851,6 +2092,15 @@ function FoldersRail({
             className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
           >
             <SendIcon className="h-[18px] w-[18px]" />
+          </button>
+          <button
+            type="button"
+            onClick={onOpenRules}
+            aria-label="Rules"
+            title="Rules"
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+          >
+            <FunnelIcon className="h-[18px] w-[18px]" />
           </button>
         </>
       )}

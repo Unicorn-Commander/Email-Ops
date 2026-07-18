@@ -967,6 +967,9 @@ export interface ScheduleSendBody {
   bcc?: string[];
   attachments?: ComposeAttachmentRef[];
   in_reply_to_thread_id?: string;
+  /** RFC-5322 threading passthrough (parity with the immediate-send lane). */
+  in_reply_to?: string;
+  references?: string[];
   /** The composer's autosaved draft — consumed (deleted) when the send fires,
    *  so a scheduled message doesn't strand an "already sent" draft in Drafts. */
   draft_id?: string;
@@ -982,6 +985,21 @@ export async function scheduleSend(
   return apiPost<{ scheduled: boolean; item: ScheduledSendView | null }>(
     `${mailBase(workspaceId, mailboxId)}/scheduled-sends`,
     body,
+    token,
+  );
+}
+
+/** Fetch ONE scheduled send in ANY state — the pending list hides sent/failed
+ *  rows, so the undo-send bar polls this for a truthful verdict. Null item =
+ *  missing/foreign/dormant. */
+export async function getScheduledSend(
+  workspaceId: string,
+  mailboxId: string,
+  id: string,
+  token?: string,
+): Promise<{ item: ScheduledSendView | null }> {
+  return apiGet<{ item: ScheduledSendView | null }>(
+    `${mailBase(workspaceId, mailboxId)}/scheduled-sends/${seg(id)}`,
     token,
   );
 }

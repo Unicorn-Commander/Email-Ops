@@ -15,8 +15,9 @@
  * tools call, so the approval logic + the RLS write path are not duplicated. The
  * controller's only added responsibility over the MCP tool is being the HTTP
  * front door: it resolves the acting user + the guard-authorized workspace, and
- * (for approve, which SENDS) re-derives the dual-SKU compose entitlement gate
- * server-side exactly like the MCP approve tool.
+ * (for approve) re-derives the entitlement gate server-side BY ITEM KIND exactly
+ * like the MCP approve tool: an EMAIL approval SENDS outbound mail (dual-SKU
+ * compose gate), a CLEANUP approval merely runs a cleaner batch (cleaner SKU).
  */
 
 import {
@@ -32,7 +33,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
 import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
-import { AgentInboxState, User } from '@prisma/client';
+import { AgentInboxKind, AgentInboxState, User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -40,6 +41,7 @@ import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decora
 import { entitlementsOf, ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { EmailService } from '../email/email.service';
 import { checkComposeEntitlement } from '../email/entitlement';
+import { checkCleanerEntitlement } from '../connected-accounts/entitlement';
 
 /** Optional reviewer note carried on an approve/reject. */
 class ReviewBodyDto {
@@ -90,7 +92,12 @@ export class AgentInboxController {
       'the message to queued/sent. This is the human-in-the-loop SEND.',
   })
   @ApiResponse({ status: 200, description: 'The updated inbox item + message.' })
-  @ApiResponse({ status: 403, description: 'Caller lacks the dual customer-ops+email-ops SKU.' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'Caller lacks the SKU for this item kind: EMAIL (a send) requires the dual ' +
+      'customer-ops+email-ops SKU; CLEANUP requires only the email-ops cleaner SKU.',
+  })
   @ApiResponse({ status: 404, description: 'No such pending item in this workspace.' })
   async approve(
     @ResolvedWorkspace() workspaceId: string,
@@ -98,9 +105,22 @@ export class AgentInboxController {
     @Param('id') id: string,
     @Body() body: ReviewBodyDto,
   ) {
-    // Approving a draft SENDS it — gate it like a compose (defense-in-depth,
-    // re-derived off the verified token; mirrors the MCP approve tool).
-    const gate = checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    // Gate BY KIND (defense-in-depth, re-derived off the verified token; mirrors
+    // the MCP approve tool). Peek first: a missing/foreign id 404s before any
+    // entitlement verdict. A CLEANUP approval merely runs a cleaner batch →
+    // cleaner SKU; anything else (EMAIL) SENDS → the dual-SKU compose gate.
+    const kind = await this.email.peekAgentInboxKind(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      id,
+    );
+    if (kind === null) {
+      throw new NotFoundException('Agent-inbox item not found in this workspace.');
+    }
+    const gate =
+      kind === AgentInboxKind.CLEANUP
+        ? checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId)
+        : checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }

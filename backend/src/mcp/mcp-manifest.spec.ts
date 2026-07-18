@@ -55,6 +55,26 @@ describe('Brigade federation manifest (.well-known/mcps.json)', () => {
     );
   });
 
+  it('advertises the mail-rules tools with the scheduling tools’ scope register', () => {
+    // list mirrors list_snoozed (read:email, read-only); create/update/delete
+    // mirror snooze_thread / cancel_scheduled_send (write:mail, writes).
+    const byName = new Map(
+      (manifest.tools as { name: string; scopes_required: string[]; read_only: boolean }[]).map(
+        (t) => [t.name, t],
+      ),
+    );
+    expect(byName.get('list_mail_rules')).toMatchObject({
+      scopes_required: ['read:email'],
+      read_only: true,
+    });
+    for (const name of ['create_mail_rule', 'update_mail_rule', 'delete_mail_rule']) {
+      expect(byName.get(name)).toMatchObject({
+        scopes_required: ['write:mail'],
+        read_only: false,
+      });
+    }
+  });
+
   it('bundles a backend catalog copy that is identical to the static manifest (no drift)', () => {
     // The backend image ships only dist/ (no frontend static file), so the per-env
     // manifest route (mcp-manifest.controller.ts) serves the bundled

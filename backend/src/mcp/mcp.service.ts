@@ -26,6 +26,7 @@ import {
   AgentViewTools,
   ConnectedAccountsTools,
   EmailOpsTools,
+  MailRulesTools,
   SchedulingTools,
   UiControlTools,
 } from './mcp.tools';
@@ -40,6 +41,7 @@ import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port
 import { MailDomainService } from '../mail-engine-admin/mail-domain.service';
 import { SchedulingService } from '../scheduling/scheduling.service';
 import { AgentViewService } from '../agent-view/agent-view.service';
+import { MailRulesService } from '../mail-rules/mail-rules.service';
 import { enforceMcpToolScope, McpToolName, PatTaggedIdentity } from './mcp-scopes';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
@@ -66,6 +68,7 @@ export class McpService {
     private readonly mailDomains: MailDomainService,
     private readonly scheduling: SchedulingService,
     private readonly agentView: AgentViewService,
+    private readonly mailRules: MailRulesService,
   ) {}
 
   /**
@@ -138,6 +141,7 @@ export class McpService {
     const uiTools = new UiControlTools(this.membership, this.uiCommands);
     const schedulingTools = new SchedulingTools(this.membership, this.scheduling);
     const agentViewTools = new AgentViewTools(this.membership, this.agentView);
+    const mailRulesTools = new MailRulesTools(this.membership, this.mailRules);
 
     // ── Foundation tools ──
 
@@ -1109,6 +1113,98 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await agentViewTools.getAgentMailbox(user, args)),
+    );
+
+    // ── Mail rules (per-mailbox inbound filters) ──
+    // The agent analogue of the human rules-management REST routes
+    // (mail-rules.controller.ts): CRUD over one mailbox's inbound rules. Thin
+    // wrappers over the SAME MailRulesService — one implementation, one RLS path;
+    // the per-mailbox tenant fence + sovereign-owner check and ALL match/actions
+    // validation live in the service (a bad payload surfaces as its own
+    // BadRequestException, exactly as on REST). list is read_only; the rest are
+    // member-level writes.
+
+    registerTool(
+      'list_mail_rules',
+      {
+        title: 'List mail rules',
+        description:
+          'List one mailbox’s inbound mail rules, priority ascending: each rule’s name, ' +
+          'enabled state, priority, match tree, ordered actions, and hit stats. ' +
+          'Read-only / member-level. Returns { rules, count }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await mailRulesTools.listMailRules(user, args)),
+    );
+
+    registerTool(
+      'create_mail_rule',
+      {
+        title: 'Create a mail rule',
+        description:
+          'Create an inbound rule on one mailbox: a name, a match tree ({ all / any } ' +
+          'groups of { field, op, value } conditions over from/to/subject/fromDomain), ' +
+          'and an ordered actions list (MOVE_TO_FOLDER/ARCHIVE/TRASH/MARK_READ/STOP). ' +
+          'priority auto-assigns past the current max when omitted. The service validates ' +
+          'match + actions exactly as on REST — a bad payload is refused, never stored ' +
+          'raw. Member-level write; runs AS the calling user. Returns the created rule.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          name: z.string().min(1).max(120),
+          // match/actions are rule-engine JSON; zod pins only the container types —
+          // the service is the real validator (parseMatch/parseActions + policy
+          // checks), exactly as on the REST DTO.
+          match: z.record(z.unknown()),
+          actions: z.array(z.unknown()),
+          enabled: z.boolean().optional(),
+          priority: z.number().int().optional(),
+        },
+      },
+      async (args: any) => wrap(await mailRulesTools.createMailRule(user, args)),
+    );
+
+    registerTool(
+      'update_mail_rule',
+      {
+        title: 'Update a mail rule',
+        description:
+          'Update any subset of an inbound rule’s fields (name, enabled, priority, ' +
+          'match, actions); provided fields are re-validated exactly as on create. ' +
+          'Member-level write; runs AS the calling user. Returns the updated rule, or ' +
+          '{ status:"not_found" } when the rule is not in this workspace + mailbox.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          rule_id: z.string().min(1),
+          name: z.string().min(1).max(120).optional(),
+          match: z.record(z.unknown()).optional(),
+          actions: z.array(z.unknown()).optional(),
+          enabled: z.boolean().optional(),
+          priority: z.number().int().optional(),
+        },
+      },
+      async (args: any) => wrap(await mailRulesTools.updateMailRule(user, args)),
+    );
+
+    registerTool(
+      'delete_mail_rule',
+      {
+        title: 'Delete a mail rule',
+        description:
+          'Delete an inbound rule from one mailbox. Member-level write; runs AS the ' +
+          'calling user. Returns { ok:true }, or { ok:false, reason } when the rule is ' +
+          'not in this workspace + mailbox.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          rule_id: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await mailRulesTools.deleteMailRule(user, args)),
     );
 
     return server;

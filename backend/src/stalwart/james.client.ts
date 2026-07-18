@@ -1343,7 +1343,7 @@ export class JamesClient extends StalwartPort {
           'Email/get',
           {
             '#ids': { resultOf: '0', name: 'Email/query', path: '/ids' },
-            properties: ['id', 'threadId', 'subject', 'from', 'receivedAt'],
+            properties: ['id', 'threadId', 'subject', 'from', 'to', 'receivedAt'],
           },
           '1',
         ],
@@ -1359,6 +1359,10 @@ export class JamesClient extends StalwartPort {
         threadId: typeof m?.threadId === 'string' ? m.threadId : '',
         fromAddress:
           Array.isArray(m?.from) && m.from[0]?.email ? String(m.from[0].email) : null,
+        // The REAL To recipients — rules' 'to' conditions match against these.
+        toAddresses: Array.isArray(m?.to)
+          ? m.to.map((a: any) => (a?.email ? String(a.email) : '')).filter(Boolean)
+          : [],
         subject: typeof m?.subject === 'string' ? m.subject : null,
         receivedAt: typeof m?.receivedAt === 'string' ? m.receivedAt : '',
       }))

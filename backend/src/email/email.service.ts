@@ -1573,6 +1573,25 @@ export class EmailService {
   }
 
   /**
+   * Peek an inbox item's kind WITHOUT touching it — the approve front doors use
+   * this to route the entitlement gate per kind (EMAIL sends → dual-SKU compose;
+   * CLEANUP runs a cleaner batch → cleaner SKU) before delegating the approval.
+   * Tenant fence: scope by workspaceId so a foreign item id resolves to null
+   * (→ 404) and can NEVER be probed across tenants. RLS is inert under the
+   * owner role today, so this explicit predicate is the real guard.
+   */
+  async peekAgentInboxKind(
+    workspaceId: string,
+    ucUid: string | null,
+    itemId: string,
+  ): Promise<AgentInboxKind | null> {
+    const item = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      tx.agentInboxItem.findFirst({ where: { id: itemId, workspaceId }, select: { kind: true } }),
+    );
+    return item?.kind ?? null;
+  }
+
+  /**
    * Approve a pending agent-inbox draft: PENDING → APPROVED, hand the staged
    * draft to the send lane, advance the message to queued/sent/failed. Returns
    * the updated message view. Idempotent-ish: approving a non-pending item is a

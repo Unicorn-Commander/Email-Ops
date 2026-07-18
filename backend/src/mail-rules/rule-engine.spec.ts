@@ -244,6 +244,53 @@ describe('rule engine', () => {
     expect(evaluateRules(rules, msg)).toEqual([action('MARK_READ')]);
   });
 
+  it("matches 'to' against ANY real recipient when toAddresses is present", () => {
+    const multi: InboundMessage = {
+      fromAddress: 'list@acme.com',
+      toAddress: '', // the applicator zeroes this so the fallback can't fire
+      toAddresses: ['other@example.com', 'founder+lists@acme.test'],
+      subject: 'Weekly digest',
+    };
+    const rules = [
+      rule('r1', 10, { all: [{ field: 'to', op: 'contains', value: 'founder+lists' }] }, [
+        action('ARCHIVE'),
+      ]),
+    ];
+    expect(evaluateRules(rules, multi)).toEqual([action('ARCHIVE')]);
+    // 'equals' must test each recipient individually, not a joined string.
+    const eq = [
+      rule('r2', 10, { all: [{ field: 'to', op: 'equals', value: 'other@example.com' }] }, [
+        action('MARK_READ'),
+      ]),
+    ];
+    expect(evaluateRules(eq, multi)).toEqual([action('MARK_READ')]);
+  });
+
+  it("matches NOTHING on 'to' when the real header is unknown (empty lists)", () => {
+    const unknown: InboundMessage = {
+      fromAddress: 'a@x.test',
+      toAddress: '',
+      toAddresses: [],
+      subject: 'hi',
+    };
+    // Even an always-true-looking condition can't fire without a real To value —
+    // the old bug matched the mailbox's own address stand-in on every message.
+    const rules = [
+      rule('r1', 10, { all: [{ field: 'to', op: 'contains', value: '@' }] }, [action('TRASH')]),
+    ];
+    expect(evaluateRules(rules, unknown)).toEqual([]);
+  });
+
+  it("keeps the single toAddress back-compat path for 'to' conditions", () => {
+    // The legacy fixture (toAddress only, no toAddresses) still matches.
+    const rules = [
+      rule('r1', 10, { all: [{ field: 'to', op: 'equals', value: 'support@example.com' }] }, [
+        action('MARK_READ'),
+      ]),
+    ];
+    expect(evaluateRules(rules, msg)).toEqual([action('MARK_READ')]);
+  });
+
   it('parseMatch tolerates unknown input into a safe empty match', () => {
     expect(parseMatch(null)).toEqual({});
     expect(parseMatch({ all: [{ field: 'from', op: 'equals', value: 'alice@acme.com' }] })).toEqual({

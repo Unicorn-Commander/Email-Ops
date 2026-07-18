@@ -1,6 +1,11 @@
 export interface InboundMessage {
   fromAddress: string;
+  /** Back-compat single recipient; prefer toAddresses when available. */
   toAddress: string;
+  /** Every address on the message's REAL To header. When present, 'to'
+   *  conditions match if ANY recipient satisfies the op (plus-address and
+   *  list filtering need the actual header, not the mailbox's own address). */
+  toAddresses?: string[];
   subject: string;
 }
 
@@ -148,35 +153,47 @@ function matchesChild(child: Condition | MatchNode, msg: InboundMessage): boolea
 }
 
 function matchesCondition(condition: Condition, msg: InboundMessage): boolean {
-  const actual = readField(condition.field, msg).toLowerCase();
   const expected = condition.value.toLowerCase();
 
-  switch (condition.op) {
-    case 'equals':
-      return actual === expected;
-    case 'contains':
-      return actual.includes(expected);
-    case 'startsWith':
-      return actual.startsWith(expected);
-    case 'endsWith':
-      return actual.endsWith(expected);
-    default:
-      return false;
-  }
+  // A field can be multi-valued ('to' = every real recipient); the condition
+  // matches when ANY value satisfies the op.
+  return readField(condition.field, msg).some((raw) => {
+    const actual = raw.toLowerCase();
+    switch (condition.op) {
+      case 'equals':
+        return actual === expected;
+      case 'contains':
+        return actual.includes(expected);
+      case 'startsWith':
+        return actual.startsWith(expected);
+      case 'endsWith':
+        return actual.endsWith(expected);
+      default:
+        return false;
+    }
+  });
 }
 
-function readField(field: MatchField, msg: InboundMessage): string {
+function readField(field: MatchField, msg: InboundMessage): string[] {
   switch (field) {
     case 'from':
-      return typeof msg?.fromAddress === 'string' ? msg.fromAddress : '';
-    case 'to':
-      return typeof msg?.toAddress === 'string' ? msg.toAddress : '';
+      return [typeof msg?.fromAddress === 'string' ? msg.fromAddress : ''];
+    case 'to': {
+      // Prefer the REAL To header (all recipients). An empty/missing list means
+      // the header is unknown — a 'to' condition then matches NOTHING rather
+      // than falsely matching against a stand-in address.
+      const many = Array.isArray(msg?.toAddresses)
+        ? msg.toAddresses.filter((a): a is string => typeof a === 'string' && a.length > 0)
+        : [];
+      if (many.length > 0) return many;
+      return typeof msg?.toAddress === 'string' && msg.toAddress ? [msg.toAddress] : [];
+    }
     case 'subject':
-      return typeof msg?.subject === 'string' ? msg.subject : '';
+      return [typeof msg?.subject === 'string' ? msg.subject : ''];
     case 'fromDomain':
-      return extractDomain(typeof msg?.fromAddress === 'string' ? msg.fromAddress : '');
+      return [extractDomain(typeof msg?.fromAddress === 'string' ? msg.fromAddress : '')];
     default:
-      return '';
+      return [];
   }
 }
 

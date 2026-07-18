@@ -412,6 +412,7 @@ model Workspace {
   senderPolicies     SenderPolicy[]
   snoozedThreads     SnoozedThread[]
   scheduledSends     ScheduledSend[]
+  mailRules          MailRule[]
   spaces             Space[]
   invitations        Invitation[]
   uiCommands         UiCommand[]
@@ -615,6 +616,7 @@ model MailboxAccount {
   contacts       MailContact[]
   snoozedThreads SnoozedThread[]
   scheduledSends ScheduledSend[]
+  mailRules      MailRule[]
 
   // One mailbox identity per address per workspace.
   @@unique([workspaceId, emailAddress])
@@ -903,6 +905,33 @@ model ScheduledSend {
   @@index([workspaceId, mailboxId, state, sendAt])
   @@index([state, sendAt])
   @@map("scheduled_sends")
+}
+
+// A per-mailbox inbound mail rule. `match` / `actions` hold the rule-engine
+// JSON (MatchNode / RuleAction[], see src/mail-rules/rule-engine.ts) validated
+// via parseMatch/parseActions at write time; the inbound watcher compiles the
+// enabled rows and applies them to each newly arrived message. hitCount /
+// lastHitAt are observability counters only (never load-bearing).
+model MailRule {
+  id          String    @id @default(uuid())
+  workspaceId String
+  mailboxId   String
+  name        String
+  enabled     Boolean   @default(true)
+  priority    Int
+  match       Json
+  actions     Json
+  hitCount    Int       @default(0)
+  lastHitAt   DateTime?
+  createdBy   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@index([mailboxId, enabled])
+  @@map("mail_rules")
 }
 
 // ============================================================

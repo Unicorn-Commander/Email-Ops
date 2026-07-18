@@ -209,6 +209,26 @@ export class SchedulingService {
     return rows.map((row) => this.scheduledView(row));
   }
 
+  /** Fetch ONE scheduled send in ANY state (the list hides terminal rows). The
+   *  undo-send bar polls this after its window closes for a truthful SENT/FAILED
+   *  verdict instead of guessing from absence. Null = missing/foreign/dormant. */
+  async getScheduledSend(
+    user: SchedulingUser,
+    workspaceId: string,
+    mailboxId: string,
+    id: string,
+  ): Promise<ScheduledSendView | null> {
+    const ucUid = ucUidOf(user);
+    const mailbox = await this.resolveSovereignMailboxForCaller(workspaceId, ucUid, mailboxId);
+    if (!mailbox || !this.stalwart.isConfigured()) return null;
+    const row = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      // Scoped by workspaceId AND mailboxId: a foreign id resolves to null, never
+      // to another tenant's payload (same explicit fence as the list).
+      tx.scheduledSend.findFirst({ where: { id, workspaceId, mailboxId } }),
+    );
+    return row ? this.scheduledView(row) : null;
+  }
+
   async surfaceDueSnoozes(now = new Date(), take = 100): Promise<number> {
     const rows = await this.prisma.systemClient.snoozedThread.findMany({
       where: {

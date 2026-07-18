@@ -26,6 +26,7 @@
 
 import { ForbiddenException } from '@nestjs/common';
 import {
+  AgentInboxKind,
   AgentInboxState,
   MailboxOwnerKind,
   MessageDisposition,
@@ -61,6 +62,8 @@ import { MailDomainService } from '../mail-engine-admin/mail-domain.service';
 import { DEFAULT_MAILBOX_QUOTA_BYTES } from '../mail-engine-admin/mail-engine-admin.constants';
 import { SchedulingService } from '../scheduling/scheduling.service';
 import { AgentViewService } from '../agent-view/agent-view.service';
+import { MailRulesService } from '../mail-rules/mail-rules.service';
+import { MailRuleView } from '../mail-rules/mail-rules.types';
 
 export class EmailOpsTools {
   constructor(
@@ -533,8 +536,20 @@ export class EmailOpsTools {
     args: { workspace_id?: string; item_id: string; note?: string },
   ): Promise<unknown> {
     const workspaceId = await this.resolve(user, args.workspace_id);
-    // Approving a draft is the human-in-the-loop SEND — gate it like a compose.
-    const gate = checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    // Gate BY KIND (mirrors the REST approve): peek first so a missing/foreign
+    // id reads as not-found before any entitlement verdict. Approving an EMAIL
+    // draft is the human-in-the-loop SEND → the dual-SKU compose gate; approving
+    // a CLEANUP item merely runs a cleaner batch → the cleaner SKU only.
+    const kind = await this.email.peekAgentInboxKind(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.item_id,
+    );
+    if (kind === null) return { ok: false, reason: 'agent-inbox item not found in this workspace' };
+    const gate =
+      kind === AgentInboxKind.CLEANUP
+        ? checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId)
+        : checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
@@ -1106,6 +1121,112 @@ export class AgentViewTools {
       threadLimit: args.thread_limit,
     });
     return view ?? { status: 'not_found', reason: 'agent not found in this workspace' };
+  }
+
+  private async resolve(user: User, requested?: string): Promise<string> {
+    return this.membership.resolveAndAuthorize(user, requested ?? null);
+  }
+}
+
+/**
+ * MailRulesTools — the inbound mail-rules surface, giving an agent the SAME
+ * rule CRUD the human has over the REST routes in mail-rules.controller.ts.
+ * Each tool runs AS the calling user: the membership gate resolves + authorizes
+ * the workspace, then the SAME MailRulesService the REST controller uses does
+ * the work (one implementation, one RLS path). The per-mailbox tenant fence +
+ * sovereign-owner check (assertMailbox) and ALL match/actions validation live
+ * INSIDE the service — a bad payload surfaces as its own BadRequestException,
+ * exactly as on REST — so no extra entitlement gate is added here (mirrors
+ * SchedulingTools).
+ */
+export class MailRulesTools {
+  constructor(
+    private readonly membership: MembershipService,
+    private readonly mailRules: MailRulesService,
+  ) {}
+
+  /** List one mailbox's inbound rules, priority ascending. */
+  async listMailRules(
+    user: User,
+    args: { workspace_id?: string; mailbox_id: string },
+  ): Promise<{ rules: MailRuleView[]; count: number }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const rules = await this.mailRules.list(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.mailbox_id,
+    );
+    return { rules, count: rules.length };
+  }
+
+  /** Create a rule (the service validates name/match/actions + the per-mailbox cap). */
+  async createMailRule(
+    user: User,
+    args: {
+      workspace_id?: string;
+      mailbox_id: string;
+      name: string;
+      match: Record<string, unknown>;
+      actions: unknown[];
+      enabled?: boolean;
+      priority?: number;
+    },
+  ): Promise<MailRuleView> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.mailRules.create(workspaceId, ucUidOf(user as WithWorkspaceClaim), args.mailbox_id, {
+      name: args.name,
+      enabled: args.enabled,
+      priority: args.priority,
+      match: args.match,
+      actions: args.actions,
+    });
+  }
+
+  /** Update any subset of a rule's fields; provided fields re-validate as on create. */
+  async updateMailRule(
+    user: User,
+    args: {
+      workspace_id?: string;
+      mailbox_id: string;
+      rule_id: string;
+      name?: string;
+      match?: Record<string, unknown>;
+      actions?: unknown[];
+      enabled?: boolean;
+      priority?: number;
+    },
+  ): Promise<MailRuleView | { status: string; reason: string }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const view = await this.mailRules.update(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.mailbox_id,
+      args.rule_id,
+      {
+        name: args.name,
+        enabled: args.enabled,
+        priority: args.priority,
+        match: args.match,
+        actions: args.actions,
+      },
+    );
+    return view ?? { status: 'not_found', reason: 'rule not found in this mailbox' };
+  }
+
+  /** Delete a rule from one mailbox. */
+  async deleteMailRule(
+    user: User,
+    args: { workspace_id?: string; mailbox_id: string; rule_id: string },
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const removed = await this.mailRules.remove(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.mailbox_id,
+      args.rule_id,
+    );
+    if (!removed) return { ok: false, reason: 'rule not found in this mailbox' };
+    return { ok: true };
   }
 
   private async resolve(user: User, requested?: string): Promise<string> {

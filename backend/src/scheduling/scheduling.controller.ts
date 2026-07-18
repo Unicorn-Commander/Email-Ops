@@ -143,4 +143,21 @@ export class SchedulingController {
     const scheduled_sends = await this.scheduling.listScheduledSends(user, workspaceId, mailboxId);
     return { scheduled_sends, count: scheduled_sends.length };
   }
+
+  @Get(':mailboxId/scheduled-sends/:id')
+  @ApiOperation({
+    summary:
+      'Fetch one scheduled send in ANY state (the list hides sent/failed rows) — ' +
+      'the undo-send bar polls this for a truthful sent/failed verdict.',
+  })
+  @ApiResponse({ status: 200, description: '{ item } — null when missing/foreign/dormant.' })
+  async getScheduledSend(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+    @Param('id') id: string,
+  ) {
+    const item = await this.scheduling.getScheduledSend(user, workspaceId, mailboxId, id);
+    return { item };
+  }
 }

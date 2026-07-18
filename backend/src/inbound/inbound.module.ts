@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { StalwartModule } from '../stalwart/stalwart.module';
 import { MailTriageModule } from '../mail-triage/mail-triage.module';
+import { MailRulesModule } from '../mail-rules/mail-rules.module';
 import { InboundWatcherService } from './inbound-watcher.service';
 
 /**
@@ -10,7 +11,7 @@ import { InboundWatcherService } from './inbound-watcher.service';
  * module only wires the service + its deps. Gated OFF by INBOUND_WATCHER_ENABLED.
  */
 @Module({
-  imports: [PrismaModule, StalwartModule, MailTriageModule],
+  imports: [PrismaModule, StalwartModule, MailTriageModule, MailRulesModule],
   providers: [InboundWatcherService],
   exports: [InboundWatcherService],
 })

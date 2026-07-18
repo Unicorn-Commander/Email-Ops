@@ -15,6 +15,7 @@ import { UiCommandsModule } from '../ui-commands/ui-commands.module';
 import { MailEngineAdminModule } from '../mail-engine-admin/mail-engine-admin.module';
 import { SchedulingModule } from '../scheduling/scheduling.module';
 import { AgentViewModule } from '../agent-view/agent-view.module';
+import { MailRulesModule } from '../mail-rules/mail-rules.module';
 
 @Module({
   // EmailModule exports EmailService so the contract MCP tools run the SAME SoR
@@ -46,6 +47,10 @@ import { AgentViewModule } from '../agent-view/agent-view.module';
     // the human REST routes use (one implementation, one RLS path).
     SchedulingModule,
     AgentViewModule,
+    // MailRulesModule exports MailRulesService so the mail-rules MCP tools run the
+    // SAME rule CRUD (validation + per-mailbox fence) the human REST routes use
+    // (one implementation, one RLS path).
+    MailRulesModule,
   ],
   // McpManifestController is the PUBLIC per-environment federation-manifest route
   // (mcp_endpoint derived from the host / PUBLIC_BASE_URL) — fixes prod advertising

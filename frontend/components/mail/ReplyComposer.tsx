@@ -251,7 +251,9 @@ export const ReplyComposer = forwardRef<
       return;
     }
     setStatus(res.message?.status ?? null);
-    if (describeStatus(res.message?.status).sent) {
+    // A messageless ok = the undo-send lane accepted the reply (it's a scheduled
+    // send in its undo window; the UndoSendBar reports the truthful outcome).
+    if (describeStatus(res.message?.status).sent || !res.message) {
       setBody('');
       uploads.reset();
       setDraftId(null);

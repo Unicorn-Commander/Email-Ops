@@ -3,6 +3,8 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { MailTriageService } from '../mail-triage/mail-triage.service';
+import { MailRulesService } from '../mail-rules/mail-rules.service';
+import { MailRuleRow } from '../mail-rules/mail-rules.types';
 import { inboundWatcherEnabled } from '../common/workspace/feature-flags';
 
 /**
@@ -28,6 +30,7 @@ export class InboundWatcherService {
     private readonly prisma: PrismaService,
     private readonly stalwart: StalwartPort,
     private readonly triage: MailTriageService,
+    private readonly rules: MailRulesService,
   ) {}
 
   @Cron(CronExpression.EVERY_MINUTE)
@@ -60,10 +63,39 @@ export class InboundWatcherService {
       orderBy: { updatedAt: 'asc' },
     });
 
+    // Preload ALL enabled rules ONCE per sweep (the sanctioned systemClient
+    // cross-tenant enumeration, same doctrine as the mailbox scan above) and
+    // group by mailbox — pollOne then skips rules work instantly (no queries)
+    // for mailboxes with none. Degrade-clean: a rules load failure warns and
+    // the sweep still classifies (rules must never block triage).
+    const rulesByMailbox = new Map<string, MailRuleRow[]>();
+    try {
+      const ruleRows = await this.prisma.systemClient.mailRule.findMany({
+        where: { enabled: true },
+        select: {
+          id: true,
+          workspaceId: true,
+          mailboxId: true,
+          enabled: true,
+          priority: true,
+          match: true,
+          actions: true,
+        },
+        orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
+      });
+      for (const row of ruleRows) {
+        const group = rulesByMailbox.get(row.mailboxId);
+        if (group) group.push(row);
+        else rulesByMailbox.set(row.mailboxId, [row]);
+      }
+    } catch (err) {
+      this.logger.warn(`inbound sweep: rules preload failed: ${(err as Error).message}`);
+    }
+
     let total = 0;
     for (const mb of mailboxes) {
       try {
-        total += await this.pollOne(mb);
+        total += await this.pollOne(mb, rulesByMailbox.get(mb.id));
       } catch (err) {
         this.logger.warn(`inbound poll failed for ${mb.emailAddress}: ${(err as Error).message}`);
       }
@@ -71,13 +103,16 @@ export class InboundWatcherService {
     return total;
   }
 
-  private async pollOne(mb: {
-    id: string;
-    workspaceId: string;
-    emailAddress: string;
-    inboundCursor: string | null;
-    ownerKind: string;
-  }): Promise<number> {
+  private async pollOne(
+    mb: {
+      id: string;
+      workspaceId: string;
+      emailAddress: string;
+      inboundCursor: string | null;
+      ownerKind: string;
+    },
+    mailboxRules?: MailRuleRow[],
+  ): Promise<number> {
     const result = await this.stalwart.pollInbound(mb.emailAddress, mb.inboundCursor);
     if (!result) return 0; // engine dormant / degrade-clean
 
@@ -89,6 +124,16 @@ export class InboundWatcherService {
         fromAddress: msg.fromAddress,
         subject: msg.subject,
       });
+      if (mailboxRules?.length) {
+        // The RULES ENGINE seam: applyInbound catches internally (degrade-clean),
+        // and this guard is belt-and-braces — a rules failure must never block
+        // triage of the remaining messages or the cursor advance below.
+        try {
+          await this.rules.applyInbound(mb.workspaceId, mb.id, mb.emailAddress, msg, mailboxRules);
+        } catch (err) {
+          this.logger.warn(`rules apply failed for ${mb.emailAddress}: ${(err as Error).message}`);
+        }
+      }
       if (mb.ownerKind === 'AGENT') {
         // Reply-routing seam: an agent received mail. The Brigade runtime that
         // drafts a reply into the approval queue consumes this hand-off (follow-up).

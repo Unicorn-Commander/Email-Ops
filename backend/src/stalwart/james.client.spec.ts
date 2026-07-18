@@ -315,7 +315,7 @@ describe('JamesClient', () => {
               {
                 list: [
                   { id: 'e3', threadId: 'th-3', subject: 'C', from: [{ email: 'c@x.test' }], receivedAt: '2026-02-03T00:00:00Z' },
-                  { id: 'e2', threadId: 'th-2', subject: 'B', from: [{ email: 'b@x.test' }], receivedAt: '2026-02-02T00:00:00Z' },
+                  { id: 'e2', threadId: 'th-2', subject: 'B', from: [{ email: 'b@x.test' }], to: [{ email: 'sales@unicorncommander.ai' }, { email: 'ops+lists@unicorncommander.ai' }], receivedAt: '2026-02-02T00:00:00Z' },
                   { id: 'e1', threadId: 'th-1', subject: 'A', from: [{ email: 'a@x.test' }], receivedAt: '2026-02-01T00:00:00Z' },
                 ],
               },
@@ -332,9 +332,14 @@ describe('JamesClient', () => {
       expect(res?.newMessages[0]).toEqual({
         threadId: 'th-2',
         fromAddress: 'b@x.test',
+        // The REAL To header rides along — the rules engine's 'to' conditions
+        // match these, never the polled mailbox's own address as a stand-in.
+        toAddresses: ['sales@unicorncommander.ai', 'ops+lists@unicorncommander.ai'],
         subject: 'B',
         receivedAt: '2026-02-02T00:00:00Z',
       });
+      // A message with no To header degrades to an empty list (header unknown).
+      expect(res?.newMessages[1]?.toAddresses).toEqual([]);
     });
 
     it('pollInbound degrades to null when the inbox role has no mailbox', async () => {

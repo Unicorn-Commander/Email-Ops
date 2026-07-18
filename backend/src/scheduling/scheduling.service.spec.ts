@@ -238,6 +238,37 @@ describe('SchedulingService', () => {
     expect(out.item?.state).toBe('pending');
   });
 
+  it('getScheduledSend returns a terminal row the pending list hides (undo-bar verdict)', async () => {
+    const tx = {
+      mailboxAccount: { findFirst: jest.fn().mockResolvedValue(mailbox) },
+      user: { findFirst: jest.fn().mockResolvedValue(null) },
+      scheduledSend: {
+        findFirst: jest.fn().mockResolvedValue(
+          scheduled({ state: ScheduledSendState.SENT, sentAt: new Date('2026-07-18T10:00:30.000Z') }),
+        ),
+      },
+    };
+    const { service } = make({ tx });
+    const view = await service.getScheduledSend(user, WS, 'mb-1', 'sch-1');
+    expect(view?.state).toBe('sent');
+    // The fence: scoped by id AND workspace AND mailbox — a foreign id nulls out.
+    expect(tx.scheduledSend.findFirst).toHaveBeenCalledWith({
+      where: { id: 'sch-1', workspaceId: WS, mailboxId: 'mb-1' },
+    });
+  });
+
+  it('getScheduledSend degrades to null when the engine is dormant (no DB read)', async () => {
+    const tx = {
+      mailboxAccount: { findFirst: jest.fn().mockResolvedValue(mailbox) },
+      user: { findFirst: jest.fn().mockResolvedValue(null) },
+      scheduledSend: { findFirst: jest.fn() },
+    };
+    const { service } = make({ tx, configured: false });
+    const view = await service.getScheduledSend(user, WS, 'mb-1', 'sch-1');
+    expect(view).toBeNull();
+    expect(tx.scheduledSend.findFirst).not.toHaveBeenCalled();
+  });
+
   it('refuses an invalid snooze `until` BEFORE archiving the thread (no stranding)', async () => {
     const { service, tx, stalwart } = make();
     const out = await service.snoozeThread(user, {

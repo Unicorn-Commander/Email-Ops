@@ -330,7 +330,10 @@ export function ComposeDialog({
     }
     const meta = describeStatus(res.message?.status);
     setStatus(res.message?.status ?? null);
-    if (meta.sent) {
+    // A messageless ok = the undo-send lane accepted it (the message is a
+    // scheduled send in its undo window; the UndoSendBar takes over from here).
+    // The immediate lane always carries the recorded message projection.
+    if (meta.sent || !res.message) {
       clearDraftState();
       onClose();
     }
