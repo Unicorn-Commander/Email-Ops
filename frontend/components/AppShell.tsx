@@ -18,7 +18,7 @@ import { useAgentControls } from './useAgentControls';
 import {
   cleanupActivity,
   getStoredUser,
-  getToken,
+  isAuthenticated,
   undoBatch,
   type CleanupBatchView,
   type EmailOpsUser,
@@ -38,7 +38,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       setReady(true);
       return;
     }
-    if (!getToken()) {
+    if (!isAuthenticated()) {
       router.replace('/auth/login');
       return;
     }

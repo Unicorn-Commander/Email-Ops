@@ -56,6 +56,7 @@ export async function fetchMobileconfigBlob(
 ): Promise<Blob> {
   const bearer = token ?? getToken();
   const res = await fetch(`${API_BASE}${mailboxPath(workspaceId, mailboxId)}/config.mobileconfig`, {
+    credentials: 'include',
     headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
   });
   if (!res.ok) {

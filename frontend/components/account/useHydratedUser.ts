@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { fetchProfile, getStoredUser, getToken, setSession, type EmailOpsUser } from '@/lib/api';
+import { fetchProfile, getStoredUser, isAuthenticated, setStoredUser, type EmailOpsUser } from '@/lib/api';
 
 /**
  * Resolve the signed-in user for the avatar/account menu.
@@ -19,14 +19,13 @@ export function useHydratedUser(): EmailOpsUser | null {
   useEffect(() => {
     if (attempted.current) return;
     if (user?.picture) return;
-    const token = getToken();
-    if (!token) return;
+    if (!isAuthenticated()) return;
     attempted.current = true;
     let alive = true;
-    fetchProfile(token)
+    fetchProfile() // authed by the HttpOnly cookie — no token needed
       .then((p) => {
         if (!alive) return;
-        setSession(token, p);
+        setStoredUser(p);
         setUser(p);
       })
       .catch(() => {});

@@ -559,6 +559,7 @@ export async function fetchMailBlob(
 ): Promise<Blob> {
   const bearer = token ?? getToken();
   const res = await fetch(`${API_BASE}${mailBlobPath(workspaceId, mailboxId, blobId, name, type)}`, {
+    credentials: 'include',
     headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
   });
   if (!res.ok) throw new ApiError(res.status, `Could not download the attachment (${res.status}).`);
@@ -587,6 +588,7 @@ export function uploadMailAttachment(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API_BASE}${mailBase(workspaceId, mailboxId)}/attachments`);
+    xhr.withCredentials = true; // send the HttpOnly session cookie (same-origin)
     const bearer = token ?? getToken();
     if (bearer) xhr.setRequestHeader('Authorization', `Bearer ${bearer}`);
     xhr.upload.onprogress = (e) => {

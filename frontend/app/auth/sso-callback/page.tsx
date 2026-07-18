@@ -2,25 +2,34 @@
 
 import { Suspense, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { setSession, fetchProfile } from '@/lib/api';
+import { setSession, setStoredUser, fetchProfile } from '@/lib/api';
 import { Skeleton } from '@/components/ui';
 
 function Callback() {
   const router = useRouter();
   const params = useSearchParams();
   useEffect(() => {
+    // Back-compat: an older backend redirected with the JWT as `?token=`. If it's
+    // there, keep the legacy localStorage flow.
     const token = params.get('token');
     if (token) {
       setSession(token, null);
-      // Hydrate the profile so the account avatar shows real initials/photo
-      // instead of a fallback; never block the redirect on it.
       fetchProfile(token)
         .then((u) => setSession(token, u))
         .catch(() => {})
         .finally(() => router.replace('/dashboard'));
-    } else {
-      router.replace('/auth/login');
+      return;
     }
+    // Cookie flow: the backend already set the HttpOnly session cookie on the
+    // callback. Hydrate the profile (authed by that cookie) as the client-side
+    // "logged in" marker, then land on the dashboard. A failure means no valid
+    // session — send them to login rather than a broken shell.
+    fetchProfile()
+      .then((u) => {
+        setStoredUser(u);
+        router.replace('/dashboard');
+      })
+      .catch(() => router.replace('/auth/login'));
   }, [params, router]);
   return (
     <div className="grid min-h-screen place-items-center bg-surface-base">

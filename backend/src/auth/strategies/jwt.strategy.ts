@@ -8,6 +8,32 @@ import { AuthService, JwtPayload } from '../auth.service';
 import { User } from '@prisma/client';
 
 /**
+ * Extract the local session JWT from the HttpOnly `access_token` cookie — the
+ * web session's transport. An HttpOnly cookie is not readable by JS, so an XSS
+ * can't exfiltrate it the way it could the old localStorage token. Dependency-
+ * free (parses the raw Cookie header) so no cookie-parser middleware is needed.
+ * Returns null when absent; the Bearer header extractor still serves MCP / PAT /
+ * federation callers, so this is purely ADDITIVE.
+ */
+function cookieTokenExtractor(req: any): string | null {
+  const header: string | undefined = req?.headers?.cookie;
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === 'access_token') {
+      const value = part.slice(idx + 1).trim();
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        return value;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Multi-token JWT strategy (SUITE-IDENTITY §D6).
  *
  * Accepts:
@@ -57,7 +83,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     }
 
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      // Cookie first (the web session's HttpOnly transport), then the Bearer
+      // header (MCP / PAT / Brigade federation). Same secretOrKeyProvider
+      // validates whichever token is found, so all three token types still work.
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        cookieTokenExtractor,
+        ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ]),
       ignoreExpiration: false,
       // secretOrKeyProvider runs per-request; inspect the JWT header + payload
       // and resolve the right key on the fly. Provider must call done(err, key).

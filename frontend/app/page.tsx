@@ -2,13 +2,13 @@
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { getToken } from '@/lib/api';
+import { isAuthenticated } from '@/lib/api';
 import { Skeleton } from '@/components/ui';
 
 export default function Home() {
   const router = useRouter();
   useEffect(() => {
-    router.replace(getToken() ? '/dashboard' : '/auth/login');
+    router.replace(isAuthenticated() ? '/dashboard' : '/auth/login');
   }, [router]);
 
   return (

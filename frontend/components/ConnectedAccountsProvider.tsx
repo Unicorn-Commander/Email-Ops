@@ -14,7 +14,7 @@ import {
   ApiError,
   clearSession,
   type ConnectedProvider,
-  getToken,
+  isAuthenticated,
   listConnectedAccounts,
   type LinkedAccountView,
 } from '@/lib/api';
@@ -62,7 +62,7 @@ export function ConnectedAccountsProvider({ children }: { children: ReactNode })
   }, []);
 
   const refreshAccounts = useCallback(async () => {
-    if (!getToken()) {
+    if (!isAuthenticated()) {
       setLoading(false);
       return;
     }

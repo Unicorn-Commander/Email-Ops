@@ -23,6 +23,17 @@ export function setSession(token: string, user: unknown): void {
   window.localStorage.setItem(USER_KEY, JSON.stringify(user));
 }
 
+/**
+ * Store just the signed-in user — for display AND as the client-side "logged in"
+ * marker. The auth token itself now rides in an HttpOnly cookie (not readable by
+ * JS), so the browser no longer holds the credential in localStorage. This marker
+ * is non-sensitive (id/email/name) and only gates client-side routing.
+ */
+export function setStoredUser(user: unknown): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+
 export function getStoredUser<T = unknown>(): T | null {
   if (typeof window === 'undefined') return null;
   const raw = window.localStorage.getItem(USER_KEY);
@@ -34,10 +45,32 @@ export function getStoredUser<T = unknown>(): T | null {
   }
 }
 
+/**
+ * Client-side "is there a session?" heuristic for routing gates. True when a
+ * stored user marker exists OR a legacy localStorage token is present (transition
+ * back-compat). The authoritative check is always the server — an API 401 makes
+ * the guards bounce to login — this only avoids flashing the login screen to an
+ * already-signed-in user whose session lives in the HttpOnly cookie.
+ */
+export function isAuthenticated(): boolean {
+  if (typeof window === 'undefined') return false;
+  return !!window.localStorage.getItem(USER_KEY) || !!window.localStorage.getItem(TOKEN_KEY);
+}
+
+/** Sign out server-side: clears the HttpOnly session cookie. Best-effort. */
+export async function logout(): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/auth/logout`, { method: 'POST', credentials: 'include' });
+  } catch {
+    /* clear local state regardless of the network result */
+  }
+}
+
 export function clearSession(): void {
   if (typeof window === 'undefined') return;
   window.localStorage.removeItem(TOKEN_KEY);
   window.localStorage.removeItem(USER_KEY);
+  void logout(); // also clear the server-side session cookie
 }
 
 /** The backend SSO entry point — redirects the browser to Keycloak. */
@@ -73,6 +106,7 @@ async function errorMessage(res: Response, fallback: string): Promise<string> {
 export async function apiGet<T = unknown>(path: string, token?: string): Promise<T> {
   const bearer = token ?? getToken();
   const res = await fetch(`${API_BASE}${path}`, {
+    credentials: 'include',
     headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
   });
   if (!res.ok) {
@@ -89,6 +123,7 @@ export async function apiPost<T = unknown>(
 ): Promise<T> {
   const bearer = token ?? getToken();
   const res = await fetch(`${API_BASE}${path}`, {
+    credentials: 'include',
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -190,6 +225,7 @@ export async function assistantChatStream(
   const res = await fetch(
     `${API_BASE}/workspaces/${encodeURIComponent(workspaceId)}/assistant/chat/stream`,
     {
+      credentials: 'include',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -242,6 +278,7 @@ export async function apiPatch<T = unknown>(
 ): Promise<T> {
   const bearer = token ?? getToken();
   const res = await fetch(`${API_BASE}${path}`, {
+    credentials: 'include',
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
@@ -261,6 +298,7 @@ export async function apiPatch<T = unknown>(
 export async function apiPut<T = unknown>(path: string, body?: unknown, token?: string): Promise<T> {
   const bearer = token ?? getToken();
   const res = await fetch(`${API_BASE}${path}`, {
+    credentials: 'include',
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
@@ -279,6 +317,7 @@ export async function apiPut<T = unknown>(path: string, body?: unknown, token?: 
 export async function apiDelete<T = unknown>(path: string, token?: string): Promise<T> {
   const bearer = token ?? getToken();
   const res = await fetch(`${API_BASE}${path}`, {
+    credentials: 'include',
     method: 'DELETE',
     headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
   });
