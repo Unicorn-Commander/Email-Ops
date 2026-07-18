@@ -83,6 +83,9 @@ describe('AgentViewService', () => {
         findFirst: jest.fn(),
         findMany: jest.fn(),
       },
+      agentMailbox: {
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
       agentInboxItem: {
         groupBy: jest.fn(),
         findFirst: jest.fn().mockResolvedValue(null),
@@ -181,6 +184,28 @@ describe('AgentViewService', () => {
       },
       stats: { lastActivityAt: null },
     });
+  });
+
+  it('falls back to a READ-only binding when the agent has no send identity', async () => {
+    const tx = makeTx();
+    tx.agent.findFirst.mockResolvedValue(agent({ mailboxAccountId: null }));
+    // No send identity, but a readable binding exists → show its inbox.
+    tx.agentMailbox.findFirst.mockResolvedValue({
+      mailbox: mailbox({ id: 'mb-read', emailAddress: 'shared@example.com' }),
+    });
+    tx.agentInboxItem.groupBy.mockResolvedValue([]);
+    const threads = [{ id: 't1', subject: 'Hi', message_count: 1, unread: false, last_message_at: null, last_snippet: null, participants: [] }];
+    const { service, email } = make(tx, {
+      listMailboxInbox: jest.fn().mockResolvedValue(threads),
+    } as Partial<EmailService>);
+
+    const view = await service.getAgentMailbox(user(), { workspaceId: WS, agentId: 'agent-1' });
+
+    // Reads the readable binding's mailbox, not the (null) send identity.
+    expect(tx.agentMailbox.findFirst).toHaveBeenCalled();
+    expect(email.listMailboxInbox).toHaveBeenCalledWith(WS, UID, 'mb-read', 25, 'inbox');
+    expect(view?.agent.mailbox).toMatchObject({ id: 'mb-read', address: 'shared@example.com' });
+    expect(view?.threads).toEqual(threads);
   });
 
   it('refuses a cross-workspace agent id by returning null from the fenced lookup', async () => {

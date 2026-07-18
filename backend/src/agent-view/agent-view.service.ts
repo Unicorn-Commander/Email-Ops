@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { AgentInboxState, User } from '@prisma/client';
+import { AgentInboxState, MailboxAccessLevel, User } from '@prisma/client';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { EmailService } from '../email/email.service';
 import { AgentInboxView, MailboxCountsView, ThreadView } from '../email/email.types';
@@ -41,11 +41,7 @@ export class AgentViewService {
       });
       if (!agent) return null;
 
-      const mailbox = agent.mailboxAccountId
-        ? await tx.mailboxAccount.findFirst({
-            where: { id: agent.mailboxAccountId, workspaceId: input.workspaceId },
-          })
-        : null;
+      const mailbox = await this.resolveViewableMailbox(tx, input.workspaceId, agent);
 
       const counts = await this.countAgentInboxByState(tx, input.workspaceId, agent.key);
       const lastActivityAt = await this.lastActivityAt(tx, input.workspaceId, agent.key, mailbox?.emailAddress ?? null);
@@ -135,6 +131,34 @@ export class AgentViewService {
     });
 
     return { items, count: items.length };
+  }
+
+  /**
+   * The mailbox whose inbox the drill-in shows. Prefer the agent's send identity
+   * (mailboxAccountId); fall back to any READ/BOTH binding so a read-only-bound
+   * agent (no send identity) still shows its inbox — its card lists that mailbox.
+   */
+  private async resolveViewableMailbox(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    agent: NonNullable<AgentRow>,
+  ): Promise<MailboxRow> {
+    if (agent.mailboxAccountId) {
+      const send = await tx.mailboxAccount.findFirst({
+        where: { id: agent.mailboxAccountId, workspaceId },
+      });
+      if (send) return send;
+    }
+    const binding = await tx.agentMailbox.findFirst({
+      where: {
+        workspaceId,
+        agentId: agent.id,
+        access: { in: [MailboxAccessLevel.READ, MailboxAccessLevel.BOTH] },
+      },
+      orderBy: [{ isPrimary: 'desc' }, { updatedAt: 'desc' }],
+      include: { mailbox: true },
+    });
+    return binding?.mailbox ?? null;
   }
 
   private async countAgentInboxByState(

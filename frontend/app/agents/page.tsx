@@ -37,6 +37,7 @@ import {
   ApiError,
   bindAgentMailbox,
   getAgentMailbox,
+  listAgentMailboxes,
   listMailboxes,
   unbindAgentMailbox,
   type AgentMailboxView,
@@ -98,6 +99,25 @@ export default function AgentsPage() {
   const { workspace, items, load, error, refresh, create, update } = useAgents();
   const { activeSpace } = useActiveSpace();
   const [createOpen, setCreateOpen] = useState(false);
+
+  // Live per-agent unread from the mailbox roster (best-effort — if it fails the
+  // cards simply omit the unread badge). Re-fetched when the fleet refreshes.
+  const workspaceId = workspace?.workspace_id ?? null;
+  const [unreadByAgent, setUnreadByAgent] = useState<Map<string, number>>(new Map());
+  useEffect(() => {
+    if (!workspaceId) return;
+    let alive = true;
+    listAgentMailboxes(workspaceId)
+      .then((res) => {
+        if (alive) setUnreadByAgent(new Map(res.items.map((i) => [i.agent.id, i.mailbox.unread])));
+      })
+      .catch(() => {
+        /* best-effort; the card omits the badge */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [workspaceId, items]);
 
   // Scope the displayed fleet to the active Space (purely client-side). "All" —
   // a null activeSpace — is unfiltered.
@@ -161,7 +181,8 @@ export default function AgentsPage() {
                 key={agent.id}
                 agent={agent}
                 managedByLabel={managerLabels.get(agent.id) ?? null}
-                workspaceId={workspace?.workspace_id ?? null}
+                workspaceId={workspaceId}
+                unread={unreadByAgent.get(agent.id) ?? 0}
                 onUpdate={(body) => update(agent.id, body)}
                 onRefresh={() => void refresh()}
               />
@@ -243,6 +264,7 @@ function AgentCard({
   agent,
   managedByLabel,
   workspaceId,
+  unread,
   onUpdate,
   onRefresh,
 }: {
@@ -251,6 +273,8 @@ function AgentCard({
   managedByLabel: string | null;
   /** The active workspace id mailbox bindings are scoped to (null = none). */
   workspaceId: string | null;
+  /** Live unread count in this agent's mailbox (0 = none / unknown). */
+  unread: number;
   onUpdate: (body: { autonomy_level?: AutonomyLevel; active?: boolean }) => Promise<{
     ok: boolean;
     error?: string;
@@ -320,6 +344,11 @@ function AgentCard({
                   {agent.pending_count} awaiting
                 </Badge>
               </Link>
+            )}
+            {unread > 0 && (
+              <Badge variant="info" title="Unread in this agent's mailbox">
+                {unread} unread
+              </Badge>
             )}
           </div>
 
@@ -413,6 +442,15 @@ function whenLabel(iso: string | null | undefined): string | null {
   return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+/** A complete relative-activity phrase (whenLabel + the right connective), so the
+ *  caller never has to append " ago" — which mis-reads on "just now" / absolute dates. */
+function lastActivityLabel(iso: string | null | undefined): string | null {
+  const rel = whenLabel(iso);
+  if (!rel) return null;
+  if (rel === 'just now') return 'just now';
+  return /^\d+[mhd]$/.test(rel) ? `${rel} ago` : `on ${rel}`;
+}
+
 function participantLabel(parts: { address: string; name: string | null }[]): string {
   if (parts.length === 0) return 'no participants';
   const first = parts[0];
@@ -497,9 +535,9 @@ function AgentMailboxDialog({
               tone={view.agentInbox.counts.pending > 0 ? 'review' : 'neutral'}
             />
           </div>
-          {view.stats.lastActivityAt && (
+          {lastActivityLabel(view.stats.lastActivityAt) && (
             <p className="text-[11px] text-muted">
-              Last activity {whenLabel(view.stats.lastActivityAt)} ago
+              Last activity {lastActivityLabel(view.stats.lastActivityAt)}
             </p>
           )}
 
@@ -547,7 +585,7 @@ function AgentMailboxDialog({
                 {view.threads.map((t) => (
                   <li
                     key={t.id}
-                    className="flex items-center gap-2 rounded-token px-2.5 py-1.5 hover:bg-surface-overlay"
+                    className="flex items-center gap-2 rounded-token px-2.5 py-1.5"
                   >
                     <span
                       aria-hidden
@@ -561,6 +599,7 @@ function AgentMailboxDialog({
                           t.unread ? 'font-semibold text-primary' : 'text-secondary'
                         }`}
                       >
+                        {t.unread && <span className="sr-only">Unread — </span>}
                         {t.subject?.trim() || '(no subject)'}
                       </span>
                       <span className="block truncate text-[11px] text-tertiary">
