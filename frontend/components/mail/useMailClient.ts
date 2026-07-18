@@ -233,6 +233,8 @@ export interface UseMailClient {
    * truthful rollback + error on moved:false so nothing fakes success).
    */
   moveThreadToFolder: (threadId: string, folderId: string) => Promise<TriageOutcome>;
+  /** Move a whole check-selection into a custom folder (per-thread, reconciled). */
+  moveThreadsToFolder: (threadIds: string[], folderId: string) => Promise<TriageOutcome>;
 }
 
 function messageOf(err: unknown, fallback: string): string {
@@ -644,6 +646,46 @@ export function useMailClient(): UseMailClient {
     [openThread, refreshFolders, refreshCounts, guard401],
   );
 
+  const moveThreadsToFolder = useCallback(
+    async (threadIds: string[], folderId: string): Promise<TriageOutcome> => {
+      const ws = workspaceRef.current;
+      if (!ws || threadIds.length === 0) return { ok: false, error: 'Nothing selected.' };
+      const ids = new Set(threadIds);
+      const before = threadsRef.current;
+      const rowsById = new Map(before.map((t) => [t.id, t] as const));
+      const fallbackMbx = selectedMailboxIdRef.current;
+      // Optimistic: pull the whole selection out of the current list at once.
+      setThreads((prev) => prev.filter((t) => !ids.has(t.id)));
+      setOpenThread((prev) => (prev && ids.has(prev.id) ? null : prev));
+      try {
+        const results = await Promise.all(
+          threadIds.map((id) => {
+            const mbx = rowsById.get(id)?.mailbox_id ?? fallbackMbx;
+            if (!mbx || mbx === ALL_INBOXES) return Promise.resolve({ moved: false });
+            return moveThreadToCustomFolder(ws.workspace_id, mbx, id, folderId).catch(() => ({ moved: false }));
+          }),
+        );
+        const moved = results.filter((r) => r.moved).length;
+        refreshFolders(); // target folder unread badge changed
+        refreshCounts();
+        if (moved === threadIds.length) return { ok: true };
+        // Partial/none moved server-side: reconcile with the server rather than
+        // trusting the optimistic removal, so the list stays truthful.
+        const mbx = selectedMailboxIdRef.current;
+        if (mbx) void fetchThreads(ws, mbx, folderRef.current, queryRef.current, 0, false, true);
+        return moved === 0
+          ? { ok: false, error: 'Could not move the selected conversations.' }
+          : { ok: true };
+      } catch (err) {
+        setThreads(before);
+        if (guard401(err)) return { ok: false, error: 'Session expired.' };
+        if (isMissingEndpoint(err)) return { ok: false, error: 'Folders are not available here.' };
+        return { ok: false, error: messageOf(err, 'Could not move the selection.') };
+      }
+    },
+    [refreshFolders, refreshCounts, fetchThreads, guard401],
+  );
+
   // ── New-mail arrival: manual Refresh + visibility-gated background poll ─────
   // Both take a SILENT fetch (no skeleton, no error-state on a transient blip)
   // so the user's scroll / selection / open thread are never reset — the list is
@@ -1020,6 +1062,7 @@ export function useMailClient(): UseMailClient {
     renameFolder,
     deleteFolder,
     moveThreadToFolder,
+    moveThreadsToFolder,
   };
 }
 

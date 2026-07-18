@@ -445,6 +445,17 @@ export default function MailPage() {
     [selected, mail],
   );
 
+  const runBulkMoveToFolder = useCallback(
+    async (folderId: string): Promise<{ ok: boolean; error?: string }> => {
+      const ids = [...selected];
+      if (ids.length === 0) return { ok: false };
+      const res = await mail.moveThreadsToFolder(ids, folderId);
+      if (res.ok) setSelected(new Set());
+      return { ok: res.ok, error: res.error };
+    },
+    [selected, mail],
+  );
+
   // ── Keyboard layer ────────────────────────────────────────────────────────────
   const lastMessage = mail.messages[mail.messages.length - 1] ?? null;
   const cursorThread = cursor >= 0 ? displayThreads[cursor] ?? null : null;
@@ -574,7 +585,7 @@ export default function MailPage() {
   }, [selectThread, selectedThreadId, selectedThreadMailboxId]);
 
   // ── ⌘K command palette actions (built from the real handlers) ───────────────
-  const { selectFolder } = mail;
+  const { selectFolder, customFolders: cmdCustomFolders, moveThreadToFolder: cmdMoveToFolder } = mail;
   const commandActions = useMemo<CommandAction[]>(() => {
     const list: CommandAction[] = [];
 
@@ -721,6 +732,22 @@ export default function MailPage() {
       );
     }
 
+    // Organize — file the open thread into a custom folder.
+    if (selectedThreadId && cmdCustomFolders.length > 0) {
+      for (const f of cmdCustomFolders) {
+        list.push({
+          id: `move:${f.id}`,
+          label: `Move to ${f.name}`,
+          group: 'Organize',
+          icon: <FolderIcon />,
+          keywords: `move file folder organize ${f.name}`,
+          run: () => {
+            void cmdMoveToFolder(selectedThreadId, f.id);
+          },
+        });
+      }
+    }
+
     // Help
     list.push({
       id: 'help:shortcuts',
@@ -746,6 +773,8 @@ export default function MailPage() {
     shortcutTriage,
     shortcutMark,
     openCompose,
+    cmdCustomFolders,
+    cmdMoveToFolder,
   ]);
 
   const canCompose =
@@ -904,6 +933,9 @@ export default function MailPage() {
                 onSelectFolder={mail.selectFolder}
                 pendingCount={inbox.pendingCount}
                 onExpand={toggleFolders}
+                customFolders={mail.customFolders}
+                activeCustomFolderId={mail.activeCustomFolderId}
+                onSelectCustomFolder={mail.selectCustomFolder}
               />
             ) : (
               <FoldersColumn
@@ -1071,6 +1103,8 @@ export default function MailPage() {
           folder={mail.folder}
           onAction={runBulk}
           onClear={() => setSelected(new Set())}
+          customFolders={mail.customFolders}
+          onMoveToFolder={runBulkMoveToFolder}
         />
       )}
 
@@ -1588,6 +1622,9 @@ function FoldersRail({
   onSelectFolder,
   pendingCount,
   onExpand,
+  customFolders,
+  activeCustomFolderId,
+  onSelectCustomFolder,
 }: {
   mailboxes: MailboxPick[];
   selectedId: string | null;
@@ -1599,6 +1636,9 @@ function FoldersRail({
   onSelectFolder: (folder: MailFolder) => void;
   pendingCount: number;
   onExpand: () => void;
+  customFolders: MailFolderView[];
+  activeCustomFolderId: string | null;
+  onSelectCustomFolder: (id: string) => void;
 }) {
   return (
     <aside className="flex h-full w-[56px] flex-col items-center gap-1 overflow-y-auto overflow-x-visible border-r border-subtle bg-surface-raised py-2.5">
@@ -1658,7 +1698,7 @@ function FoldersRail({
       {/* Folders — icon-only, active glyph filled. */}
       {FOLDERS.map((f) => {
         const Glyph = FOLDER_GLYPH[f.id];
-        const active = f.id === folder;
+        const active = f.id === folder && !activeCustomFolderId;
         return (
           <button
             key={f.id}
@@ -1675,6 +1715,37 @@ function FoldersRail({
             )}
           >
             <Glyph className="h-[18px] w-[18px]" />
+          </button>
+        );
+      })}
+
+      {/* Custom folders — icon-only mirror; human surface, neutral tokens. */}
+      {customFolders.length > 0 && (
+        <div className="my-1 h-px w-6 shrink-0 bg-border-subtle" />
+      )}
+      {customFolders.map((f) => {
+        const active = f.id === activeCustomFolderId;
+        return (
+          <button
+            key={f.id}
+            type="button"
+            onClick={() => onSelectCustomFolder(f.id)}
+            aria-current={active}
+            aria-label={f.name}
+            title={f.name}
+            className={cn(
+              'relative grid h-9 w-9 shrink-0 place-items-center rounded-[9px] transition-colors',
+              active
+                ? 'bg-surface-overlay text-primary'
+                : 'text-tertiary hover:bg-surface-overlay hover:text-secondary',
+            )}
+          >
+            <FolderIcon className="h-[18px] w-[18px]" />
+            {(f.unread ?? 0) > 0 && (
+              <span className="absolute -right-0.5 -top-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-lg border-2 border-surface-raised bg-tertiary px-[3px] text-[9px] font-bold leading-none text-white mono">
+                {(f.unread ?? 0) > 99 ? '99+' : f.unread}
+              </span>
+            )}
           </button>
         );
       })}
