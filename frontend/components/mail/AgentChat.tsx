@@ -18,6 +18,8 @@ import {
   type AssistantAction,
 } from '@/lib/api';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
+import { coerceCleanupTargets } from '@/lib/cleanupTargets';
+import { CleanupTargetsList } from './CleanupTargetsList';
 import { ArchiveIcon, RobotIcon, SendSolidIcon, TrashIcon } from './icons';
 
 /** Inline **bold** and `code` within one line → React nodes (no HTML injection). */
@@ -376,6 +378,8 @@ function InlineActionCard({
   // Cleanup verb → icon + accent (Archive is non-destructive; Trash/Delete remove).
   const cleanupVerb = String(action.action ?? 'TRASH').toUpperCase();
   const CleanupIcon = cleanupVerb === 'ARCHIVE' ? ArchiveIcon : TrashIcon;
+  // The concrete "what would this touch" preview (senders / subjects), when staged.
+  const cleanupTargets = isCleanup ? coerceCleanupTargets(action.targets) : null;
 
   const run = async (kind: 'approve' | 'discard') => {
     if (!workspaceId || !itemId || state !== 'idle') return;
@@ -434,11 +438,15 @@ function InlineActionCard({
 
         <div className="px-3 py-2.5 text-[12px] leading-[1.55] text-secondary">
           {isCleanup ? (
-            (action.count ?? 0) > 0 && (
-              <p className="mb-1.5 inline-flex items-center gap-1.5 rounded-md bg-surface-base px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-tertiary">
-                <CleanupIcon className="h-3 w-3" />
-                {cleanupVerb} · {action.count} message{action.count === 1 ? '' : 's'}
-              </p>
+            cleanupTargets ? (
+              <CleanupTargetsList targets={cleanupTargets} className="mb-2" />
+            ) : (
+              (action.count ?? 0) > 0 && (
+                <p className="mb-1.5 inline-flex items-center gap-1.5 rounded-md bg-surface-base px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-tertiary">
+                  <CleanupIcon className="h-3 w-3" />
+                  {cleanupVerb} · {action.count} message{action.count === 1 ? '' : 's'}
+                </p>
+              )
             )
           ) : (
             (subject || to) && (

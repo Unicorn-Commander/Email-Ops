@@ -40,6 +40,10 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { ConnectedAccountsEnginePort } from '../connected-accounts/connected-accounts.port';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
+import {
+  cleanupTargetsFromPlan,
+  type CleanupTargets,
+} from '../connected-accounts/cleanup-targets';
 import type {
   CleanupPlanResult,
   CleanupWriteMode,
@@ -96,6 +100,8 @@ interface StagedCleanup {
   count: number;
   /** Storage the plan would free, in bytes. */
   bytes: number;
+  /** A bounded, readable preview of WHAT the batch would touch (senders / subjects). */
+  targets?: CleanupTargets | null;
   preview: string | null;
   error?: string;
 }
@@ -323,6 +329,12 @@ export class AssistantStreamController {
     try {
       const view = await this.email.stageNativeCleanup(workspaceId, ucUid, disposition, threadIds);
       if (!view) return fail('No threads to clean up.');
+      // Surface the concrete subject preview the service persisted on the item so
+      // the in-chat card shows WHAT would move, not just a count.
+      const targets =
+        (view.payload && typeof view.payload === 'object'
+          ? ((view.payload as Record<string, unknown>).targets as CleanupTargets | undefined)
+          : undefined) ?? null;
       return {
         kind: 'cleanup',
         item_id: view.id,
@@ -330,6 +342,7 @@ export class AssistantStreamController {
         provider: 'this inbox',
         count: n,
         bytes: 0,
+        targets,
         preview: `${verb} ${n} thread${n === 1 ? '' : 's'} in your inbox. Nothing moves until you approve.`,
       };
     } catch {
@@ -410,6 +423,9 @@ export class AssistantStreamController {
       const count = result.plan?.counts?.safe ?? 0;
       const bytes = result.plan?.freesBytes ?? 0;
       const preview = this.cleanupPreview(rawAction, provider, result.plan);
+      // The concrete "what would this touch" preview (top senders + counts), shared
+      // with the persisted item so the in-chat card and ReviewCard agree.
+      const targets = cleanupTargetsFromPlan(rawAction, provider, result.plan);
       if (!result.staged || !result.staged_item_id) {
         return {
           kind: 'cleanup',
@@ -418,6 +434,7 @@ export class AssistantStreamController {
           provider,
           count,
           bytes,
+          targets,
           preview,
           error: result.reason ?? 'Nothing matched — no cleanup was staged.',
         };
@@ -429,6 +446,7 @@ export class AssistantStreamController {
         provider,
         count,
         bytes,
+        targets,
         preview,
       };
     } catch (e) {

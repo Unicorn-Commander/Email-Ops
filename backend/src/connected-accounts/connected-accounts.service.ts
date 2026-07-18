@@ -18,6 +18,7 @@ import { MembershipService } from '../common/workspace/membership.service';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { checkCleanerEntitlement, checkVaultEntitlement } from './entitlement';
+import { cleanupTargetsFromPlan } from './cleanup-targets';
 import { ArchiveStorageService } from './archive-storage.service';
 import { ConnectedAccountsEnginePort } from './connected-accounts.port';
 import {
@@ -501,6 +502,10 @@ export class ConnectedAccountsService {
             mode,
             criteria: plan.criteria as any,
             plan: plan as any,
+            // A compact, bounded "what would this touch" preview so the approval
+            // surfaces (ReviewCard / in-chat card / MCP) can show the concrete
+            // targets — top senders + counts — not just the one-line summary.
+            targets: cleanupTargetsFromPlan(action, provider, plan) as any,
           },
           state: AgentInboxState.PENDING,
           draftedBy: 'email-ops-agent',
@@ -782,6 +787,7 @@ export class ConnectedAccountsService {
     provider: string;
     mode: string;
     action: CleanupActionKind;
+    state?: CleanupBatchState;
     plan: unknown;
     result: unknown;
     backupRef: string | null;
@@ -793,8 +799,12 @@ export class ConnectedAccountsService {
     archiveExpiresAt?: Date | null;
     archiveRetained?: boolean;
   }): CleanupExecutionResult {
+    // Reflect the batch's REAL terminal state — a re-read of a FAILED/UNDONE batch
+    // must NOT masquerade as a fresh success (the truthful-UI contract). Only a
+    // COMPLETED batch reports ok:true/completed.
+    const status = this.batchStatusOf(batch.state);
     return {
-      ok: true,
+      ok: status === 'completed' || status === 'undone',
       provider: batch.provider as ConnectedProvider,
       mode: batch.mode as CleanupWriteMode,
       batch_id: batch.id,
@@ -820,8 +830,23 @@ export class ConnectedAccountsService {
             retained: batch.archiveRetained ?? false,
           }
         : undefined,
-      status: 'completed',
+      status,
     };
+  }
+
+  /** Map a persisted batch state → the wire `status` an approve/read returns. */
+  private batchStatusOf(state?: CleanupBatchState): CleanupExecutionResult['status'] {
+    switch (state) {
+      case CleanupBatchState.FAILED:
+        return 'failed';
+      case CleanupBatchState.UNDONE:
+        return 'undone';
+      case CleanupBatchState.PENDING:
+        return 'pending';
+      case CleanupBatchState.COMPLETED:
+      default:
+        return 'completed';
+    }
   }
 
   private batchView(row: {

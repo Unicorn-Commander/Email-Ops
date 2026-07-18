@@ -32,7 +32,7 @@
  *     and never leaves.
  */
 
-import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import {
   AgentActionKind,
   AgentInboxKind,
@@ -45,6 +45,7 @@ import {
   Prisma,
 } from '@prisma/client';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
+import { MAX_TARGET_ROWS } from '../connected-accounts/cleanup-targets';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { StalwartDraftRequest, StalwartMailFolder, StalwartMessageDetail, StalwartThread } from '../stalwart/stalwart.types';
@@ -1459,13 +1460,27 @@ export class EmailService {
     const folder = this.dispositionFolder(disposition);
     const verb = disposition === MessageDisposition.TRASH ? 'Move to Trash' : 'Archive';
     const summary = `${verb} ${ids.length} thread${ids.length === 1 ? '' : 's'} in your inbox`;
+    // Resolve a bounded subject preview BEFORE the tx (JMAP reads must never run
+    // inside withWorkspace — the §3 send lesson). Best-effort: an unreachable
+    // mailbox yields no rows and the card degrades to the count + verb.
+    const rows = await this.resolveNativeCleanupTargets(workspaceId, ucUid, ids, MAX_TARGET_ROWS);
+    const targets = {
+      verb,
+      scope: 'threads' as const,
+      provider: 'this inbox',
+      total: ids.length,
+      rows,
+      truncated: ids.length > rows.length,
+    };
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const item = await tx.agentInboxItem.create({
         data: {
           workspaceId,
           messageId: null,
           kind: AgentInboxKind.CLEANUP,
-          payload: { native: true, action: disposition, folder, thread_ids: ids },
+          // `targets` carries the concrete, bounded preview (subjects) the human
+          // sees before approving; the raw thread_ids drive the actual move.
+          payload: { native: true, action: disposition, folder, thread_ids: ids, targets },
           state: AgentInboxState.PENDING,
           draftedBy: opts?.agentKey ?? 'email-ops-assistant',
           summary,
@@ -1473,6 +1488,57 @@ export class EmailService {
       });
       return this.inboxView(item, null);
     });
+  }
+
+  /**
+   * Best-effort bounded subject/sender preview for a NATIVE cleanup batch: read the
+   * inbox folder of each readable James mailbox once and map the (bounded) requested
+   * thread ids to their subject + first participant. Never throws — an unreachable
+   * mailbox simply yields fewer rows and the confirm card degrades to the count.
+   */
+  private async resolveNativeCleanupTargets(
+    workspaceId: string,
+    ucUid: string | null,
+    threadIds: string[],
+    limit: number,
+  ): Promise<Array<{ subject: string | null; sender: string | null }>> {
+    const wanted = threadIds.slice(0, Math.max(0, limit));
+    if (wanted.length === 0) return [];
+    try {
+      const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+        this.readableMailboxes(tx, workspaceId, ucUid),
+      );
+      const found = new Map<string, { subject: string | null; sender: string | null }>();
+      for (const mb of mailboxes) {
+        if (this.mailProvider.handles(mb)) continue; // native James mailboxes only
+        if (found.size >= wanted.length) break;
+        let res: Awaited<ReturnType<StalwartPort['listFolderThreads']>> | null = null;
+        try {
+          res = await this.stalwart.listFolderThreads(mb.emailAddress, {
+            folder: 'inbox',
+            limit: 200,
+            offset: 0,
+          });
+        } catch {
+          continue; // degrade-clean: skip an unreachable mailbox
+        }
+        for (const t of res?.threads ?? []) {
+          if (!found.has(t.id) && wanted.includes(t.id)) {
+            const p = t.participants?.[0] ?? null;
+            found.set(t.id, {
+              subject: t.subject ?? null,
+              sender: p ? (p.name ?? p.address ?? null) : null,
+            });
+          }
+        }
+      }
+      // Preserve the requested order; drop ids we couldn't resolve.
+      return wanted
+        .map((id) => found.get(id))
+        .filter((row): row is { subject: string | null; sender: string | null } => Boolean(row));
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -1572,6 +1638,15 @@ export class EmailService {
 
           const executed = await this.connectedAccounts.approveCleanupBatch(workspaceId, owner, batchId);
           if (!executed) return { kind: 'null' };
+          // Truthful UI: only a batch that actually ran flips the item to APPROVED.
+          // A failed/disabled/rejected batch must NOT report success — throw with the
+          // reason so the approval surface shows the real outcome and the item stays
+          // PENDING for a retry or reject (confirm-on-success-only).
+          if (!executed.ok || (executed.status !== 'completed' && executed.status !== 'undone')) {
+            throw new BadRequestException(
+              executed.reason ?? 'The cleanup batch could not be executed — nothing was changed.',
+            );
+          }
 
           const updated = await tx.agentInboxItem.update({
             where: { id: itemId },

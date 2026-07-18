@@ -13,7 +13,9 @@
 import { useMemo, useState } from 'react';
 import { Badge, Button, Card, Skeleton, SkeletonText, cn, useConfirm } from '@/components/ui';
 import { useAgentInbox } from '@/components/useAgentInbox';
+import { CleanupTargetsList, cleanupTargetsSentence } from '@/components/mail/CleanupTargetsList';
 import { agentLabel } from '@/lib/agents';
+import { deriveCleanupTargets } from '@/lib/cleanupTargets';
 import type { AgentInboxItemView, AgentInboxState } from '@/lib/api';
 
 const TABS: Array<{ value: AgentInboxState; label: string }> = [
@@ -185,6 +187,10 @@ function ReviewCard({
 }) {
   const confirm = useConfirm();
   const meta = useMemo(() => kindMeta(item.kind), [item.kind]);
+  const targets = useMemo(
+    () => (item.kind === 'CLEANUP' ? deriveCleanupTargets(item.payload) : null),
+    [item.kind, item.payload],
+  );
   const [note, setNote] = useState('');
   const [noteOpen, setNoteOpen] = useState(false);
   const [acting, setActing] = useState<null | 'approve' | 'reject'>(null);
@@ -194,11 +200,20 @@ function ReviewCard({
   const trimmedNote = note.trim() || undefined;
 
   async function handleApprove() {
+    const cleanupDesc = targets
+      ? `${cleanupTargetsSentence(targets)} ${
+          targets.verb === 'Permanently delete'
+            ? 'A downloadable backup is kept first.'
+            : targets.verb === 'Move to Trash'
+              ? 'Trash is reversible.'
+              : 'This moves them out of the inbox.'
+        }`
+      : `The staged batch will run (${item.summary ?? 'cleanup'}). Trash is reversible; permanent purge stays gated behind a downloadable backup.`;
     const ok = await confirm({
       title: meta.approveTitle,
       description:
         item.kind === 'CLEANUP'
-          ? `The staged batch will run (${item.summary ?? 'cleanup'}). Trash is reversible; permanent purge stays gated behind a downloadable backup.`
+          ? cleanupDesc
           : `It will be delivered to ${item.to_address ?? 'the recipient'}, drafted by ${agentLabel(item.drafted_by)}. This can't be unsent.`,
       confirmLabel: meta.approveVerb,
       cancelLabel: 'Not yet',
@@ -252,10 +267,14 @@ function ReviewCard({
           {item.to_address && (
             <p className="mt-1 truncate font-mono text-xs text-tertiary">to {item.to_address}</p>
           )}
-          {item.body_preview && (
-            <p className="mt-2 max-h-16 overflow-hidden whitespace-pre-wrap text-xs leading-5 text-secondary">
-              {item.body_preview}
-            </p>
+          {targets ? (
+            <CleanupTargetsList targets={targets} className="mt-2.5" />
+          ) : (
+            item.body_preview && (
+              <p className="mt-2 max-h-16 overflow-hidden whitespace-pre-wrap text-xs leading-5 text-secondary">
+                {item.body_preview}
+              </p>
+            )
           )}
 
           {item.state !== 'pending' && (
