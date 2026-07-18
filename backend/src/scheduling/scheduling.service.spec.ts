@@ -187,6 +187,32 @@ describe('SchedulingService', () => {
     expect(out.item?.state).toBe('pending');
   });
 
+  it('refuses an invalid snooze `until` BEFORE archiving the thread (no stranding)', async () => {
+    const { service, tx, stalwart } = make();
+    const out = await service.snoozeThread(user, {
+      workspaceId: WS,
+      mailboxId: 'mb-1',
+      threadId: 'thr-1',
+      until: new Date('not-a-date'), // Invalid Date, as an LLM might emit
+    });
+    expect(out).toEqual({ snoozed: false, item: null });
+    // Critical: the thread must NOT have been archived (else it strands out of Inbox).
+    expect(stalwart.moveThreadToFolder).not.toHaveBeenCalled();
+    expect(tx.snoozedThread.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses an invalid scheduled-send sendAt without writing', async () => {
+    const { service, tx } = make();
+    const out = await service.scheduleSend(user, {
+      workspaceId: WS,
+      mailboxId: 'mb-1',
+      sendAt: new Date('whenever'),
+      payload: { toAddress: 'you@acme.test', subject: 'x', body: 'y' },
+    });
+    expect(out).toEqual({ scheduled: false, item: null });
+    expect(tx.scheduledSend.create).not.toHaveBeenCalled();
+  });
+
   it('fires a scheduled send with claim-then-send idempotency', async () => {
     const row = scheduled();
     const systemClient = {

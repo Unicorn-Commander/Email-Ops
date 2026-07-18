@@ -1048,9 +1048,10 @@ export default function MailPage() {
               customFolders={mail.customFolders}
               onSnooze={mail.snoozeThreadUntil}
               snoozeEnabled={
+                // Sovereign James mailbox only — NOT gated on foldersSupported
+                // (a different endpoint); a dormant snooze endpoint degrades clean.
                 !mail.unified &&
                 !!mail.selectedMailbox &&
-                mail.foldersSupported &&
                 mail.selectedMailbox.provider !== 'gmail' &&
                 mail.selectedMailbox.provider !== 'microsoft'
               }
@@ -2510,15 +2511,28 @@ function snoozePresets(now = new Date()): { label: string; until: Date }[] {
     d.setDate(d.getDate() + n);
     return d;
   };
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
   const dow = now.getDay(); // 0 Sun … 6 Sat
+  const isWeekend = dow === 0 || dow === 6;
   const daysToSat = (6 - dow + 7) % 7 || 7;
   const daysToMon = (1 - dow + 7) % 7 || 7;
-  return [
-    { label: 'Later today', until: new Date(now.getTime() + 3 * 3600 * 1000) },
-    { label: 'Tomorrow', until: atHour(addDays(now, 1), 9) },
-    { label: 'This weekend', until: atHour(addDays(now, daysToSat), 9) },
-    { label: 'Next week', until: atHour(addDays(now, daysToMon), 9) },
-  ].filter((p) => p.until.getTime() > now.getTime() + 60_000);
+
+  const laterToday = new Date(now.getTime() + 3 * 3600 * 1000);
+  const out: { label: string; until: Date }[] = [];
+  // "Later today" only while it's still today — after ~9pm now+3h crosses midnight
+  // and "today" would be a lie.
+  if (sameDay(laterToday, now)) out.push({ label: 'Later today', until: laterToday });
+  out.push({ label: 'Tomorrow', until: atHour(addDays(now, 1), 9) });
+  // "This weekend" only Mon–Fri; on Sat/Sun you're already in it, and (6-dow)%7||7
+  // would resolve to NEXT Saturday (a week out) — confusing, so drop it.
+  if (!isWeekend) out.push({ label: 'This weekend', until: atHour(addDays(now, daysToSat), 9) });
+  out.push({ label: 'Next week', until: atHour(addDays(now, daysToMon), 9) });
+
+  // Chronological order so the menu never lists a later time above an earlier one.
+  return out
+    .filter((p) => p.until.getTime() > now.getTime() + 60_000)
+    .sort((a, b) => a.until.getTime() - b.until.getTime());
 }
 
 function formatSnoozeWhen(d: Date): string {
@@ -2539,16 +2553,23 @@ function SnoozeControl({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const focusTrigger = () => ref.current?.querySelector<HTMLButtonElement>('button')?.focus();
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') {
+        setOpen(false);
+        focusTrigger(); // return focus to the trigger, not lost to <body>
+      }
     };
     document.addEventListener('mousedown', onDoc);
     document.addEventListener('keydown', onKey);
+    // Move focus into the menu so keyboard users land on the first option.
+    menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
     return () => {
       document.removeEventListener('mousedown', onDoc);
       document.removeEventListener('keydown', onKey);
@@ -2561,7 +2582,12 @@ function SnoozeControl({
         <ClockIcon className="h-[17px] w-[17px]" />
       </ReaderTool>
       {open && (
-        <div className="absolute right-0 top-full z-30 mt-1 w-60 rounded-lg border border-subtle bg-surface-overlay p-1 shadow-xl">
+        <div
+          ref={menuRef}
+          role="menu"
+          aria-label="Snooze until"
+          className="absolute right-0 top-full z-30 mt-1 w-60 rounded-lg border border-subtle bg-surface-overlay p-1 shadow-xl"
+        >
           <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary">
             Snooze until
           </p>
@@ -2569,11 +2595,12 @@ function SnoozeControl({
             <button
               key={p.label}
               type="button"
+              role="menuitem"
               onClick={() => {
                 setOpen(false);
                 onSnooze(p.until);
               }}
-              className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-secondary transition-colors hover:bg-surface-elevated hover:text-primary"
+              className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-secondary transition-colors hover:bg-surface-elevated hover:text-primary focus:bg-surface-elevated focus:text-primary focus:outline-none"
             >
               <span>{p.label}</span>
               <span className="mono text-[11px] text-muted">{formatSnoozeWhen(p.until)}</span>

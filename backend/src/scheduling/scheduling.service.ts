@@ -43,6 +43,10 @@ export class SchedulingService {
     input: SnoozeThreadInput,
   ): Promise<{ snoozed: boolean; item: SnoozedThreadView | null }> {
     const ucUid = ucUidOf(user);
+    // Reject an invalid `until` BEFORE the (committed, external) archive move, so a
+    // bad time never strands the thread out of Inbox with no SnoozedThread row.
+    // REST validates via @IsISO8601; this covers the MCP + any other caller.
+    if (!Number.isFinite(input.until.getTime())) return { snoozed: false, item: null };
     const mailbox = await this.resolveSovereignMailboxForCaller(input.workspaceId, ucUid, input.mailboxId);
     if (!mailbox || !this.stalwart.isConfigured()) return { snoozed: false, item: null };
 
@@ -136,6 +140,9 @@ export class SchedulingService {
     },
   ): Promise<{ scheduled: boolean; item: ScheduledSendView | null }> {
     const ucUid = ucUidOf(user);
+    // Reject an invalid sendAt before any write (REST validates via @IsISO8601;
+    // this covers the MCP + any other caller so a bad time can't crash the write).
+    if (!Number.isFinite(input.sendAt.getTime())) return { scheduled: false, item: null };
     const mailbox = await this.resolveSovereignMailboxForCaller(input.workspaceId, ucUid, input.mailboxId);
     if (!mailbox || !this.stalwart.isConfigured()) return { scheduled: false, item: null };
 

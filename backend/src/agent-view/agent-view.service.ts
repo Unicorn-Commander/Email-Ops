@@ -155,7 +155,9 @@ export class AgentViewService {
         agentId: agent.id,
         access: { in: [MailboxAccessLevel.READ, MailboxAccessLevel.BOTH] },
       },
-      orderBy: [{ isPrimary: 'desc' }, { updatedAt: 'desc' }],
+      // Tie-break on the immutable createdAt (matches agents.service ordering),
+      // so which mailbox the drill-in shows is deterministic across edits.
+      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
       include: { mailbox: true },
     });
     return binding?.mailbox ?? null;
