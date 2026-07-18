@@ -32,6 +32,7 @@ import { SenderPolicyService } from '../mail-triage/sender-policy.service';
 import { UiCommandService } from '../ui-commands/ui-commands.service';
 import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
 import { MailDomainService } from '../mail-engine-admin/mail-domain.service';
+import { enforceMcpToolScope, McpToolName, PatTaggedIdentity } from './mcp-scopes';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
@@ -98,6 +99,19 @@ export class McpService {
       },
     );
 
+    // Every MCP handler is registered through this one PAT authorization choke
+    // point. JWT identities carry no __patAuth record and pass through unchanged.
+    const identity = user as User & PatTaggedIdentity;
+    const registerTool = (
+      name: McpToolName,
+      config: Record<string, unknown>,
+      handler: (...args: any[]) => any,
+    ) =>
+      server.registerTool(name, config, (...args: any[]) => {
+        enforceMcpToolScope(identity, name);
+        return handler(...args);
+      });
+
     const tools = new EmailOpsTools(
       this.membership,
       this.email,
@@ -115,7 +129,7 @@ export class McpService {
 
     // ── Foundation tools ──
 
-    server.registerTool(
+    registerTool(
       'health',
       {
         title: 'Email-Ops health',
@@ -127,7 +141,7 @@ export class McpService {
       async () => wrap(tools.health()),
     );
 
-    server.registerTool(
+    registerTool(
       'list_my_workspaces',
       {
         title: 'List my workspaces',
@@ -144,7 +158,7 @@ export class McpService {
 
     // ── Email-steward tools (a Mail-Ops agent's observability) ──
 
-    server.registerTool(
+    registerTool(
       'email_ops_health',
       {
         title: 'Email-Ops health',
@@ -161,7 +175,7 @@ export class McpService {
       async (args: any) => wrap(await tools.emailHealth(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'list_agents',
       {
         title: 'List the agent fleet',
@@ -178,7 +192,7 @@ export class McpService {
 
     // ── Conversational provisioning (write; runs AS the user, policy-gated) ──
 
-    server.registerTool(
+    registerTool(
       'provision_mailbox',
       {
         title: 'Provision a mailbox',
@@ -200,7 +214,7 @@ export class McpService {
       async (args: any) => wrap(await tools.provisionMailbox(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'provision_agent',
       {
         title: 'Provision an agent',
@@ -230,7 +244,7 @@ export class McpService {
 
     // ── Mail triage (write; runs AS the user, member-level) ──
 
-    server.registerTool(
+    registerTool(
       'set_disposition',
       {
         title: 'Move a thread to a folder',
@@ -249,7 +263,7 @@ export class McpService {
       async (args: any) => wrap(await tools.setDisposition(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'set_sender_policy',
       {
         title: 'Block or trust a sender',
@@ -271,7 +285,7 @@ export class McpService {
 
     // ── EmailOpsPort contract tools ──
 
-    server.registerTool(
+    registerTool(
       'list_threads_with_contact',
       {
         title: 'List threads with a contact',
@@ -288,7 +302,7 @@ export class McpService {
       async (args: any) => wrap(await tools.listThreadsWithContact(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'list_thread_messages',
       {
         title: 'List thread messages',
@@ -303,7 +317,7 @@ export class McpService {
       async (args: any) => wrap(await tools.listThreadMessages(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'compose_email',
       {
         title: 'Compose an outbound email',
@@ -338,7 +352,7 @@ export class McpService {
     // mail BFF uses — one RLS path, degrade-clean (reads → [] when the engine is
     // dormant). Reads are read_only; set_read + bulk_disposition are member writes.
 
-    server.registerTool(
+    registerTool(
       'list_threads',
       {
         title: 'List mailbox threads',
@@ -361,7 +375,7 @@ export class McpService {
       async (args: any) => wrap(await tools.listThreads(user, args ?? {})),
     );
 
-    server.registerTool(
+    registerTool(
       'get_thread',
       {
         title: 'Get a thread with bodies',
@@ -380,7 +394,7 @@ export class McpService {
       async (args: any) => wrap(await tools.getThread(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'search_mail',
       {
         title: 'Search mail',
@@ -402,7 +416,7 @@ export class McpService {
       async (args: any) => wrap(await tools.searchMail(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'set_read',
       {
         title: 'Mark a thread read/unread',
@@ -422,7 +436,7 @@ export class McpService {
       async (args: any) => wrap(await tools.setRead(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'bulk_disposition',
       {
         title: 'Bulk-triage threads into a folder',
@@ -445,7 +459,7 @@ export class McpService {
     // The agent's folder rail: list, create, rename, delete custom folders.
     // Member-level; degrade-clean (dormant/external mailbox → []/false).
 
-    server.registerTool(
+    registerTool(
       'list_folders',
       {
         title: 'List mailbox folders',
@@ -463,7 +477,7 @@ export class McpService {
       async (args: any) => wrap(await tools.listFolders(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'create_folder',
       {
         title: 'Create a custom folder',
@@ -481,7 +495,7 @@ export class McpService {
       async (args: any) => wrap(await tools.createFolder(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'rename_folder',
       {
         title: 'Rename a custom folder',
@@ -498,7 +512,7 @@ export class McpService {
       async (args: any) => wrap(await tools.renameFolder(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'delete_folder',
       {
         title: 'Delete a custom folder',
@@ -515,7 +529,7 @@ export class McpService {
       async (args: any) => wrap(await tools.deleteFolder(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'move_to_folder',
       {
         title: 'Move a thread into a custom folder',
@@ -536,7 +550,7 @@ export class McpService {
 
     // ── Connected-accounts / Cleaner Engine tools ──
 
-    server.registerTool(
+    registerTool(
       'list_connected_accounts',
       {
         title: 'List connected accounts',
@@ -550,7 +564,7 @@ export class McpService {
       async (args: any) => wrap(await connectedTools.listConnectedAccounts(user, args ?? {})),
     );
 
-    server.registerTool(
+    registerTool(
       'get_inbox_stats',
       {
         title: 'Get inbox stats',
@@ -565,7 +579,7 @@ export class McpService {
       async (args: any) => wrap(await connectedTools.getInboxStats(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'analyze_inbox',
       {
         title: 'Analyze inbox',
@@ -580,7 +594,7 @@ export class McpService {
       async (args: any) => wrap(await connectedTools.analyzeInbox(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'plan_cleanup',
       {
         title: 'Plan cleanup',
@@ -595,7 +609,7 @@ export class McpService {
       async (args: any) => wrap(await connectedTools.planCleanup(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'clean_trash',
       {
         title: 'Trash cleanup batch',
@@ -610,7 +624,7 @@ export class McpService {
       async (args: any) => wrap(await connectedTools.cleanTrash(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'clean_delete',
       {
         title: 'Delete cleanup batch',
@@ -625,7 +639,7 @@ export class McpService {
       async (args: any) => wrap(await connectedTools.cleanDelete(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'organize_messages',
       {
         title: 'Organize messages',
@@ -640,7 +654,7 @@ export class McpService {
       async (args: any) => wrap(await connectedTools.organizeMessages(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'unsubscribe_sender',
       {
         title: 'Unsubscribe sender group',
@@ -655,7 +669,7 @@ export class McpService {
       async (args: any) => wrap(await connectedTools.unsubscribeSender(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'undo_batch',
       {
         title: 'Undo cleanup batch',
@@ -672,7 +686,7 @@ export class McpService {
 
     // ── Agent-inbox approval tools ──
 
-    server.registerTool(
+    registerTool(
       'list_agent_inbox',
       {
         title: 'List the agent inbox',
@@ -688,7 +702,7 @@ export class McpService {
       async (args: any) => wrap(await tools.listAgentInbox(user, args ?? {})),
     );
 
-    server.registerTool(
+    registerTool(
       'approve_agent_inbox_item',
       {
         title: 'Approve an agent-inbox draft (sends it)',
@@ -706,7 +720,7 @@ export class McpService {
       async (args: any) => wrap(await tools.approveAgentInboxItem(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'reject_agent_inbox_item',
       {
         title: 'Reject an agent-inbox draft',
@@ -724,7 +738,7 @@ export class McpService {
 
     // ── Mail-engine admin tools (control-plane; OWNER-gated writes) ──
 
-    server.registerTool(
+    registerTool(
       'list_mail_domains',
       {
         title: 'List mail engine domains',
@@ -740,7 +754,7 @@ export class McpService {
       async (args: any) => wrap(await tools.listMailDomains(user, args ?? {})),
     );
 
-    server.registerTool(
+    registerTool(
       'list_mail_accounts',
       {
         title: 'List mail engine accounts',
@@ -755,7 +769,7 @@ export class McpService {
       async (args: any) => wrap(await tools.listMailAccounts(user, args ?? {})),
     );
 
-    server.registerTool(
+    registerTool(
       'ensure_mail_domain',
       {
         title: 'Ensure a domain on the mail engine',
@@ -772,7 +786,7 @@ export class McpService {
       async (args: any) => wrap(await tools.ensureMailDomain(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'remove_mail_domain',
       {
         title: 'Remove a domain from the mail engine',
@@ -789,7 +803,7 @@ export class McpService {
       async (args: any) => wrap(await tools.removeMailDomain(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'set_mailbox_quota',
       {
         title: 'Set mailbox storage quota',
@@ -808,7 +822,7 @@ export class McpService {
       async (args: any) => wrap(await tools.setMailboxQuota(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'remove_mailbox_engine',
       {
         title: 'Remove engine mailbox account',
@@ -832,7 +846,7 @@ export class McpService {
     // external side effect → member-level, NOT routed through the compose
     // autonomy / agent-inbox gate. ui_compose only PREFILLS (the human sends).
 
-    server.registerTool(
+    registerTool(
       'ui_navigate',
       {
         title: 'Navigate the user’s cockpit',
@@ -859,7 +873,7 @@ export class McpService {
       async (args: any) => wrap(await uiTools.navigate(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'ui_open_thread',
       {
         title: 'Open a mail thread in the cockpit',
@@ -876,7 +890,7 @@ export class McpService {
       async (args: any) => wrap(await uiTools.openThread(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'ui_compose',
       {
         title: 'Pre-fill the composer (does NOT send)',
@@ -896,7 +910,7 @@ export class McpService {
       async (args: any) => wrap(await uiTools.compose(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'ui_switch_space',
       {
         title: 'Switch the active Space',
@@ -912,7 +926,7 @@ export class McpService {
       async (args: any) => wrap(await uiTools.switchSpace(user, args)),
     );
 
-    server.registerTool(
+    registerTool(
       'ui_notify',
       {
         title: 'Show a toast in the cockpit',

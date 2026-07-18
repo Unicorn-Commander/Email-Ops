@@ -27,31 +27,70 @@ describe('JwtAuthGuard', () => {
   }
 
   it('routes an eo_pat_ bearer through PatService and sets req.user + __patAuth on success', async () => {
-    const resolvedUser = { id: 'u1', email: 'a@b.com' };
-    const resolvePat = jest.fn().mockResolvedValue(resolvedUser);
-    const { guard } = makeGuard({ resolvePat });
+    const resolvePatRecord = jest.fn().mockResolvedValue({
+      user: { id: 'u1', email: 'a@b.com' },
+      scopes: ['mail:read'],
+      expiresAt: null,
+      revokedAt: null,
+    });
+    const { guard } = makeGuard({ resolvePatRecord });
     const { context, req } = makeContext({ authorization: 'Bearer eo_pat_ABCDEFGHJKMN' });
 
     const result = await guard.canActivate(context);
 
     expect(result).toBe(true);
-    expect(resolvePat).toHaveBeenCalledWith('eo_pat_ABCDEFGHJKMN');
+    expect(resolvePatRecord).toHaveBeenCalledWith('eo_pat_ABCDEFGHJKMN');
     expect(req.user).toMatchObject({ id: 'u1' });
-    expect(req.user.__patAuth).toBe(true);
+    expect(req.user.__patAuth).toEqual({
+      scopes: ['mail:read'],
+      expiresAt: null,
+      revokedAt: null,
+    });
   });
 
   it('rejects an eo_pat_ bearer that fails to resolve with 401 + WWW-Authenticate', async () => {
-    const resolvePat = jest.fn().mockResolvedValue(null);
-    const { guard } = makeGuard({ resolvePat });
+    const resolvePatRecord = jest.fn().mockResolvedValue(null);
+    const { guard } = makeGuard({ resolvePatRecord });
     const { context, setHeader } = makeContext({ authorization: 'Bearer eo_pat_revokedtoken' });
 
     await expect(guard.canActivate(context)).rejects.toBeInstanceOf(UnauthorizedException);
     expect(setHeader).toHaveBeenCalledWith('WWW-Authenticate', 'Bearer realm="email-ops-mcp"');
   });
 
+  it('rejects an expired PAT before it can reach any protected route', async () => {
+    const resolvePatRecord = jest.fn().mockResolvedValue({
+      user: { id: 'u1', email: 'a@b.com' },
+      scopes: ['mail:read'],
+      expiresAt: '2020-01-01T00:00:00.000Z',
+      revokedAt: null,
+    });
+    const { guard } = makeGuard({ resolvePatRecord });
+    const { context, setHeader } = makeContext({ authorization: 'Bearer eo_pat_expiredtoken' });
+
+    await expect(guard.canActivate(context)).rejects.toThrow('Personal access token expired');
+    expect(setHeader).toHaveBeenCalledWith('WWW-Authenticate', 'Bearer realm="email-ops-mcp"');
+  });
+
+  it('rejects a revoked PAT before it can reach any protected route', async () => {
+    const resolvePatRecord = jest.fn().mockResolvedValue({
+      user: { id: 'u1', email: 'a@b.com' },
+      scopes: ['*'],
+      expiresAt: null,
+      revokedAt: '2026-07-17T11:00:00.000Z',
+    });
+    const { guard } = makeGuard({ resolvePatRecord });
+    const { context, req, setHeader } = makeContext({
+      authorization: 'Bearer eo_pat_revokedtoken',
+    });
+
+    await expect(guard.canActivate(context)).rejects.toThrow('Personal access token revoked');
+    expect(req.user).toBeUndefined();
+    expect(setHeader).toHaveBeenCalledWith('WWW-Authenticate', 'Bearer realm="email-ops-mcp"');
+  });
+
   it('falls through to the existing passport JWT path for a non-eo_pat_ bearer', async () => {
-    const resolvePat = jest.fn();
-    const { guard } = makeGuard({ resolvePat });
+    const resolvePatRecord = jest.fn();
+    const { guard } = makeGuard({ resolvePatRecord });
     const superSpy = jest
       .spyOn(Object.getPrototypeOf(Object.getPrototypeOf(guard)), 'canActivate')
       .mockReturnValue(true as any);
@@ -61,13 +100,13 @@ describe('JwtAuthGuard', () => {
 
     expect(result).toBe(true);
     expect(superSpy).toHaveBeenCalledWith(context);
-    expect(resolvePat).not.toHaveBeenCalled();
+    expect(resolvePatRecord).not.toHaveBeenCalled();
     superSpy.mockRestore();
   });
 
   it('falls through to the existing passport JWT path when there is no Authorization header', async () => {
-    const resolvePat = jest.fn();
-    const { guard } = makeGuard({ resolvePat });
+    const resolvePatRecord = jest.fn();
+    const { guard } = makeGuard({ resolvePatRecord });
     const superSpy = jest
       .spyOn(Object.getPrototypeOf(Object.getPrototypeOf(guard)), 'canActivate')
       .mockReturnValue(false as any);
@@ -77,19 +116,19 @@ describe('JwtAuthGuard', () => {
 
     expect(result).toBe(false);
     expect(superSpy).toHaveBeenCalledWith(context);
-    expect(resolvePat).not.toHaveBeenCalled();
+    expect(resolvePatRecord).not.toHaveBeenCalled();
     superSpy.mockRestore();
   });
 
   it('short-circuits to true for @Public() routes without touching PatService or passport', async () => {
-    const resolvePat = jest.fn();
+    const resolvePatRecord = jest.fn();
     const reflector = { getAllAndOverride: jest.fn().mockReturnValue(true) } as any;
-    const guard = new JwtAuthGuard(reflector, { resolvePat } as unknown as PatService);
+    const guard = new JwtAuthGuard(reflector, { resolvePatRecord } as unknown as PatService);
     const { context } = makeContext({ authorization: 'Bearer eo_pat_whatever', isPublic: true });
 
     const result = await guard.canActivate(context);
 
     expect(result).toBe(true);
-    expect(resolvePat).not.toHaveBeenCalled();
+    expect(resolvePatRecord).not.toHaveBeenCalled();
   });
 });

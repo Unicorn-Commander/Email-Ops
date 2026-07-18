@@ -2,7 +2,10 @@ import { ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/com
 import { AuthGuard } from '@nestjs/passport';
 import { Reflector } from '@nestjs/core';
 import { Request, Response } from 'express';
-import { PatService, PAT_PREFIX } from '../pat.service';
+import { PatService, PAT_PREFIX, ResolvedPatRecord } from '../pat.service';
+import { checkPat, PatRecord } from '../pat-scope';
+
+export type PatAuthenticatedUser = ResolvedPatRecord['user'] & { __patAuth: PatRecord };
 
 /**
  * Auth chokepoint for protected routes. Delegates to Passport's JWT strategy
@@ -15,9 +18,8 @@ import { PatService, PAT_PREFIX } from '../pat.service';
  * BEFORE Passport ever sees it. Any other bearer value (a real JWT, or
  * nothing at all) falls through to the exact existing `super.canActivate`
  * behavior, untouched. A resolved PAT sets `req.user` to the same Prisma
- * `User` shape the JWT path yields, plus a non-persistent `__patAuth` marker
- * so downstream code (e.g. the /auth/pats controller) can tell a request was
- * authenticated via PAT rather than a real login.
+ * `User` shape the JWT path yields, plus a non-persistent `__patAuth` record
+ * containing the scopes and lifecycle stamps needed at MCP dispatch.
  */
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {
@@ -46,15 +48,28 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
       return super.canActivate(context) as Promise<boolean>;
     }
 
-    const user = await this.patService.resolvePat(bearer);
-    if (!user) {
+    const record = await this.patService.resolvePatRecord(bearer);
+    if (!record) {
       const response = context.switchToHttp().getResponse<Response>();
       response.setHeader('WWW-Authenticate', 'Bearer realm="email-ops-mcp"');
-      throw new UnauthorizedException('Invalid or revoked personal access token');
+      throw new UnauthorizedException('Invalid personal access token');
     }
 
-    const augmented = user as typeof user & { __patAuth?: boolean };
-    augmented.__patAuth = true;
+    // Authentication freshness is global, including non-MCP protected routes.
+    // Scope authorization remains at the MCP dispatch choke point.
+    const validity = checkPat(record, '*', new Date().toISOString());
+    if (!validity.ok && validity.reason !== 'missing-scope') {
+      const response = context.switchToHttp().getResponse<Response>();
+      response.setHeader('WWW-Authenticate', 'Bearer realm="email-ops-mcp"');
+      throw new UnauthorizedException(`Personal access token ${validity.reason}`);
+    }
+
+    const augmented = record.user as PatAuthenticatedUser;
+    augmented.__patAuth = {
+      scopes: record.scopes,
+      expiresAt: record.expiresAt,
+      revokedAt: record.revokedAt,
+    };
     request.user = augmented;
     return true;
   }

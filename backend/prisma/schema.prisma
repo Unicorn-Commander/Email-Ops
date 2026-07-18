@@ -515,6 +515,8 @@ model PersonalAccessToken {
   name        String
   tokenHash   String    @unique
   tokenPrefix String
+  scopes      String[]  @default([])
+  expiresAt   DateTime?
   lastUsedAt  DateTime?
   createdAt   DateTime  @default(now())
   revokedAt   DateTime?

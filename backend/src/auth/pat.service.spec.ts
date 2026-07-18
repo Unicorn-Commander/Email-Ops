@@ -22,6 +22,8 @@ function makePrisma(users: Record<string, { id: string; isActive: boolean }>) {
           name: data.name,
           tokenHash: data.tokenHash,
           tokenPrefix: data.tokenPrefix,
+          scopes: data.scopes,
+          expiresAt: data.expiresAt,
           lastUsedAt: null as Date | null,
           createdAt: new Date(),
           revokedAt: null as Date | null,
@@ -63,21 +65,63 @@ function makePrisma(users: Record<string, { id: string; isActive: boolean }>) {
 
 describe('PatService', () => {
   it('mints and resolves a token — full round-trip', async () => {
-    const { prisma } = makePrisma({ u1: { id: 'u1', isActive: true } });
+    const { prisma, store } = makePrisma({ u1: { id: 'u1', isActive: true } });
     const svc = new PatService(prisma);
 
     const minted = await svc.createPat('u1', 'my-agent');
     expect(minted.token.startsWith('eo_pat_')).toBe(true);
     expect(minted.token.length).toBe('eo_pat_'.length + 32);
     expect(minted.tokenPrefix).toBe(minted.token.slice(0, 12));
+    expect([...store.values()][0]).toMatchObject({ scopes: ['*'], expiresAt: null });
 
-    const resolved = await svc.resolvePat(minted.token);
-    expect(resolved).not.toBeNull();
-    expect(resolved!.id).toBe('u1');
+    const record = await svc.resolvePatRecord(minted.token);
+    expect(record).toMatchObject({
+      user: { id: 'u1' },
+      scopes: ['*'],
+      expiresAt: null,
+      revokedAt: null,
+    });
+    await expect(svc.resolvePat(minted.token)).resolves.toMatchObject({ id: 'u1' });
 
     // lastUsedAt stamp is fire-and-forget; let the microtask flush.
     await new Promise((r) => setImmediate(r));
-    expect((prisma.personalAccessToken.update as jest.Mock)).toHaveBeenCalled();
+    expect(prisma.personalAccessToken.update as jest.Mock).toHaveBeenCalled();
+  });
+
+  it('normalizes explicit scopes and persists an expiry', async () => {
+    const { prisma, store } = makePrisma({ u1: { id: 'u1', isActive: true } });
+    const svc = new PatService(prisma);
+    const expiresAt = new Date('2027-01-02T03:04:05.000Z');
+
+    const minted = await svc.createPat('u1', 'scoped-agent', {
+      scopes: [' mail:read ', 'mail:read', 'mail:*', 'agent-inbox:approve'],
+      expiresAt,
+    });
+
+    expect(store.get(minted.id)).toMatchObject({
+      scopes: ['mail:read', 'mail:*', 'agent-inbox:approve'],
+      expiresAt,
+    });
+    await expect(svc.resolvePatRecord(minted.token)).resolves.toMatchObject({
+      scopes: ['mail:read', 'mail:*', 'agent-inbox:approve'],
+      expiresAt: expiresAt.toISOString(),
+    });
+  });
+
+  it('rejects unknown, malformed, and unknown-prefix wildcard scopes', async () => {
+    const { prisma } = makePrisma({ u1: { id: 'u1', isActive: true } });
+    const svc = new PatService(prisma);
+
+    await expect(svc.createPat('u1', 'bad', { scopes: ['mailish:read'] })).rejects.toThrow(
+      'Unknown PAT scope',
+    );
+    await expect(svc.createPat('u1', 'bad', { scopes: ['other:*'] })).rejects.toThrow(
+      'Unknown PAT scope',
+    );
+    await expect(svc.createPat('u1', 'bad', { scopes: [42 as any] })).rejects.toThrow(
+      'PAT scopes must be strings',
+    );
+    expect(prisma.personalAccessToken.create).not.toHaveBeenCalled();
   });
 
   it('rejects a garbage / wrong-prefix token without a DB lookup', async () => {
@@ -96,6 +140,23 @@ describe('PatService', () => {
     const minted = await svc.createPat('u1', 'my-agent');
     await svc.revokePat('u1', minted.id);
 
+    await expect(svc.resolvePatRecord(minted.token)).resolves.toMatchObject({
+      user: { id: 'u1' },
+      revokedAt: expect.any(String),
+    });
+    await expect(svc.resolvePat(minted.token)).resolves.toBeNull();
+  });
+
+  it('returns expiry metadata but the legacy resolver rejects an expired token', async () => {
+    const { prisma } = makePrisma({ u1: { id: 'u1', isActive: true } });
+    const svc = new PatService(prisma);
+    const expiresAt = new Date('2020-01-01T00:00:00.000Z');
+    const minted = await svc.createPat('u1', 'expired', { scopes: ['mail:read'], expiresAt });
+
+    await expect(svc.resolvePatRecord(minted.token)).resolves.toMatchObject({
+      scopes: ['mail:read'],
+      expiresAt: expiresAt.toISOString(),
+    });
     await expect(svc.resolvePat(minted.token)).resolves.toBeNull();
   });
 
@@ -108,7 +169,10 @@ describe('PatService', () => {
   });
 
   it('revokePat only affects the owner’s own token', async () => {
-    const { prisma, store } = makePrisma({ u1: { id: 'u1', isActive: true }, u2: { id: 'u2', isActive: true } });
+    const { prisma, store } = makePrisma({
+      u1: { id: 'u1', isActive: true },
+      u2: { id: 'u2', isActive: true },
+    });
     const svc = new PatService(prisma);
 
     const minted = await svc.createPat('u1', 'my-agent');

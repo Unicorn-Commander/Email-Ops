@@ -1,7 +1,8 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import { PersonalAccessToken, User } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { checkPat, KNOWN_SCOPES } from './pat-scope';
 
 /** Reserved prefix for Email-Ops PATs (SUITE-IDENTITY §D9). */
 export const PAT_PREFIX = 'eo_pat_';
@@ -22,6 +23,18 @@ export interface MintedPat {
   token: string;
   tokenPrefix: string;
   createdAt: Date;
+}
+
+export interface CreatePatOptions {
+  scopes?: string[];
+  expiresAt?: Date | null;
+}
+
+export interface ResolvedPatRecord {
+  user: User;
+  scopes: string[];
+  expiresAt: string | null;
+  revokedAt: string | null;
 }
 
 export type PatSummary = Pick<
@@ -66,13 +79,15 @@ export class PatService {
    * caller (the /auth/pats controller) must surface it to the user
    * immediately; it cannot be recovered afterward.
    */
-  async createPat(userId: string, name: string): Promise<MintedPat> {
+  async createPat(userId: string, name: string, opts: CreatePatOptions = {}): Promise<MintedPat> {
+    const scopes = PatService.normalizeScopes(opts.scopes ?? ['*']);
+    const expiresAt = PatService.normalizeExpiry(opts.expiresAt);
     const plaintext = `${PAT_PREFIX}${PatService.randomBody(PAT_BODY_LENGTH)}`;
     const tokenHash = PatService.hash(plaintext);
     const tokenPrefix = plaintext.slice(0, PAT_DISPLAY_PREFIX_LENGTH);
 
     const row = await this.prisma.personalAccessToken.create({
-      data: { userId, name, tokenHash, tokenPrefix },
+      data: { userId, name, tokenHash, tokenPrefix, scopes, expiresAt },
     });
 
     return {
@@ -84,14 +99,50 @@ export class PatService {
     };
   }
 
+  private static normalizeScopes(scopes: string[]): string[] {
+    if (!Array.isArray(scopes)) {
+      throw new BadRequestException('PAT scopes must be an array');
+    }
+
+    const known = new Set<string>(KNOWN_SCOPES);
+    const wildcardPrefixes = new Set(KNOWN_SCOPES.map((scope) => scope.split(':', 1)[0]));
+    const normalized: string[] = [];
+
+    for (const raw of scopes) {
+      if (typeof raw !== 'string') {
+        throw new BadRequestException('PAT scopes must be strings');
+      }
+      const scope = raw.trim();
+      const prefix = scope.endsWith(':*') ? scope.slice(0, -2) : null;
+      if (scope !== '*' && !known.has(scope) && (!prefix || !wildcardPrefixes.has(prefix))) {
+        throw new BadRequestException(`Unknown PAT scope: ${scope || '(empty)'}`);
+      }
+      if (!normalized.includes(scope)) {
+        normalized.push(scope);
+      }
+    }
+
+    return normalized;
+  }
+
+  private static normalizeExpiry(expiresAt: Date | null | undefined): Date | null {
+    if (expiresAt == null) {
+      return null;
+    }
+    if (!(expiresAt instanceof Date) || !Number.isFinite(expiresAt.getTime())) {
+      throw new BadRequestException('PAT expiry must be a valid Date or null');
+    }
+    return expiresAt;
+  }
+
   /**
    * Resolve a bearer credential to its owning User, mirroring the shape the
    * JWT path yields so `createServerForUser` and any downstream
-   * workspace-scoping keep working unchanged. Returns null (never throws) on
-   * any failure — wrong prefix, unknown/garbage token, revoked token, or an
-   * inactive user — so the guard can uniformly answer 401.
+   * workspace-scoping keep working unchanged. Returns null (never throws) for
+   * a wrong prefix, unknown token, or inactive user. Revoked/expired records
+   * are returned with their lifecycle stamps so the guard can explain its 401.
    */
-  async resolvePat(plaintext: string): Promise<User | null> {
+  async resolvePatRecord(plaintext: string): Promise<ResolvedPatRecord | null> {
     if (!plaintext || !plaintext.startsWith(PAT_PREFIX)) {
       return null;
     }
@@ -102,21 +153,46 @@ export class PatService {
       include: { user: true },
     });
 
-    if (!record || record.revokedAt) {
+    if (!record) {
       return null;
     }
     if (!record.user.isActive) {
       return null;
     }
 
-    // Fire-and-forget last-used stamp: never let a metadata write block or
-    // fail the authenticated request it is merely bookkeeping for.
-    this.prisma.personalAccessToken
-      .update({ where: { id: record.id }, data: { lastUsedAt: new Date() } })
-      .catch((err) => {
-        this.logger.warn(`Failed to stamp lastUsedAt for PAT ${record.id}: ${(err as Error).message}`);
-      });
+    const resolved: ResolvedPatRecord = {
+      user: record.user,
+      scopes: record.scopes,
+      expiresAt: record.expiresAt?.toISOString() ?? null,
+      revokedAt: record.revokedAt?.toISOString() ?? null,
+    };
 
+    // Stamp only credentials that are current. Revoked/expired records still
+    // resolve so the guard can return a precise authentication failure.
+    const validity = checkPat(resolved, '*', new Date().toISOString());
+    if (validity.ok || validity.reason === 'missing-scope') {
+      this.prisma.personalAccessToken
+        .update({ where: { id: record.id }, data: { lastUsedAt: new Date() } })
+        .catch((err) => {
+          this.logger.warn(
+            `Failed to stamp lastUsedAt for PAT ${record.id}: ${(err as Error).message}`,
+          );
+        });
+    }
+
+    return resolved;
+  }
+
+  /** Legacy user-only resolver retained for existing callers. */
+  async resolvePat(plaintext: string): Promise<User | null> {
+    const record = await this.resolvePatRecord(plaintext);
+    if (!record) {
+      return null;
+    }
+    const validity = checkPat(record, '*', new Date().toISOString());
+    if (!validity.ok && validity.reason !== 'missing-scope') {
+      return null;
+    }
     return record.user;
   }
 
