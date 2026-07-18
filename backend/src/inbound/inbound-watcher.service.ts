@@ -6,6 +6,7 @@ import { MailTriageService } from '../mail-triage/mail-triage.service';
 import { MailRulesService } from '../mail-rules/mail-rules.service';
 import { MailRuleRow } from '../mail-rules/mail-rules.types';
 import { inboundWatcherEnabled } from '../common/workspace/feature-flags';
+import { AgentReplyService } from '../agent-reply/agent-reply.service';
 
 /**
  * The inbound half of the agent-email fabric: a per-mailbox JMAP delta poll that
@@ -31,6 +32,7 @@ export class InboundWatcherService {
     private readonly stalwart: StalwartPort,
     private readonly triage: MailTriageService,
     private readonly rules: MailRulesService,
+    private readonly agentReply: AgentReplyService,
   ) {}
 
   @Cron(CronExpression.EVERY_MINUTE)
@@ -135,11 +137,33 @@ export class InboundWatcherService {
         }
       }
       if (mb.ownerKind === 'AGENT') {
-        // Reply-routing seam: an agent received mail. The Brigade runtime that
-        // drafts a reply into the approval queue consumes this hand-off (follow-up).
+        // Reply-routing seam: an agent received mail. The AGENT-REPLY RUNTIME
+        // consumes this hand-off — it drafts a reply into the approval queue
+        // (never auto-sends; dormant unless AGENT_REPLY_RUNTIME_ENABLED).
         this.logger.log(
           `inbound → AGENT ${mb.emailAddress} thread=${msg.threadId} from=${msg.fromAddress ?? '?'} (reply-routing seam)`,
         );
+        // Fire-and-forget (same doctrine as the rules applicator above): the
+        // service is degrade-clean internally, and this try/catch + .catch is
+        // belt-and-braces — a draft failure (or a slow LLM turn) must NEVER
+        // block triage of the remaining messages or the cursor advance below.
+        try {
+          void this.agentReply
+            .draftReplyForInbound(
+              mb.workspaceId,
+              { id: mb.id, emailAddress: mb.emailAddress, workspaceId: mb.workspaceId },
+              msg,
+            )
+            .catch((err) =>
+              this.logger.warn(
+                `agent-reply draft failed for ${mb.emailAddress}: ${(err as Error).message}`,
+              ),
+            );
+        } catch (err) {
+          this.logger.warn(
+            `agent-reply hook failed for ${mb.emailAddress}: ${(err as Error).message}`,
+          );
+        }
       }
     }
 

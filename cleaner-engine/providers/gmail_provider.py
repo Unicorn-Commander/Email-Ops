@@ -431,6 +431,19 @@ class GmailProvider(EmailProvider):
             changed += len(batch)
         return changed
 
+    def batch_set_read(self, message_ids: List[str], read: bool = True) -> int:
+        """Set/clear the UNREAD label (read=True removes it). Returns count changed."""
+        changed = 0
+        label_op = 'removeLabelIds' if read else 'addLabelIds'
+        for i in range(0, len(message_ids), 100):
+            batch = message_ids[i:i + 100]
+            self.service.users().messages().batchModify(
+                userId='me',
+                body={'ids': batch, label_op: ['UNREAD']},
+            ).execute()
+            changed += len(batch)
+        return changed
+
     def export_messages(self, message_ids: List[str]):
         for message_id in message_ids:
             msg = self.service.users().messages().get(

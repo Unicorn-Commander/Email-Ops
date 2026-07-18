@@ -31,6 +31,9 @@ function make(opts: {
   thread?: unknown;
   send?: unknown;
   profile?: unknown;
+  archive?: unknown;
+  trash?: unknown;
+  readSet?: unknown;
 }) {
   const broker = {
     getProviderAccessToken: jest.fn().mockResolvedValue(opts.token ?? null),
@@ -40,6 +43,9 @@ function make(opts: {
     listMailThreads: jest.fn().mockResolvedValue(opts.threads ?? null),
     getMailThread: jest.fn().mockResolvedValue(opts.thread ?? null),
     sendMail: jest.fn().mockResolvedValue(opts.send ?? null),
+    archiveMailThread: jest.fn().mockResolvedValue(opts.archive ?? null),
+    trashMailThread: jest.fn().mockResolvedValue(opts.trash ?? null),
+    setMailThreadRead: jest.fn().mockResolvedValue(opts.readSet ?? null),
   } as unknown as ConnectedAccountsEnginePort;
   const prisma = {
     user: {
@@ -135,6 +141,50 @@ describe('EngineMailProvider', () => {
     const res = await notConnected.provider.send(gmailbox(), { from: 'person84@example.com', to: 'x@y.test', subject: 's', body: 'b' });
     expect(res).toEqual({ accepted: false, providerMessageId: null, threadId: null, reason: 'account_not_connected' });
     expect(notConnected.engine.sendMail).not.toHaveBeenCalled();
+  });
+
+  it('archiveThread: routes through the engine triage verb; ok:true → true', async () => {
+    const { provider, engine } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      archive: { ok: true, moved: 3 },
+    });
+    expect(await provider.archiveThread(gmailbox(), 't1')).toBe(true);
+    expect(engine.archiveMailThread).toHaveBeenCalledWith('gmail', { token: 'gtok' }, 't1');
+  });
+
+  it('trashThread: ok:true → true; not-connected → false without touching the engine', async () => {
+    const happy = make({ user: { keycloakId: 'kc-sub-1' }, token: 'gtok', trash: { ok: true, moved: 2 } });
+    expect(await happy.provider.trashThread(gmailbox(), 't1')).toBe(true);
+    expect(happy.engine.trashMailThread).toHaveBeenCalledWith('gmail', { token: 'gtok' }, 't1');
+
+    const notConnected = make({ user: { keycloakId: 'kc-sub-1' }, token: null });
+    expect(await notConnected.provider.trashThread(gmailbox(), 't1')).toBe(false);
+    expect(notConnected.engine.trashMailThread).not.toHaveBeenCalled();
+  });
+
+  it('setThreadRead: forwards the read flag (microsoft credentials shape) and maps ok', async () => {
+    const { provider, engine } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'mtok',
+      readSet: { ok: true, moved: 4 },
+    });
+    expect(
+      await provider.setThreadRead(gmailbox({ provider: 'microsoft', kind: 'microsoft' }), 't1', false),
+    ).toBe(true);
+    expect(engine.setMailThreadRead).toHaveBeenCalledWith(
+      'microsoft',
+      { access_token: 'mtok' },
+      't1',
+      false,
+    );
+  });
+
+  it('triage verbs degrade clean: dormant engine (null) or engine ok:false → false', async () => {
+    const base = { user: { keycloakId: 'kc-sub-1' }, token: 'gtok' };
+    expect(await make({ ...base, archive: null }).provider.archiveThread(gmailbox(), 't1')).toBe(false);
+    expect(await make({ ...base, trash: { ok: false, moved: 0 } }).provider.trashThread(gmailbox(), 't1')).toBe(false);
+    expect(await make({ ...base, readSet: { ok: false, moved: 0 } }).provider.setThreadRead(gmailbox(), 't1', true)).toBe(false);
   });
 
   it('resolveOwnAddress returns the provider-authoritative address, lowercased', async () => {

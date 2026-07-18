@@ -105,6 +105,10 @@ import { useDesktopNotifications } from '@/components/mail/useDesktopNotificatio
 import { MailSettingsDialog } from '@/components/mail/MailSettingsDialog';
 import { RulesDialog } from '@/components/mail/RulesDialog';
 import { cleanupReason, deriveCleanupTargets } from '@/lib/cleanupTargets';
+import { ProposedReplies, isProposedReply } from '@/components/mail/ProposedReplies';
+import { AiPulse, type AiPulseActivityLine } from '@/components/mail/AiPulse';
+import { HowAiHelps, requestAiHelpCard } from '@/components/mail/HowAiHelps';
+import { useAgentPulse } from '@/components/mail/useAgentPulse';
 
 /** Funnel glyph for the Rules entries (matches the stroke language of icons.tsx). */
 function FunnelIcon({ className }: { className?: string }) {
@@ -302,6 +306,13 @@ export default function MailPage() {
     () => inbox.items.filter((i) => i.state === 'pending'),
     [inbox.items],
   );
+  // The AI-visibility split: proposed replies (EMAIL drafts) vs cleanup batches.
+  const pendingReplies = useMemo(() => pendingItems.filter(isProposedReply), [pendingItems]);
+  const pendingCleanups = useMemo(
+    () => pendingItems.filter((i) => i.kind === 'CLEANUP'),
+    [pendingItems],
+  );
+  const pulse = useAgentPulse();
   const draftForThread = useCallback(
     (thread: ThreadView | null): AgentInboxItemView | null => {
       if (!thread || pendingItems.length === 0) return null;
@@ -884,6 +895,22 @@ export default function MailPage() {
       keywords: 'settings preferences notifications undo send window',
       run: () => setSettingsOpen(true),
     });
+    list.push(
+      {
+        id: 'agent:proposed-replies',
+        label: 'Review proposed replies',
+        group: 'Actions',
+        keywords: 'approve draft pending response ai agent replies',
+        run: () => router.push('/agent-inbox'),
+      },
+      {
+        id: 'agent:how-ai-helps',
+        label: 'How your AI helps',
+        group: 'Actions',
+        keywords: 'tour orientation onboarding agents ai help explain',
+        run: () => requestAiHelpCard(),
+      },
+    );
     if (notificationsSupported && notificationsPermission !== 'denied') {
       list.push({
         id: 'action:toggle-desktop-notifications',
@@ -1121,6 +1148,14 @@ export default function MailPage() {
       if (tid) selectThread(String(tid), (p.mailbox_id as string | undefined) ?? undefined);
       else router.push('/agent-inbox');
     },
+    replies: pendingReplies.slice(0, 3),
+    repliesTotal: pendingReplies.length,
+    cleanups: pendingCleanups.slice(0, 3),
+    pulseRecent: pulse.recent,
+    paused: agentsPaused,
+    onApproveItem: (it) => inbox.approve(it.id),
+    onRejectItem: (it) => inbox.reject(it.id),
+    onOpenRules: sovereignMailbox ? () => setRulesOpen(true) : undefined,
   };
 
   return (
@@ -3362,6 +3397,20 @@ export interface BriefData {
   onCompose: () => void;
   onReviewApprovals: () => void;
   onReviewItem: (item: AgentInboxItemView) => void;
+  // ── AI-visibility layer (the "how is the AI helping me" answer) ──
+  /** Pending EMAIL drafts (proposed replies), sliced for the brief. */
+  replies: AgentInboxItemView[];
+  repliesTotal: number;
+  /** Pending CLEANUP batches, sliced — the "Waiting on you" list. */
+  cleanups: AgentInboxItemView[];
+  /** Recent agent activity lines ("Perry staged a reply · 2h ago"). */
+  pulseRecent: AiPulseActivityLine[];
+  /** The workspace agent kill-switch state (renders an honest Paused chip). */
+  paused: boolean;
+  onApproveItem: (item: AgentInboxItemView) => Promise<{ ok: boolean; error?: string }>;
+  onRejectItem: (item: AgentInboxItemView) => Promise<{ ok: boolean; error?: string }>;
+  /** Present only when a sovereign mailbox is selected (rules are sovereign-only). */
+  onOpenRules?: () => void;
 }
 
 function greeting(): string {
@@ -3444,6 +3493,11 @@ function DailyBrief({ brief }: { brief: BriefData }) {
           </p>
         </div>
 
+        <HowAiHelps
+          onOpenRules={brief.onOpenRules}
+          onOpenApprovals={brief.onReviewApprovals}
+        />
+
         <div className="flex gap-2.5">
           <BriefStat label="Unread" value={brief.unread} />
           <BriefStat label="Needs approval" value={brief.pendingCount} tone="warn" />
@@ -3451,11 +3505,34 @@ function DailyBrief({ brief }: { brief: BriefData }) {
           <BriefStat label="Inboxes" value={brief.mailboxCount} />
         </div>
 
+        <AiPulse
+          agentsLive={brief.agentsLive}
+          pendingDrafts={brief.repliesTotal}
+          pendingCleanups={brief.pendingCount - brief.repliesTotal}
+          rulesActive={null}
+          lastAgentActivity={brief.pulseRecent}
+          paused={brief.paused}
+        />
+
+        {brief.replies.length > 0 && (
+          <ProposedReplies
+            items={brief.replies}
+            totalCount={brief.repliesTotal}
+            onReview={brief.onReviewItem}
+            onApprove={brief.onApproveItem}
+            onReject={brief.onRejectItem}
+            onViewAll={brief.onReviewApprovals}
+          />
+        )}
+
+        {/* Cleanup batches only — proposed replies live in their own section above,
+            so nothing double-lists. Hidden entirely when replies cover the queue. */}
+        {(brief.cleanups.length > 0 || brief.pendingCount === 0) && (
         <div>
           <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary">
             Waiting on you
           </p>
-          {brief.pending.length === 0 ? (
+          {brief.pendingCount === 0 ? (
             <div className="flex items-center gap-3 rounded-token border border-subtle bg-surface-base/50 px-4 py-3.5">
               <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-success/15 text-success">
                 <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none" aria-hidden>
@@ -3474,7 +3551,7 @@ function DailyBrief({ brief }: { brief: BriefData }) {
             </div>
           ) : (
             <div className="space-y-1.5">
-              {brief.pending.map((it) => (
+              {brief.cleanups.map((it) => (
                 <button
                   key={it.id}
                   type="button"
@@ -3510,18 +3587,20 @@ function DailyBrief({ brief }: { brief: BriefData }) {
                   </span>
                 </button>
               ))}
-              {brief.pendingCount > brief.pending.length && (
+              {brief.pendingCount > brief.replies.length + brief.cleanups.length && (
                 <button
                   type="button"
                   onClick={brief.onReviewApprovals}
                   className="px-1 pt-1 text-[12px] font-medium text-accent hover:underline"
                 >
-                  +{brief.pendingCount - brief.pending.length} more in approvals →
+                  +{brief.pendingCount - brief.replies.length - brief.cleanups.length} more in
+                  approvals →
                 </button>
               )}
             </div>
           )}
         </div>
+        )}
 
         <div className="flex flex-wrap gap-2">
           {brief.hasUnread && (

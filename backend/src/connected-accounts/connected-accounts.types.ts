@@ -232,6 +232,17 @@ export interface EngineMailSendResult {
   reason: string | null;
 }
 
+/**
+ * Result of a thread-level TRIAGE verb (archive / trash / read) applied in the
+ * REAL external mailbox; `moved` = messages the batch touched. `ok:false` is the
+ * engine's degrade-clean answer (unusable provider / provider error) — never an
+ * HTTP error.
+ */
+export interface EngineMailThreadActionResult {
+  ok: boolean;
+  moved: number;
+}
+
 /** The client mail folders the unified inbox can request from a provider. */
 export type EngineMailFolder = 'inbox' | 'archive' | 'spam' | 'trash' | 'sent' | 'drafts';
 

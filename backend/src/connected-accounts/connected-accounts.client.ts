@@ -11,6 +11,7 @@ import {
   EngineListMessagesResult,
   EngineMailFolder,
   EngineMailSendResult,
+  EngineMailThreadActionResult,
   EngineMailThreadResult,
   EngineMailThreadsResult,
   EngineMessageSummary,
@@ -380,6 +381,44 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       credentials,
       thread_id: threadId,
     });
+  }
+
+  // Thread-level triage verbs. The thread id rides in the PATH (the engine's
+  // /mail/threads/{id}/... routes), so encode it — Microsoft conversation ids
+  // are base64 and may contain '/' or '='.
+
+  async archiveMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>(
+      `/mail/threads/${encodeURIComponent(threadId)}/archive`,
+      { provider, credentials },
+    );
+  }
+
+  async trashMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>(
+      `/mail/threads/${encodeURIComponent(threadId)}/trash`,
+      { provider, credentials },
+    );
+  }
+
+  async setMailThreadRead(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+    read: boolean,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>(
+      `/mail/threads/${encodeURIComponent(threadId)}/read`,
+      { provider, credentials, read },
+    );
   }
 
   async sendMail(

@@ -700,9 +700,12 @@ export class EmailService {
 
   /**
    * READ STATE (webmail wave): set/clear `$seen` on every message in a thread
-   * via the engine (JMAP Email/set). `updated:false` means the engine could
-   * not apply it (unknown thread / unsupported engine) — degrade-clean, not an
-   * error. The mailbox is workspace-fenced + per-user fenced like every other
+   * via the engine (JMAP Email/set) — or, for an EXTERNAL (Gmail/M365) mailbox,
+   * flip the REAL provider read state through the MailProviderPort (triage
+   * parity: the actual Gmail box changes, not just this app's view).
+   * `updated:false` means the engine/provider could not apply it (unknown
+   * thread / not connected / dormant engine) — degrade-clean, not an error.
+   * The mailbox is workspace-fenced + per-user fenced like every other
    * mailbox-scoped read/write.
    */
   async setThreadReadState(
@@ -713,8 +716,12 @@ export class EmailService {
     read: boolean,
   ): Promise<{ thread_id: string; read: boolean; updated: boolean }> {
     const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
-    if (!mailbox || this.mailProvider.handles(mailbox)) {
+    if (!mailbox) {
       return { thread_id: threadId, read, updated: false };
+    }
+    if (this.mailProvider.handles(mailbox)) {
+      const updated = await this.mailProvider.setThreadRead(mailbox, threadId, read);
+      return { thread_id: threadId, read, updated };
     }
     const updated = await this.stalwart.setThreadRead(mailbox.emailAddress, threadId, read);
     return { thread_id: threadId, read, updated };
@@ -775,10 +782,13 @@ export class EmailService {
 
   /**
    * The read/unread half of BULK (webmail wave): the bulk route is
-   * workspace-level (no mailbox in the path) while JMAP thread ids live
-   * per-account — so try each readable sovereign mailbox in turn until one
-   * accepts the toggle. Bounded: bulk lists are small and the loop stops at
-   * the first success per thread. False = no account knew the thread.
+   * workspace-level (no mailbox in the path) while thread ids live per-account
+   * — so try each readable mailbox in turn until one accepts the toggle.
+   * Sovereign boxes go through the JMAP engine; EXTERNAL (Gmail/M365) boxes go
+   * through the MailProviderPort so the REAL provider read state flips too
+   * (a foreign thread id simply comes back false and the loop moves on).
+   * Bounded: bulk lists are small and the loop stops at the first success per
+   * thread. False = no account knew the thread.
    */
   async setThreadReadAcrossMailboxes(
     workspaceId: string,
@@ -790,7 +800,10 @@ export class EmailService {
       this.readableMailboxes(tx, workspaceId, ucUid),
     );
     for (const mb of mailboxes) {
-      if (this.mailProvider.handles(mb)) continue;
+      if (this.mailProvider.handles(mb)) {
+        if (await this.mailProvider.setThreadRead(mb, threadId, read)) return true;
+        continue;
+      }
       if (await this.stalwart.setThreadRead(mb.emailAddress, threadId, read)) return true;
     }
     return false;
@@ -811,13 +824,15 @@ export class EmailService {
   }
 
   /**
-   * Reconcile a thread's folder placement into the ACTUAL mailbox on James (the
-   * overlay's move half). Like the read toggle, the caller path is workspace-level
-   * while JMAP thread ids are per-account — so try each readable sovereign mailbox
-   * until one owns the thread. Returns true when a real James move happened; false
-   * when no sovereign account knew it (e.g. the thread lives in a connected
-   * Gmail/M365 box — that path still only carries the overlay tag). Best-effort:
-   * never throws, so a degraded engine can't block the approval that tags the overlay.
+   * Reconcile a thread's folder placement into the ACTUAL mailbox (the overlay's
+   * move half). Like the read toggle, the caller path is workspace-level while
+   * thread ids are per-account — so try each readable mailbox until one owns the
+   * thread. Sovereign boxes move via James (JMAP Email/set); EXTERNAL (Gmail/M365)
+   * boxes reconcile ARCHIVE/TRASH through the MailProviderPort so the triage is
+   * REAL in the provider mailbox too (SPAM and INBOX-restore have no provider verb
+   * yet and stay overlay-only there). Returns true when a real move happened; false
+   * when no account knew the thread. Best-effort: never throws, so a degraded
+   * engine/provider can't block the overlay write that follows.
    */
   async moveThreadToFolderAcrossMailboxes(
     workspaceId: string,
@@ -830,7 +845,25 @@ export class EmailService {
       this.readableMailboxes(tx, workspaceId, ucUid),
     );
     for (const mb of mailboxes) {
-      if (this.mailProvider.handles(mb)) continue;
+      if (this.mailProvider.handles(mb)) {
+        try {
+          if (
+            disposition === MessageDisposition.ARCHIVE &&
+            (await this.mailProvider.archiveThread(mb, threadId))
+          ) {
+            return true;
+          }
+          if (
+            disposition === MessageDisposition.TRASH &&
+            (await this.mailProvider.trashThread(mb, threadId))
+          ) {
+            return true;
+          }
+        } catch {
+          // degrade-clean: try the next mailbox
+        }
+        continue;
+      }
       try {
         if (await this.stalwart.moveThreadToFolder(mb.emailAddress, threadId, folder)) return true;
       } catch {
@@ -843,12 +876,12 @@ export class EmailService {
   /**
    * Apply a MANUAL thread disposition (reader / bulk-bar Archive・Trash・Spam・
    * Inbox) so the triage is REAL, not just an overlay tag: reconcile the actual
-   * mailbox on James (Email/set move) AND write the overlay in one step. Without
-   * the move, the thread stays in James's inbox and reappears on the next live
-   * refetch (the "triage undoes itself" bug). Best-effort move (never throws); the
-   * overlay is always written so the view is correct even if the engine is briefly
-   * unreachable. External (Gmail/M365) threads carry only the overlay today — the
-   * provider-side sync-back is a follow-up.
+   * mailbox — James (Email/set move) for sovereign boxes, the provider port
+   * (Gmail/M365 archive/trash) for external ones — AND write the overlay in one
+   * step. Without the move, the thread stays in the real inbox and reappears on
+   * the next live refetch (the "triage undoes itself" bug). Best-effort move
+   * (never throws); the overlay is ALWAYS written so the view is correct even if
+   * the engine/provider is briefly unreachable.
    */
   async applyThreadDisposition(
     workspaceId: string,

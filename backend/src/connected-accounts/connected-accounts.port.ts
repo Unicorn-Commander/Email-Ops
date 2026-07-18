@@ -20,6 +20,7 @@ import {
   EngineListMessagesResult,
   EngineMailFolder,
   EngineMailSendResult,
+  EngineMailThreadActionResult,
   EngineMailThreadResult,
   EngineMailThreadsResult,
   EngineMessageSummary,
@@ -131,6 +132,28 @@ export abstract class ConnectedAccountsEnginePort {
     credentials: Record<string, unknown>,
     threadId: string,
   ): Promise<EngineMailThreadResult | null>;
+
+  // Thread-level triage verbs — make Archive/Trash/read REAL in the external
+  // mailbox (the disposition overlay stays the UI's source of truth).
+
+  abstract archiveMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null>;
+
+  abstract trashMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null>;
+
+  abstract setMailThreadRead(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+    read: boolean,
+  ): Promise<EngineMailThreadActionResult | null>;
 
   abstract sendMail(
     provider: 'gmail' | 'microsoft',

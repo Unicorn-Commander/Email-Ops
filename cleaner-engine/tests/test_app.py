@@ -92,6 +92,10 @@ class FakeProvider:
         self.calls.append(("batch_archive", tuple(message_ids), {"label": label}))
         return len(message_ids)
 
+    def batch_set_read(self, message_ids: list[str], read: bool = True) -> int:
+        self.calls.append(("batch_set_read", tuple(message_ids), {"read": read}))
+        return len(message_ids)
+
     def export_messages(self, message_ids: list[str]):
         self.calls.append(("export_messages", tuple(message_ids), {}))
         for message_id in message_ids:
@@ -180,6 +184,25 @@ class FailingProvider(FakeProvider):
 
     def send_message(self, from_addr, to_addr, subject, body, in_reply_to_thread_id=None):
         raise RuntimeError("token expired")
+
+
+class MixedThreadProvider(FakeProvider):
+    """A provider whose thread carries received + sent + draft messages, to prove
+    the triage routes' direction filtering (drafts never; sent skipped only for
+    Microsoft's move-semantics archive/trash)."""
+
+    def get_thread(self, thread_id: str):
+        from providers.mail_client import Address, ThreadMessage
+
+        self.calls.append(("get_thread", (thread_id,), {}))
+        return [
+            ThreadMessage(id="m-received", thread_id=thread_id, direction="received",
+                          sender=Address(address="a@example.com")),
+            ThreadMessage(id="m-sent", thread_id=thread_id, direction="sent",
+                          sender=Address(address="me@example.com")),
+            ThreadMessage(id="m-draft", thread_id=thread_id, direction="draft",
+                          sender=Address(address="me@example.com")),
+        ]
 
 
 class UnauthenticatableProvider(FakeProvider):
@@ -616,6 +639,9 @@ def test_mail_routes_require_auth(client):
         ("/mail/threads", {"provider": "gmail", "credentials": {"token": "abc"}}),
         ("/mail/thread", {"provider": "gmail", "credentials": {"token": "abc"}, "thread_id": "t"}),
         ("/mail/send", {"provider": "gmail", "credentials": {"token": "abc"}, "to": "x@example.com"}),
+        ("/mail/threads/t/archive", {"provider": "gmail", "credentials": {"token": "abc"}}),
+        ("/mail/threads/t/trash", {"provider": "gmail", "credentials": {"token": "abc"}}),
+        ("/mail/threads/t/read", {"provider": "gmail", "credentials": {"token": "abc"}, "read": True}),
     ]:
         response = client.post(path, json=payload)
         assert response.status_code == 401, path
@@ -661,6 +687,107 @@ def test_mail_send_degrades_clean_on_provider_error(monkeypatch):
     body = response.json()
     assert body["accepted"] is False
     assert body["reason"] == "send_failed"
+
+
+@pytest.mark.parametrize("provider", ["gmail", "microsoft"])
+def test_mail_thread_archive_happy_path(client, fake_provider_factory, provider):
+    response = client.post(
+        "/mail/threads/thread-1/archive",
+        headers=_auth_headers(),
+        json={"provider": provider, "credentials": {"token": "abc"}},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "moved": 1}
+    fake = fake_provider_factory.instances[-1]
+    # Resolved the thread's ids, then archived them (no label).
+    assert fake.calls[-2] == ("get_thread", ("thread-1",), {})
+    assert fake.calls[-1] == ("batch_archive", ("msg-1",), {"label": None})
+
+
+@pytest.mark.parametrize("provider", ["gmail", "microsoft"])
+def test_mail_thread_trash_happy_path(client, fake_provider_factory, provider):
+    response = client.post(
+        "/mail/threads/thread-1/trash",
+        headers=_auth_headers(),
+        json={"provider": provider, "credentials": {"token": "abc"}},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "moved": 1}
+    fake = fake_provider_factory.instances[-1]
+    assert fake.calls[-1] == ("batch_trash", ("msg-1",), {})
+
+
+@pytest.mark.parametrize("provider,read", [("gmail", True), ("gmail", False), ("microsoft", False)])
+def test_mail_thread_read_happy_path(client, fake_provider_factory, provider, read):
+    response = client.post(
+        "/mail/threads/thread-1/read",
+        headers=_auth_headers(),
+        json={"provider": provider, "credentials": {"token": "abc"}, "read": read},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "moved": 1}
+    fake = fake_provider_factory.instances[-1]
+    assert fake.calls[-1] == ("batch_set_read", ("msg-1",), {"read": read})
+
+
+def test_mail_thread_triage_direction_filtering(monkeypatch):
+    """Drafts are never touched; Microsoft's move-semantics archive/trash skip
+    SENT copies (a Gmail label edit keeps them, so the whole thread goes)."""
+    cli, factory = _client_with_factory(monkeypatch, MixedThreadProvider)
+
+    cli.post("/mail/threads/t/archive", headers=_auth_headers(),
+             json={"provider": "gmail", "credentials": {"token": "abc"}})
+    assert factory.instances[-1].calls[-1] == ("batch_archive", ("m-received", "m-sent"), {"label": None})
+
+    cli.post("/mail/threads/t/archive", headers=_auth_headers(),
+             json={"provider": "microsoft", "credentials": {"access_token": "abc"}})
+    assert factory.instances[-1].calls[-1] == ("batch_archive", ("m-received",), {"label": None})
+
+    cli.post("/mail/threads/t/trash", headers=_auth_headers(),
+             json={"provider": "microsoft", "credentials": {"access_token": "abc"}})
+    assert factory.instances[-1].calls[-1] == ("batch_trash", ("m-received",), {})
+
+    # Read is a flag flip on BOTH providers: sent copies included, drafts not.
+    cli.post("/mail/threads/t/read", headers=_auth_headers(),
+             json={"provider": "microsoft", "credentials": {"access_token": "abc"}, "read": True})
+    assert factory.instances[-1].calls[-1] == ("batch_set_read", ("m-received", "m-sent"), {"read": True})
+
+
+def test_mail_thread_triage_accepts_slash_bearing_thread_ids(client, fake_provider_factory):
+    """Microsoft conversation ids are base64 and can contain '/'; the ``:path``
+    route converter must still resolve them after percent-decoding."""
+    response = client.post(
+        "/mail/threads/AAQkAD%2FAbc%3D/archive",
+        headers=_auth_headers(),
+        json={"provider": "microsoft", "credentials": {"access_token": "abc"}},
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    fake = fake_provider_factory.instances[-1]
+    assert fake.calls[-2] == ("get_thread", ("AAQkAD/Abc=",), {})
+
+
+def test_mail_thread_triage_degrades_clean_on_provider_error(monkeypatch):
+    cli, _ = _client_with_factory(monkeypatch, FailingProvider)
+    for path in ["/mail/threads/t/archive", "/mail/threads/t/trash", "/mail/threads/t/read"]:
+        response = cli.post(
+            path,
+            headers=_auth_headers(),
+            json={"provider": "gmail", "credentials": {"token": "abc"}},
+        )
+        assert response.status_code == 200, path
+        assert response.json() == {"ok": False, "moved": 0}, path
+
+
+def test_mail_thread_triage_degrades_clean_on_auth_failure(monkeypatch):
+    cli, _ = _client_with_factory(monkeypatch, UnauthenticatableProvider)
+    response = cli.post(
+        "/mail/threads/t/trash",
+        headers=_auth_headers(),
+        json={"provider": "gmail", "credentials": {"token": "expired"}},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "moved": 0}
 
 
 def test_mail_threads_degrades_clean_on_auth_failure(monkeypatch):

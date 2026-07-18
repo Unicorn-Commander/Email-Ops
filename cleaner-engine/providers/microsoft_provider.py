@@ -503,6 +503,29 @@ class MicrosoftGraphProvider(EmailProvider):
             return resp.json()['id']
         return self._graph_get('/me/mailFolders/archive')['id']
 
+    def batch_set_read(self, message_ids: List[str], read: bool = True) -> int:
+        """PATCH isRead on each message (Graph $batch). Returns count changed."""
+        changed = 0
+        for i in range(0, len(message_ids), 20):
+            batch = message_ids[i:i + 20]
+            batch_body = {
+                'requests': [
+                    {
+                        'id': str(j),
+                        'method': 'PATCH',
+                        'url': f'/me/messages/{mid}',
+                        'body': {'isRead': read},
+                        'headers': {'Content-Type': 'application/json'},
+                    }
+                    for j, mid in enumerate(batch)
+                ]
+            }
+            resp = self._graph_post('/$batch', json_body=batch_body)
+            if resp.status_code == 200:
+                results = resp.json().get('responses', [])
+                changed += sum(1 for r in results if r.get('status', 0) in (200, 201))
+        return changed
+
     def export_messages(self, message_ids: List[str]):
         for message_id in message_ids:
             url = f'{GRAPH_BASE}/me/messages/{message_id}/$value'

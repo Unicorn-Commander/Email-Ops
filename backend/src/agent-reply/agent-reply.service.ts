@@ -1,0 +1,349 @@
+/**
+ * AgentReplyService — the AGENT-REPLY RUNTIME (email an agent → it drafts the
+ * answer → a human approves).
+ *
+ * The consumer of the inbound watcher's reply-routing seam: when a message
+ * arrives at an ownerKind=AGENT sovereign mailbox, this service (a) resolves the
+ * registered agent identity bound to that mailbox, (b) pulls the thread context
+ * from the mail engine, (c) asks the Cleaner Engine LLM (/ai/chat — SERVICE
+ * auth via X-Engine-Token, no per-user broker token involved) for a reply body,
+ * and (d) stages it as a DRAFT through the ONE canonical staging lane —
+ * EmailService.composeEmail(mode:'draft') — so it lands in the agent-inbox
+ * approval queue with full provenance (draftedBy=agent key), the autonomy gate,
+ * the audit log, and idempotency on (workspaceId, externalSource, externalRef).
+ *
+ * SAFETY DOCTRINE (v1, binding):
+ *   - NEVER auto-send. Every reply is staged mode:'draft' regardless of the
+ *     agent's autonomy dial — L0_DRAFT_ONLY, L1_APPROVE_TO_SEND, and even
+ *     L2_AUTONOMOUS_AUDIT all land in the approval queue (requesting 'draft'
+ *     means decideComposeMode honors it unconditionally; auto-send for L2 is a
+ *     DELIBERATE deferral, not an oversight).
+ *   - DORMANT unless AGENT_REPLY_RUNTIME_ENABLED=true (dormant-seam posture).
+ *   - Respects the workspace kill switch (Workspace.agentsPaused — the same
+ *     switch AgentControlsService toggles and composeEmail enforces) AND the
+ *     per-agent pause, both checked BEFORE any engine/LLM work so a paused
+ *     fleet does zero external calls.
+ *   - DEGRADE-CLEAN: this service never throws. Any failure (engine dormant,
+ *     LLM timeout, compose refusal) logs and returns null — a draft failure
+ *     must never block the watcher's triage or cursor advance.
+ *   - Idempotent: external_ref = `${mailboxId}:${threadId}:${receivedAt}` ⇒ one
+ *     staged draft per inbound message; watcher retries are safe (composeEmail
+ *     returns the existing row, queues nothing).
+ */
+
+import { Injectable, Logger } from '@nestjs/common';
+import { withTimeout } from '../common/async/concurrency';
+import { ConnectedAccountsEnginePort } from '../connected-accounts/connected-accounts.port';
+import { EmailService } from '../email/email.service';
+import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
+import { StalwartPort } from '../stalwart/stalwart.port';
+import { StalwartMessageDetail } from '../stalwart/stalwart.types';
+import { agentReplyRuntimeEnabled } from './agent-reply.flags';
+
+/** The stable provenance slug for drafts staged by this runtime. */
+export const AGENT_REPLY_SOURCE = 'agent-reply-runtime';
+
+/** Thread-context caps: last N messages, bounded per-message and in total. */
+const MAX_CONTEXT_MESSAGES = 5;
+const MAX_MESSAGE_CHARS = 1500;
+const MAX_DIGEST_CHARS = 6000;
+
+/** Hard cap on the LLM turn (belt-and-braces over the engine client's own timeout). */
+const LLM_TIMEOUT_MS = 30_000;
+
+/** The AGENT mailbox the watcher polled (its shape in the watcher's sweep). */
+export interface AgentReplyMailboxRef {
+  id: string;
+  emailAddress: string;
+  workspaceId: string;
+}
+
+/** The newly-arrived inbound message (structurally InboundMessageRef). */
+export interface AgentReplyInboundMsg {
+  threadId: string;
+  fromAddress: string | null;
+  subject: string | null;
+  /** ISO receivedAt from the poll — the idempotency component per message. */
+  receivedAt?: string | null;
+}
+
+/** The registered-agent identity resolved for the receiving mailbox. */
+interface ResolvedAgent {
+  key: string;
+  displayName: string;
+  autonomyLevel: string;
+  paused: boolean;
+}
+
+/** One message of the thread digest handed to the LLM. */
+interface DigestMessage {
+  from: string;
+  subject: string;
+  body: string;
+}
+
+@Injectable()
+export class AgentReplyService {
+  private readonly logger = new Logger(AgentReplyService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly stalwart: StalwartPort,
+    private readonly engine: ConnectedAccountsEnginePort,
+    private readonly email: EmailService,
+  ) {}
+
+  /**
+   * Draft a reply to a message that just arrived at an AGENT mailbox and stage
+   * it into the agent-inbox approval queue. Returns the staged SoR message id,
+   * or null when skipped/failed (flag off, paused, no sender, LLM failure, …).
+   * NEVER throws (degrade-clean — the watcher fire-and-forgets this).
+   */
+  async draftReplyForInbound(
+    workspaceId: string,
+    agentMailbox: AgentReplyMailboxRef,
+    msg: AgentReplyInboundMsg,
+  ): Promise<string | null> {
+    // DORMANT unless deliberately enabled (checked FIRST — zero work while off).
+    if (!agentReplyRuntimeEnabled()) {
+      this.logger.debug(
+        `agent-reply dormant (AGENT_REPLY_RUNTIME_ENABLED off) — skipping ${agentMailbox.emailAddress} thread=${msg.threadId}`,
+      );
+      return null;
+    }
+
+    try {
+      // No sender → nothing to reply to. Self-mail → loop guard (an agent must
+      // never draft a reply to its own outbound landing back in its inbox).
+      const sender = (msg.fromAddress ?? '').trim();
+      if (!sender) {
+        this.logger.debug(
+          `agent-reply skip: no from-address on thread=${msg.threadId} (${agentMailbox.emailAddress})`,
+        );
+        return null;
+      }
+      if (sender.toLowerCase() === agentMailbox.emailAddress.trim().toLowerCase()) {
+        this.logger.debug(
+          `agent-reply skip: self-addressed message on thread=${msg.threadId} (${agentMailbox.emailAddress})`,
+        );
+        return null;
+      }
+
+      // Pause switches + agent identity in ONE fenced read. The workspace kill
+      // switch is the SAME stored bit AgentControlsService toggles
+      // (Workspace.agentsPaused); composeEmail re-checks it, but checking here
+      // first means a paused fleet does no thread read and no LLM call — and we
+      // skip quietly instead of catching a ForbiddenException.
+      const gate = await this.prisma.withWorkspace(workspaceId, null, async (tx) => {
+        const ws = await tx.workspace.findUnique({
+          where: { id: workspaceId },
+          select: { agentsPaused: true, displayName: true },
+        });
+        return {
+          agentsPaused: ws?.agentsPaused ?? false,
+          workspaceName: ws?.displayName ?? workspaceId,
+          agent: await this.resolveAgentForMailbox(tx, workspaceId, agentMailbox.id),
+        };
+      });
+      if (gate.agentsPaused) {
+        this.logger.debug(
+          `agent-reply skip: agents paused for workspace ${workspaceId} (thread=${msg.threadId})`,
+        );
+        return null;
+      }
+      if (gate.agent?.paused) {
+        this.logger.debug(
+          `agent-reply skip: agent '${gate.agent.key}' is paused (thread=${msg.threadId})`,
+        );
+        return null;
+      }
+
+      // Defaults when no registered agent is bound to the mailbox: draft under
+      // the runtime's own provenance slug with the mailbox local-part as the
+      // persona. (composeEmail then treats it as an UNREGISTERED source: the
+      // From falls back to the workspace default mailbox, and a 'draft' request
+      // is always honored — still nothing can auto-send.)
+      const agentName =
+        gate.agent?.displayName ?? agentMailbox.emailAddress.split('@')[0] ?? 'Email Agent';
+      const draftedBy = gate.agent?.key ?? AGENT_REPLY_SOURCE;
+
+      // Thread context via the mail engine (degrade-clean: [] on any failure).
+      // DOCUMENTED CHOICE: an EMPTY thread detail still drafts — the latest
+      // inbound's sender/subject alone is enough for a useful first draft, and
+      // a human reviews every word before anything leaves.
+      const detail = await this.stalwart.getThreadDetail(agentMailbox.emailAddress, msg.threadId);
+      const digest = this.buildThreadDigest(detail ?? [], msg);
+
+      // The LLM turn. /ai/chat frames `context` as an "Inbox context" JSON blob
+      // and `message` as the user turn, so the drafting instruction rides in
+      // `message` and the thread digest rides in `context`. Timeout + null +
+      // the engine's in-band "ai_unavailable:" sentinel all degrade to skip.
+      const instruction =
+        `You are ${agentName}, an email agent for ${gate.workspaceName}. ` +
+        'Draft a concise, professional reply to the latest message in the email thread ' +
+        'provided in the context. Output ONLY the reply body text — no subject line, ' +
+        'no signature placeholders, no commentary.';
+      let replyBody: string | null = null;
+      try {
+        replyBody = await withTimeout(
+          this.engine.chat(instruction, {
+            task: 'agent-reply-draft',
+            agent: agentName,
+            latest_message: {
+              from: sender,
+              subject: msg.subject ?? '(no subject)',
+              received_at: msg.receivedAt ?? null,
+            },
+            thread: digest,
+          }),
+          LLM_TIMEOUT_MS,
+          'agent-reply llm',
+        );
+      } catch (err) {
+        this.logger.debug(
+          `agent-reply LLM failed for thread=${msg.threadId} (${agentMailbox.emailAddress}): ${(err as Error).message}`,
+        );
+        return null;
+      }
+      const body = (replyBody ?? '').trim();
+      if (!body || body.toLowerCase().startsWith('ai_unavailable')) {
+        this.logger.debug(
+          `agent-reply LLM unavailable/empty for thread=${msg.threadId} (${agentMailbox.emailAddress}) — nothing staged`,
+        );
+        return null;
+      }
+
+      // Stage through the ONE canonical lane. mode:'draft' is honored
+      // unconditionally by the autonomy gate (L0/L1/L2 alike land in the
+      // approval queue — the v1 never-auto-send doctrine). draftedBy carries
+      // the agent key so the AgentInboxItem is attributed to the registered
+      // agent (composeEmail resolves the agent by this key and sends From its
+      // primary mailbox on approve). external_ref makes retries idempotent:
+      // ONE staged draft per inbound message.
+      const externalRef = `${agentMailbox.id}:${msg.threadId}:${msg.receivedAt ?? 'na'}`;
+      const staged = await this.email.composeEmail(workspaceId, null, {
+        contactId: null,
+        toAddress: sender,
+        subject: this.replySubject(msg.subject),
+        body,
+        mode: 'draft',
+        inReplyToThreadId: msg.threadId,
+        externalSource: AGENT_REPLY_SOURCE,
+        externalRef,
+        draftedBy,
+      });
+      this.logger.log(
+        `agent-reply staged draft ${staged.id} for ${agentMailbox.emailAddress} thread=${msg.threadId} ` +
+          `(agent=${draftedBy}, autonomy=${gate.agent?.autonomyLevel ?? 'unregistered'} → approval queue)`,
+      );
+      return staged.id;
+    } catch (err) {
+      // Final backstop: the runtime NEVER throws into the watcher.
+      this.logger.warn(
+        `agent-reply draft failed for ${agentMailbox.emailAddress} thread=${msg.threadId}: ${(err as Error).message}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Resolve the registered agent bound to a mailbox: the AgentMailbox junction
+   * (primary binding first — the agent whose From identity this mailbox is),
+   * falling back to the denormalized Agent.mailboxAccountId cache. Null when no
+   * active agent is resolvable (the caller drafts under runtime defaults).
+   */
+  private async resolveAgentForMailbox(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    mailboxAccountId: string,
+  ): Promise<ResolvedAgent | null> {
+    const select = { key: true, displayName: true, autonomyLevel: true, paused: true };
+    const binding = await tx.agentMailbox.findFirst({
+      where: { workspaceId, mailboxAccountId },
+      orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+      select: { agentId: true },
+    });
+    if (binding) {
+      const agent = await tx.agent.findFirst({
+        where: { id: binding.agentId, workspaceId, active: true },
+        select,
+      });
+      if (agent) return agent;
+    }
+    return tx.agent.findFirst({
+      where: { workspaceId, mailboxAccountId, active: true },
+      select,
+    });
+  }
+
+  /** "Re: <subject>" without stacking Re:s; a missing subject still threads. */
+  private replySubject(subject: string | null): string {
+    const s = (subject ?? '').trim();
+    if (!s) return 'Re: (no subject)';
+    return /^re:/i.test(s) ? s : `Re: ${s}`;
+  }
+
+  /**
+   * The last MAX_CONTEXT_MESSAGES of the thread as a compact sender/subject/body
+   * digest (text preferred, HTML stripped, preview as last resort), bounded
+   * per-message and in total so a huge thread can't blow the prompt budget.
+   * Empty detail → a single-entry digest built from the inbound ref alone.
+   */
+  private buildThreadDigest(
+    detail: StalwartMessageDetail[],
+    msg: AgentReplyInboundMsg,
+  ): DigestMessage[] {
+    const chronological = [...detail].sort(
+      (a, b) => new Date(a.sentAt ?? 0).getTime() - new Date(b.sentAt ?? 0).getTime(),
+    );
+    const recent = chronological.slice(-MAX_CONTEXT_MESSAGES);
+    const digest: DigestMessage[] = [];
+    let total = 0;
+    // Walk NEWEST-first so the total cap trims the oldest context, never the
+    // latest message (the one being replied to); then restore order.
+    for (const m of [...recent].reverse()) {
+      const body = this.extractBody(m).slice(0, MAX_MESSAGE_CHARS);
+      const entry: DigestMessage = {
+        from: m.from ? `${m.from.name ?? ''} <${m.from.address}>`.trim() : '(unknown sender)',
+        subject: m.subject ?? '(no subject)',
+        body,
+      };
+      const size = entry.from.length + entry.subject.length + entry.body.length;
+      if (digest.length > 0 && total + size > MAX_DIGEST_CHARS) break;
+      digest.push(entry);
+      total += size;
+    }
+    digest.reverse();
+    if (digest.length === 0) {
+      digest.push({
+        from: msg.fromAddress ?? '(unknown sender)',
+        subject: msg.subject ?? '(no subject)',
+        body: '(message body unavailable — reply from the subject and sender alone)',
+      });
+    }
+    return digest;
+  }
+
+  /** Best body text for one message: text > stripped HTML > preview. */
+  private extractBody(m: StalwartMessageDetail): string {
+    if (m.textBody && m.textBody.trim()) return m.textBody.trim();
+    if (m.htmlBody && m.htmlBody.trim()) return this.stripHtml(m.htmlBody);
+    return (m.preview ?? '').trim();
+  }
+
+  /** Minimal HTML→text: drop style/script, strip tags, unescape, collapse. */
+  private stripHtml(html: string): string {
+    return html
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+}

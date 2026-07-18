@@ -133,6 +133,17 @@ class MailSendRequest(ProfileRequest):
     model_config = {"populate_by_name": True}
 
 
+class MailReadRequest(ProfileRequest):
+    read: bool = True
+
+
+class ThreadActionResponse(BaseModel):
+    """Result of a thread-level triage verb; ``moved`` = messages affected."""
+
+    ok: bool
+    moved: int
+
+
 class AiAnalyzeRequest(ProfileRequest):
     pass
 
@@ -231,6 +242,27 @@ def _mail_message_to_dict(message: Any) -> dict[str, Any]:
     data = asdict(message)
     data["from"] = data.pop("sender", None)
     return data
+
+
+def _thread_triage_ids(provider_name: str, messages: list[Any], verb: str) -> list[str]:
+    """Which of a thread's messages a triage verb (archive/trash/read) touches.
+
+    Drafts are NEVER touched — their lifecycle belongs to the drafts surface,
+    not triage. Gmail archive/trash are LABEL edits (a SENT copy keeps its place
+    in Sent), so the whole thread is safe; Microsoft archive/trash are folder
+    MOVES, so only received copies go — moving Sent Items out of the sent folder
+    would corrupt the user's sent-mail record.
+    """
+    move_semantics = provider_name == "microsoft" and verb in ("archive", "trash")
+    ids: list[str] = []
+    for message in messages:
+        direction = getattr(message, "direction", "received")
+        if direction == "draft":
+            continue
+        if move_semantics and direction != "received":
+            continue
+        ids.append(message.id)
+    return ids
 
 
 def _sse_event(event: str, data: Any) -> str:
@@ -457,6 +489,57 @@ def mail_send(request: MailSendRequest) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - degrade clean
         logger.warning("mail/send failed for %s: %s", request.provider, exc)
         return {"accepted": False, "provider_message_id": None, "thread_id": None, "reason": "send_failed"}
+
+
+# Thread-level TRIAGE verbs (webmail parity for external accounts): resolve the
+# thread's message ids via the provider, then apply the batch verb so the action
+# is REAL in the Gmail/M365 mailbox, not just an app-side overlay. ``thread_id``
+# uses the ``:path`` converter because Microsoft conversation ids are base64 and
+# may contain ``/`` (which the ASGI server percent-DECODES before routing, so a
+# plain segment param would 404 on them). Same degrade-clean contract as the
+# other /mail/* routes: unusable provider / provider error -> ok:false + 200.
+
+
+@app.post("/mail/threads/{thread_id:path}/archive", dependencies=[Depends(_require_engine_token)])
+def mail_thread_archive(thread_id: str, request: ProfileRequest) -> ThreadActionResponse:
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return ThreadActionResponse(ok=False, moved=0)
+    try:
+        ids = _thread_triage_ids(request.provider, provider.get_thread(thread_id), "archive")
+        moved = provider.batch_archive(ids) if ids else 0
+        return ThreadActionResponse(ok=True, moved=moved)
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/threads/archive failed for %s: %s", request.provider, exc)
+        return ThreadActionResponse(ok=False, moved=0)
+
+
+@app.post("/mail/threads/{thread_id:path}/trash", dependencies=[Depends(_require_engine_token)])
+def mail_thread_trash(thread_id: str, request: ProfileRequest) -> ThreadActionResponse:
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return ThreadActionResponse(ok=False, moved=0)
+    try:
+        ids = _thread_triage_ids(request.provider, provider.get_thread(thread_id), "trash")
+        moved = provider.batch_trash(ids) if ids else 0
+        return ThreadActionResponse(ok=True, moved=moved)
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/threads/trash failed for %s: %s", request.provider, exc)
+        return ThreadActionResponse(ok=False, moved=0)
+
+
+@app.post("/mail/threads/{thread_id:path}/read", dependencies=[Depends(_require_engine_token)])
+def mail_thread_read(thread_id: str, request: MailReadRequest) -> ThreadActionResponse:
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return ThreadActionResponse(ok=False, moved=0)
+    try:
+        ids = _thread_triage_ids(request.provider, provider.get_thread(thread_id), "read")
+        moved = provider.batch_set_read(ids, request.read) if ids else 0
+        return ThreadActionResponse(ok=True, moved=moved)
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/threads/read failed for %s: %s", request.provider, exc)
+        return ThreadActionResponse(ok=False, moved=0)
 
 
 @app.post("/archive/create", dependencies=[Depends(_require_engine_token)])

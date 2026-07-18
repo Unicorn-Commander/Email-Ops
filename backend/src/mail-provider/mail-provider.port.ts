@@ -54,6 +54,25 @@ export abstract class MailProviderPort {
     req: MailProviderSendRequest,
   ): Promise<MailProviderSendResult>;
 
+  // Thread-level TRIAGE verbs — make Archive/Trash/read-state REAL in the
+  // external mailbox. The disposition overlay stays the UI's source of truth;
+  // these reconcile the actual Gmail/M365 box so the triage doesn't undo itself
+  // on the provider side. Degrade-clean: false when not connected / the engine
+  // is dormant / the provider refused — NEVER throws.
+
+  /** Archive the whole thread in the real external mailbox. */
+  abstract archiveThread(mailbox: MailboxAccount, threadId: string): Promise<boolean>;
+
+  /** Move the whole thread to the provider's trash. */
+  abstract trashThread(mailbox: MailboxAccount, threadId: string): Promise<boolean>;
+
+  /** Set/clear read state on every message in the thread. */
+  abstract setThreadRead(
+    mailbox: MailboxAccount,
+    threadId: string,
+    read: boolean,
+  ): Promise<boolean>;
+
   /**
    * The authoritative linked address for (provider, owning user) — fetched from
    * the provider, so connecting registers the real Gmail/M365 address even when

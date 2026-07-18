@@ -23,6 +23,7 @@ import { MailboxAccountsModule } from './mailbox-accounts/mailbox-accounts.modul
 import { MailModule } from './mail/mail.module';
 import { MailTriageModule } from './mail-triage/mail-triage.module';
 import { InboundModule } from './inbound/inbound.module';
+import { AgentReplyModule } from './agent-reply/agent-reply.module';
 import { SpacesModule } from './spaces/spaces.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
 import { UiCommandsModule } from './ui-commands/ui-commands.module';
@@ -90,6 +91,10 @@ import { MailRulesModule } from './mail-rules/mail-rules.module';
     // dormant SpamPort engine seam. Pairs with the mail-engine/migration project.
     MailTriageModule,
     InboundModule,
+    // The agent-reply runtime: mail arriving at an AGENT mailbox → an
+    // LLM-drafted reply staged into the agent-inbox approval queue (never
+    // auto-sends). Dormant unless AGENT_REPLY_RUNTIME_ENABLED.
+    AgentReplyModule,
     // Spaces: soft, overlapping groupings of mailboxes + agents (PERSONAL /
     // TEAM views) inside the workspace — the top-bar switcher scopes /mail + the
     // agents view to the active Space. JWT + membership guarded.

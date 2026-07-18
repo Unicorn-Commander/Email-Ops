@@ -11,12 +11,14 @@ describe('InboundWatcherService', () => {
     rules?: any[];
     rulesFindMany?: jest.Mock;
     applyInbound?: jest.Mock;
+    draftReplyForInbound?: jest.Mock;
   }) {
     const classifyInbound = jest.fn().mockResolvedValue({});
     const update = jest.fn().mockResolvedValue({});
     const findMany = jest.fn().mockResolvedValue(opts.mailboxes);
     const rulesFindMany = opts.rulesFindMany ?? jest.fn().mockResolvedValue(opts.rules ?? []);
     const applyInbound = opts.applyInbound ?? jest.fn().mockResolvedValue({ matched: 0, applied: 0 });
+    const draftReplyForInbound = opts.draftReplyForInbound ?? jest.fn().mockResolvedValue(null);
     const prisma = {
       systemClient: { mailboxAccount: { findMany }, mailRule: { findMany: rulesFindMany } },
       withWorkspace: jest.fn((_ws: string, _uc: string, cb: any) => cb({ mailboxAccount: { update } })),
@@ -27,8 +29,9 @@ describe('InboundWatcherService', () => {
       stalwart as any,
       { classifyInbound } as any,
       { applyInbound } as any,
+      { draftReplyForInbound } as any,
     );
-    return { svc, classifyInbound, update, findMany, stalwart, rulesFindMany, applyInbound };
+    return { svc, classifyInbound, update, findMany, stalwart, rulesFindMany, applyInbound, draftReplyForInbound };
   }
 
   afterEach(() => delete process.env.INBOUND_WATCHER_ENABLED);
@@ -82,6 +85,53 @@ describe('InboundWatcherService', () => {
     });
   });
 
+  // ------------------------------------------------- agent-reply runtime wiring
+
+  it('hands an AGENT-mailbox message to the agent-reply runtime (fire-and-forget)', async () => {
+    const { svc, draftReplyForInbound } = make({
+      mailboxes: [{ id: 'mba', workspaceId: 'ws1', emailAddress: 'agent@x.test', inboundCursor: 'c', ownerKind: 'AGENT' }],
+      poll: async () => ({
+        cursor: 'd',
+        newMessages: [{ threadId: 'ta', fromAddress: 'human@x.test', subject: 'help', receivedAt: 'd' }],
+      }),
+    });
+    expect(await svc.runSweep()).toBe(1);
+    expect(draftReplyForInbound).toHaveBeenCalledWith(
+      'ws1',
+      { id: 'mba', emailAddress: 'agent@x.test', workspaceId: 'ws1' },
+      expect.objectContaining({ threadId: 'ta', fromAddress: 'human@x.test', subject: 'help' }),
+    );
+  });
+
+  it('does NOT invoke the agent-reply runtime for non-AGENT mailboxes', async () => {
+    const { svc, draftReplyForInbound } = make({
+      mailboxes: [{ id: 'mb1', workspaceId: 'ws1', emailAddress: 'a@x.test', inboundCursor: 'c', ownerKind: 'SHARED' }],
+      poll: async () => ({
+        cursor: 'd',
+        newMessages: [{ threadId: 't1', fromAddress: 'p@q.test', subject: 'hi', receivedAt: 'd' }],
+      }),
+    });
+    expect(await svc.runSweep()).toBe(1);
+    expect(draftReplyForInbound).not.toHaveBeenCalled();
+  });
+
+  it('an agent-reply failure is swallowed: triage + the cursor advance are never blocked', async () => {
+    const { svc, classifyInbound, update } = make({
+      mailboxes: [{ id: 'mba', workspaceId: 'ws1', emailAddress: 'agent@x.test', inboundCursor: 'c', ownerKind: 'AGENT' }],
+      draftReplyForInbound: jest.fn().mockRejectedValue(new Error('llm exploded')),
+      poll: async () => ({
+        cursor: '2026-06-01T00:00:00Z',
+        newMessages: [{ threadId: 'ta', fromAddress: 'human@x.test', subject: 'help', receivedAt: 'd' }],
+      }),
+    });
+    expect(await svc.runSweep()).toBe(1);
+    expect(classifyInbound).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith({
+      where: { id: 'mba' },
+      data: { inboundCursor: '2026-06-01T00:00:00Z' },
+    });
+  });
+
   it('degrade-clean: a null poll classifies nothing and leaves the cursor untouched', async () => {
     const { svc, classifyInbound, update } = make({
       mailboxes: [{ id: 'mb1', workspaceId: 'ws1', emailAddress: 'a@x.test', inboundCursor: 'c', ownerKind: 'SHARED' }],
@@ -121,6 +171,7 @@ describe('InboundWatcherService', () => {
       stalwart as any,
       { classifyInbound } as any,
       { applyInbound: jest.fn() } as any,
+      { draftReplyForInbound: jest.fn().mockResolvedValue(null) } as any,
     );
     expect(await svc.runSweep()).toBe(1);
     expect(classifyInbound).toHaveBeenCalledTimes(1);

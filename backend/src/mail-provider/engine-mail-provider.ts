@@ -107,6 +107,35 @@ export class EngineMailProvider extends MailProviderPort {
     };
   }
 
+  // Thread-level triage verbs: same auth chain as the reads, engine answers
+  // {ok, moved} — ok:false (or a dormant engine's null) maps to false.
+
+  async archiveThread(mailbox: MailboxAccount, threadId: string): Promise<boolean> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return false;
+    const res = await this.engine.archiveMailThread(auth.provider, auth.credentials, threadId);
+    return res?.ok === true;
+  }
+
+  async trashThread(mailbox: MailboxAccount, threadId: string): Promise<boolean> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return false;
+    const res = await this.engine.trashMailThread(auth.provider, auth.credentials, threadId);
+    return res?.ok === true;
+  }
+
+  async setThreadRead(mailbox: MailboxAccount, threadId: string, read: boolean): Promise<boolean> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return false;
+    const res = await this.engine.setMailThreadRead(
+      auth.provider,
+      auth.credentials,
+      threadId,
+      read,
+    );
+    return res?.ok === true;
+  }
+
   /**
    * The AUTHORITATIVE linked address for (provider, owning user) — resolved from
    * the provider itself via the broker token, so a Gmail/M365 whose address
