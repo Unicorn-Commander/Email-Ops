@@ -36,9 +36,11 @@ import { agentLabel } from '@/lib/agents';
 import {
   ApiError,
   bindAgentMailbox,
+  getAgentMailbox,
   listMailboxes,
   unbindAgentMailbox,
   type AgentMailboxView,
+  type AgentMailboxViewResponse,
   type AgentTier,
   type AgentView,
   type AutonomyLevel,
@@ -261,6 +263,7 @@ function AgentCard({
   const tier = agent.tier !== 'UNSPECIFIED' ? TIER[agent.tier] : null;
   const [busy, setBusy] = useState<null | 'autonomy' | 'active'>(null);
   const [cardError, setCardError] = useState<string | null>(null);
+  const [mailboxOpen, setMailboxOpen] = useState(false);
 
   async function handleAutonomy(next: AutonomyLevel) {
     if (next === agent.autonomy_level) return;
@@ -370,9 +373,235 @@ function AgentCard({
                 ? 'Deactivate'
                 : 'Activate'}
           </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!workspaceId}
+            onClick={() => setMailboxOpen(true)}
+            title={`See ${agent.display_name || agent.key}'s inbox and pending drafts`}
+          >
+            View mailbox
+          </Button>
         </div>
       </div>
+
+      {workspaceId && (
+        <AgentMailboxDialog
+          open={mailboxOpen}
+          onClose={() => setMailboxOpen(false)}
+          workspaceId={workspaceId}
+          agentId={agent.id}
+          agentName={agent.display_name || agentLabel(agent.key)}
+        />
+      )}
     </Card>
+  );
+}
+
+/** Relative-time stamp for the agent-mailbox drill-in (terse, suite copy). */
+function whenLabel(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return null;
+  const mins = Math.round((Date.now() - ts) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h`;
+  const days = Math.round(hrs / 24);
+  if (days < 7) return `${days}d`;
+  return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function participantLabel(parts: { address: string; name: string | null }[]): string {
+  if (parts.length === 0) return 'no participants';
+  const first = parts[0];
+  const head = first.name?.trim() || first.address;
+  return parts.length > 1 ? `${head} +${parts.length - 1}` : head;
+}
+
+/**
+ * Read-only drill-in into one agent's mailbox world (Fleet B): live stats, recent
+ * threads, and its slice of the approval queue. Fetches on open; the reader /
+ * compose live in /mail and /agent-inbox, linked from here.
+ */
+function AgentMailboxDialog({
+  open,
+  onClose,
+  workspaceId,
+  agentId,
+  agentName,
+}: {
+  open: boolean;
+  onClose: () => void;
+  workspaceId: string;
+  agentId: string;
+  agentName: string;
+}) {
+  const [view, setView] = useState<AgentMailboxViewResponse | null>(null);
+  const [load, setLoad] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    setLoad('loading');
+    setError(null);
+    getAgentMailbox(workspaceId, agentId, 20)
+      .then((res) => {
+        if (!alive) return;
+        setView(res);
+        setLoad('ready');
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setError(errText(err, 'Could not load this agent’s mailbox.'));
+        setLoad('error');
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, workspaceId, agentId]);
+
+  const address = view?.agent.mailbox?.address ?? null;
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+      title={`${agentName}’s mailbox`}
+      description={address ? address : 'No sending mailbox assigned yet.'}
+      footer={
+        <Button variant="secondary" size="sm" onClick={onClose}>
+          Close
+        </Button>
+      }
+    >
+      {load === 'loading' ? (
+        <div className="space-y-3">
+          <Skeleton h={44} />
+          <SkeletonText lines={4} />
+        </div>
+      ) : load === 'error' ? (
+        <p className="text-sm text-danger">{error}</p>
+      ) : view ? (
+        <div className="space-y-4">
+          <div className="grid grid-cols-3 gap-2">
+            <Stat label="Unread" value={view.stats.unread ?? 0} />
+            <Stat label="Total" value={view.stats.total ?? 0} />
+            <Stat
+              label="Pending"
+              value={view.agentInbox.counts.pending}
+              tone={view.agentInbox.counts.pending > 0 ? 'review' : 'neutral'}
+            />
+          </div>
+          {view.stats.lastActivityAt && (
+            <p className="text-[11px] text-muted">
+              Last activity {whenLabel(view.stats.lastActivityAt)} ago
+            </p>
+          )}
+
+          {view.agentInbox.pending.length > 0 && (
+            <section>
+              <div className="mb-1.5 flex items-center justify-between">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wide text-tertiary">
+                  Awaiting your approval
+                </h3>
+                <Link href="/agent-inbox" className="text-[11px] text-accent hover:underline">
+                  Review all →
+                </Link>
+              </div>
+              <ul className="space-y-1.5">
+                {view.agentInbox.pending.slice(0, 5).map((item) => (
+                  <li
+                    key={item.id}
+                    className="rounded-token border border-subtle bg-surface-raised px-2.5 py-1.5"
+                  >
+                    <p className="truncate text-xs font-medium text-primary">
+                      {item.subject?.trim() || '(no subject)'}
+                    </p>
+                    <p className="truncate text-[11px] text-tertiary">
+                      to {item.to_address ?? 'unknown'}
+                      {item.body_preview ? ` — ${item.body_preview}` : ''}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          <section>
+            <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-tertiary">
+              Recent threads
+            </h3>
+            {view.threads.length === 0 ? (
+              <p className="text-[11px] leading-5 text-muted">
+                {address
+                  ? 'No mail in this mailbox yet.'
+                  : 'Assign a mailbox to this agent to see its mail here.'}
+              </p>
+            ) : (
+              <ul className="space-y-1">
+                {view.threads.map((t) => (
+                  <li
+                    key={t.id}
+                    className="flex items-center gap-2 rounded-token px-2.5 py-1.5 hover:bg-surface-overlay"
+                  >
+                    <span
+                      aria-hidden
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                        t.unread ? 'bg-accent' : 'bg-transparent'
+                      }`}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span
+                        className={`block truncate text-xs ${
+                          t.unread ? 'font-semibold text-primary' : 'text-secondary'
+                        }`}
+                      >
+                        {t.subject?.trim() || '(no subject)'}
+                      </span>
+                      <span className="block truncate text-[11px] text-tertiary">
+                        {participantLabel(t.participants)}
+                        {t.last_snippet ? ` — ${t.last_snippet}` : ''}
+                      </span>
+                    </span>
+                    <span className="shrink-0 font-mono text-[11px] text-muted">
+                      {whenLabel(t.last_message_at)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+      ) : null}
+    </Dialog>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  tone = 'neutral',
+}: {
+  label: string;
+  value: number;
+  tone?: 'neutral' | 'review';
+}) {
+  return (
+    <div className="rounded-token border border-subtle bg-surface-raised px-2.5 py-2 text-center">
+      <div
+        className={`text-lg font-semibold tabular-nums ${
+          tone === 'review' ? 'text-accent' : 'text-primary'
+        }`}
+      >
+        {value}
+      </div>
+      <div className="text-[10px] uppercase tracking-wide text-tertiary">{label}</div>
+    </div>
   );
 }
 

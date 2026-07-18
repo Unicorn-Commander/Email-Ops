@@ -512,6 +512,75 @@ export async function updateAgent(
   return apiPatch<AgentView>(`${agentsBase(workspaceId)}/${encodeURIComponent(id)}`, body, token);
 }
 
+// ── Per-agent mailbox view (Fleet B) — see into each agent's own inbox ────────
+
+/** A thread row in an agent's mailbox (subset of the mail ThreadView wire shape). */
+export interface AgentMailboxThread {
+  id: string;
+  subject: string | null;
+  unread: boolean;
+  last_message_at: string | null;
+  last_snippet: string | null;
+  participants: { address: string; name: string | null }[];
+}
+
+export interface AgentMailboxAgentSummary {
+  id: string;
+  name: string;
+  handle: string;
+  avatarUrl?: string;
+  mailbox: { id: string; address: string; provider: string } | null;
+}
+
+export interface AgentMailboxStats {
+  unread?: number;
+  total?: number;
+  lastActivityAt?: string | null;
+}
+
+/** The composed "agent mailbox world": mailbox + recent threads + approval queue + stats. */
+export interface AgentMailboxViewResponse {
+  agent: AgentMailboxAgentSummary;
+  threads: AgentMailboxThread[];
+  agentInbox: {
+    pending: AgentInboxItemView[];
+    counts: { pending: number; approved: number; rejected: number };
+  };
+  stats: AgentMailboxStats;
+}
+
+export interface AgentMailboxRosterItem {
+  agent: AgentMailboxAgentSummary;
+  mailbox: { address: string | null; unread: number; pending: number };
+}
+
+export interface AgentMailboxRosterResponse {
+  items: AgentMailboxRosterItem[];
+  count: number;
+}
+
+/** Lightweight per-agent mailbox roster (address + unread + pending) for the fleet. */
+export async function listAgentMailboxes(
+  workspaceId: string,
+  token?: string,
+): Promise<AgentMailboxRosterResponse> {
+  return apiGet<AgentMailboxRosterResponse>(`${agentsBase(workspaceId)}/mailboxes`, token);
+}
+
+/** One agent's mailbox world: recent threads, pending approvals, and stats (404 if missing). */
+export async function getAgentMailbox(
+  workspaceId: string,
+  agentId: string,
+  threadLimit?: number,
+  token?: string,
+): Promise<AgentMailboxViewResponse> {
+  const q = threadLimit ? `?thread_limit=${encodeURIComponent(threadLimit)}` : '';
+  return apiGet<AgentMailboxViewResponse>(
+    `${agentsBase(workspaceId)}/${encodeURIComponent(agentId)}/mailbox${q}`,
+    token,
+  );
+}
+
 /** One workspace mailbox (mirrors the backend mailbox list wire shape). */
 export interface MailboxListItem {
   id: string;
