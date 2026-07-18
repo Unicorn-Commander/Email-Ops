@@ -26,6 +26,8 @@ import { InboundModule } from './inbound/inbound.module';
 import { SpacesModule } from './spaces/spaces.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
 import { UiCommandsModule } from './ui-commands/ui-commands.module';
+import { AgentViewModule } from './agent-view/agent-view.module';
+import { SchedulingModule } from './scheduling/scheduling.module';
 
 @Module({
   imports: [
@@ -62,6 +64,7 @@ import { UiCommandsModule } from './ui-commands/ui-commands.module';
     // delegating to the same EmailService approval flow the MCP tools use.
     AgentInboxModule,
     AssistantStreamModule,
+    AgentViewModule,
     // The agent registry surface (the "Agents" view + the autonomy dial): the
     // identity layer behind the approval queue. JWT + membership guarded.
     AgentsModule,
@@ -99,6 +102,7 @@ import { UiCommandsModule } from './ui-commands/ui-commands.module';
     // the UiCommandService the MCP ui_* tools enqueue into. Before McpModule so
     // the MCP server can consume UiCommandService.
     UiCommandsModule,
+    SchedulingModule,
     // MCP last so it can consume the contract + agent-inbox + ui_* tools.
     McpModule,
   ],

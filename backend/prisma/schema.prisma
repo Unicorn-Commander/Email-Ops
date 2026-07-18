@@ -316,6 +316,20 @@ enum CleanupBatchState {
   CANCELED
 }
 
+enum SnoozedThreadState {
+  ACTIVE
+  SURFACED
+  CANCELLED
+}
+
+enum ScheduledSendState {
+  PENDING
+  CLAIMED
+  SENT
+  CANCELLED
+  FAILED
+}
+
 // ── Normalized engagement vocabulary (Email-Ops OWNS the capture) ──
 //
 // The suite's normalized engagement vocabulary (SUITE contract / Customer-Ops'
@@ -396,6 +410,8 @@ model Workspace {
   engagementEvents  EmailEngagementEvent[]
   threadDispositions ThreadDisposition[]
   senderPolicies     SenderPolicy[]
+  snoozedThreads     SnoozedThread[]
+  scheduledSends     ScheduledSend[]
   spaces             Space[]
   invitations        Invitation[]
   uiCommands         UiCommand[]
@@ -597,6 +613,8 @@ model MailboxAccount {
   signatures     MailSignature[]
   mailVacationSettings MailVacationSetting[]
   contacts       MailContact[]
+  snoozedThreads SnoozedThread[]
+  scheduledSends ScheduledSend[]
 
   // One mailbox identity per address per workspace.
   @@unique([workspaceId, emailAddress])
@@ -833,6 +851,53 @@ model SenderPolicy {
   @@unique([workspaceId, scope, pattern])
   @@index([workspaceId, kind])
   @@map("sender_policies")
+}
+
+// ============================================================
+// SNOOZE + SEND-LATER (Email-Ops OWNS this — tenant-scoped scheduler state)
+// ============================================================
+//
+// SnoozedThread hides one live mailbox thread until a chosen time. The worker
+// wakes ACTIVE rows by moving the live thread back to Inbox, then marks SURFACED.
+// RLS-fenced on workspaceId exactly like the other scoped mail tables.
+model SnoozedThread {
+  id          String             @id @default(uuid())
+  workspaceId String
+  mailboxId   String
+  threadId    String
+  snoozeUntil DateTime
+  createdBy   String?
+  state       SnoozedThreadState @default(ACTIVE)
+  createdAt   DateTime           @default(now())
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, mailboxId, state, snoozeUntil])
+  @@index([state, snoozeUntil])
+  @@map("snoozed_threads")
+}
+
+// A scheduled outbound email. The payload is the compose payload the existing
+// EmailService.composeEmail send lane consumes later; the worker claims before
+// sending so retries cannot double-send a SENT row.
+model ScheduledSend {
+  id          String             @id @default(uuid())
+  workspaceId String
+  mailboxId   String
+  payload     Json
+  sendAt      DateTime
+  state       ScheduledSendState @default(PENDING)
+  createdBy   String?
+  createdAt   DateTime           @default(now())
+  sentAt      DateTime?
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, mailboxId, state, sendAt])
+  @@index([state, sendAt])
+  @@map("scheduled_sends")
 }
 
 // ============================================================
