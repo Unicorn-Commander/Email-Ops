@@ -69,6 +69,8 @@ interface RawAction {
   /** Native cleanup: the thread ids (from the Inbox context) to Archive/Trash. */
   thread_ids?: unknown;
   action?: unknown;
+  /** The agent's stated WHY for a cleanup — persisted on the approval card. */
+  reason?: unknown;
   to?: unknown;
   subject?: unknown;
   body?: unknown;
@@ -102,6 +104,8 @@ interface StagedCleanup {
   bytes: number;
   /** A bounded, readable preview of WHAT the batch would touch (senders / subjects). */
   targets?: CleanupTargets | null;
+  /** The agent's stated WHY (mirrors payload.reason on the inbox item). */
+  reason?: string | null;
   preview: string | null;
   error?: string;
 }
@@ -327,7 +331,10 @@ export class AssistantStreamController {
     }
 
     try {
-      const view = await this.email.stageNativeCleanup(workspaceId, ucUid, disposition, threadIds);
+      const view = await this.email.stageNativeCleanup(workspaceId, ucUid, disposition, threadIds, {
+        // Carry the model's stated rationale onto the approval card ("what + why").
+        reason: String(a.reason ?? '').trim() || null,
+      });
       if (!view) return fail('No threads to clean up.');
       // Surface the concrete subject preview the service persisted on the item so
       // the in-chat card shows WHAT would move, not just a count.
@@ -343,6 +350,10 @@ export class AssistantStreamController {
         count: n,
         bytes: 0,
         targets,
+        reason:
+          (view.payload && typeof view.payload === 'object'
+            ? ((view.payload as Record<string, unknown>).reason as string | undefined)
+            : undefined) ?? null,
         preview: `${verb} ${n} thread${n === 1 ? '' : 's'} in your inbox. Nothing moves until you approve.`,
       };
     } catch {

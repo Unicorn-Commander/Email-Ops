@@ -180,6 +180,8 @@ export interface AssistantAction {
   count?: number;
   /** Storage the plan would free, in bytes. */
   bytes?: number;
+  /** The agent's stated WHY for a cleanup (mirrors the inbox item's payload). */
+  reason?: string | null;
   [key: string]: unknown;
 }
 

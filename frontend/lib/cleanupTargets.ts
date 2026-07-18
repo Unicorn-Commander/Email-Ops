@@ -51,6 +51,12 @@ export function cleanupVerb(action: unknown): string {
   return 'Move to Trash';
 }
 
+/** The agent's stated rationale for a staged cleanup, when it recorded one. */
+export function cleanupReason(payload: unknown): string | null {
+  const p = asRecord(payload);
+  return p ? cleanStr(p.reason) : null;
+}
+
 /** "Jane Doe <jane@acme.com>" → "Jane Doe"; a bare address stays as-is. */
 export function displaySender(raw: unknown): string {
   const s = String(raw ?? '').trim();

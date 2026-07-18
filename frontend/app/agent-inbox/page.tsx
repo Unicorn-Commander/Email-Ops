@@ -15,7 +15,7 @@ import { Badge, Button, Card, Skeleton, SkeletonText, cn, useConfirm } from '@/c
 import { useAgentInbox } from '@/components/useAgentInbox';
 import { CleanupTargetsList, cleanupTargetsSentence } from '@/components/mail/CleanupTargetsList';
 import { agentLabel } from '@/lib/agents';
-import { deriveCleanupTargets } from '@/lib/cleanupTargets';
+import { cleanupReason, deriveCleanupTargets } from '@/lib/cleanupTargets';
 import type { AgentInboxItemView, AgentInboxState } from '@/lib/api';
 
 const TABS: Array<{ value: AgentInboxState; label: string }> = [
@@ -275,6 +275,11 @@ function ReviewCard({
                 {item.body_preview}
               </p>
             )
+          )}
+          {item.kind === 'CLEANUP' && cleanupReason(item.payload) && (
+            <p className="mt-1.5 text-xs leading-5 text-tertiary">
+              <span className="font-medium text-secondary">Why:</span> {cleanupReason(item.payload)}
+            </p>
           )}
 
           {item.state !== 'pending' && (

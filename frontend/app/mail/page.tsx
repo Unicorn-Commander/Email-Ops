@@ -104,6 +104,7 @@ import { UndoSendBar, readUndoSeconds, type UndoEntry } from '@/components/mail/
 import { useDesktopNotifications } from '@/components/mail/useDesktopNotifications';
 import { MailSettingsDialog } from '@/components/mail/MailSettingsDialog';
 import { RulesDialog } from '@/components/mail/RulesDialog';
+import { cleanupReason, deriveCleanupTargets } from '@/lib/cleanupTargets';
 
 /** Funnel glyph for the Rules entries (matches the stroke language of icons.tsx). */
 function FunnelIcon({ className }: { className?: string }) {
@@ -3371,6 +3372,29 @@ function greeting(): string {
   return 'Good evening';
 }
 
+/** One truthful line under a pending CLEANUP card: WHAT it touches (+ WHY). */
+function PendingTargetLine({ item }: { item: AgentInboxItemView }) {
+  if (item.kind !== 'CLEANUP') return null;
+  const targets = deriveCleanupTargets(item.payload);
+  const why = cleanupReason(item.payload);
+  if (!targets && !why) return null;
+  const first = targets?.rows?.[0];
+  const label = first
+    ? `${targets.verb}: ${
+        (targets.scope === 'threads' ? first.subject : first.sender) || '(no subject)'
+      }${targets.total > 1 ? ` +${targets.total - 1} more` : ''}`
+    : targets
+      ? `${targets.verb} ${targets.total} thread${targets.total === 1 ? '' : 's'}`
+      : null;
+  return (
+    <span className="mt-0.5 block truncate text-[12px] text-tertiary">
+      {label}
+      {label && why ? ' · ' : ''}
+      {why}
+    </span>
+  );
+}
+
 function BriefStat({
   label,
   value,
@@ -3479,6 +3503,7 @@ function DailyBrief({ brief }: { brief: BriefData }) {
                       {agentLabel(it.drafted_by)} drafted
                       {it.to_address ? ` → ${it.to_address}` : ''}
                     </span>
+                    <PendingTargetLine item={it} />
                   </span>
                   <span className="shrink-0 rounded-md bg-accent px-2.5 py-1 text-[11px] font-semibold text-white opacity-0 transition-opacity group-hover:opacity-100">
                     Review

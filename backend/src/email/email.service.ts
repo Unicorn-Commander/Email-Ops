@@ -1422,8 +1422,8 @@ export class EmailService {
     ucUid: string | null,
     state?: AgentInboxState,
   ): Promise<AgentInboxView[]> {
-    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const items = await tx.agentInboxItem.findMany({
+    const items = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      return tx.agentInboxItem.findMany({
         // Explicit workspaceId predicate (defense-in-depth: the real fence when
         // RLS is inert under the owner role) + a bound so this hot path — drained
         // on every agent-inbox view and assistant stream — can never turn into an
@@ -1433,8 +1433,73 @@ export class EmailService {
         include: { message: true },
         take: 200,
       });
-      return items.map((it) => this.inboxView(it, it.message));
     });
+    // Lazy TARGET BACKFILL: items staged before target-capture existed carry only
+    // bare thread_ids, so their approval cards could only say "N threads". Resolve
+    // the real subjects on read (bounded, OUTSIDE the tx — the §3 JMAP lesson) and
+    // persist, so old pending batches become reviewable too. Degrade-clean.
+    await this.backfillNativeCleanupTargets(workspaceId, ucUid, items);
+    return items.map((it) => this.inboxView(it, it.message));
+  }
+
+  /**
+   * Resolve + persist the `targets` preview for up to 3 PENDING native CLEANUP
+   * items whose payload predates target-capture (bare thread_ids only). Persists
+   * only when at least one subject resolved — a momentarily-dormant engine just
+   * retries on a later list instead of freezing a count-only card forever.
+   */
+  private async backfillNativeCleanupTargets(
+    workspaceId: string,
+    ucUid: string | null,
+    items: Array<{ id: string; state: AgentInboxState; kind: AgentInboxKind; payload: unknown }>,
+  ): Promise<void> {
+    const isRec = (v: unknown): v is Record<string, unknown> =>
+      !!v && typeof v === 'object' && !Array.isArray(v);
+    const candidates = items
+      .filter((it) => {
+        if (it.state !== AgentInboxState.PENDING || it.kind !== AgentInboxKind.CLEANUP) return false;
+        if (!isRec(it.payload)) return false;
+        const p = it.payload;
+        return (
+          p.native === true &&
+          Array.isArray(p.thread_ids) &&
+          p.thread_ids.length > 0 &&
+          !isRec(p.targets)
+        );
+      })
+      .slice(0, 3);
+    for (const it of candidates) {
+      try {
+        const payload = it.payload as Record<string, unknown>;
+        const ids = (payload.thread_ids as unknown[]).map((t) => String(t ?? '').trim()).filter(Boolean);
+        const verb =
+          String(payload.action ?? '').toUpperCase() === 'TRASH' ? 'Move to Trash' : 'Archive';
+        const rows = await this.resolveNativeCleanupTargets(workspaceId, ucUid, ids, MAX_TARGET_ROWS);
+        if (rows.length === 0) continue; // engine dormant/rotated — retry next list
+        const next = {
+          ...payload,
+          targets: {
+            verb,
+            scope: 'threads' as const,
+            provider: 'this inbox',
+            total: ids.length,
+            rows,
+            truncated: ids.length > rows.length,
+          },
+        };
+        await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+          // Fenced by id+workspace+state: never rewrites a foreign or already-
+          // reviewed item (approval may have raced this resolve).
+          tx.agentInboxItem.updateMany({
+            where: { id: it.id, workspaceId, state: AgentInboxState.PENDING },
+            data: { payload: next as Prisma.InputJsonValue },
+          }),
+        );
+        it.payload = next; // this response already renders the resolved preview
+      } catch {
+        /* degrade-clean: the card keeps its count-only line until a later list */
+      }
+    }
   }
 
   /**
@@ -1451,7 +1516,7 @@ export class EmailService {
     ucUid: string | null,
     disposition: MessageDisposition,
     threadIds: string[],
-    opts?: { agentKey?: string | null },
+    opts?: { agentKey?: string | null; reason?: string | null },
   ): Promise<AgentInboxView | null> {
     const ids = Array.from(
       new Set(threadIds.map((t) => String(t ?? '').trim()).filter(Boolean)),
@@ -1472,6 +1537,9 @@ export class EmailService {
       rows,
       truncated: ids.length > rows.length,
     };
+    // The agent's stated WHY, shown beside the targets on the approval card —
+    // "what + why" is the minimum a human needs to trust a destructive batch.
+    const reason = String(opts?.reason ?? '').trim().slice(0, 300) || null;
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const item = await tx.agentInboxItem.create({
         data: {
@@ -1480,7 +1548,14 @@ export class EmailService {
           kind: AgentInboxKind.CLEANUP,
           // `targets` carries the concrete, bounded preview (subjects) the human
           // sees before approving; the raw thread_ids drive the actual move.
-          payload: { native: true, action: disposition, folder, thread_ids: ids, targets },
+          payload: {
+            native: true,
+            action: disposition,
+            folder,
+            thread_ids: ids,
+            targets,
+            ...(reason ? { reason } : {}),
+          },
           state: AgentInboxState.PENDING,
           draftedBy: opts?.agentKey ?? 'email-ops-assistant',
           summary,

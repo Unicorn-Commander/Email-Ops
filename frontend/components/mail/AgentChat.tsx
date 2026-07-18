@@ -380,6 +380,7 @@ function InlineActionCard({
   const CleanupIcon = cleanupVerb === 'ARCHIVE' ? ArchiveIcon : TrashIcon;
   // The concrete "what would this touch" preview (senders / subjects), when staged.
   const cleanupTargets = isCleanup ? coerceCleanupTargets(action.targets) : null;
+  const cleanupWhy = isCleanup && typeof action.reason === 'string' ? action.reason.trim() : '';
 
   const run = async (kind: 'approve' | 'discard') => {
     if (!workspaceId || !itemId || state !== 'idle') return;
@@ -437,6 +438,11 @@ function InlineActionCard({
         </div>
 
         <div className="px-3 py-2.5 text-[12px] leading-[1.55] text-secondary">
+          {isCleanup && cleanupWhy && (
+            <p className="mb-1.5 text-[11.5px] leading-5 text-tertiary">
+              <span className="font-medium text-secondary">Why:</span> {cleanupWhy}
+            </p>
+          )}
           {isCleanup ? (
             cleanupTargets ? (
               <CleanupTargetsList targets={cleanupTargets} className="mb-2" />
