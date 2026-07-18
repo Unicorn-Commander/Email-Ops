@@ -1011,6 +1011,8 @@ export default function MailPage() {
               onBack={() => selectThread(null)}
               onReply={mail.reply}
               onTriage={triageAndAdvance}
+              onMoveToFolder={mail.moveThreadToFolder}
+              customFolders={mail.customFolders}
               onReload={reloadOpenThread}
               replySeed={activeSeed}
               replyRef={replyRef}
@@ -2348,6 +2350,73 @@ function ListBannerView({
 
 // ── (4) Reader ──────────────────────────────────────────────────────────────────
 
+/**
+ * A "Move to folder" control: a toolbar button that drops a menu of the
+ * mailbox's custom folders. Renders nothing when there are no custom folders
+ * (unified list, external mailbox, or none created) — so callers can place it
+ * unconditionally and it self-hides. Closes on pick / outside-click / Escape.
+ */
+function MoveToFolderControl({
+  folders,
+  onPick,
+  disabled,
+}: {
+  folders: MailFolderView[];
+  onPick: (folderId: string) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  if (folders.length === 0) return null;
+  return (
+    <div ref={ref} className="relative">
+      <ReaderTool
+        label="Move to folder"
+        onClick={() => setOpen((v) => !v)}
+        disabled={disabled}
+      >
+        <FolderIcon className="h-[17px] w-[17px]" />
+      </ReaderTool>
+      {open && (
+        <div className="absolute right-0 top-full z-30 mt-1 max-h-72 w-56 overflow-y-auto rounded-lg border border-subtle bg-surface-overlay p-1 shadow-xl">
+          <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary">
+            Move to folder
+          </p>
+          {folders.map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                onPick(f.id);
+              }}
+              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-secondary transition-colors hover:bg-surface-elevated hover:text-primary"
+            >
+              <FolderIcon className="h-4 w-4 shrink-0 text-tertiary" />
+              <span className="flex-1 truncate">{f.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Reader({
   workspaceId,
   mailbox,
@@ -2360,6 +2429,8 @@ function Reader({
   onBack,
   onReply,
   onTriage,
+  onMoveToFolder,
+  customFolders,
   onReload,
   replySeed,
   replyRef,
@@ -2393,6 +2464,9 @@ function Reader({
     disposition: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM',
     opts?: { blockSender?: boolean; trustSender?: boolean; senderAddress?: string },
   ) => Promise<TriageOutcome>;
+  /** Move the open thread into a custom folder (empty list => the control self-hides). */
+  onMoveToFolder: (threadId: string, folderId: string) => Promise<TriageOutcome>;
+  customFolders: MailFolderView[];
   /** Re-run the open thread's messages fetch (reader error-retry). */
   onReload: () => void;
   replySeed: ReplySeed;
@@ -2500,6 +2574,13 @@ function Reader({
                 <TrashIcon className="h-[17px] w-[17px]" />
               </ReaderTool>
             )}
+            <MoveToFolderControl
+              folders={customFolders}
+              disabled={triageBusy}
+              onPick={(folderId) => {
+                if (threadId) void onMoveToFolder(threadId, folderId);
+              }}
+            />
             {/* Divide destructive triage from safe compose actions. */}
             <span aria-hidden className="mx-0.5 h-5 w-px bg-border-subtle" />
             <ReaderTool label="Reply" onClick={onFocusReply}>
