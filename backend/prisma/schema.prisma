@@ -866,6 +866,10 @@ model SnoozedThread {
   mailboxId   String
   threadId    String
   snoozeUntil DateTime
+  // Thread subject captured at snooze time (from the caller, else best-effort
+  // from the engine) so the Snoozed view renders a human row. Display-only,
+  // nullable — agent snoozes without a subject and dormant-engine lookups store null.
+  subject     String?
   createdBy   String?
   state       SnoozedThreadState @default(ACTIVE)
   createdAt   DateTime           @default(now())

@@ -880,6 +880,8 @@ export interface SnoozedThreadView {
   id: string;
   mailbox_id: string;
   thread_id: string;
+  /** Thread subject captured at snooze time; null for agent snoozes / dormant engine. */
+  subject: string | null;
   snooze_until: string;
   state: string;
   created_by: string | null;
@@ -914,11 +916,15 @@ export async function snoozeThread(
   mailboxId: string,
   threadId: string,
   until: string,
+  subject?: string | null,
   token?: string,
 ): Promise<{ snoozed: boolean; item: SnoozedThreadView | null }> {
+  // Pass the subject the reader already has so the Snoozed view renders a human
+  // row; the backend resolves it best-effort when a caller (e.g. an agent) omits it.
+  const cleaned = subject?.trim();
   return apiPut<{ snoozed: boolean; item: SnoozedThreadView | null }>(
     `${mailBase(workspaceId, mailboxId)}/threads/${seg(threadId)}/snooze`,
-    { until },
+    cleaned ? { until, subject: cleaned } : { until },
     token,
   );
 }
@@ -957,7 +963,11 @@ export interface ScheduleSendBody {
   to_addresses?: string[];
   cc?: string[];
   bcc?: string[];
+  attachments?: ComposeAttachmentRef[];
   in_reply_to_thread_id?: string;
+  /** The composer's autosaved draft — consumed (deleted) when the send fires,
+   *  so a scheduled message doesn't strand an "already sent" draft in Drafts. */
+  draft_id?: string;
 }
 
 /** Schedule an outbound email to leave at `send_at`. `scheduled:false` = dormant/external/refused. */

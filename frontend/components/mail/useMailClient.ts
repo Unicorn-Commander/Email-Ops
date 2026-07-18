@@ -40,6 +40,7 @@ import {
   listMailThreads,
   moveThreadToCustomFolder,
   renameMailFolder,
+  scheduleSend as apiScheduleSend,
   snoozeThread,
   setThreadDisposition,
   setThreadFlags,
@@ -238,6 +239,15 @@ export interface UseMailClient {
   moveThreadsToFolder: (threadIds: string[], folderId: string) => Promise<TriageOutcome>;
   /** Snooze a thread out of the inbox until a chosen time (sovereign mailboxes only). */
   snoozeThreadUntil: (threadId: string, until: Date) => Promise<TriageOutcome>;
+  /** Schedule the composed message to leave at a future time (sovereign mailboxes only). */
+  scheduleSend: (
+    body: Pick<
+      ComposeBody,
+      'to_address' | 'subject' | 'body' | 'body_html' | 'cc' | 'bcc' | 'attachments' | 'draft_id'
+    >,
+    sendAt: Date,
+    mailboxId?: string,
+  ) => Promise<TriageOutcome>;
 }
 
 function messageOf(err: unknown, fallback: string): string {
@@ -721,7 +731,10 @@ export function useMailClient(): UseMailClient {
         if (prevOpen?.id === threadId) setOpenThread(prevOpen);
       };
       try {
-        const res = await snoozeThread(ws.workspace_id, mbx, threadId, until.toISOString());
+        // Pass the subject the row already carries so the Snoozed view renders a
+        // human label without a server round-trip (backend resolves it if absent).
+        const subject = row?.subject ?? null;
+        const res = await snoozeThread(ws.workspace_id, mbx, threadId, until.toISOString(), subject);
         if (!res.snoozed) {
           rollback();
           return { ok: false, error: 'Snooze is unavailable for this mailbox.' };
@@ -736,6 +749,53 @@ export function useMailClient(): UseMailClient {
       }
     },
     [refreshCounts, guard401],
+  );
+
+  const scheduleSend = useCallback(
+    async (
+      body: Pick<
+        ComposeBody,
+        'to_address' | 'subject' | 'body' | 'body_html' | 'cc' | 'bcc' | 'attachments' | 'draft_id'
+      >,
+      sendAt: Date,
+      mailboxId?: string,
+    ): Promise<TriageOutcome> => {
+      const ws = workspaceRef.current;
+      // Schedule from the given mailbox, else the selected sovereign one, else the
+      // first — never the unified sentinel (send-later is a single-mailbox verb).
+      const mbxId =
+        mailboxId ??
+        (selectedMailboxIdRef.current !== ALL_INBOXES ? selectedMailboxIdRef.current : null) ??
+        mailboxesRef.current[0]?.id ??
+        null;
+      if (!ws || !mbxId) return { ok: false, error: 'No mailbox selected.' };
+      if (!Number.isFinite(sendAt.getTime()) || sendAt.getTime() <= Date.now()) {
+        return { ok: false, error: 'Pick a time in the future.' };
+      }
+      try {
+        const res = await apiScheduleSend(ws.workspace_id, mbxId, {
+          to_address: body.to_address,
+          send_at: sendAt.toISOString(),
+          ...(body.subject ? { subject: body.subject } : {}),
+          ...(body.body ? { body: body.body } : {}),
+          ...(body.body_html ? { body_html: body.body_html } : {}),
+          ...(body.cc?.length ? { cc: body.cc } : {}),
+          ...(body.bcc?.length ? { bcc: body.bcc } : {}),
+          ...(body.attachments?.length ? { attachments: body.attachments } : {}),
+          // Forward the draft id so the scheduled send deletes it at fire time
+          // (parity with the immediate-send lane) — no orphaned "sent" draft.
+          ...(body.draft_id ? { draft_id: body.draft_id } : {}),
+        });
+        // Truthful: a dormant/external mailbox returns scheduled:false — surface it.
+        if (!res.scheduled) return { ok: false, error: 'Send later is unavailable for this mailbox.' };
+        return { ok: true };
+      } catch (err) {
+        if (guard401(err)) return { ok: false, error: 'Session expired.' };
+        if (isMissingEndpoint(err)) return { ok: false, error: 'Send later is not available here.' };
+        return { ok: false, error: messageOf(err, 'Could not schedule this message.') };
+      }
+    },
+    [guard401],
   );
 
   // ── New-mail arrival: manual Refresh + visibility-gated background poll ─────
@@ -1122,6 +1182,7 @@ export function useMailClient(): UseMailClient {
     moveThreadToFolder,
     moveThreadsToFolder,
     snoozeThreadUntil,
+    scheduleSend,
   };
 }
 

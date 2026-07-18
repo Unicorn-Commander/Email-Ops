@@ -50,6 +50,10 @@ export class SchedulingService {
     const mailbox = await this.resolveSovereignMailboxForCaller(input.workspaceId, ucUid, input.mailboxId);
     if (!mailbox || !this.stalwart.isConfigured()) return { snoozed: false, item: null };
 
+    // Capture the subject for the Snoozed view BEFORE the archive move (the thread
+    // is still in Inbox and definitely locatable). Best-effort + degrade-clean.
+    const subject = await this.resolveSnoozeSubject(input, mailbox.emailAddress);
+
     const hidden = await this.stalwart.moveThreadToFolder(mailbox.emailAddress, input.threadId, 'archive');
     if (!hidden) return { snoozed: false, item: null };
 
@@ -60,6 +64,7 @@ export class SchedulingService {
           mailboxId: input.mailboxId,
           threadId: input.threadId,
           snoozeUntil: input.until,
+          subject,
           createdBy: ucUid || null,
         },
       }),
@@ -403,11 +408,38 @@ export class SchedulingService {
     return out.length ? out : undefined;
   }
 
+  /**
+   * The subject stored on a new snooze row. Prefer the caller-supplied subject
+   * (the webmail reader has it), else resolve it best-effort from the engine so
+   * an agent-initiated snooze (no subject in hand) still renders a human row.
+   * Degrade-clean: returns null when the engine is dormant/unknown/fails — the
+   * Snoozed view falls back to a neutral label. Never throws.
+   */
+  private async resolveSnoozeSubject(
+    input: SnoozeThreadInput,
+    mailboxAddress: string,
+  ): Promise<string | null> {
+    const provided = (input.subject ?? '').trim();
+    if (provided) return provided.slice(0, 300);
+    try {
+      const detail = await this.stalwart.getThreadDetail(mailboxAddress, input.threadId);
+      // The most recent non-empty subject (matches what the reader shows).
+      for (let i = detail.length - 1; i >= 0; i--) {
+        const s = detail[i].subject?.trim();
+        if (s) return s.slice(0, 300);
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   private snoozedView(row: SnoozedThread): SnoozedThreadView {
     return {
       id: row.id,
       mailbox_id: row.mailboxId,
       thread_id: row.threadId,
+      subject: row.subject ?? null,
       snooze_until: row.snoozeUntil.toISOString(),
       state: row.state.toLowerCase(),
       created_by: row.createdBy,

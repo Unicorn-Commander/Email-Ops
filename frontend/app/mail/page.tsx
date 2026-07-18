@@ -55,6 +55,8 @@ import {
 } from '@/components/mail/useMailClient';
 import { ReplyComposer, type ReplyComposerHandle } from '@/components/mail/ReplyComposer';
 import { ComposeDialog, type ComposeDialogPrefill } from '@/components/mail/ComposeDialog';
+import { SnoozedDialog, ScheduledDialog } from '@/components/mail/ScheduleViews';
+import { schedulePresets as snoozePresets, formatScheduleWhen as formatSnoozeWhen } from '@/lib/scheduleTime';
 import { SendersDialog } from '@/components/mail/SendersDialog';
 import { MessageItem } from '@/components/mail/MessageItem';
 import { BulkBar } from '@/components/mail/BulkBar';
@@ -170,6 +172,8 @@ export default function MailPage() {
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeInitial, setComposeInitial] = useState<ComposePrefill | null>(null);
   const [sendersOpen, setSendersOpen] = useState(false);
+  const [snoozedOpen, setSnoozedOpen] = useState(false);
+  const [scheduledOpen, setScheduledOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [popoutOpen, setPopoutOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -559,7 +563,13 @@ export default function MailPage() {
       onCompose: openCompose,
       onHelp: () => setHelpOpen(true),
     },
-    !composeOpen && !sendersOpen && !helpOpen && !popoutOpen && !paletteOpen,
+    !composeOpen &&
+      !sendersOpen &&
+      !snoozedOpen &&
+      !scheduledOpen &&
+      !helpOpen &&
+      !popoutOpen &&
+      !paletteOpen,
   );
 
   // Per-mailbox unread badges (Wave-2 counts endpoint; null = hidden).
@@ -584,6 +594,18 @@ export default function MailPage() {
   const reloadOpenThread = useCallback(() => {
     if (selectedThreadId) selectThread(selectedThreadId, selectedThreadMailboxId ?? undefined);
   }, [selectThread, selectedThreadId, selectedThreadMailboxId]);
+
+  // A single selected sovereign (stalwart) mailbox is the context for snooze,
+  // send-later, and their management views. Null in unified mode / external accounts;
+  // gates the rail entries, the ⌘K entries, and the composer's "Send later".
+  const sovereignMailbox =
+    !mail.unified &&
+    mail.selectedMailbox &&
+    mail.selectedMailbox.provider !== 'gmail' &&
+    mail.selectedMailbox.provider !== 'microsoft'
+      ? mail.selectedMailbox
+      : null;
+  const canSchedule = !!sovereignMailbox;
 
   // ── ⌘K command palette actions (built from the real handlers) ───────────────
   const { selectFolder, customFolders: cmdCustomFolders, moveThreadToFolder: cmdMoveToFolder } = mail;
@@ -662,6 +684,26 @@ export default function MailPage() {
       keywords: 'new message write email compose',
       run: openCompose,
     });
+    if (canSchedule) {
+      list.push(
+        {
+          id: 'view:snoozed',
+          label: 'Snoozed',
+          group: 'Actions',
+          icon: <ClockIcon />,
+          keywords: 'snoozed later remind hidden tucked away',
+          run: () => setSnoozedOpen(true),
+        },
+        {
+          id: 'view:scheduled',
+          label: 'Scheduled',
+          group: 'Actions',
+          icon: <SendIcon />,
+          keywords: 'scheduled send later outbox queued pending',
+          run: () => setScheduledOpen(true),
+        },
+      );
+    }
     if (selectedThreadId) {
       list.push(
         {
@@ -776,6 +818,7 @@ export default function MailPage() {
     openCompose,
     cmdCustomFolders,
     cmdMoveToFolder,
+    canSchedule,
   ]);
 
   const canCompose =
@@ -937,6 +980,9 @@ export default function MailPage() {
                 customFolders={mail.customFolders}
                 activeCustomFolderId={mail.activeCustomFolderId}
                 onSelectCustomFolder={mail.selectCustomFolder}
+                schedulingEnabled={canSchedule}
+                onOpenSnoozed={() => setSnoozedOpen(true)}
+                onOpenScheduled={() => setScheduledOpen(true)}
               />
             ) : (
               <FoldersColumn
@@ -970,6 +1016,9 @@ export default function MailPage() {
                 onCreateFolder={mail.createFolder}
                 onRenameFolder={mail.renameFolder}
                 onDeleteFolder={mail.deleteFolder}
+                schedulingEnabled={canSchedule}
+                onOpenSnoozed={() => setSnoozedOpen(true)}
+                onOpenScheduled={() => setScheduledOpen(true)}
               />
             )}
           </div>
@@ -1132,6 +1181,8 @@ export default function MailPage() {
             mail.composeMailbox?.id,
           )
         }
+        canSchedule={canSchedule}
+        onScheduleSend={(b, at) => mail.scheduleSend(b, at, mail.composeMailbox?.id)}
         initial={composeInitial}
       />
 
@@ -1139,6 +1190,21 @@ export default function MailPage() {
         open={sendersOpen}
         onClose={() => setSendersOpen(false)}
         workspaceId={mail.workspace?.workspace_id ?? null}
+      />
+
+      <SnoozedDialog
+        open={snoozedOpen}
+        onClose={() => setSnoozedOpen(false)}
+        workspaceId={mail.workspace?.workspace_id ?? null}
+        mailbox={sovereignMailbox}
+        onChanged={mail.refresh}
+      />
+
+      <ScheduledDialog
+        open={scheduledOpen}
+        onClose={() => setScheduledOpen(false)}
+        workspaceId={mail.workspace?.workspace_id ?? null}
+        mailbox={sovereignMailbox}
       />
 
       <ShortcutsHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
@@ -1416,6 +1482,9 @@ function FoldersColumn({
   onCreateFolder,
   onRenameFolder,
   onDeleteFolder,
+  schedulingEnabled,
+  onOpenSnoozed,
+  onOpenScheduled,
 }: {
   mailboxes: MailboxPick[];
   selectedId: string | null;
@@ -1436,6 +1505,10 @@ function FoldersColumn({
   onCreateFolder: (name: string) => Promise<FolderActionResult>;
   onRenameFolder: (id: string, name: string) => Promise<FolderActionResult>;
   onDeleteFolder: (id: string) => Promise<FolderActionResult>;
+  /** Sovereign-mailbox only: gates the Snoozed / Scheduled entries. */
+  schedulingEnabled: boolean;
+  onOpenSnoozed: () => void;
+  onOpenScheduled: () => void;
 }) {
   return (
     <aside className="flex h-full w-[236px] flex-col overflow-y-auto border-r border-subtle bg-surface-raised">
@@ -1526,6 +1599,28 @@ function FoldersColumn({
           </button>
         );
       })}
+
+      {/* Snoozed + Scheduled — action rows (open a manager), sovereign mailbox only. */}
+      {schedulingEnabled && (
+        <>
+          <button
+            type="button"
+            onClick={onOpenSnoozed}
+            className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
+          >
+            <ClockIcon className="h-4 w-4 shrink-0 text-tertiary" />
+            <span className="flex-1 text-[13px]">Snoozed</span>
+          </button>
+          <button
+            type="button"
+            onClick={onOpenScheduled}
+            className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
+          >
+            <SendIcon className="h-4 w-4 shrink-0 text-tertiary" />
+            <span className="flex-1 text-[13px]">Scheduled</span>
+          </button>
+        </>
+      )}
 
       {foldersEnabled && (
         <>
@@ -1636,6 +1731,9 @@ function FoldersRail({
   customFolders,
   activeCustomFolderId,
   onSelectCustomFolder,
+  schedulingEnabled,
+  onOpenSnoozed,
+  onOpenScheduled,
 }: {
   mailboxes: MailboxPick[];
   selectedId: string | null;
@@ -1650,6 +1748,9 @@ function FoldersRail({
   customFolders: MailFolderView[];
   activeCustomFolderId: string | null;
   onSelectCustomFolder: (id: string) => void;
+  schedulingEnabled: boolean;
+  onOpenSnoozed: () => void;
+  onOpenScheduled: () => void;
 }) {
   return (
     <aside className="flex h-full w-[56px] flex-col items-center gap-1 overflow-y-auto overflow-x-visible border-r border-subtle bg-surface-raised py-2.5">
@@ -1729,6 +1830,30 @@ function FoldersRail({
           </button>
         );
       })}
+
+      {/* Snoozed + Scheduled — icon-only openers (sovereign mailbox only). */}
+      {schedulingEnabled && (
+        <>
+          <button
+            type="button"
+            onClick={onOpenSnoozed}
+            aria-label="Snoozed"
+            title="Snoozed"
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+          >
+            <ClockIcon className="h-[18px] w-[18px]" />
+          </button>
+          <button
+            type="button"
+            onClick={onOpenScheduled}
+            aria-label="Scheduled"
+            title="Scheduled"
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+          >
+            <SendIcon className="h-[18px] w-[18px]" />
+          </button>
+        </>
+      )}
 
       {/* Custom folders — icon-only mirror; human surface, neutral tokens. */}
       {customFolders.length > 0 && (
@@ -2500,49 +2625,10 @@ function MoveToFolderControl({
 }
 
 /** Snooze presets relative to now — only future times, terse labels. */
-function snoozePresets(now = new Date()): { label: string; until: Date }[] {
-  const atHour = (base: Date, h: number) => {
-    const d = new Date(base);
-    d.setHours(h, 0, 0, 0);
-    return d;
-  };
-  const addDays = (base: Date, n: number) => {
-    const d = new Date(base);
-    d.setDate(d.getDate() + n);
-    return d;
-  };
-  const sameDay = (a: Date, b: Date) =>
-    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-  const dow = now.getDay(); // 0 Sun … 6 Sat
-  const isWeekend = dow === 0 || dow === 6;
-  const daysToSat = (6 - dow + 7) % 7 || 7;
-  const daysToMon = (1 - dow + 7) % 7 || 7;
-
-  const laterToday = new Date(now.getTime() + 3 * 3600 * 1000);
-  const out: { label: string; until: Date }[] = [];
-  // "Later today" only while it's still today — after ~9pm now+3h crosses midnight
-  // and "today" would be a lie.
-  if (sameDay(laterToday, now)) out.push({ label: 'Later today', until: laterToday });
-  out.push({ label: 'Tomorrow', until: atHour(addDays(now, 1), 9) });
-  // "This weekend" only Mon–Fri; on Sat/Sun you're already in it, and (6-dow)%7||7
-  // would resolve to NEXT Saturday (a week out) — confusing, so drop it.
-  if (!isWeekend) out.push({ label: 'This weekend', until: atHour(addDays(now, daysToSat), 9) });
-  out.push({ label: 'Next week', until: atHour(addDays(now, daysToMon), 9) });
-
-  // Chronological order so the menu never lists a later time above an earlier one.
-  return out
-    .filter((p) => p.until.getTime() > now.getTime() + 60_000)
-    .sort((a, b) => a.until.getTime() - b.until.getTime());
-}
-
-function formatSnoozeWhen(d: Date): string {
-  return d.toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
-}
-
 /**
  * Reader snooze menu — hide the open thread until a chosen time (the scheduler
- * restores it to Inbox then). Presets for now; a custom picker is a follow-up.
- * Closes on pick / outside-click / Escape.
+ * restores it to Inbox then). Presets are shared with the composer's Send-later
+ * (see lib/scheduleTime). Closes on pick / outside-click / Escape.
  */
 function SnoozeControl({
   onSnooze,
@@ -2598,12 +2684,12 @@ function SnoozeControl({
               role="menuitem"
               onClick={() => {
                 setOpen(false);
-                onSnooze(p.until);
+                onSnooze(p.at);
               }}
               className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-secondary transition-colors hover:bg-surface-elevated hover:text-primary focus:bg-surface-elevated focus:text-primary focus:outline-none"
             >
               <span>{p.label}</span>
-              <span className="mono text-[11px] text-muted">{formatSnoozeWhen(p.until)}</span>
+              <span className="mono text-[11px] text-muted">{formatSnoozeWhen(p.at)}</span>
             </button>
           ))}
         </div>

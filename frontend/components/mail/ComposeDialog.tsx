@@ -18,7 +18,7 @@
  * can open the composer already populated — the user still reviews and sends it.
  */
 
-import { useEffect, useRef, useState, type DragEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { Button, Dialog, Input, cn } from '@/components/ui';
 import {
   createMailDraft,
@@ -28,6 +28,7 @@ import {
   type MailSignature,
   type UploadedBlob,
 } from '@/lib/mailApi';
+import { formatScheduleWhen, schedulePresets, toDatetimeLocalValue } from '@/lib/scheduleTime';
 import type { ComposeOutcome } from './useMailClient';
 import { ComposeStatusLine, describeStatus } from './ComposeStatus';
 import { RecipientChips, isValidEmail } from './RecipientChips';
@@ -76,6 +77,8 @@ export function ComposeDialog({
   workspaceId,
   mailboxId,
   onCompose,
+  onScheduleSend,
+  canSchedule,
   initial,
 }: {
   open: boolean;
@@ -91,6 +94,19 @@ export function ComposeDialog({
       'to_address' | 'subject' | 'body' | 'body_html' | 'cc' | 'bcc' | 'attachments' | 'draft_id'
     >,
   ) => Promise<ComposeOutcome>;
+  /**
+   * Optional "Send later": schedule the composed message to leave at `sendAt`.
+   * Only offered when `canSchedule` is true (a sovereign mailbox with the
+   * scheduling endpoint live); absent → the composer sends immediately only.
+   */
+  onScheduleSend?: (
+    body: Pick<
+      ComposeBody,
+      'to_address' | 'subject' | 'body' | 'body_html' | 'cc' | 'bcc' | 'attachments' | 'draft_id'
+    >,
+    sendAt: Date,
+  ) => Promise<{ ok: boolean; error?: string }>;
+  canSchedule?: boolean;
   /**
    * Optional prefill (e.g. an agent's `ui_compose`, or Forward). Seeds the
    * fields each time the dialog opens; null/undefined opens it blank.
@@ -281,13 +297,9 @@ export function ComposeDialog({
     void saveAndClose();
   }
 
-  async function handleSend() {
-    if (!canSend) return;
-    setSending(true);
-    setError(null);
-    setStatus(null);
+  function buildComposeBody() {
     const attachments = uploads.refs();
-    const res = await onCompose({
+    return {
       to_address: to.join(', '),
       subject: subject.trim() || undefined,
       body: htmlToText(body) || undefined,
@@ -296,7 +308,21 @@ export function ComposeDialog({
       ...(cc.length > 0 ? { cc } : {}),
       ...(bcc.length > 0 ? { bcc } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
-    });
+    };
+  }
+
+  function clearDraftState() {
+    setDraftId(null);
+    setDraftSavedAt(null);
+    lastSavedSnapshot.current = '';
+  }
+
+  async function handleSend() {
+    if (!canSend) return;
+    setSending(true);
+    setError(null);
+    setStatus(null);
+    const res = await onCompose(buildComposeBody());
     setSending(false);
     if (!res.ok) {
       setError(res.error ?? 'Could not record the message.');
@@ -305,11 +331,32 @@ export function ComposeDialog({
     const meta = describeStatus(res.message?.status);
     setStatus(res.message?.status ?? null);
     if (meta.sent) {
-      setDraftId(null);
-      setDraftSavedAt(null);
-      lastSavedSnapshot.current = '';
+      clearDraftState();
       onClose();
     }
+  }
+
+  async function handleSchedule(sendAt: Date) {
+    // Same guard as Send — valid recipients, not mid-upload/mid-send — plus a
+    // strictly-future time (the menu only offers future times, but a custom pick
+    // could be stale by the time it's confirmed).
+    if (!canSend || !onScheduleSend) return;
+    if (!Number.isFinite(sendAt.getTime()) || sendAt.getTime() <= Date.now()) {
+      setError('Pick a time in the future.');
+      return;
+    }
+    setSending(true);
+    setError(null);
+    setStatus(null);
+    const res = await onScheduleSend(buildComposeBody(), sendAt);
+    setSending(false);
+    if (!res.ok) {
+      setError(res.error ?? 'Could not schedule the message.');
+      return;
+    }
+    // Queued to send later — treat like a successful send: drop the draft + close.
+    clearDraftState();
+    onClose();
   }
 
   function handleDrop(e: DragEvent<HTMLFormElement>) {
@@ -362,6 +409,9 @@ export function ComposeDialog({
           <Button variant="secondary" size="sm" disabled={sending} onClick={() => void saveAndClose()}>
             Save draft & close
           </Button>
+          {canSchedule && onScheduleSend && (
+            <SendLaterMenu disabled={!canSend} onPick={(at) => void handleSchedule(at)} />
+          )}
           <kbd className="hidden min-w-[18px] items-center justify-center rounded-[5px] border border-border bg-surface-overlay px-1.5 py-px text-[11px] leading-none text-secondary sm:inline-flex mono">
             ⌘↵
           </kbd>
@@ -497,5 +547,101 @@ export function ComposeDialog({
         ) : null}
       </form>
     </Dialog>
+  );
+}
+
+/**
+ * "Send later" split control — presets (shared with snooze) plus a custom
+ * datetime picker. Drops UPWARD (it lives in the dialog footer). Closes on
+ * pick / outside-click / Escape. Purely presentational: it hands a chosen Date
+ * back to the composer, which validates + schedules.
+ */
+function SendLaterMenu({ disabled, onPick }: { disabled?: boolean; onPick: (at: Date) => void }) {
+  const [open, setOpen] = useState(false);
+  const [custom, setCustom] = useState('');
+  const ref = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpen(false);
+        ref.current?.querySelector<HTMLButtonElement>('button')?.focus(); // back to the trigger
+      }
+    };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    // Land keyboard focus on the first option, matching the reader's SnoozeControl.
+    menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  const presets = useMemo(() => (open ? schedulePresets() : []), [open]);
+  // Custom picker floor: ~5 minutes out, so the value is meaningfully in the future.
+  const minLocal = useMemo(() => toDatetimeLocalValue(new Date(Date.now() + 5 * 60 * 1000)), [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function pickCustom() {
+    if (!custom) return;
+    // datetime-local has no timezone → parsed as LOCAL wall-clock, which is what
+    // the user meant; the composer converts to ISO/UTC for the API.
+    const at = new Date(custom);
+    if (!Number.isFinite(at.getTime()) || at.getTime() <= Date.now()) return;
+    setOpen(false);
+    onPick(at);
+  }
+
+  return (
+    <div ref={ref} className="relative">
+      <Button variant="secondary" size="sm" disabled={disabled} onClick={() => setOpen((v) => !v)}>
+        Send later
+      </Button>
+      {open && (
+        <div
+          ref={menuRef}
+          role="menu"
+          aria-label="Send later"
+          className="absolute bottom-full right-0 z-30 mb-1 w-64 rounded-lg border border-subtle bg-surface-overlay p-1 shadow-xl"
+        >
+          <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary">
+            Send later
+          </p>
+          {presets.map((p) => (
+            <button
+              key={p.label}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onPick(p.at);
+              }}
+              className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-secondary transition-colors hover:bg-surface-elevated hover:text-primary focus:bg-surface-elevated focus:text-primary focus:outline-none"
+            >
+              <span>{p.label}</span>
+              <span className="mono text-[11px] text-muted">{formatScheduleWhen(p.at)}</span>
+            </button>
+          ))}
+          <div className="mt-1 border-t border-subtle px-2 pb-1 pt-2">
+            <label className="mb-1 block text-[11px] font-medium text-tertiary">Pick a time</label>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="datetime-local"
+                value={custom}
+                min={minLocal}
+                onChange={(e) => setCustom(e.target.value)}
+                className="min-w-0 flex-1 rounded-token border border-border bg-surface-base px-2 py-1 text-[12px] text-primary focus:border-accent focus:outline-none"
+              />
+              <Button size="sm" disabled={!custom} onClick={pickCustom}>
+                Set
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

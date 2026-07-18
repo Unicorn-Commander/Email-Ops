@@ -11,12 +11,17 @@ export interface SnoozeThreadInput {
   mailboxId: string;
   threadId: string;
   until: Date;
+  /** Optional caller-supplied thread subject for the Snoozed view (the webmail
+   *  reader has it in hand). When absent the service resolves it best-effort. */
+  subject?: string | null;
 }
 
 export interface SnoozedThreadView {
   id: string;
   mailbox_id: string;
   thread_id: string;
+  /** Thread subject captured at snooze time; null for agent snoozes / dormant engine. */
+  subject: string | null;
   snooze_until: string;
   state: string;
   created_by: string | null;

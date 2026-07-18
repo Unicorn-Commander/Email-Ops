@@ -28,6 +28,7 @@ describe('SchedulingService', () => {
       mailboxId: 'mb-1',
       threadId: 'thr-1',
       snoozeUntil: new Date('2026-07-18T10:00:00.000Z'),
+      subject: 'Weekly digest',
       createdBy: UC,
       state: SnoozedThreadState.ACTIVE,
       createdAt: new Date('2026-07-17T10:00:00.000Z'),
@@ -57,6 +58,7 @@ describe('SchedulingService', () => {
     handles?: boolean;
     move?: boolean;
     composeStatus?: string;
+    threadDetail?: { subject: string | null }[];
   } = {}) {
     const tx = opts.tx ?? {
       mailboxAccount: { findFirst: jest.fn().mockResolvedValue(mailbox) },
@@ -93,6 +95,7 @@ describe('SchedulingService', () => {
     const stalwart = {
       isConfigured: jest.fn().mockReturnValue(opts.configured ?? true),
       moveThreadToFolder: jest.fn().mockResolvedValue(opts.move ?? true),
+      getThreadDetail: jest.fn().mockResolvedValue(opts.threadDetail ?? [{ subject: 'Engine subject' }]),
     } as unknown as StalwartPort;
     const mailProvider = {
       handles: jest.fn().mockReturnValue(opts.handles ?? false),
@@ -150,7 +153,55 @@ describe('SchedulingService', () => {
       orderBy: { snoozeUntil: 'asc' },
     }));
     expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ id: 'snz-1', thread_id: 'thr-1' });
+    expect(out[0]).toMatchObject({ id: 'snz-1', thread_id: 'thr-1', subject: 'Weekly digest' });
+  });
+
+  it('captures the caller-supplied subject on the snooze row (no engine lookup)', async () => {
+    const { service, tx, stalwart } = make();
+    await service.snoozeThread(user, {
+      workspaceId: WS,
+      mailboxId: 'mb-1',
+      threadId: 'thr-1',
+      until: new Date('2026-07-18T10:00:00.000Z'),
+      subject: '  Quarterly board deck  ',
+    });
+    // The reader had the subject in hand — no need to hit the engine for it.
+    expect(stalwart.getThreadDetail).not.toHaveBeenCalled();
+    expect(tx.snoozedThread.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ subject: 'Quarterly board deck' }), // trimmed
+    }));
+  });
+
+  it('resolves the subject from the engine when the caller omits it (agent path)', async () => {
+    const { service, tx, stalwart } = make({
+      threadDetail: [{ subject: 'Older' }, { subject: 'Most recent' }],
+    });
+    await service.snoozeThread(user, {
+      workspaceId: WS,
+      mailboxId: 'mb-1',
+      threadId: 'thr-1',
+      until: new Date('2026-07-18T10:00:00.000Z'),
+    });
+    expect(stalwart.getThreadDetail).toHaveBeenCalledWith('founder@acme.test', 'thr-1');
+    // The most recent non-empty subject wins (matches what the reader shows).
+    expect(tx.snoozedThread.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ subject: 'Most recent' }),
+    }));
+  });
+
+  it('stores a null subject when the engine lookup degrades (never throws)', async () => {
+    const { service, tx, stalwart } = make();
+    (stalwart.getThreadDetail as jest.Mock).mockRejectedValue(new Error('engine down'));
+    const out = await service.snoozeThread(user, {
+      workspaceId: WS,
+      mailboxId: 'mb-1',
+      threadId: 'thr-1',
+      until: new Date('2026-07-18T10:00:00.000Z'),
+    });
+    expect(out.snoozed).toBe(true); // the snooze still succeeds; only the label degrades
+    expect(tx.snoozedThread.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ subject: null }),
+    }));
   });
 
   it('refuses external mailboxes cleanly without creating snooze state', async () => {

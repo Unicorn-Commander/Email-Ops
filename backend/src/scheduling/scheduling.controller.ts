@@ -11,6 +11,9 @@ import { ScheduledSendPayload } from './scheduling.types';
 
 class SnoozeDto {
   @IsISO8601() until!: string;
+  // The reader passes the thread subject so the Snoozed view renders a human row;
+  // absent (e.g. an agent caller) → the service resolves it best-effort.
+  @IsOptional() @IsString() @MaxLength(300) subject?: string;
 }
 
 class ScheduleSendDto {
@@ -77,6 +80,7 @@ export class SchedulingController {
       mailboxId,
       threadId,
       until: parseDate(body.until, 'until'),
+      subject: body.subject ?? null,
     });
   }
 
