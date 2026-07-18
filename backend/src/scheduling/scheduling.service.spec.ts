@@ -237,6 +237,66 @@ describe('SchedulingService', () => {
     expect(stalwart.moveThreadToFolder).toHaveBeenCalledWith('founder@acme.test', 'thr-1', 'inbox');
   });
 
+  it('reclaims a stale CLAIMED scheduled send and retries it (crash recovery)', async () => {
+    const claimedAt = new Date('2026-07-18T09:50:00.000Z'); // 10 min before "now" — past the TTL
+    const stale = scheduled({ state: ScheduledSendState.CLAIMED, claimedAt });
+    const updateMany = jest.fn().mockResolvedValue({ count: 1 }); // reclaim + mark-sent
+    const systemClient = {
+      scheduledSend: {
+        findMany: jest.fn().mockResolvedValue([stale]),
+        updateMany,
+      },
+      snoozedThread: { findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn() },
+      mailboxAccount: { findFirst: jest.fn().mockResolvedValue({ id: 'mb-1' }) },
+    };
+    const { service, email } = make({ systemClient });
+
+    const sent = await service.fireDueScheduledSends(new Date('2026-07-18T10:00:00.000Z'));
+
+    expect(sent).toBe(1);
+    // The sweep must look for stale CLAIMED rows, not just PENDING.
+    expect(systemClient.scheduledSend.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: expect.arrayContaining([
+            expect.objectContaining({ state: ScheduledSendState.CLAIMED }),
+          ]),
+        }),
+      }),
+    );
+    // Reclaim guards on the exact prior claimedAt so only one worker wins the race.
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          state: ScheduledSendState.CLAIMED,
+          claimedAt,
+        }),
+        data: expect.objectContaining({ state: ScheduledSendState.CLAIMED }),
+      }),
+    );
+    expect(email.composeEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancelScheduledSend refuses a caller who cannot act through a HUMAN mailbox', async () => {
+    const cancelUpdate = jest.fn().mockResolvedValue({ count: 1 });
+    const tx = {
+      mailboxAccount: {
+        findFirst: jest.fn().mockResolvedValue({ ...mailbox, ownerKind: 'HUMAN', ownerKey: 'someone-else' }),
+      },
+      user: { findFirst: jest.fn().mockResolvedValue(null) },
+      scheduledSend: {
+        findFirst: jest.fn().mockResolvedValue(scheduled()),
+        updateMany: cancelUpdate,
+      },
+    };
+    const { service } = make({ tx });
+
+    const out = await service.cancelScheduledSend(user, WS, 'sch-1');
+
+    expect(out).toEqual({ cancelled: false });
+    expect(cancelUpdate).not.toHaveBeenCalled(); // owner gate blocks before the write
+  });
+
   it('worker runOnce is reentrant-safe', async () => {
     let release!: () => void;
     const service = {

@@ -298,6 +298,8 @@ export function useMailClient(): UseMailClient {
   mailboxesRef.current = mailboxes;
   const threadsRef = useRef(threads);
   threadsRef.current = threads;
+  const openThreadRef = useRef(openThread);
+  openThreadRef.current = openThread;
   const selectedMailboxIdRef = useRef(selectedMailboxId);
   selectedMailboxIdRef.current = selectedMailboxId;
   const folderRef = useRef(folder);
@@ -595,21 +597,27 @@ export function useMailClient(): UseMailClient {
       const mbx = selectedMailboxIdRef.current;
       if (!ws || !mbx || mbx === ALL_INBOXES) return { ok: false, error: 'Pick one mailbox first.' };
       const before = customFoldersRef.current;
+      const wasViewing = activeCustomFolderIdRef.current === folderId;
       // Optimistic removal; if we were viewing it, fall back to the inbox.
       setCustomFolders((prev) => prev.filter((f) => f.id !== folderId));
-      if (activeCustomFolderIdRef.current === folderId) {
+      if (wasViewing) {
         setActiveCustomFolderId(null);
         setFolder('inbox');
       }
+      // Restore both the list AND the view we navigated away from, on any failure.
+      const rollback = () => {
+        setCustomFolders(before);
+        if (wasViewing) setActiveCustomFolderId(folderId);
+      };
       try {
         const res = await deleteMailFolder(ws.workspace_id, mbx, folderId);
         if (!res.deleted) {
-          setCustomFolders(before);
+          rollback();
           return { ok: false, error: 'That folder could not be deleted.' };
         }
         return { ok: true };
       } catch (err) {
-        setCustomFolders(before);
+        rollback();
         if (guard401(err)) return { ok: false, error: 'Session expired.' };
         return { ok: false, error: messageOf(err, 'Could not delete the folder.') };
       }
@@ -624,20 +632,26 @@ export function useMailClient(): UseMailClient {
       const mbx = row?.mailbox_id ?? openThread?.mailboxId ?? selectedMailboxIdRef.current;
       if (!ws || !mbx || mbx === ALL_INBOXES) return { ok: false, error: 'Pick one mailbox first.' };
       const before = threadsRef.current;
+      const prevOpen = openThreadRef.current;
       // Optimistic: pull the thread out of the current list immediately.
       setThreads((prev) => prev.filter((t) => t.id !== threadId));
       setOpenThread((prev) => (prev?.id === threadId ? null : prev));
+      // Restore BOTH the list and the reader if nothing actually moved.
+      const rollback = () => {
+        setThreads(before);
+        if (prevOpen?.id === threadId) setOpenThread(prevOpen);
+      };
       try {
         const res = await moveThreadToCustomFolder(ws.workspace_id, mbx, threadId, folderId);
         if (!res.moved) {
-          setThreads(before); // truthful rollback — nothing actually moved
+          rollback(); // truthful rollback — nothing actually moved
           return { ok: false, error: 'That folder is unavailable for this mailbox.' };
         }
         refreshFolders(); // the target folder's unread badge changed
         refreshCounts();
         return { ok: true };
       } catch (err) {
-        setThreads(before);
+        rollback();
         if (guard401(err)) return { ok: false, error: 'Session expired.' };
         if (isMissingEndpoint(err)) return { ok: false, error: 'Folders are not available here.' };
         return { ok: false, error: messageOf(err, 'Could not move this conversation.') };
@@ -652,6 +666,7 @@ export function useMailClient(): UseMailClient {
       if (!ws || threadIds.length === 0) return { ok: false, error: 'Nothing selected.' };
       const ids = new Set(threadIds);
       const before = threadsRef.current;
+      const prevOpen = openThreadRef.current;
       const rowsById = new Map(before.map((t) => [t.id, t] as const));
       const fallbackMbx = selectedMailboxIdRef.current;
       // Optimistic: pull the whole selection out of the current list at once.
@@ -678,6 +693,7 @@ export function useMailClient(): UseMailClient {
           : { ok: true };
       } catch (err) {
         setThreads(before);
+        if (prevOpen && ids.has(prevOpen.id)) setOpenThread(prevOpen);
         if (guard401(err)) return { ok: false, error: 'Session expired.' };
         if (isMissingEndpoint(err)) return { ok: false, error: 'Folders are not available here.' };
         return { ok: false, error: messageOf(err, 'Could not move the selection.') };
@@ -846,10 +862,16 @@ export function useMailClient(): UseMailClient {
 
   const selectMailbox = useCallback((mailboxId: string) => {
     setSelectedMailboxId(mailboxId);
+    // A custom folder belongs to one mailbox — leaving the mailbox leaves it.
+    setActiveCustomFolderId(null);
   }, []);
 
   // Switching folders (the effect above closes the open thread + refetches).
   const selectFolder = useCallback((next: MailFolder) => {
+    // Clearing the active custom folder is what makes the list effect re-run and
+    // fetchThreads route back to a SYSTEM folder — without this, picking a system
+    // folder while a custom one is open is a no-op dead-end.
+    setActiveCustomFolderId(null);
     setFolder(next);
   }, []);
 

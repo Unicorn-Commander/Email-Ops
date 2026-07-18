@@ -1342,11 +1342,12 @@ function CustomFoldersSection({
             ) : (
               <>
                 {unread != null && (
-                  <span className="shrink-0 rounded-full bg-accent/[0.14] px-1.5 py-px text-[11px] font-semibold text-accent mono group-hover:hidden">
+                  <span className="shrink-0 rounded-full bg-accent/[0.14] px-1.5 py-px text-[11px] font-semibold text-accent mono group-hover:hidden group-focus-within:hidden">
                     {unread > 999 ? '999+' : unread}
                   </span>
                 )}
-                <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
+                {/* focus-within parity so the actions are keyboard/SR reachable, not hover-only */}
+                <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex">
                   <button
                     type="button"
                     onClick={() => {

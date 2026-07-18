@@ -26,6 +26,10 @@ const SCHEDULER_SOURCE = 'email-ops-client';
 @Injectable()
 export class SchedulingService {
   private readonly logger = new Logger(SchedulingService.name);
+  // A claim older than this is treated as abandoned (worker died mid-send) and
+  // is reclaimed on the next sweep. Well above the multi-second send window so a
+  // legitimately in-flight send is never reaped; the 30s worker retries after.
+  private static readonly CLAIM_TTL_MS = 5 * 60 * 1000;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -158,6 +162,15 @@ export class SchedulingService {
     id: string,
   ): Promise<{ cancelled: boolean }> {
     const ucUid = ucUidOf(user);
+    const row = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      tx.scheduledSend.findFirst({ where: { id, workspaceId, state: ScheduledSendState.PENDING } }),
+    );
+    if (!row) return { cancelled: false };
+    // Same sovereign-owner gate as unsnooze: a workspace member must be able to
+    // act through the owning mailbox to cancel its pending send.
+    const mailbox = await this.resolveSovereignMailboxForCaller(workspaceId, ucUid, row.mailboxId);
+    if (!mailbox) return { cancelled: false };
+
     const updated = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
       tx.scheduledSend.updateMany({
         where: { id, workspaceId, state: ScheduledSendState.PENDING },
@@ -219,10 +232,17 @@ export class SchedulingService {
   }
 
   async fireDueScheduledSends(now = new Date(), take = 50): Promise<number> {
+    // A CLAIMED row whose claim is older than the TTL means the worker died
+    // between claim and terminal transition — reclaim and retry it. composeEmail
+    // is idempotent on externalRef (scheduled-send:<id>), so a half-finished send
+    // is deduped, never doubled; without this the row would be stranded forever.
+    const staleClaimBefore = new Date(now.getTime() - SchedulingService.CLAIM_TTL_MS);
     const rows = await this.prisma.systemClient.scheduledSend.findMany({
       where: {
-        state: ScheduledSendState.PENDING,
-        sendAt: { lte: now },
+        OR: [
+          { state: ScheduledSendState.PENDING, sendAt: { lte: now } },
+          { state: ScheduledSendState.CLAIMED, claimedAt: { lte: staleClaimBefore } },
+        ],
       },
       take,
       orderBy: { sendAt: 'asc' },
@@ -231,9 +251,14 @@ export class SchedulingService {
     let sent = 0;
     for (const row of rows) {
       try {
+        // Claim (PENDING) or reclaim (stale CLAIMED) atomically — guard on the
+        // exact state+claimedAt we read so only one worker wins the race.
         const claimed = await this.prisma.systemClient.scheduledSend.updateMany({
-          where: { id: row.id, state: ScheduledSendState.PENDING },
-          data: { state: ScheduledSendState.CLAIMED },
+          where:
+            row.state === ScheduledSendState.CLAIMED
+              ? { id: row.id, state: ScheduledSendState.CLAIMED, claimedAt: row.claimedAt }
+              : { id: row.id, state: ScheduledSendState.PENDING },
+          data: { state: ScheduledSendState.CLAIMED, claimedAt: now },
         });
         if (claimed.count !== 1) continue;
 

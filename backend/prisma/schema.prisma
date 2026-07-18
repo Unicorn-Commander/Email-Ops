@@ -890,6 +890,7 @@ model ScheduledSend {
   state       ScheduledSendState @default(PENDING)
   createdBy   String?
   createdAt   DateTime           @default(now())
+  claimedAt   DateTime?
   sentAt      DateTime?
 
   workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
