@@ -126,6 +126,54 @@ describe('parseSearchQuery', () => {
     expect(r.text).toContain('from:');
   });
 
+  it('parses cc: operator', () => {
+    expect(parseSearchQuery('cc:bob@example.com')).toEqual({
+      text: '',
+      cc: 'bob@example.com',
+    });
+  });
+
+  it('parses is:unread operator', () => {
+    expect(parseSearchQuery('is:unread')).toEqual({
+      text: '',
+      isUnread: true,
+    });
+  });
+
+  it('parses is:read operator', () => {
+    expect(parseSearchQuery('is:read')).toEqual({
+      text: '',
+      isRead: true,
+    });
+  });
+
+  it('parses is:starred operator', () => {
+    expect(parseSearchQuery('is:starred')).toEqual({
+      text: '',
+      isStarred: true,
+    });
+  });
+
+  it('parses is:flagged operator as is:starred', () => {
+    expect(parseSearchQuery('is:flagged')).toEqual({
+      text: '',
+      isStarred: true,
+    });
+  });
+
+  it('treats unknown is: value as free text', () => {
+    const r = parseSearchQuery('is:important');
+    expect(r.isUnread).toBeUndefined();
+    expect(r.isRead).toBeUndefined();
+    expect(r.isStarred).toBeUndefined();
+    expect(r.text).toContain('is:important');
+  });
+
+  it('handles duplicate operators with last-wins convention', () => {
+    const r = parseSearchQuery('from:a@b.com from:c@d.com');
+    expect(r.from).toBe('c@d.com');
+  });
+
   it('does not throw on garbage input', () => {
     expect(() => parseSearchQuery('from: :: before:not-a-date')).not.toThrow();
     const r = parseSearchQuery('from: :: before:not-a-date');
@@ -216,8 +264,11 @@ describe('buildJmapFilter', () => {
         text: 'receipt',
         from: 'store@example.com',
         to: 'me@example.com',
+        cc: 'manager@example.com',
         subject: 'order',
         hasAttachment: true,
+        isUnread: true,
+        isStarred: true,
         before: '2024-03-01',
         after: '2024-01-01',
       },
@@ -229,12 +280,21 @@ describe('buildJmapFilter', () => {
         { text: 'receipt' },
         { from: 'store@example.com' },
         { to: 'me@example.com' },
+        { cc: 'manager@example.com' },
         { subject: 'order' },
         { hasAttachment: true },
+        { isUnread: true },
+        { isStarred: true },
         { before: '2024-03-01T00:00:00Z' },
         { after: '2024-01-01T00:00:00Z' },
         { inMailbox: 'inbox-id' },
       ],
     });
+  });
+
+  it('handles unknown key:value as free text', () => {
+    const parsed = parseSearchQuery('foo:bar hello');
+    expect(parsed.text).toBe('foo:bar hello');
+    expect(buildJmapFilter(parsed)).toEqual({ text: 'foo:bar hello' });
   });
 });

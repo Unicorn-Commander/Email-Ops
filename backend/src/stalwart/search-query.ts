@@ -2,13 +2,17 @@ export interface ParsedSearch {
   text: string;
   from?: string;
   to?: string;
+  cc?: string;
   subject?: string;
   hasAttachment?: boolean;
+  isUnread?: boolean;
+  isRead?: boolean;
+  isStarred?: boolean;
   before?: string;
   after?: string;
 }
 
-const KNOWN_KEYS = new Set(['from', 'to', 'subject', 'has', 'before', 'after']);
+const KNOWN_KEYS = new Set(['from', 'to', 'cc', 'subject', 'has', 'is', 'before', 'after']);
 
 function unquote(s: string): string {
   if (s.length >= 2) {
@@ -85,11 +89,21 @@ export function parseSearchQuery(q: string | null | undefined): ParsedSearch {
       case 'to':
         result.to = op.value;
         break;
+      case 'cc':
+        result.cc = op.value;
+        break;
       case 'subject':
         result.subject = op.value;
         break;
       case 'has':
         if (op.value === 'attachment') result.hasAttachment = true;
+        else freeText.push(unquote(token));
+        break;
+      case 'is':
+        const val = op.value.toLowerCase();
+        if (val === 'unread') result.isUnread = true;
+        else if (val === 'read') result.isRead = true;
+        else if (val === 'starred' || val === 'flagged') result.isStarred = true;
         else freeText.push(unquote(token));
         break;
       case 'before':
@@ -114,8 +128,12 @@ export function buildJmapFilter(
   if (parsed.text) conditions.push({ text: parsed.text });
   if (parsed.from) conditions.push({ from: parsed.from });
   if (parsed.to) conditions.push({ to: parsed.to });
+  if (parsed.cc) conditions.push({ cc: parsed.cc });
   if (parsed.subject) conditions.push({ subject: parsed.subject });
   if (parsed.hasAttachment) conditions.push({ hasAttachment: true });
+  if (parsed.isUnread) conditions.push({ isUnread: true });
+  if (parsed.isRead) conditions.push({ isRead: true });
+  if (parsed.isStarred) conditions.push({ isStarred: true });
   if (parsed.before) conditions.push({ before: parsed.before + 'T00:00:00Z' });
   if (parsed.after) conditions.push({ after: parsed.after + 'T00:00:00Z' });
   if (inMailboxId) conditions.push({ inMailbox: inMailboxId });
