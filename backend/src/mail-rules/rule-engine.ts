@@ -31,6 +31,23 @@ export interface Condition {
   value: string;
 }
 
+/**
+ * One node of a rule's match tree. `all` = every child must hold (AND) —
+ * the original flat shape `{ all: [conditions] }` keeps meaning exactly that.
+ * `any` = at least one child must hold (OR). Children are leaf conditions or
+ * nested group nodes (`{ all: [{ any: [...] }, ...] }` = AND-of-ORs, etc.).
+ *
+ * Evaluation semantics (see matchesNode; full write-side contract in
+ * mail-rules.types.ts):
+ * - An EMPTY `all` matches NOTHING. An EMPTY `any` matches NOTHING. `{}` or
+ *   malformed JSON matches NOTHING. Guard posture: a degenerate rule must
+ *   never accidentally match every message.
+ * - A node carrying BOTH keys (legacy stored rows only — writes reject it)
+ *   requires BOTH clauses to hold: (every `all` child) AND (some `any` child).
+ * - The engine evaluates nesting to ANY depth so previously stored trees keep
+ *   working; the SERVICE caps new writes to one group level (groups contain
+ *   only conditions).
+ */
 export interface MatchNode {
   all?: (Condition | MatchNode)[];
   any?: (Condition | MatchNode)[];
@@ -123,25 +140,26 @@ function matchesNode(raw: unknown, msg: InboundMessage): boolean {
     return false;
   }
 
-  // Narrow node.all / node.any DIRECTLY (a boolean alias doesn't narrow under
-  // the repo's strict tsconfig).
-  if (Array.isArray(node.all)) {
-    if (node.all.length === 0) {
-      return false;
-    }
+  // Value aliases narrow cleanly under the repo's strict tsconfig (a boolean
+  // alias wouldn't). EVERY clause present must hold — a node carrying both
+  // `all` and `any` (legacy stored rows; writes reject it) is their AND, never
+  // a silent ignore of one side. An EMPTY clause matches NOTHING.
+  const all = Array.isArray(node.all) ? node.all : null;
+  const any = Array.isArray(node.any) ? node.any : null;
 
-    return node.all.every((child) => matchesChild(child, msg));
+  if (!all && !any) {
+    return false;
   }
 
-  if (Array.isArray(node.any)) {
-    if (node.any.length === 0) {
-      return false;
-    }
-
-    return node.any.some((child) => matchesChild(child, msg));
+  if (all && (all.length === 0 || !all.every((child) => matchesChild(child, msg)))) {
+    return false;
   }
 
-  return false;
+  if (any && (any.length === 0 || !any.some((child) => matchesChild(child, msg)))) {
+    return false;
+  }
+
+  return true;
 }
 
 function matchesChild(child: Condition | MatchNode, msg: InboundMessage): boolean {

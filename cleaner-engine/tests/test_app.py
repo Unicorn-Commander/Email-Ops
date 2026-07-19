@@ -96,6 +96,14 @@ class FakeProvider:
         self.calls.append(("batch_set_read", tuple(message_ids), {"read": read}))
         return len(message_ids)
 
+    def batch_spam(self, message_ids: list[str]) -> int:
+        self.calls.append(("batch_spam", tuple(message_ids), {}))
+        return len(message_ids)
+
+    def batch_restore_inbox(self, message_ids: list[str]) -> int:
+        self.calls.append(("batch_restore_inbox", tuple(message_ids), {}))
+        return len(message_ids)
+
     def export_messages(self, message_ids: list[str]):
         self.calls.append(("export_messages", tuple(message_ids), {}))
         for message_id in message_ids:
@@ -642,6 +650,8 @@ def test_mail_routes_require_auth(client):
         ("/mail/threads/t/archive", {"provider": "gmail", "credentials": {"token": "abc"}}),
         ("/mail/threads/t/trash", {"provider": "gmail", "credentials": {"token": "abc"}}),
         ("/mail/threads/t/read", {"provider": "gmail", "credentials": {"token": "abc"}, "read": True}),
+        ("/mail/threads/t/spam", {"provider": "gmail", "credentials": {"token": "abc"}}),
+        ("/mail/threads/t/inbox", {"provider": "gmail", "credentials": {"token": "abc"}}),
     ]:
         response = client.post(path, json=payload)
         assert response.status_code == 401, path
@@ -730,6 +740,34 @@ def test_mail_thread_read_happy_path(client, fake_provider_factory, provider, re
     assert fake.calls[-1] == ("batch_set_read", ("msg-1",), {"read": read})
 
 
+@pytest.mark.parametrize("provider", ["gmail", "microsoft"])
+def test_mail_thread_spam_happy_path(client, fake_provider_factory, provider):
+    response = client.post(
+        "/mail/threads/thread-1/spam",
+        headers=_auth_headers(),
+        json={"provider": provider, "credentials": {"token": "abc"}},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "moved": 1}
+    fake = fake_provider_factory.instances[-1]
+    # Resolved the thread's ids, then reported them as spam.
+    assert fake.calls[-2] == ("get_thread", ("thread-1",), {})
+    assert fake.calls[-1] == ("batch_spam", ("msg-1",), {})
+
+
+@pytest.mark.parametrize("provider", ["gmail", "microsoft"])
+def test_mail_thread_restore_inbox_happy_path(client, fake_provider_factory, provider):
+    response = client.post(
+        "/mail/threads/thread-1/inbox",
+        headers=_auth_headers(),
+        json={"provider": provider, "credentials": {"token": "abc"}},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "moved": 1}
+    fake = fake_provider_factory.instances[-1]
+    assert fake.calls[-1] == ("batch_restore_inbox", ("msg-1",), {})
+
+
 def test_mail_thread_triage_direction_filtering(monkeypatch):
     """Drafts are never touched; Microsoft's move-semantics archive/trash skip
     SENT copies (a Gmail label edit keeps them, so the whole thread goes)."""
@@ -752,6 +790,24 @@ def test_mail_thread_triage_direction_filtering(monkeypatch):
              json={"provider": "microsoft", "credentials": {"access_token": "abc"}, "read": True})
     assert factory.instances[-1].calls[-1] == ("batch_set_read", ("m-received", "m-sent"), {"read": True})
 
+    # Spam/inbox-restore are label edits on Gmail (whole thread) but folder
+    # MOVES on Microsoft (received copies only — Sent Items stay put).
+    cli.post("/mail/threads/t/spam", headers=_auth_headers(),
+             json={"provider": "gmail", "credentials": {"token": "abc"}})
+    assert factory.instances[-1].calls[-1] == ("batch_spam", ("m-received", "m-sent"), {})
+
+    cli.post("/mail/threads/t/spam", headers=_auth_headers(),
+             json={"provider": "microsoft", "credentials": {"access_token": "abc"}})
+    assert factory.instances[-1].calls[-1] == ("batch_spam", ("m-received",), {})
+
+    cli.post("/mail/threads/t/inbox", headers=_auth_headers(),
+             json={"provider": "gmail", "credentials": {"token": "abc"}})
+    assert factory.instances[-1].calls[-1] == ("batch_restore_inbox", ("m-received", "m-sent"), {})
+
+    cli.post("/mail/threads/t/inbox", headers=_auth_headers(),
+             json={"provider": "microsoft", "credentials": {"access_token": "abc"}})
+    assert factory.instances[-1].calls[-1] == ("batch_restore_inbox", ("m-received",), {})
+
 
 def test_mail_thread_triage_accepts_slash_bearing_thread_ids(client, fake_provider_factory):
     """Microsoft conversation ids are base64 and can contain '/'; the ``:path``
@@ -769,7 +825,13 @@ def test_mail_thread_triage_accepts_slash_bearing_thread_ids(client, fake_provid
 
 def test_mail_thread_triage_degrades_clean_on_provider_error(monkeypatch):
     cli, _ = _client_with_factory(monkeypatch, FailingProvider)
-    for path in ["/mail/threads/t/archive", "/mail/threads/t/trash", "/mail/threads/t/read"]:
+    for path in [
+        "/mail/threads/t/archive",
+        "/mail/threads/t/trash",
+        "/mail/threads/t/read",
+        "/mail/threads/t/spam",
+        "/mail/threads/t/inbox",
+    ]:
         response = cli.post(
             path,
             headers=_auth_headers(),

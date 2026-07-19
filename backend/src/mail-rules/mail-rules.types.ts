@@ -1,6 +1,34 @@
 import { MailRule } from '@prisma/client';
 import { MatchNode, RuleAction } from './rule-engine';
 
+/**
+ * The `match` JSON contract (mail_rules.match JSONB — backward-compatible
+ * data, no migration; rule-engine.ts is the evaluator, MailRulesService the
+ * write-side validator):
+ *
+ *   match := node
+ *   node  := { all: child[] } | { any: child[] }     — exactly ONE mode per node on write
+ *   child := { field, op, value }                    — leaf condition
+ *          | node                                    — a nested GROUP (one level deep on write)
+ *
+ * - `{ all: [conditions] }` — every condition must hold. This is the original
+ *   flat shape and keeps meaning ALL, unchanged.
+ * - `{ any: [conditions] }` — at least one condition must hold.
+ * - Grouped combinations: `{ all: [{ any: [...] }, { any: [...] }] }`
+ *   (AND-of-ORs) or `{ any: [{ all: [...] }, ...] }` (OR-of-ANDs). Top-level
+ *   children may mix conditions and groups.
+ *
+ * Write caps (create/PATCH, clear BadRequests in the service): ≤5 groups per
+ * rule, ≤10 conditions per group and at the top level, groups contain only
+ * conditions (no group-in-group), no empty groups, no node with both modes.
+ *
+ * Empty semantics (guard posture — a rule never accidentally matches every
+ * message): an empty ALL matches NOTHING, an empty ANY matches NOTHING, `{}` /
+ * malformed matches NOTHING. Stored legacy trees that exceed the write caps
+ * (deeper nesting, both modes on one node) still EVALUATE: every clause
+ * present must hold.
+ */
+
 /** Snake_case wire shape (same register as SnoozedThreadView). */
 export interface MailRuleView {
   id: string;

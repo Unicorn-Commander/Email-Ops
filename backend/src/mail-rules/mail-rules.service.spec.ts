@@ -145,6 +145,123 @@ describe('MailRulesService', () => {
     expect(tx.mailRule.create).not.toHaveBeenCalled();
   });
 
+  it('accepts an ANY match and a grouped ALL-of-ANYs match, storing the parsed forms', async () => {
+    const { service, tx } = make();
+    const grouped = {
+      all: [
+        {
+          any: [
+            { field: 'fromDomain', op: 'equals', value: 'acme.test' },
+            { field: 'fromDomain', op: 'equals', value: 'other.test' },
+          ],
+        },
+        {
+          any: [
+            { field: 'subject', op: 'contains', value: 'receipt' },
+            { field: 'subject', op: 'contains', value: 'invoice' },
+          ],
+        },
+      ],
+    };
+    await service.create(WS, UC, 'mb-1', { name: 'Grouped', match: grouped, actions: [{ type: 'ARCHIVE' }] });
+    expect(tx.mailRule.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ match: grouped }),
+    });
+
+    await service.create(WS, UC, 'mb-1', {
+      name: 'Any',
+      match: { any: [{ field: 'from', op: 'equals', value: 'a@b.test' }] },
+      actions: [{ type: 'ARCHIVE' }],
+    });
+    expect(tx.mailRule.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ match: { any: [{ field: 'from', op: 'equals', value: 'a@b.test' }] } }),
+    });
+  });
+
+  it('rejects a match node that sets both "all" and "any" (create AND patch)', async () => {
+    const { service, tx } = make();
+    const both = {
+      all: [{ field: 'from', op: 'contains', value: 'a' }],
+      any: [{ field: 'subject', op: 'contains', value: 'b' }],
+    };
+    await expect(
+      service.create(WS, UC, 'mb-1', { name: 'x', match: both, actions: [{ type: 'ARCHIVE' }] }),
+    ).rejects.toThrow('match node must use either "all" or "any", not both');
+    // Same fence on a nested group.
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'x',
+        match: { all: [both] },
+        actions: [{ type: 'ARCHIVE' }],
+      }),
+    ).rejects.toThrow('match node must use either "all" or "any", not both');
+    await expect(service.update(WS, UC, 'mb-1', 'rule-1', { match: both })).rejects.toThrow(
+      'match node must use either "all" or "any", not both',
+    );
+    expect(tx.mailRule.create).not.toHaveBeenCalled();
+    expect(tx.mailRule.update).not.toHaveBeenCalled();
+  });
+
+  it('caps the match tree: ≤5 groups, ≤10 conditions per group / top level', async () => {
+    const { service, tx } = make();
+    const cond = (value: string) => ({ field: 'subject' as const, op: 'contains' as const, value });
+    const group = (value: string) => ({ any: [cond(value)] });
+
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'too many groups',
+        match: { all: Array.from({ length: 6 }, (_, i) => group(`g${i}`)) },
+        actions: [{ type: 'ARCHIVE' }],
+      }),
+    ).rejects.toThrow('match supports at most 5 groups.');
+
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'too many top-level conditions',
+        match: { all: Array.from({ length: 11 }, (_, i) => cond(`c${i}`)) },
+        actions: [{ type: 'ARCHIVE' }],
+      }),
+    ).rejects.toThrow('match supports at most 10 conditions per group.');
+
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'too many grouped conditions',
+        match: { all: [{ any: Array.from({ length: 11 }, (_, i) => cond(`c${i}`)) }] },
+        actions: [{ type: 'ARCHIVE' }],
+      }),
+    ).rejects.toThrow('match supports at most 10 conditions per group.');
+
+    // At the caps exactly, the rule is accepted.
+    await service.create(WS, UC, 'mb-1', {
+      name: 'at cap',
+      match: { all: Array.from({ length: 5 }, (_, i) => group(`g${i}`)) },
+      actions: [{ type: 'ARCHIVE' }],
+    });
+    expect(tx.mailRule.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects group-in-group nesting and empty groups with clear messages', async () => {
+    const { service, tx } = make();
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'too deep',
+        match: { all: [{ any: [{ all: [{ field: 'from', op: 'contains', value: 'a' }] }] }] },
+        actions: [{ type: 'ARCHIVE' }],
+      }),
+    ).rejects.toThrow('match groups nest one level deep — a group may contain only conditions');
+
+    // An empty group beside a real condition is a rule that can NEVER match
+    // (empty ANY matches nothing) — refuse it loudly instead of storing it.
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'dead group',
+        match: { all: [{ field: 'from', op: 'contains', value: 'a' }, { any: [] }] },
+        actions: [{ type: 'ARCHIVE' }],
+      }),
+    ).rejects.toThrow('match groups must contain at least one condition');
+    expect(tx.mailRule.create).not.toHaveBeenCalled();
+  });
+
   it('rejects LABEL actions (not supported yet)', async () => {
     const { service } = make();
     await expect(

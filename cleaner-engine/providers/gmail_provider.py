@@ -444,6 +444,46 @@ class GmailProvider(EmailProvider):
             changed += len(batch)
         return changed
 
+    def batch_spam(self, message_ids: List[str]) -> int:
+        """Report messages as spam: add SPAM, drop INBOX (a label edit, like trash).
+
+        Returns count changed.
+        """
+        changed = 0
+        for i in range(0, len(message_ids), 100):
+            batch = message_ids[i:i + 100]
+            self.service.users().messages().batchModify(
+                userId='me',
+                body={
+                    'ids': batch,
+                    'addLabelIds': ['SPAM'],
+                    'removeLabelIds': ['INBOX'],
+                },
+            ).execute()
+            changed += len(batch)
+        return changed
+
+    def batch_restore_inbox(self, message_ids: List[str]) -> int:
+        """Restore messages to the inbox: add INBOX, drop SPAM + TRASH.
+
+        ``batch_trash`` trashes by ADDING the TRASH label (batchModify, not the
+        messages.trash endpoint), so the symmetric restore REMOVES it here — no
+        separate untrash call needed. Returns count changed.
+        """
+        changed = 0
+        for i in range(0, len(message_ids), 100):
+            batch = message_ids[i:i + 100]
+            self.service.users().messages().batchModify(
+                userId='me',
+                body={
+                    'ids': batch,
+                    'addLabelIds': ['INBOX'],
+                    'removeLabelIds': ['SPAM', 'TRASH'],
+                },
+            ).execute()
+            changed += len(batch)
+        return changed
+
     def export_messages(self, message_ids: List[str]):
         for message_id in message_ids:
             msg = self.service.users().messages().get(

@@ -17,7 +17,7 @@ import {
   StalwartUploadResult,
 } from '../stalwart/stalwart.types';
 import { EmailService } from './email.service';
-import { AgentAutonomyLevel } from '@prisma/client';
+import { AgentAutonomyLevel, MessageDisposition } from '@prisma/client';
 import { TEST_DATABASE_URL } from '../../test/test-db';
 
 /**
@@ -58,6 +58,15 @@ class FakeStalwart extends StalwartPort {
   async moveThreadToMailbox(): Promise<boolean> {
     return false;
   }
+  async moveThreadToFolder(): Promise<boolean> {
+    return false;
+  }
+  async setThreadFlags(): Promise<boolean> {
+    return false;
+  }
+  async emptyFolder(): Promise<number | null> {
+    return null;
+  }
   async listFolders(): Promise<never[]> {
     return [];
   }
@@ -91,8 +100,9 @@ class FakeStalwart extends StalwartPort {
   ): Promise<StalwartFolderThreadsResult> {
     return { threads: [] };
   }
+  public threadDetails: StalwartMessageDetail[] = [];
   async getThreadDetail(): Promise<StalwartMessageDetail[]> {
-    return [];
+    return this.threadDetails;
   }
   async setThreadRead(): Promise<boolean> {
     return true;
@@ -556,7 +566,7 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
         subject: 'Full payload',
         body: 'plain body',
         bodyHtml: '<p>rich body</p>',
-        attachments: [{ blobId: 'blob-9', name: 'deck.pdf', type: 'application/pdf' }],
+        attachments: [{ blob_id: 'blob-9', name: 'deck.pdf', type: 'application/pdf' }],
         mode: 'draft',
         externalSource: 'customer-ops',
         externalRef: ref,
@@ -620,6 +630,107 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
     });
   });
 
+  describe('thread disposition — external (Gmail/M365) provider reconciliation', () => {
+    // An external HUMAN mailbox owned by the caller, alongside the sovereign
+    // desk@ box — moveThreadToFolderAcrossMailboxes must fall THROUGH the
+    // sovereign box (FakeStalwart.moveThreadToFolder → false) to the provider.
+    beforeAll(async () => {
+      await prisma.mailboxAccount.create({
+        data: {
+          workspaceId: WS,
+          emailAddress: 'me.external@gmail.test',
+          displayName: 'Me (Gmail)',
+          provider: 'gmail',
+          kind: 'gmail',
+          ownerKind: 'HUMAN',
+          ownerKey: UC_UID,
+          postmarkLane: false,
+        },
+      });
+    });
+
+    /** An EmailService whose MailProviderPort handles gmail boxes via jest mocks. */
+    function externalService(overrides: Record<string, unknown> = {}) {
+      const mailProvider = {
+        handles: (mb: { provider: string }) => mb.provider === 'gmail',
+        listInbox: async () => [],
+        listThreadMessages: async () => [],
+        send: async () => ({ accepted: false, providerMessageId: null, threadId: null, reason: 'test' }),
+        archiveThread: jest.fn().mockResolvedValue(false),
+        trashThread: jest.fn().mockResolvedValue(false),
+        spamThread: jest.fn().mockResolvedValue(false),
+        restoreThreadToInbox: jest.fn().mockResolvedValue(false),
+        setThreadRead: jest.fn().mockResolvedValue(false),
+        resolveOwnAddress: async () => null,
+        ...overrides,
+      };
+      return {
+        mailProvider,
+        service: new EmailService(prisma, stalwart, connectedAccounts, mailProvider as any),
+      };
+    }
+
+    it('SPAM reconciles the REAL external mailbox (spamThread) and writes the overlay', async () => {
+      const threadId = `ext-spam-${Date.now()}`;
+      const { mailProvider, service: svc } = externalService({
+        spamThread: jest.fn().mockResolvedValue(true),
+      });
+
+      const out = await svc.applyThreadDisposition(WS, UC_UID, threadId, MessageDisposition.SPAM);
+
+      expect(out.moved).toBe(true);
+      expect(out.disposition).toBe(MessageDisposition.SPAM);
+      expect(mailProvider.spamThread).toHaveBeenCalledWith(
+        expect.objectContaining({ emailAddress: 'me.external@gmail.test' }),
+        threadId,
+      );
+      // The dispatch is verb-exact: no other triage verb fired.
+      expect(mailProvider.archiveThread).not.toHaveBeenCalled();
+      expect(mailProvider.trashThread).not.toHaveBeenCalled();
+      expect(mailProvider.restoreThreadToInbox).not.toHaveBeenCalled();
+      const row = await prisma.threadDisposition.findUnique({
+        where: { workspaceId_threadId: { workspaceId: WS, threadId } },
+      });
+      expect(row?.disposition).toBe(MessageDisposition.SPAM);
+    });
+
+    it('INBOX (restore) reconciles via restoreThreadToInbox and writes the overlay', async () => {
+      const threadId = `ext-restore-${Date.now()}`;
+      const { mailProvider, service: svc } = externalService({
+        restoreThreadToInbox: jest.fn().mockResolvedValue(true),
+      });
+
+      const out = await svc.applyThreadDisposition(WS, UC_UID, threadId, MessageDisposition.INBOX);
+
+      expect(out.moved).toBe(true);
+      expect(out.disposition).toBe(MessageDisposition.INBOX);
+      expect(mailProvider.restoreThreadToInbox).toHaveBeenCalledWith(
+        expect.objectContaining({ emailAddress: 'me.external@gmail.test' }),
+        threadId,
+      );
+      expect(mailProvider.spamThread).not.toHaveBeenCalled();
+      const row = await prisma.threadDisposition.findUnique({
+        where: { workspaceId_threadId: { workspaceId: WS, threadId } },
+      });
+      expect(row?.disposition).toBe(MessageDisposition.INBOX);
+    });
+
+    it('degrades clean: a throwing provider verb → moved:false but the overlay is STILL written', async () => {
+      const threadId = `ext-spam-broken-${Date.now()}`;
+      const { service: svc } = externalService({
+        spamThread: jest.fn().mockRejectedValue(new Error('provider 500')),
+      });
+
+      const out = await svc.applyThreadDisposition(WS, UC_UID, threadId, MessageDisposition.SPAM);
+
+      expect(out.moved).toBe(false);
+      const row = await prisma.threadDisposition.findUnique({
+        where: { workspaceId_threadId: { workspaceId: WS, threadId } },
+      });
+      expect(row?.disposition).toBe(MessageDisposition.SPAM);
+    });
+  });
+
   describe('reads (degrade-clean; SoR union)', () => {
     it('list_threads_with_contact returns the workspace’s own outbound thread even with the engine empty', async () => {
       const ref = `read-${Date.now()}`;
@@ -656,8 +767,9 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       });
       const row = await prisma.emailMessage.findUniqueOrThrow({ where: { id: sent.id } });
       const tid = row.threadId!;
-      // A live message in the SAME thread, different id.
-      stalwart.messages = [
+      // A live message in the SAME thread, different id (webmail wave: the live
+      // half of the merge reads the FULL thread detail, not the previews list).
+      stalwart.threadDetails = [
         {
           id: 'live-msg-1',
           threadId: tid,
@@ -667,6 +779,15 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
           sentAt: '2026-06-03T00:00:00Z',
           preview: 'a reply preview',
           direction: 'received',
+          cc: [],
+          bcc: [],
+          htmlBody: null,
+          textBody: null,
+          messageIdHeader: null,
+          references: null,
+          isUnread: false,
+          flagged: false,
+          attachments: [],
         },
       ];
       const messages = await service.listThreadMessages(WS, UC_UID, tid);

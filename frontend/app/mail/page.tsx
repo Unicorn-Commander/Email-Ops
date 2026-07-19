@@ -24,7 +24,6 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
-  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -57,6 +56,7 @@ import {
 import { ReplyComposer, type ReplyComposerHandle } from '@/components/mail/ReplyComposer';
 import { ComposeDialog, type ComposeDialogPrefill } from '@/components/mail/ComposeDialog';
 import { SnoozedDialog, ScheduledDialog } from '@/components/mail/ScheduleViews';
+import { WindowedThreadList } from '@/components/mail/WindowedThreadList';
 import { schedulePresets as snoozePresets, formatScheduleWhen as formatSnoozeWhen } from '@/lib/scheduleTime';
 import { SendersDialog } from '@/components/mail/SendersDialog';
 import { MessageItem } from '@/components/mail/MessageItem';
@@ -2393,43 +2393,38 @@ function ConversationList({
           <EmptyList filter={filter} />
         ) : (
           <>
-            {(() => {
-              let prevBucket: string | null = null;
-              return threads.map((t) => {
-                const bucket = dateBucketKey(t.last_message_at);
-                const showHeader = bucket !== prevBucket;
-                prevBucket = bucket;
-                return (
-                  <Fragment key={t.id}>
-                    {showHeader && (
-                      <div className="sticky top-0 z-[1] border-b border-subtle bg-surface-base/85 px-3.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary backdrop-blur">
-                        {bucket}
-                      </div>
-                    )}
-                    <ConversationRow
-                      thread={t}
-                      active={t.id === selectedThreadId}
-                      cursor={t.id === cursorThreadId}
-                      unified={unified}
-                      selectable={selectable}
-                      checked={selected.has(t.id)}
-                      anySelected={selected.size > 0}
-                      onToggle={() => onToggleSelect(t.id)}
-                      onSelect={() => onSelect(t)}
-                      draft={draftForThread(t)}
-                      selfAddresses={selfAddresses}
-                      onQuickTriage={onQuickTriage}
-                      onQuickMark={onQuickMark}
-                      onToggleFlag={onToggleFlag}
-                      refCb={(el) => {
-                        if (el) rowRefs.current?.set(t.id, el);
-                        else rowRefs.current?.delete(t.id);
-                      }}
-                    />
-                  </Fragment>
-                );
-              });
-            })()}
+            <WindowedThreadList
+              items={threads}
+              pinnedIds={[cursorThreadId, selectedThreadId]}
+              bucketKey={(t) => dateBucketKey(t.last_message_at)}
+              renderHeader={(bucket) => (
+                <div className="sticky top-0 z-[1] border-b border-subtle bg-surface-base/85 px-3.5 py-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-tertiary backdrop-blur">
+                  {bucket}
+                </div>
+              )}
+              renderRow={(t) => (
+                <ConversationRow
+                  thread={t}
+                  active={t.id === selectedThreadId}
+                  cursor={t.id === cursorThreadId}
+                  unified={unified}
+                  selectable={selectable}
+                  checked={selected.has(t.id)}
+                  anySelected={selected.size > 0}
+                  onToggle={() => onToggleSelect(t.id)}
+                  onSelect={() => onSelect(t)}
+                  draft={draftForThread(t)}
+                  selfAddresses={selfAddresses}
+                  onQuickTriage={onQuickTriage}
+                  onQuickMark={onQuickMark}
+                  onToggleFlag={onToggleFlag}
+                  refCb={(el) => {
+                    if (el) rowRefs.current?.set(t.id, el);
+                    else rowRefs.current?.delete(t.id);
+                  }}
+                />
+              )}
+            />
             {hasMore && (
               <div className="p-2">
                 <Button variant="secondary" size="sm" block disabled={loadingMore} onClick={onLoadMore}>

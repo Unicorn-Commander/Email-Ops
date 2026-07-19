@@ -23,6 +23,13 @@
  *     switch AgentControlsService toggles and composeEmail enforces) AND the
  *     per-agent pause, both checked BEFORE any engine/LLM work so a paused
  *     fleet does zero external calls.
+ *   - Automated senders are SUPPRESSED: a no-reply/do-not-reply/bounce/
+ *     postmaster style localpart never gets a drafted reply — nobody reads
+ *     those, and each one pollutes the approval queue (isAutomatedSender).
+ *   - LLM failures get ONE spaced retry: a single-slot local model under
+ *     near-simultaneous drafts fails transiently, and unretried those inbound
+ *     messages were silently never drafted. After the second failure the
+ *     degrade-clean rule below applies unchanged.
  *   - DEGRADE-CLEAN: this service never throws. Any failure (engine dormant,
  *     LLM timeout, compose refusal) logs and returns null — a draft failure
  *     must never block the watcher's triage or cursor advance.
@@ -50,6 +57,42 @@ const MAX_DIGEST_CHARS = 6000;
 
 /** Hard cap on the LLM turn (belt-and-braces over the engine client's own timeout). */
 const LLM_TIMEOUT_MS = 30_000;
+
+/**
+ * The LLM turn gets ONE retry (2 attempts total) with a short pause between: a
+ * single-slot local llama server under near-simultaneous drafts fails
+ * transiently (in-band 'ai_unavailable:' / null / a hard-cap throw), and
+ * without the retry those inbound messages were silently never drafted.
+ */
+const LLM_MAX_ATTEMPTS = 2;
+const LLM_RETRY_DELAY_MS = 2_500;
+
+/**
+ * Localparts that mark an AUTOMATED sender (no human reads the reply): the
+ * no-reply/do-not-reply spellings, tagged noreply forms (noreply+x / noreply.x
+ * / noreply-x), and bounce plumbing (bounce/bounces/mailer-daemon/postmaster).
+ * Anchored on the WHOLE localpart; isAutomatedSender adds the plain
+ * 'noreply'/'no-reply' PREFIX catch on top (noreply123@, no-reply-alerts@, …).
+ */
+const AUTOMATED_LOCALPART_RE =
+  /^(no-?reply|do-?not-?reply|donotreply|noreply[-+.].*|bounce|bounces|mailer-daemon|postmaster)$/i;
+
+/**
+ * True when an inbound from-address is an automated/no-reply sender. Drafting
+ * a reply to one is pointless approval-queue pollution (live finding: agents
+ * drafted replies to noreply@ notification mail), so the runtime skips these
+ * before doing ANY work. Case-insensitive on the localpart (the part before
+ * '@'; an address with no '@' is treated as all-localpart).
+ */
+export function isAutomatedSender(fromAddress: string): boolean {
+  const localpart = fromAddress.trim().toLowerCase().split('@')[0] ?? '';
+  if (!localpart) return false;
+  return (
+    AUTOMATED_LOCALPART_RE.test(localpart) ||
+    localpart.startsWith('noreply') ||
+    localpart.startsWith('no-reply')
+  );
+}
 
 /** The AGENT mailbox the watcher polled (its shape in the watcher's sweep). */
 export interface AgentReplyMailboxRef {
@@ -128,6 +171,15 @@ export class AgentReplyService {
         );
         return null;
       }
+      // Automated senders (noreply@, do-not-reply@, bounce plumbing) never get
+      // a drafted reply — nobody reads it, and each one pollutes the approval
+      // queue. Checked BEFORE the gate read and the LLM so suppression is free.
+      if (isAutomatedSender(sender)) {
+        this.logger.debug(
+          `agent-reply skip: automated sender '${sender}' on thread=${msg.threadId} (${agentMailbox.emailAddress})`,
+        );
+        return null;
+      }
 
       // Pause switches + agent identity in ONE fenced read. The workspace kill
       // switch is the SAME stored bit AgentControlsService toggles
@@ -142,7 +194,12 @@ export class AgentReplyService {
         return {
           agentsPaused: ws?.agentsPaused ?? false,
           workspaceName: ws?.displayName ?? workspaceId,
-          agent: await this.resolveAgentForMailbox(tx, workspaceId, agentMailbox.id),
+          agent: await this.resolveAgentForMailbox(
+            tx,
+            workspaceId,
+            agentMailbox.id,
+            agentMailbox.emailAddress,
+          ),
         };
       });
       if (gate.agentsPaused) {
@@ -176,36 +233,44 @@ export class AgentReplyService {
 
       // The LLM turn. /ai/chat frames `context` as an "Inbox context" JSON blob
       // and `message` as the user turn, so the drafting instruction rides in
-      // `message` and the thread digest rides in `context`. Timeout + null +
-      // the engine's in-band "ai_unavailable:" sentinel all degrade to skip.
+      // `message` and the thread digest rides in `context`. Every failure shape
+      // — a hard-cap throw, null, the engine's in-band "ai_unavailable:"
+      // sentinel, or an empty draft — gets the ONE spaced retry
+      // (LLM_MAX_ATTEMPTS) before degrading to skip.
       const instruction =
         `You are ${agentName}, an email agent for ${gate.workspaceName}. ` +
         'Draft a concise, professional reply to the latest message in the email thread ' +
         'provided in the context. Output ONLY the reply body text — no subject line, ' +
         'no signature placeholders, no commentary.';
-      let replyBody: string | null = null;
-      try {
-        replyBody = await withTimeout(
-          this.engine.chat(instruction, {
-            task: 'agent-reply-draft',
-            agent: agentName,
-            latest_message: {
-              from: sender,
-              subject: msg.subject ?? '(no subject)',
-              received_at: msg.receivedAt ?? null,
-            },
-            thread: digest,
-          }),
-          LLM_TIMEOUT_MS,
-          'agent-reply llm',
-        );
-      } catch (err) {
-        this.logger.debug(
-          `agent-reply LLM failed for thread=${msg.threadId} (${agentMailbox.emailAddress}): ${(err as Error).message}`,
-        );
-        return null;
+      let body = '';
+      for (let attempt = 1; attempt <= LLM_MAX_ATTEMPTS; attempt++) {
+        let replyBody: string | null = null;
+        try {
+          replyBody = await withTimeout(
+            this.engine.chat(instruction, {
+              task: 'agent-reply-draft',
+              agent: agentName,
+              latest_message: {
+                from: sender,
+                subject: msg.subject ?? '(no subject)',
+                received_at: msg.receivedAt ?? null,
+              },
+              thread: digest,
+            }),
+            LLM_TIMEOUT_MS,
+            'agent-reply llm',
+          );
+        } catch (err) {
+          this.logger.debug(
+            `agent-reply LLM failed (attempt ${attempt}/${LLM_MAX_ATTEMPTS}) for thread=${msg.threadId} ` +
+              `(${agentMailbox.emailAddress}): ${(err as Error).message}`,
+          );
+        }
+        body = (replyBody ?? '').trim();
+        // A usable draft ends the loop; any failure shape pauses once and retries.
+        if (body && !body.toLowerCase().startsWith('ai_unavailable')) break;
+        if (attempt < LLM_MAX_ATTEMPTS) await this.sleep(LLM_RETRY_DELAY_MS);
       }
-      const body = (replyBody ?? '').trim();
       if (!body || body.toLowerCase().startsWith('ai_unavailable')) {
         this.logger.debug(
           `agent-reply LLM unavailable/empty for thread=${msg.threadId} (${agentMailbox.emailAddress}) — nothing staged`,
@@ -249,13 +314,17 @@ export class AgentReplyService {
   /**
    * Resolve the registered agent bound to a mailbox: the AgentMailbox junction
    * (primary binding first — the agent whose From identity this mailbox is),
-   * falling back to the denormalized Agent.mailboxAccountId cache. Null when no
-   * active agent is resolvable (the caller drafts under runtime defaults).
+   * then the denormalized Agent.mailboxAccountId cache, then a SECOND CHANCE by
+   * naming convention — key == the mailbox localpart (perry@… ↔ key 'perry';
+   * live finding: a bindingless agent mailbox drafted as 'unregistered' even
+   * though the matching agent row existed). Null when no active agent is
+   * resolvable (the caller drafts under runtime defaults).
    */
   private async resolveAgentForMailbox(
     tx: WorkspaceTxClient,
     workspaceId: string,
     mailboxAccountId: string,
+    emailAddress: string,
   ): Promise<ResolvedAgent | null> {
     const select = { key: true, displayName: true, autonomyLevel: true, paused: true };
     const binding = await tx.agentMailbox.findFirst({
@@ -270,10 +339,27 @@ export class AgentReplyService {
       });
       if (agent) return agent;
     }
-    return tx.agent.findFirst({
+    const byCache = await tx.agent.findFirst({
       where: { workspaceId, mailboxAccountId, active: true },
       select,
     });
+    if (byCache) return byCache;
+    // Agent keys are canonical lowercase slugs, so match the lowercased
+    // localpart exactly (same fenced tx, workspace-scoped, active-only).
+    const localpart = emailAddress.trim().toLowerCase().split('@')[0] ?? '';
+    if (!localpart) return null;
+    return tx.agent.findFirst({
+      where: { workspaceId, key: localpart, active: true },
+      select,
+    });
+  }
+
+  /**
+   * The retry pause, isolated so unit tests can fake it (a spy/mock instead of
+   * a real 2.5s wait). Protected rather than private for exactly that reason.
+   */
+  protected sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /** "Re: <subject>" without stacking Re:s; a missing subject still threads. */

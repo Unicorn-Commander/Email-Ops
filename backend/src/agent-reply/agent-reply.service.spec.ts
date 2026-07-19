@@ -1,11 +1,12 @@
-import { AgentReplyService, AGENT_REPLY_SOURCE } from './agent-reply.service';
+import { AgentReplyService, AGENT_REPLY_SOURCE, isAutomatedSender } from './agent-reply.service';
 
 /**
  * Pure-unit coverage (no DB, no engines): flag gating, both pause switches, the
  * happy staging path (LLM digest → composeEmail mode:'draft' with the
- * idempotent external_ref + agent attribution), LLM failure modes, the
- * empty-thread-detail choice (STILL drafts), loop/sender guards, and the
- * never-throws backstop.
+ * idempotent external_ref + agent attribution), LLM failure modes + the ONE
+ * spaced retry, automated-sender (noreply) suppression, the localpart
+ * attribution second chance, the empty-thread-detail choice (STILL drafts),
+ * loop/sender guards, and the never-throws backstop.
  */
 describe('AgentReplyService', () => {
   const MAILBOX = { id: 'mb-agent', emailAddress: 'concierge@x.test', workspaceId: 'ws1' };
@@ -50,6 +51,8 @@ describe('AgentReplyService', () => {
     detail?: unknown[];
     chat?: jest.Mock;
     compose?: jest.Mock;
+    /** Full control of tx.agent.findFirst (attribution second-chance tests). */
+    agentFindFirst?: jest.Mock;
   }) {
     const workspaceFindUnique = jest
       .fn()
@@ -57,9 +60,9 @@ describe('AgentReplyService', () => {
     const bindingFindFirst = jest
       .fn()
       .mockResolvedValue(opts?.binding === undefined ? { agentId: 'a1' } : opts.binding);
-    const agentFindFirst = jest
-      .fn()
-      .mockResolvedValue(opts?.agent === undefined ? AGENT_ROW : opts.agent);
+    const agentFindFirst =
+      opts?.agentFindFirst ??
+      jest.fn().mockResolvedValue(opts?.agent === undefined ? AGENT_ROW : opts.agent);
     const tx = {
       workspace: { findUnique: workspaceFindUnique },
       agentMailbox: { findFirst: bindingFindFirst },
@@ -76,7 +79,9 @@ describe('AgentReplyService', () => {
       jest.fn().mockResolvedValue({ id: 'staged-1', thread_id: 'T1', status: 'pending_approval', mode: 'draft' });
     const email = { composeEmail: compose };
     const svc = new AgentReplyService(prisma as any, stalwart as any, engine as any, email as any);
-    return { svc, withWorkspace, getThreadDetail, chat, compose, agentFindFirst, bindingFindFirst };
+    // Fake the retry pause so LLM-failure tests don't really wait ~2.5s.
+    const sleep = jest.spyOn(svc as any, 'sleep').mockResolvedValue(undefined);
+    return { svc, withWorkspace, getThreadDetail, chat, compose, agentFindFirst, bindingFindFirst, sleep };
   }
 
   beforeEach(() => {
@@ -161,6 +166,52 @@ describe('AgentReplyService', () => {
     expect(sentinel.compose).not.toHaveBeenCalled();
   });
 
+  it('LLM retry: ONE spaced retry after an in-band failure — attempt 2 succeeds and stages', async () => {
+    const chat = jest
+      .fn()
+      .mockResolvedValueOnce('ai_unavailable: single-slot server busy')
+      .mockResolvedValueOnce('Second attempt draft.');
+    const { svc, compose, sleep } = make({ chat });
+    expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBe('staged-1');
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledWith(2500);
+    expect(compose).toHaveBeenCalledWith(
+      'ws1',
+      null,
+      expect.objectContaining({ body: 'Second attempt draft.', mode: 'draft' }),
+    );
+  });
+
+  it('LLM retry: a null first turn (engine dormant blip) is retried too', async () => {
+    const chat = jest.fn().mockResolvedValueOnce(null).mockResolvedValueOnce('Recovered.');
+    const { svc, compose } = make({ chat });
+    expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBe('staged-1');
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect(compose).toHaveBeenCalledTimes(1);
+  });
+
+  it('LLM retry: a thrown first attempt (hard-cap timeout) is retried, not fatal', async () => {
+    const chat = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('agent-reply llm timed out after 30000ms'))
+      .mockResolvedValueOnce('Back on line.');
+    const { svc, compose, sleep } = make({ chat });
+    expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBe('staged-1');
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(compose).toHaveBeenCalledTimes(1);
+  });
+
+  it('LLM retry exhausted: two failures → null, EXACTLY 2 attempts, nothing staged, no throw', async () => {
+    const chat = jest.fn().mockResolvedValue('ai_unavailable: still busy');
+    const { svc, compose, sleep } = make({ chat });
+    await expect(svc.draftReplyForInbound('ws1', MAILBOX, MSG)).resolves.toBeNull();
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(compose).not.toHaveBeenCalled();
+  });
+
   it('EMPTY thread detail STILL drafts (documented choice): digest falls back to the inbound sender/subject', async () => {
     const { svc, chat, compose } = make({ detail: [] });
     expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBe('staged-1');
@@ -178,6 +229,45 @@ describe('AgentReplyService', () => {
       'ws1',
       null,
       expect.objectContaining({ draftedBy: AGENT_REPLY_SOURCE, mode: 'draft' }),
+    );
+  });
+
+  it('attribution second chance: mailbox lookups miss → agent resolved by key == localpart', async () => {
+    // The live case: perry@magicunicorn.dev had no AgentMailbox row and no
+    // mailboxAccountId cache hit, but an agent with key 'perry' existed.
+    const perryBox = { id: 'mb-perry', emailAddress: 'perry@magicunicorn.dev', workspaceId: 'ws1' };
+    const agentFindFirst = jest.fn(async ({ where }: any) =>
+      where?.key === 'perry'
+        ? { key: 'perry', displayName: 'Perry', autonomyLevel: 'L1_APPROVE_TO_SEND', paused: false }
+        : null,
+    );
+    const { svc, compose } = make({ binding: null, agentFindFirst });
+    expect(await svc.draftReplyForInbound('ws1', perryBox, MSG)).toBe('staged-1');
+    // The localpart lookup stays workspace-fenced + active-only (same RLS pattern).
+    expect(agentFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ workspaceId: 'ws1', key: 'perry', active: true }),
+      }),
+    );
+    expect(compose).toHaveBeenCalledWith(
+      'ws1',
+      null,
+      expect.objectContaining({ draftedBy: 'perry' }),
+    );
+  });
+
+  it('attribution second chance MISS: no key match either → today\'s runtime fallback exactly', async () => {
+    const { svc, compose, agentFindFirst } = make({ binding: null, agent: null });
+    expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBe('staged-1');
+    // The localpart second chance WAS attempted (concierge@x.test → key 'concierge')…
+    expect(agentFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ key: 'concierge' }) }),
+    );
+    // …and with every lookup missing, the provenance-slug fallback is unchanged.
+    expect(compose).toHaveBeenCalledWith(
+      'ws1',
+      null,
+      expect.objectContaining({ draftedBy: AGENT_REPLY_SOURCE }),
     );
   });
 
@@ -200,6 +290,26 @@ describe('AgentReplyService', () => {
     ).toBeNull();
     expect(b.chat).not.toHaveBeenCalled();
     expect(b.compose).not.toHaveBeenCalled();
+  });
+
+  it('suppresses automated senders BEFORE any work: no gate read, no thread read, no LLM, no stage', async () => {
+    for (const from of [
+      'noreply@magicunicorn.dev',
+      'No-Reply@Billing.TEST',
+      'DoNotReply@x.test',
+      'noreply+tag@x.test',
+      'bounces@list.test',
+      'mailer-daemon@mta.test',
+    ]) {
+      const { svc, withWorkspace, getThreadDetail, chat, compose } = make();
+      expect(
+        await svc.draftReplyForInbound('ws1', MAILBOX, { ...MSG, fromAddress: from }),
+      ).toBeNull();
+      expect(withWorkspace).not.toHaveBeenCalled();
+      expect(getThreadDetail).not.toHaveBeenCalled();
+      expect(chat).not.toHaveBeenCalled();
+      expect(compose).not.toHaveBeenCalled();
+    }
   });
 
   it('missing subject still threads: subject becomes "Re: (no subject)"', async () => {
@@ -252,5 +362,51 @@ describe('AgentReplyService', () => {
     // Chronological order preserved; the LAST entry is the newest message.
     expect(context.thread[4].body).toContain('message number 7');
     expect(context.thread[0].body).toContain('message number 3');
+  });
+});
+
+/**
+ * The automated-sender classifier on its own: localpart-anchored,
+ * case-insensitive, plus the plain noreply/no-reply prefix catch.
+ */
+describe('isAutomatedSender', () => {
+  it.each([
+    'noreply@magicunicorn.dev',
+    'NoReply@MagicUnicorn.DEV',
+    'no-reply@x.test',
+    'NO-REPLY@x.test',
+    'donotreply@x.test',
+    'do-not-reply@x.test',
+    'DoNotReply@x.test',
+    'noreply+tag@x.test',
+    'noreply.billing@x.test',
+    'noreply-alerts@x.test',
+    'noreply123@x.test',
+    'no-reply-svc@x.test',
+    'bounce@x.test',
+    'bounces@x.test',
+    'mailer-daemon@mta.test',
+    'MAILER-DAEMON@mta.test',
+    'postmaster@x.test',
+  ])('flags %s as automated', (addr) => {
+    expect(isAutomatedSender(addr)).toBe(true);
+  });
+
+  it.each([
+    'human@q.test',
+    'perry@magicunicorn.dev',
+    'reply@x.test',
+    'replies@x.test',
+    'norepl@x.test',
+    'bounced@x.test',
+    'not-a-reply@x.test',
+    'support@x.test',
+  ])('leaves %s alone', (addr) => {
+    expect(isAutomatedSender(addr)).toBe(false);
+  });
+
+  it('empty / whitespace-only input is not automated (the no-sender guard owns that skip)', () => {
+    expect(isAutomatedSender('')).toBe(false);
+    expect(isAutomatedSender('   ')).toBe(false);
   });
 });

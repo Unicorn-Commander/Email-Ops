@@ -153,6 +153,126 @@ describe('rule engine', () => {
     expect(evaluateRules(rules, msg)).toEqual([action('MOVE_TO_FOLDER', 'Finance')]);
   });
 
+  it('supports nested OR-of-ANDs (any of grouped alls)', () => {
+    const rules = [
+      rule(
+        'nested-any',
+        1,
+        {
+          any: [
+            {
+              all: [
+                { field: 'fromDomain', op: 'equals', value: 'other.com' },
+                { field: 'subject', op: 'contains', value: 'invoice' },
+              ],
+            },
+            {
+              all: [
+                { field: 'fromDomain', op: 'equals', value: 'acme.com' },
+                { field: 'subject', op: 'contains', value: 'invoice' },
+              ],
+            },
+          ],
+        },
+        [action('ARCHIVE')],
+      ),
+    ];
+
+    expect(evaluateRules(rules, msg)).toEqual([action('ARCHIVE')]);
+  });
+
+  it('mixes conditions and groups under one top-level node', () => {
+    const rules = [
+      rule(
+        'mixed',
+        1,
+        {
+          all: [
+            { field: 'from', op: 'contains', value: 'alice' },
+            {
+              any: [
+                { field: 'subject', op: 'contains', value: 'receipt' },
+                { field: 'subject', op: 'contains', value: 'invoice' },
+              ],
+            },
+          ],
+        },
+        [action('MARK_READ')],
+      ),
+    ];
+
+    expect(evaluateRules(rules, msg)).toEqual([action('MARK_READ')]);
+  });
+
+  it('a node carrying BOTH all and any requires both clauses to hold (legacy rows)', () => {
+    const both = (allValue: string, anyValue: string): CompiledRule['match'] => ({
+      all: [{ field: 'from', op: 'contains', value: allValue }],
+      any: [{ field: 'subject', op: 'contains', value: anyValue }],
+    });
+
+    // Both clauses hold → match.
+    expect(
+      evaluateRules([rule('r1', 1, both('alice', 'invoice'), [action('MARK_READ')])], msg),
+    ).toEqual([action('MARK_READ')]);
+    // The any-side fails → no match (it is never silently ignored).
+    expect(evaluateRules([rule('r2', 1, both('alice', 'missing'), [action('MARK_READ')])], msg)).toEqual([]);
+    // The all-side fails → no match.
+    expect(evaluateRules([rule('r3', 1, both('nobody', 'invoice'), [action('MARK_READ')])], msg)).toEqual([]);
+  });
+
+  it('an EMPTY group matches NOTHING — it sinks its parent ALL and adds nothing to a parent ANY', () => {
+    // A valid condition alongside an empty ANY group: the group contributes
+    // false, so the enclosing ALL can never hold.
+    const sunkAll = [
+      rule(
+        'sunk',
+        1,
+        { all: [{ field: 'from', op: 'contains', value: 'alice' }, { any: [] }] },
+        [action('TRASH')],
+      ),
+    ];
+    expect(evaluateRules(sunkAll, msg)).toEqual([]);
+
+    // Under ANY, an empty ALL group is just a false branch — the sibling
+    // condition still carries the match.
+    const carried = [
+      rule(
+        'carried',
+        1,
+        { any: [{ all: [] }, { field: 'subject', op: 'contains', value: 'invoice' }] },
+        [action('ARCHIVE')],
+      ),
+    ];
+    expect(evaluateRules(carried, msg)).toEqual([action('ARCHIVE')]);
+  });
+
+  it('still evaluates legacy trees nested deeper than the one write-time group level', () => {
+    const rules = [
+      rule(
+        'deep',
+        1,
+        {
+          all: [
+            {
+              any: [
+                {
+                  all: [
+                    { field: 'from', op: 'contains', value: 'alice' },
+                    { field: 'subject', op: 'contains', value: 'invoice' },
+                  ],
+                },
+                { field: 'fromDomain', op: 'equals', value: 'other.com' },
+              ],
+            },
+          ],
+        },
+        [action('MOVE_TO_FOLDER', 'Deep')],
+      ),
+    ];
+
+    expect(evaluateRules(rules, msg)).toEqual([action('MOVE_TO_FOLDER', 'Deep')]);
+  });
+
   it('runs matched rules by ascending priority', () => {
     const rules = [
       rule('later', 20, { all: [{ field: 'subject', op: 'contains', value: 'invoice' }] }, [

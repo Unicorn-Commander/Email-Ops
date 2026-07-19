@@ -41,6 +41,19 @@ import {
 export class SmsService {
   private readonly logger = new Logger(SmsService.name);
 
+  /**
+   * Provenance sources trusted to send WITHOUT a registered agent — the SAME
+   * knob EmailService uses (one first-party federation allowlist for both
+   * channels), so an unregistered-but-trusted cockpit (e.g. Customer-Ops) sends
+   * while an unknown/spoofed source is fail-safed to a staged draft.
+   */
+  private readonly trustedComposeSources = new Set(
+    (process.env.EMAIL_OPS_TRUSTED_COMPOSE_SOURCES ?? 'email-ops-client,customer-ops')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly twilio: TwilioPort,
@@ -100,11 +113,16 @@ export class SmsService {
 
       // The autonomy dial — the SAME pure decision email uses. (For SMS the
       // recipient is a phone, which has no internal domain, so the L2
-      // external-recipient guard defaults to the SAFE side: approval.)
+      // external-recipient guard defaults to the SAFE side: approval.) For an
+      // UNREGISTERED provenance, a 'send' is honored only from a TRUSTED
+      // first-party source — mirroring composeEmail's injection guard.
+      const trustedUnregisteredSend =
+        !agent && (agentKey == null || this.trustedComposeSources.has(agentKey));
       const decision = decideComposeMode({
         requestedMode: input.mode === 'draft' ? 'draft' : 'send',
         agent,
         toAddress: input.toPhoneNumber,
+        trustedUnregisteredSend,
       });
       const mode = decision.mode === 'draft' ? SmsMode.DRAFT : SmsMode.SEND;
       if (decision.coerced) {

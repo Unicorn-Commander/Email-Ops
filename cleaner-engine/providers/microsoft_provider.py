@@ -503,6 +503,38 @@ class MicrosoftGraphProvider(EmailProvider):
             return resp.json()['id']
         return self._graph_get('/me/mailFolders/archive')['id']
 
+    def _batch_move_to_folder(self, message_ids: List[str], well_known_folder: str) -> int:
+        """Graph $batch move of messages into a well-known folder. Returns count moved."""
+        moved = 0
+        folder_id = self._graph_get(f'/me/mailFolders/{well_known_folder}')['id']
+        for i in range(0, len(message_ids), 20):
+            batch = message_ids[i:i + 20]
+            batch_body = {
+                'requests': [
+                    {
+                        'id': str(j),
+                        'method': 'POST',
+                        'url': f'/me/messages/{mid}/move',
+                        'body': {'destinationId': folder_id},
+                        'headers': {'Content-Type': 'application/json'},
+                    }
+                    for j, mid in enumerate(batch)
+                ]
+            }
+            resp = self._graph_post('/$batch', json_body=batch_body)
+            if resp.status_code == 200:
+                results = resp.json().get('responses', [])
+                moved += sum(1 for r in results if r.get('status', 0) in (200, 201))
+        return moved
+
+    def batch_spam(self, message_ids: List[str]) -> int:
+        """Move messages to the Junk Email folder (a folder MOVE, like trash)."""
+        return self._batch_move_to_folder(message_ids, 'junkemail')
+
+    def batch_restore_inbox(self, message_ids: List[str]) -> int:
+        """Move messages back to the Inbox folder (restore from junk/trash/archive)."""
+        return self._batch_move_to_folder(message_ids, 'inbox')
+
     def batch_set_read(self, message_ids: List[str], read: bool = True) -> int:
         """PATCH isRead on each message (Graph $batch). Returns count changed."""
         changed = 0

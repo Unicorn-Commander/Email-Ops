@@ -828,11 +828,11 @@ export class EmailService {
    * move half). Like the read toggle, the caller path is workspace-level while
    * thread ids are per-account — so try each readable mailbox until one owns the
    * thread. Sovereign boxes move via James (JMAP Email/set); EXTERNAL (Gmail/M365)
-   * boxes reconcile ARCHIVE/TRASH through the MailProviderPort so the triage is
-   * REAL in the provider mailbox too (SPAM and INBOX-restore have no provider verb
-   * yet and stay overlay-only there). Returns true when a real move happened; false
-   * when no account knew the thread. Best-effort: never throws, so a degraded
-   * engine/provider can't block the overlay write that follows.
+   * boxes reconcile ARCHIVE/TRASH/SPAM/INBOX-restore through the MailProviderPort
+   * so the triage is REAL in the provider mailbox too. Returns true when a real
+   * move happened; false when no account knew the thread. Best-effort: never
+   * throws, so a degraded engine/provider can't block the overlay write that
+   * follows.
    */
   async moveThreadToFolderAcrossMailboxes(
     workspaceId: string,
@@ -859,6 +859,18 @@ export class EmailService {
           ) {
             return true;
           }
+          if (
+            disposition === MessageDisposition.SPAM &&
+            (await this.mailProvider.spamThread(mb, threadId))
+          ) {
+            return true;
+          }
+          if (
+            disposition === MessageDisposition.INBOX &&
+            (await this.mailProvider.restoreThreadToInbox(mb, threadId))
+          ) {
+            return true;
+          }
         } catch {
           // degrade-clean: try the next mailbox
         }
@@ -877,8 +889,8 @@ export class EmailService {
    * Apply a MANUAL thread disposition (reader / bulk-bar Archive・Trash・Spam・
    * Inbox) so the triage is REAL, not just an overlay tag: reconcile the actual
    * mailbox — James (Email/set move) for sovereign boxes, the provider port
-   * (Gmail/M365 archive/trash) for external ones — AND write the overlay in one
-   * step. Without the move, the thread stays in the real inbox and reappears on
+   * (Gmail/M365 archive/trash/spam/inbox-restore) for external ones — AND write
+   * the overlay in one step. Without the move, the thread stays in the real inbox and reappears on
    * the next live refetch (the "triage undoes itself" bug). Best-effort move
    * (never throws); the overlay is ALWAYS written so the view is correct even if
    * the engine/provider is briefly unreachable.
@@ -961,7 +973,10 @@ export class EmailService {
     for (const item of raw) {
       if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
       const a = item as Record<string, unknown>;
-      const blobId = String(a.blobId ?? '');
+      // The stage path persists the ComposeInput shape verbatim (`blob_id`,
+      // wire-style); older rows carried camelCase. Accept EITHER so no staged
+      // draft ever re-sends without the attachments the approver reviewed.
+      const blobId = String(a.blobId ?? a.blob_id ?? '');
       if (!blobId) continue;
       out.push({
         blobId,

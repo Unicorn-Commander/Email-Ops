@@ -409,6 +409,28 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
     );
   }
 
+  async spamMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>(
+      `/mail/threads/${encodeURIComponent(threadId)}/spam`,
+      { provider, credentials },
+    );
+  }
+
+  async restoreMailThreadToInbox(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>(
+      `/mail/threads/${encodeURIComponent(threadId)}/inbox`,
+      { provider, credentials },
+    );
+  }
+
   async setMailThreadRead(
     provider: 'gmail' | 'microsoft',
     credentials: Record<string, unknown>,

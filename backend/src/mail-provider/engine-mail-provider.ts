@@ -124,6 +124,24 @@ export class EngineMailProvider extends MailProviderPort {
     return res?.ok === true;
   }
 
+  async spamThread(mailbox: MailboxAccount, threadId: string): Promise<boolean> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return false;
+    const res = await this.engine.spamMailThread(auth.provider, auth.credentials, threadId);
+    return res?.ok === true;
+  }
+
+  async restoreThreadToInbox(mailbox: MailboxAccount, threadId: string): Promise<boolean> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return false;
+    const res = await this.engine.restoreMailThreadToInbox(
+      auth.provider,
+      auth.credentials,
+      threadId,
+    );
+    return res?.ok === true;
+  }
+
   async setThreadRead(mailbox: MailboxAccount, threadId: string, read: boolean): Promise<boolean> {
     const auth = await this.authFor(mailbox);
     if (!auth) return false;

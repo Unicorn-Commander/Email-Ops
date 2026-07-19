@@ -26,11 +26,18 @@ export interface RuleCondition {
   value: string;
 }
 
+/** How a node combines its children: every one must hold, or at least one. */
+export type RuleMatchMode = 'all' | 'any';
+
 /**
  * A match-tree node: `all` = every child must match (AND), `any` = at least
- * one must (OR). Children may nest further nodes. The simple builder UI only
- * ever EMITS `{ all: [conditions] }`; any other shape renders as "advanced
- * matching" and is replaced wholesale when edited there.
+ * one must (OR). Children are leaf conditions or ONE level of nested group
+ * nodes (`{ all: [{ any: [...] }, …] }` = AND-of-ORs, and vice versa). The
+ * server accepts exactly one mode per node on write, ≤5 groups per rule, and
+ * ≤10 conditions per group; an empty clause matches NOTHING. The builder UI
+ * EMITS the single-mode flat shape (`{ all: [conditions] }` or
+ * `{ any: [conditions] }`); grouped shapes render as "advanced matching" and
+ * are replaced wholesale when edited there.
  */
 export interface MatchNode {
   all?: (RuleCondition | MatchNode)[];
@@ -88,6 +95,8 @@ export interface MailRulesResponse {
 /* Server-enforced limits, mirrored here so forms can validate inline. */
 export const RULE_NAME_MAX = 120;
 export const MAX_RULES_PER_MAILBOX = 100;
+export const MAX_MATCH_GROUPS = 5;
+export const MAX_MATCH_CONDITIONS_PER_GROUP = 10;
 
 const seg = encodeURIComponent;
 
@@ -146,19 +155,25 @@ export function isRuleCondition(node: RuleCondition | MatchNode): node is RuleCo
   return typeof c.field === 'string' && typeof c.op === 'string' && typeof c.value === 'string';
 }
 
+/** A match the simple builder can edit: ONE mode over flat leaf conditions. */
+export interface SimpleMatch {
+  mode: RuleMatchMode;
+  conditions: RuleCondition[];
+}
+
 /**
- * Flatten a match tree into the simple all-of-conditions list the builder
- * edits, or `null` when the tree doesn't fit that shape (any-groups or nested
- * nodes) — the "advanced matching" case.
+ * Flatten a match tree into the single-mode condition list the builder edits,
+ * or `null` when the tree doesn't fit that shape (nested groups, or a node
+ * carrying both `all` and `any`) — the "advanced matching" case.
  */
-export function flattenAllConditions(match: MatchNode): RuleCondition[] | null {
-  if (match.any && match.any.length > 0) return null;
-  const out: RuleCondition[] = [];
-  for (const child of match.all ?? []) {
+export function flattenSimpleMatch(match: MatchNode): SimpleMatch | null {
+  if (match.all && match.any) return null;
+  const conditions: RuleCondition[] = [];
+  for (const child of match.all ?? match.any ?? []) {
     if (!isRuleCondition(child)) return null;
-    out.push(child);
+    conditions.push(child);
   }
-  return out;
+  return { mode: match.any ? 'any' : 'all', conditions };
 }
 
 /** Count the leaf conditions anywhere in a match tree (for summaries). */

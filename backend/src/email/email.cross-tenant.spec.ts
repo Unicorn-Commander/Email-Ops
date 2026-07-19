@@ -28,6 +28,38 @@ const fakeMailProvider = {
 const DB_URL = TEST_DATABASE_URL;
 
 class FakeStalwart extends StalwartPort {
+  // Wave-5 port surface — degrade-clean no-ops (these RLS/webhook specs never exercise them).
+  async listFolderThreads() {
+    return { threads: [] };
+  }
+  async getThreadDetail() {
+    return [];
+  }
+  async setThreadRead(): Promise<boolean> {
+    return false;
+  }
+  async setThreadFlags(): Promise<boolean> {
+    return false;
+  }
+  async moveThreadToFolder(): Promise<boolean> {
+    return false;
+  }
+  async emptyFolder(): Promise<number | null> {
+    return null;
+  }
+  async getMailboxCounts(): Promise<null> {
+    return null;
+  }
+  async downloadBlob(): Promise<null> {
+    return null;
+  }
+  async getMessageHeaders(): Promise<null> {
+    return null;
+  }
+  async uploadBlob(): Promise<null> {
+    return null;
+  }
+
   async pollInbound(): Promise<null> {
     return null;
   }

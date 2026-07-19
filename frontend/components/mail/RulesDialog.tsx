@@ -7,12 +7,14 @@
  * the mailbox's rules on open (skeletons → list / empty / error), resets fully
  * on close, and applies row actions optimistically with truthful rollback.
  * Two views swap INLINE within one dialog — LIST (per-rule enabled switch,
- * edit, delete-with-confirm) and EDITOR (name + all-of conditions builder +
- * a destination-and-flags action panel). The editor deliberately speaks the
- * SIMPLE shape only: `{ all: [conditions] }` plus [destination?, MARK_READ?,
- * STOP?]. A rule whose match doesn't fit (any-groups / nested nodes) is
- * labelled "advanced matching", and the editor states — before it happens —
- * that saving replaces those conditions wholesale.
+ * edit, delete-with-confirm) and EDITOR (name + a conditions builder with an
+ * all/any mode toggle + a destination-and-flags action panel). The editor
+ * deliberately speaks the SIMPLE shape only: `{ all: [conditions] }` or
+ * `{ any: [conditions] }` plus [destination?, MARK_READ?, STOP?]. The backend
+ * additionally supports ONE level of nested groups; a rule whose match doesn't
+ * fit the flat shape (nested groups / mixed modes) is labelled "advanced
+ * matching", and the editor states — before it happens — that saving replaces
+ * those conditions wholesale.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -20,18 +22,20 @@ import { useRouter } from 'next/navigation';
 import { Button, Dialog, Input, Select, cn, useConfirm } from '@/components/ui';
 import { ApiError } from '@/lib/api';
 import {
+  MAX_MATCH_CONDITIONS_PER_GROUP,
   MAX_RULES_PER_MAILBOX,
   RULE_NAME_MAX,
   countConditions,
   createMailRule,
   deleteMailRule,
-  flattenAllConditions,
+  flattenSimpleMatch,
   listMailRules,
   updateMailRule,
   type MailRuleView,
   type MatchNode,
   type RuleAction,
   type RuleField,
+  type RuleMatchMode,
   type RuleOp,
 } from '@/lib/rulesApi';
 
@@ -101,13 +105,15 @@ function messageOf(err: unknown, fallback: string): string {
   return fallback;
 }
 
-/** "From contains acme.com and Subject starts with Invoice" (or the advanced note). */
+/** "From contains acme.com and/or Subject starts with Invoice" (or the advanced note). */
 function summarizeMatch(match: MatchNode): string {
-  const flat = flattenAllConditions(match);
-  if (flat && flat.length > 0) {
-    return flat.map((c) => `${FIELD_LABEL[c.field]} ${OP_LABEL[c.op]} ${c.value}`).join(' and ');
+  const simple = flattenSimpleMatch(match);
+  if (simple && simple.conditions.length > 0) {
+    return simple.conditions
+      .map((c) => `${FIELD_LABEL[c.field]} ${OP_LABEL[c.op]} ${c.value}`)
+      .join(simple.mode === 'any' ? ' or ' : ' and ');
   }
-  if (flat) return 'Any message'; // empty match — server-invalid, but render honestly
+  if (simple) return 'Any message'; // empty match — server-invalid, but render honestly
   const n = countConditions(match);
   return `Advanced match (${n} condition${n === 1 ? '' : 's'})`;
 }
@@ -319,6 +325,7 @@ export function RulesDialog({
   // Editor state (seeded by openCreate / openEdit; null editing = creating).
   const [editing, setEditing] = useState<MailRuleView | null>(null);
   const [name, setName] = useState('');
+  const [matchMode, setMatchMode] = useState<RuleMatchMode>('all');
   const [rows, setRows] = useState<ConditionRow[]>([]);
   const [destination, setDestination] = useState<Destination>('inbox');
   const [folderId, setFolderId] = useState('');
@@ -360,6 +367,7 @@ export function RulesDialog({
       setBusyId(null);
       setEditing(null);
       setName('');
+      setMatchMode('all');
       setRows([]);
       setDestination('inbox');
       setFolderId('');
@@ -456,6 +464,7 @@ export function RulesDialog({
   function openCreate() {
     setEditing(null);
     setName('');
+    setMatchMode('all');
     setRows([makeRow()]);
     setDestination('inbox');
     setFolderId('');
@@ -469,11 +478,12 @@ export function RulesDialog({
 
   function openEdit(rule: MailRuleView) {
     if (busyId) return;
-    const flat = flattenAllConditions(rule.match);
-    setAdvanced(flat === null);
+    const simple = flattenSimpleMatch(rule.match);
+    setAdvanced(simple === null);
+    setMatchMode(simple?.mode ?? 'all');
     setRows(
-      flat && flat.length > 0
-        ? flat.map((c) => ({ key: keyRef.current++, field: c.field, op: c.op, value: c.value }))
+      simple && simple.conditions.length > 0
+        ? simple.conditions.map((c) => ({ key: keyRef.current++, field: c.field, op: c.op, value: c.value }))
         : [makeRow()], // advanced (or empty) match — start empty-but-required
     );
     let dest: Destination = 'inbox';
@@ -564,7 +574,8 @@ export function RulesDialog({
     else if (destination === 'trash') actions.push({ type: 'TRASH' });
     if (markRead) actions.push({ type: 'MARK_READ' });
     if (stopAfter) actions.push({ type: 'STOP' });
-    const match: MatchNode = { all: conditions };
+    // One flat single-mode group — the shape the mode toggle picks between.
+    const match: MatchNode = matchMode === 'any' ? { any: conditions } : { all: conditions };
 
     setSaving(true);
     setFormError(null);
@@ -747,9 +758,35 @@ export function RulesDialog({
       </label>
 
       <section>
-        <span className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-tertiary">
-          When a message matches all of
-        </span>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-tertiary">
+            When a message matches
+          </span>
+          {/* all/any toggle — the pill register of the header count badge. */}
+          <div
+            role="group"
+            aria-label="How the conditions combine"
+            className="flex shrink-0 items-center gap-0.5 rounded-full border border-subtle p-0.5"
+          >
+            {(['all', 'any'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={matchMode === mode}
+                onClick={() => setMatchMode(mode)}
+                className={cn(
+                  'rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors duration-fast ease-token',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+                  matchMode === mode
+                    ? 'bg-surface-overlay text-primary'
+                    : 'text-tertiary hover:text-secondary',
+                )}
+              >
+                {mode === 'all' ? 'All of' : 'Any of'}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="space-y-2">
           {rows.map((row, i) => (
             <div key={row.key} className="flex flex-wrap items-center gap-2">
@@ -807,10 +844,20 @@ export function RulesDialog({
           size="sm"
           className="mt-2"
           leading={<PlusIcon className="h-3.5 w-3.5" />}
-          onClick={() => setRows((prev) => [...prev, makeRow()])}
+          disabled={rows.length >= MAX_MATCH_CONDITIONS_PER_GROUP}
+          onClick={() =>
+            setRows((prev) =>
+              prev.length < MAX_MATCH_CONDITIONS_PER_GROUP ? [...prev, makeRow()] : prev,
+            )
+          }
         >
           Add condition
         </Button>
+        {rows.length >= MAX_MATCH_CONDITIONS_PER_GROUP && (
+          <p className="mt-1 text-[11px] text-muted">
+            Up to {MAX_MATCH_CONDITIONS_PER_GROUP} conditions per rule.
+          </p>
+        )}
       </section>
 
       <fieldset>

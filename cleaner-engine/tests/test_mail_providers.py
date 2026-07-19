@@ -53,6 +53,10 @@ class _FakeMessages:
         self._sink.append(("messages.send", kwargs))
         return _GmailExec(self._send_result)
 
+    def batchModify(self, **kwargs):
+        self._sink.append(("messages.batchModify", kwargs))
+        return _GmailExec({})
+
 
 class _FakeUsers:
     def __init__(self, threads, messages):
@@ -205,6 +209,38 @@ def test_gmail_send_builds_mime_and_threads_reply():
     assert parsed["Subject"] == "Re: Hi"
     assert parsed["In-Reply-To"] == "<orig@example.com>"
     assert "hello body" in parsed.get_content()
+
+
+def test_gmail_batch_spam_adds_spam_and_drops_inbox():
+    """Spam is a LABEL edit: add SPAM, remove INBOX (batchModify, one call/100)."""
+    provider, sink = _make_gmail()
+
+    assert provider.batch_spam(["m1", "m2"]) == 2
+
+    modify_calls = [c for c in sink if c[0] == "messages.batchModify"]
+    assert len(modify_calls) == 1
+    assert modify_calls[0][1]["body"] == {
+        "ids": ["m1", "m2"],
+        "addLabelIds": ["SPAM"],
+        "removeLabelIds": ["INBOX"],
+    }
+
+
+def test_gmail_batch_restore_inbox_adds_inbox_and_drops_spam_trash():
+    """Restore reverses spam AND trash in one edit: batch_trash trashes by ADDING
+    the TRASH label (batchModify), so removing SPAM+TRASH here untrashes too —
+    no separate untrash call."""
+    provider, sink = _make_gmail()
+
+    assert provider.batch_restore_inbox(["m1"]) == 1
+
+    modify_calls = [c for c in sink if c[0] == "messages.batchModify"]
+    assert len(modify_calls) == 1
+    assert modify_calls[0][1]["body"] == {
+        "ids": ["m1"],
+        "addLabelIds": ["INBOX"],
+        "removeLabelIds": ["SPAM", "TRASH"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +481,53 @@ def test_ms_send_returns_accepted_false_on_error_status(monkeypatch):
     result = provider.send_message("me@example.com", "you@example.com", "s", "b")
     assert result.accepted is False
     assert result.reason == "graph_status_403"
+
+
+def _ms_move_router(folder_key: str, folder_id: str, captured: list):
+    """Routers for the $batch move verbs: serve the well-known folder id on GET,
+    capture + succeed each /$batch POST."""
+
+    def get_router(url, params):
+        assert url.endswith(f"/me/mailFolders/{folder_key}")
+        return _FakeResp(json_data={"id": folder_id})
+
+    def post_router(url, body):
+        assert url.endswith("/$batch")
+        captured.append(body)
+        return _FakeResp(
+            status_code=200,
+            json_data={"responses": [{"id": r["id"], "status": 201} for r in body["requests"]]},
+        )
+
+    return get_router, post_router
+
+
+def test_ms_batch_spam_moves_to_junkemail(monkeypatch):
+    """Spam is a folder MOVE to the junkemail well-known folder (Graph $batch)."""
+    captured: list = []
+    get_router, post_router = _ms_move_router("junkemail", "junk-folder-id", captured)
+    provider, _ = _make_ms(monkeypatch, get_router=get_router, post_router=post_router)
+
+    assert provider.batch_spam(["m1", "m2"]) == 2
+
+    assert len(captured) == 1
+    requests_ = captured[0]["requests"]
+    assert [r["url"] for r in requests_] == ["/me/messages/m1/move", "/me/messages/m2/move"]
+    assert all(r["body"] == {"destinationId": "junk-folder-id"} for r in requests_)
+
+
+def test_ms_batch_restore_inbox_moves_to_inbox(monkeypatch):
+    """Restore is a folder MOVE back to the inbox well-known folder."""
+    captured: list = []
+    get_router, post_router = _ms_move_router("inbox", "inbox-folder-id", captured)
+    provider, _ = _make_ms(monkeypatch, get_router=get_router, post_router=post_router)
+
+    assert provider.batch_restore_inbox(["m1"]) == 1
+
+    assert len(captured) == 1
+    requests_ = captured[0]["requests"]
+    assert [r["url"] for r in requests_] == ["/me/messages/m1/move"]
+    assert requests_[0]["body"] == {"destinationId": "inbox-folder-id"}
 
 
 def test_ms_get_thread_degrades_when_account_lookup_fails(monkeypatch):

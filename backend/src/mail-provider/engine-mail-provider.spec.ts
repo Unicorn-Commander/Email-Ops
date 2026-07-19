@@ -33,6 +33,8 @@ function make(opts: {
   profile?: unknown;
   archive?: unknown;
   trash?: unknown;
+  spam?: unknown;
+  restore?: unknown;
   readSet?: unknown;
 }) {
   const broker = {
@@ -45,6 +47,8 @@ function make(opts: {
     sendMail: jest.fn().mockResolvedValue(opts.send ?? null),
     archiveMailThread: jest.fn().mockResolvedValue(opts.archive ?? null),
     trashMailThread: jest.fn().mockResolvedValue(opts.trash ?? null),
+    spamMailThread: jest.fn().mockResolvedValue(opts.spam ?? null),
+    restoreMailThreadToInbox: jest.fn().mockResolvedValue(opts.restore ?? null),
     setMailThreadRead: jest.fn().mockResolvedValue(opts.readSet ?? null),
   } as unknown as ConnectedAccountsEnginePort;
   const prisma = {
@@ -163,6 +167,26 @@ describe('EngineMailProvider', () => {
     expect(notConnected.engine.trashMailThread).not.toHaveBeenCalled();
   });
 
+  it('spamThread: routes through the engine triage verb; ok:true → true', async () => {
+    const { provider, engine } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      spam: { ok: true, moved: 2 },
+    });
+    expect(await provider.spamThread(gmailbox(), 't1')).toBe(true);
+    expect(engine.spamMailThread).toHaveBeenCalledWith('gmail', { token: 'gtok' }, 't1');
+  });
+
+  it('restoreThreadToInbox: ok:true → true; not-connected → false without touching the engine', async () => {
+    const happy = make({ user: { keycloakId: 'kc-sub-1' }, token: 'gtok', restore: { ok: true, moved: 2 } });
+    expect(await happy.provider.restoreThreadToInbox(gmailbox(), 't1')).toBe(true);
+    expect(happy.engine.restoreMailThreadToInbox).toHaveBeenCalledWith('gmail', { token: 'gtok' }, 't1');
+
+    const notConnected = make({ user: { keycloakId: 'kc-sub-1' }, token: null });
+    expect(await notConnected.provider.restoreThreadToInbox(gmailbox(), 't1')).toBe(false);
+    expect(notConnected.engine.restoreMailThreadToInbox).not.toHaveBeenCalled();
+  });
+
   it('setThreadRead: forwards the read flag (microsoft credentials shape) and maps ok', async () => {
     const { provider, engine } = make({
       user: { keycloakId: 'kc-sub-1' },
@@ -184,6 +208,8 @@ describe('EngineMailProvider', () => {
     const base = { user: { keycloakId: 'kc-sub-1' }, token: 'gtok' };
     expect(await make({ ...base, archive: null }).provider.archiveThread(gmailbox(), 't1')).toBe(false);
     expect(await make({ ...base, trash: { ok: false, moved: 0 } }).provider.trashThread(gmailbox(), 't1')).toBe(false);
+    expect(await make({ ...base, spam: null }).provider.spamThread(gmailbox(), 't1')).toBe(false);
+    expect(await make({ ...base, restore: { ok: false, moved: 0 } }).provider.restoreThreadToInbox(gmailbox(), 't1')).toBe(false);
     expect(await make({ ...base, readSet: { ok: false, moved: 0 } }).provider.setThreadRead(gmailbox(), 't1', true)).toBe(false);
   });
 

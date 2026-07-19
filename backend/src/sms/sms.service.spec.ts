@@ -89,6 +89,9 @@ describe('SmsService (verify DB; Twilio MOCKED)', () => {
 
   describe('compose — send', () => {
     it('records the SoR row + hands to Twilio (status sent, from the line)', async () => {
+      // The autonomy dial fail-safes unregistered sources to a draft, so the
+      // direct-send lane is exercised via a registered L2 agent (empty policy).
+      await makeAgent('customer-ops', AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT);
       const ref = `send-${Date.now()}`;
       const r = await service.composeSms(WS, UC_UID, {
         contactId: 'c-1',
@@ -107,6 +110,7 @@ describe('SmsService (verify DB; Twilio MOCKED)', () => {
     });
 
     it('records FAILED (never throws) when Twilio rejects (degrade-clean)', async () => {
+      await makeAgent('customer-ops', AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT);
       twilio.accept = false;
       const r = await service.composeSms(WS, UC_UID, {
         toPhoneNumber: '+15553334444',
@@ -121,6 +125,7 @@ describe('SmsService (verify DB; Twilio MOCKED)', () => {
     });
 
     it('is IDEMPOTENT on (workspace, source, ref): a repeat returns the existing row, sends once', async () => {
+      await makeAgent('customer-ops', AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT);
       const ref = `idem-${Date.now()}`;
       const first = await service.composeSms(WS, UC_UID, {
         toPhoneNumber: '+15555556666', body: 'once', mode: 'send', externalSource: 'customer-ops', externalRef: ref,

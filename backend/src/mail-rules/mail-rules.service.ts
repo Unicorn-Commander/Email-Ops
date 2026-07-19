@@ -31,6 +31,10 @@ const PRIORITY_STEP = 10;
 // Priorities live in an int4 column; bound accepted values well inside it so
 // auto-assign (max + 10) can never overflow.
 const PRIORITY_MAX = 1_000_000_000;
+// Structural caps for the match tree on WRITE (the engine keeps evaluating
+// legacy stored shapes beyond them — see the contract in mail-rules.types.ts).
+const MAX_MATCH_GROUPS = 5;
+const MAX_MATCH_CONDITIONS_PER_GROUP = 10;
 
 /**
  * Mail-rules CRUD + the inbound APPLICATOR. CRUD is workspace-member surface:
@@ -339,7 +343,54 @@ export class MailRulesService {
     if (this.countConditions(node) === 0) {
       throw new BadRequestException('match must contain at least one condition');
     }
+    this.assertMatchShape(node);
     return node;
+  }
+
+  /**
+   * Write-time structural fence for the match tree (the engine stays permissive
+   * for already-stored data): exactly one mode per node, ONE level of grouping,
+   * ≤5 groups, ≤10 conditions per group / top level, no empty groups. Runs on
+   * the PARSED node — junk children were already dropped, so the caps count
+   * what would actually be stored (same sanitize-first style as actions).
+   */
+  private assertMatchShape(node: MatchNode): void {
+    if (node.all && node.any) {
+      throw new BadRequestException(
+        'match node must use either "all" or "any", not both — put the other list in a nested group',
+      );
+    }
+    const children = node.all ?? node.any ?? [];
+    const groups = children.filter((child): child is MatchNode => !('field' in child));
+    if (children.length - groups.length > MAX_MATCH_CONDITIONS_PER_GROUP) {
+      throw new BadRequestException(
+        `match supports at most ${MAX_MATCH_CONDITIONS_PER_GROUP} conditions per group.`,
+      );
+    }
+    if (groups.length > MAX_MATCH_GROUPS) {
+      throw new BadRequestException(`match supports at most ${MAX_MATCH_GROUPS} groups.`);
+    }
+    for (const group of groups) {
+      if (group.all && group.any) {
+        throw new BadRequestException(
+          'match node must use either "all" or "any", not both — put the other list in a nested group',
+        );
+      }
+      const inner = group.all ?? group.any ?? [];
+      if (inner.some((child) => !('field' in child))) {
+        throw new BadRequestException(
+          'match groups nest one level deep — a group may contain only conditions',
+        );
+      }
+      if (inner.length === 0) {
+        throw new BadRequestException('match groups must contain at least one condition');
+      }
+      if (inner.length > MAX_MATCH_CONDITIONS_PER_GROUP) {
+        throw new BadRequestException(
+          `match supports at most ${MAX_MATCH_CONDITIONS_PER_GROUP} conditions per group.`,
+        );
+      }
+    }
   }
 
   private compileActions(raw: unknown): RuleAction[] {

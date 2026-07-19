@@ -245,15 +245,15 @@ def _mail_message_to_dict(message: Any) -> dict[str, Any]:
 
 
 def _thread_triage_ids(provider_name: str, messages: list[Any], verb: str) -> list[str]:
-    """Which of a thread's messages a triage verb (archive/trash/read) touches.
+    """Which of a thread's messages a triage verb (archive/trash/spam/inbox/read) touches.
 
     Drafts are NEVER touched — their lifecycle belongs to the drafts surface,
-    not triage. Gmail archive/trash are LABEL edits (a SENT copy keeps its place
-    in Sent), so the whole thread is safe; Microsoft archive/trash are folder
-    MOVES, so only received copies go — moving Sent Items out of the sent folder
-    would corrupt the user's sent-mail record.
+    not triage. Gmail triage verbs are LABEL edits (a SENT copy keeps its place
+    in Sent), so the whole thread is safe; Microsoft archive/trash/spam/inbox
+    are folder MOVES, so only received copies go — moving Sent Items out of the
+    sent folder would corrupt the user's sent-mail record.
     """
-    move_semantics = provider_name == "microsoft" and verb in ("archive", "trash")
+    move_semantics = provider_name == "microsoft" and verb in ("archive", "trash", "spam", "inbox")
     ids: list[str] = []
     for message in messages:
         direction = getattr(message, "direction", "received")
@@ -539,6 +539,34 @@ def mail_thread_read(thread_id: str, request: MailReadRequest) -> ThreadActionRe
         return ThreadActionResponse(ok=True, moved=moved)
     except Exception as exc:  # noqa: BLE001 - degrade clean
         logger.warning("mail/threads/read failed for %s: %s", request.provider, exc)
+        return ThreadActionResponse(ok=False, moved=0)
+
+
+@app.post("/mail/threads/{thread_id:path}/spam", dependencies=[Depends(_require_engine_token)])
+def mail_thread_spam(thread_id: str, request: ProfileRequest) -> ThreadActionResponse:
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return ThreadActionResponse(ok=False, moved=0)
+    try:
+        ids = _thread_triage_ids(request.provider, provider.get_thread(thread_id), "spam")
+        moved = provider.batch_spam(ids) if ids else 0
+        return ThreadActionResponse(ok=True, moved=moved)
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/threads/spam failed for %s: %s", request.provider, exc)
+        return ThreadActionResponse(ok=False, moved=0)
+
+
+@app.post("/mail/threads/{thread_id:path}/inbox", dependencies=[Depends(_require_engine_token)])
+def mail_thread_restore_inbox(thread_id: str, request: ProfileRequest) -> ThreadActionResponse:
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return ThreadActionResponse(ok=False, moved=0)
+    try:
+        ids = _thread_triage_ids(request.provider, provider.get_thread(thread_id), "inbox")
+        moved = provider.batch_restore_inbox(ids) if ids else 0
+        return ThreadActionResponse(ok=True, moved=moved)
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/threads/inbox failed for %s: %s", request.provider, exc)
         return ThreadActionResponse(ok=False, moved=0)
 
 
