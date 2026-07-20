@@ -186,8 +186,10 @@ describe('AgentReplyService', () => {
         draftedBy: 'concierge',
         agentAutoreply: true,
         inboundReplyAttestation: { fromAddress: 'human@q.test' },
+        // Wave 7 follow-up: name-free footer — the signature above already
+        // carries the agent name; repeating it read as a stutter in live mail.
         transparencyFooter: expect.objectContaining({
-          text: expect.stringContaining('Concierge · AI agent, sent autonomously'),
+          text: expect.stringContaining('Sent autonomously · AI agent'),
         }),
       }),
     );

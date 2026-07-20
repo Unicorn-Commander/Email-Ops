@@ -394,9 +394,11 @@ export class AgentReplyService {
               ],
             }
           : {}),
+        // Name-free: the signature directly above already carries the agent's
+        // name — repeating it here read as a stutter in live mail.
         transparencyFooter: {
-          text: `\n\n— ${agentName} · AI agent, sent autonomously`,
-          html: `<p style="color:#6b7280;font-size:12px;margin-top:16px">— ${this.escapeHtml(agentName)} · AI agent, sent autonomously</p>`,
+          text: `\n\nSent autonomously · AI agent`,
+          html: `<p style="color:#6b7280;font-size:12px;margin-top:16px">Sent autonomously · AI agent</p>`,
         },
       });
       const autoSent = staged.mode === 'send';
