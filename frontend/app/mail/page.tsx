@@ -1263,6 +1263,8 @@ export default function MailPage() {
     onStartTriage: () => {
       if (firstUnread) selectThread(firstUnread.id, firstUnread.mailbox_id);
     },
+    onAnalyzeInbox: () => router.push('/insights'),
+    onReviewCleanup: () => router.push('/cleanup'),
     onCompose: openCompose,
     onReviewApprovals: () => router.push('/agent-inbox'),
     onReviewItem: (it) => {
@@ -3610,6 +3612,8 @@ export interface BriefData {
   pending: AgentInboxItemView[];
   hasUnread: boolean;
   onStartTriage: () => void;
+  onAnalyzeInbox: () => void;
+  onReviewCleanup: () => void;
   onCompose: () => void;
   onReviewApprovals: () => void;
   onReviewItem: (item: AgentInboxItemView) => void;
@@ -3820,14 +3824,34 @@ function DailyBrief({ brief }: { brief: BriefData }) {
 
         <div className="flex flex-wrap gap-2">
           {brief.hasUnread && (
+            <Tooltip content="Opens your first unread so you can sort it by hand — archive, snooze, or reply. For AI recommendations, use Analyze inbox.">
+              <button
+                type="button"
+                onClick={brief.onStartTriage}
+                className="inline-flex h-9 items-center gap-2 rounded-lg bg-accent px-4 text-[13px] font-semibold text-white transition-colors hover:bg-accent-hover"
+              >
+                Start triage
+              </button>
+            </Tooltip>
+          )}
+          <Tooltip content="AI reads your linked Gmail / Microsoft 365 inbox and recommends what to archive, unsubscribe, or clean up. Requires a connected account.">
             <button
               type="button"
-              onClick={brief.onStartTriage}
-              className="inline-flex h-9 items-center gap-2 rounded-lg bg-accent px-4 text-[13px] font-semibold text-white transition-colors hover:bg-accent-hover"
+              onClick={brief.onAnalyzeInbox}
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-accent/40 bg-accent/[0.06] px-4 text-[13px] font-semibold text-accent transition-colors hover:bg-accent/10"
             >
-              Start triage
+              Analyze inbox
             </button>
-          )}
+          </Tooltip>
+          <Tooltip content="Build a safe cleanup plan — protected mail is held back; safe mail can be trashed (reversible) or archived & purged, with undo.">
+            <button
+              type="button"
+              onClick={brief.onReviewCleanup}
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-surface-base px-4 text-[13px] font-semibold text-secondary transition-colors hover:border-accent/60 hover:text-primary"
+            >
+              Clean up
+            </button>
+          </Tooltip>
           <button
             type="button"
             onClick={brief.onCompose}
