@@ -398,15 +398,17 @@ describe('AgentReplyService', () => {
     expect(input.body).toContain('Concierge Desk — Acme Support');
   });
 
-  it('the generated signature carries the agent displayName + description role line', async () => {
+  // Wave 7 follow-up: the registry description is internal governance
+  // documentation — it must NEVER ride along on outbound correspondence.
+  it('the generated signature carries the agent displayName ONLY (never the description)', async () => {
     const { svc, compose } = make({
       agent: { ...AGENT_ROW, description: 'Customer support agent' },
     });
     await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
     const input = compose.mock.calls[0][2];
     expect(input.bodyHtml).toContain('Concierge');
-    expect(input.bodyHtml).toContain('Customer support agent');
-    expect(input.body).toContain('Customer support agent');
+    expect(input.bodyHtml).not.toContain('Customer support agent');
+    expect(input.body).not.toContain('Customer support agent');
   });
 
   it('the LLM text becomes clean paragraph HTML (escaped, <p> per blank line, <br> per newline)', async () => {

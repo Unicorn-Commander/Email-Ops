@@ -342,16 +342,17 @@ export class AgentReplyService {
 
       // Wave 7 outbound quality: clean simple HTML (paragraphs from the LLM
       // text) + a signature block — the mailbox's stored default signature when
-      // one exists, else a minimal generated one (displayName + role line). The
+      // one exists, else a minimal generated one (displayName ONLY: the registry
+      // description is internal documentation, not correspondence identity). The
       // transparency footer is handed separately: composeEmail appends it ONLY
       // when the gate decides an AUTONOMOUS send to an external recipient
       // (a human-approved draft keeps just the normal signature).
       const signatureHtml = gate.signature?.html
         ? gate.signature.html
-        : this.generatedSignatureHtml(agentName, gate.agent?.description ?? null);
+        : this.generatedSignatureHtml(agentName);
       const signatureText = gate.signature?.html
         ? this.stripHtml(gate.signature.html)
-        : [agentName, (gate.agent?.description ?? '').trim()].filter(Boolean).join('\n');
+        : agentName;
       const bodyText = `${body}\n\n--\n${signatureText}`;
       const bodyHtml = `${this.paragraphsToHtml(body)}${signatureHtml}`;
 
@@ -497,14 +498,13 @@ export class AgentReplyService {
       .join('');
   }
 
-  /** The minimal generated signature block when the mailbox stores none. */
-  private generatedSignatureHtml(displayName: string, description: string | null): string {
-    const role = (description ?? '').trim();
-    return (
-      `<p style="margin-top:16px">— ${this.escapeHtml(displayName)}` +
-      (role ? `<br><span style="color:#6b7280;font-size:13px">${this.escapeHtml(role)}</span>` : '') +
-      '</p>'
-    );
+  /**
+   * The minimal generated signature block when the mailbox stores none.
+   * displayName ONLY — the agent registry description is internal governance
+   * documentation and must never ride along on outbound correspondence.
+   */
+  private generatedSignatureHtml(displayName: string): string {
+    return `<p style="margin-top:16px">— ${this.escapeHtml(displayName)}</p>`;
   }
 
   private escapeHtml(s: string): string {
