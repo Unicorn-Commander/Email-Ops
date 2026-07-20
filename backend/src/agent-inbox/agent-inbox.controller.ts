@@ -32,7 +32,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
-import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import { AgentInboxKind, AgentInboxState, User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
@@ -49,6 +49,14 @@ class ReviewBodyDto {
   @IsString()
   @MaxLength(2000)
   note?: string;
+  /**
+   * Wave 7 approve-path learning: default TRUE — approving an EMAIL draft
+   * trusts its external recipients (upserts trusted_correspondents). Pass
+   * false to approve this one send without learning.
+   */
+  @IsOptional()
+  @IsBoolean()
+  trustRecipients?: boolean;
 }
 
 /** The state filter for the queue list (defaults to pending in the service). */
@@ -83,6 +91,51 @@ export class AgentInboxController {
       this.inboxState(query.state),
     );
     return { items, count: items.length };
+  }
+
+  // NOTE: declared BEFORE @Get(':id') so 'auto-sent' never matches as an item id.
+  @Get('auto-sent')
+  @ApiOperation({
+    summary:
+      'The auto-sent audit feed (Wave 7): AUTONOMOUS_SEND events newest-first, ' +
+      'each joined to the FULL message that left without a human in the loop.',
+  })
+  @ApiResponse({ status: 200, description: '{ items: AutoSentItemView[] }' })
+  async autoSent(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Query('limit') limit?: string,
+  ) {
+    const items = await this.email.listAutoSentFeed(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      limit ? Number(limit) : undefined,
+    );
+    return { items };
+  }
+
+  @Get(':id')
+  @ApiOperation({
+    summary:
+      'One agent-inbox item with the FULL staged message (both bodies, every ' +
+      'recipient, attachment meta) + payload.policy (why the gate held it).',
+  })
+  @ApiResponse({ status: 200, description: '{ item: AgentInboxDetailView }' })
+  @ApiResponse({ status: 404, description: 'No such item in this workspace.' })
+  async detail(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+  ) {
+    const item = await this.email.getAgentInboxItemDetail(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      id,
+    );
+    if (!item) {
+      throw new NotFoundException('Agent-inbox item not found in this workspace.');
+    }
+    return { item };
   }
 
   @Post(':id/approve')
@@ -129,6 +182,7 @@ export class AgentInboxController {
       ucUidOf(user as WithWorkspaceClaim),
       id,
       body.note ?? null,
+      body.trustRecipients,
     );
     if (!res) {
       throw new NotFoundException('Agent-inbox item not found in this workspace.');

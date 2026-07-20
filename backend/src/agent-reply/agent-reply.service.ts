@@ -1,23 +1,30 @@
 /**
- * AgentReplyService — the AGENT-REPLY RUNTIME (email an agent → it drafts the
- * answer → a human approves).
+ * AgentReplyService — the AGENT-REPLY RUNTIME (email an agent → it answers;
+ * the autonomy gate decides whether the answer SENDS or stages for approval).
  *
  * The consumer of the inbound watcher's reply-routing seam: when a message
  * arrives at an ownerKind=AGENT sovereign mailbox, this service (a) resolves the
  * registered agent identity bound to that mailbox, (b) pulls the thread context
  * from the mail engine, (c) asks the Cleaner Engine LLM (/ai/chat — SERVICE
  * auth via X-Engine-Token, no per-user broker token involved) for a reply body,
- * and (d) stages it as a DRAFT through the ONE canonical staging lane —
- * EmailService.composeEmail(mode:'draft') — so it lands in the agent-inbox
- * approval queue with full provenance (draftedBy=agent key), the autonomy gate,
- * the audit log, and idempotency on (workspaceId, externalSource, externalRef).
+ * and (d) hands it to the ONE canonical compose lane — EmailService.composeEmail
+ * — with full provenance (draftedBy=agent key), so the Wave-7 autonomy MATRIX
+ * decides send-vs-draft, the audit log records the outcome, and idempotency on
+ * (workspaceId, externalSource, externalRef) survives watcher retries.
  *
- * SAFETY DOCTRINE (v1, binding):
- *   - NEVER auto-send. Every reply is staged mode:'draft' regardless of the
- *     agent's autonomy dial — L0_DRAFT_ONLY, L1_APPROVE_TO_SEND, and even
- *     L2_AUTONOMOUS_AUDIT all land in the approval queue (requesting 'draft'
- *     means decideComposeMode honors it unconditionally; auto-send for L2 is a
- *     DELIBERATE deferral, not an oversight).
+ * SAFETY DOCTRINE (Wave 7, binding):
+ *   - The runtime REQUESTS 'send' for a REGISTERED agent and lets the compose
+ *     gate decide ("first contact needs a human; ongoing conversation flows"):
+ *     L0 → draft; L1 → internal-only autonomous; L2 → internal + ROUTINE
+ *     external (in-thread, all-trusted, no attachments, ≤5 external, switch on).
+ *     An UNREGISTERED mailbox persona still requests 'draft' — nothing
+ *     unregistered can auto-send.
+ *   - LOOP PROTECTION (all four, Wave 7): (a) every runtime send is stamped
+ *     X-UC-Agent-Autoreply:1; (b) an inbound carrying that stamp is never
+ *     answered; (c) an inbound FROM a same-workspace agent-linked mailbox is
+ *     never answered (inter-agent tasking belongs to Brigade, not auto-reply
+ *     ping-pong); (d) ≥5 runtime auto-SENDS in a thread in 24h → the next reply
+ *     stages for approval (reason 'thread-rate-cap').
  *   - DORMANT unless AGENT_REPLY_RUNTIME_ENABLED=true (dormant-seam posture).
  *   - Respects the workspace kill switch (Workspace.agentsPaused — the same
  *     switch AgentControlsService toggles and composeEmail enforces) AND the
@@ -34,21 +41,30 @@
  *     LLM timeout, compose refusal) logs and returns null — a draft failure
  *     must never block the watcher's triage or cursor advance.
  *   - Idempotent: external_ref = `${mailboxId}:${threadId}:${receivedAt}` ⇒ one
- *     staged draft per inbound message; watcher retries are safe (composeEmail
+ *     compose per inbound message; watcher retries are safe (composeEmail
  *     returns the existing row, queues nothing).
  */
 
 import { Injectable, Logger } from '@nestjs/common';
+import { EmailMode } from '@prisma/client';
 import { withTimeout } from '../common/async/concurrency';
 import { ConnectedAccountsEnginePort } from '../connected-accounts/connected-accounts.port';
 import { EmailService } from '../email/email.service';
+import { AGENT_REPLY_RUNTIME_SOURCE } from '../email/email.types';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { StalwartMessageDetail } from '../stalwart/stalwart.types';
 import { agentReplyRuntimeEnabled } from './agent-reply.flags';
 
-/** The stable provenance slug for drafts staged by this runtime. */
-export const AGENT_REPLY_SOURCE = 'agent-reply-runtime';
+/** The stable provenance slug for composes staged/sent by this runtime. */
+export const AGENT_REPLY_SOURCE = AGENT_REPLY_RUNTIME_SOURCE;
+
+/**
+ * Loop protection (d): at most this many runtime auto-SENDS per thread per
+ * rolling 24h window; the next reply stages for approval ('thread-rate-cap').
+ */
+export const THREAD_AUTO_SEND_CAP = 5;
+const THREAD_AUTO_SEND_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** Thread-context caps: last N messages, bounded per-message and in total. */
 const MAX_CONTEXT_MESSAGES = 5;
@@ -108,12 +124,15 @@ export interface AgentReplyInboundMsg {
   subject: string | null;
   /** ISO receivedAt from the poll — the idempotency component per message. */
   receivedAt?: string | null;
+  /** True when the inbound carries the X-UC-Agent-Autoreply stamp (loop guard b). */
+  agentAutoreply?: boolean;
 }
 
 /** The registered-agent identity resolved for the receiving mailbox. */
 interface ResolvedAgent {
   key: string;
   displayName: string;
+  description?: string | null;
   autonomyLevel: string;
   paused: boolean;
 }
@@ -180,12 +199,22 @@ export class AgentReplyService {
         );
         return null;
       }
+      // Loop guard (b): the inbound is itself a runtime auto-reply (it carries
+      // the X-UC-Agent-Autoreply stamp) — answering it would ping-pong forever.
+      if (msg.agentAutoreply === true) {
+        this.logger.log(
+          `agent-reply skip: inbound carries X-UC-Agent-Autoreply (loop guard) on thread=${msg.threadId} (${agentMailbox.emailAddress})`,
+        );
+        return null;
+      }
 
-      // Pause switches + agent identity in ONE fenced read. The workspace kill
-      // switch is the SAME stored bit AgentControlsService toggles
-      // (Workspace.agentsPaused); composeEmail re-checks it, but checking here
-      // first means a paused fleet does no thread read and no LLM call — and we
-      // skip quietly instead of catching a ForbiddenException.
+      // Pause switches + agent identity + the Wave-7 loop-protection reads in
+      // ONE fenced read. The workspace kill switch is the SAME stored bit
+      // AgentControlsService toggles (Workspace.agentsPaused); composeEmail
+      // re-checks it, but checking here first means a paused fleet does no
+      // thread read and no LLM call — and we skip quietly instead of catching a
+      // ForbiddenException.
+      const capSince = new Date(Date.now() - THREAD_AUTO_SEND_WINDOW_MS);
       const gate = await this.prisma.withWorkspace(workspaceId, null, async (tx) => {
         const ws = await tx.workspace.findUnique({
           where: { id: workspaceId },
@@ -200,6 +229,32 @@ export class AgentReplyService {
             agentMailbox.id,
             agentMailbox.emailAddress,
           ),
+          // Loop guard (c): is the SENDER a same-workspace agent-linked mailbox?
+          senderIsAgentMailbox: await this.isAgentMailboxAddress(tx, workspaceId, sender),
+          // Loop guard (d): runtime auto-SENDS already in this thread inside the
+          // rolling window (mode=SEND rows under the runtime provenance — the
+          // gate-coerced drafts keep mode DRAFT and never count).
+          threadAutoSends: await tx.emailMessage.count({
+            where: {
+              workspaceId,
+              externalSource: AGENT_REPLY_SOURCE,
+              mode: EmailMode.SEND,
+              inReplyToThreadId: msg.threadId,
+              createdAt: { gt: capSince },
+            },
+          }),
+          // Wave 7 outbound quality: respect a stored default signature for the
+          // sending mailbox instead of inventing one.
+          signature:
+            (await tx.mailSignature.findFirst({
+              where: { workspaceId, mailboxAccountId: agentMailbox.id, isDefault: true },
+              select: { html: true },
+            })) ??
+            (await tx.mailSignature.findFirst({
+              where: { workspaceId, mailboxAccountId: agentMailbox.id },
+              select: { html: true },
+              orderBy: { createdAt: 'asc' },
+            })),
         };
       });
       if (gate.agentsPaused) {
@@ -211,6 +266,13 @@ export class AgentReplyService {
       if (gate.agent?.paused) {
         this.logger.debug(
           `agent-reply skip: agent '${gate.agent.key}' is paused (thread=${msg.threadId})`,
+        );
+        return null;
+      }
+      // Loop guard (c): inter-agent mail is Brigade's plane, not auto-reply's.
+      if (gate.senderIsAgentMailbox) {
+        this.logger.log(
+          `agent-reply skip: sender '${sender}' is an agent-linked mailbox in this workspace (loop guard) — thread=${msg.threadId}`,
         );
         return null;
       }
@@ -278,28 +340,70 @@ export class AgentReplyService {
         return null;
       }
 
-      // Stage through the ONE canonical lane. mode:'draft' is honored
-      // unconditionally by the autonomy gate (L0/L1/L2 alike land in the
-      // approval queue — the v1 never-auto-send doctrine). draftedBy carries
-      // the agent key so the AgentInboxItem is attributed to the registered
-      // agent (composeEmail resolves the agent by this key and sends From its
-      // primary mailbox on approve). external_ref makes retries idempotent:
-      // ONE staged draft per inbound message.
+      // Wave 7 outbound quality: clean simple HTML (paragraphs from the LLM
+      // text) + a signature block — the mailbox's stored default signature when
+      // one exists, else a minimal generated one (displayName + role line). The
+      // transparency footer is handed separately: composeEmail appends it ONLY
+      // when the gate decides an AUTONOMOUS send to an external recipient
+      // (a human-approved draft keeps just the normal signature).
+      const signatureHtml = gate.signature?.html
+        ? gate.signature.html
+        : this.generatedSignatureHtml(agentName, gate.agent?.description ?? null);
+      const signatureText = gate.signature?.html
+        ? this.stripHtml(gate.signature.html)
+        : [agentName, (gate.agent?.description ?? '').trim()].filter(Boolean).join('\n');
+      const bodyText = `${body}\n\n--\n${signatureText}`;
+      const bodyHtml = `${this.paragraphsToHtml(body)}${signatureHtml}`;
+
+      // Compose through the ONE canonical lane and LET THE GATE DECIDE (Wave 7):
+      // a REGISTERED agent requests 'send' — the autonomy matrix sends internal
+      // (L1+) / routine-external (L2) mail and stages everything else; an
+      // UNREGISTERED persona still requests 'draft' (nothing unregistered can
+      // auto-send). Over the per-thread cap (loop guard d) the runtime itself
+      // requests 'draft' and passes the reason for the approval card.
+      // draftedBy carries the agent key so the item/audit rows are attributed to
+      // the registered agent. external_ref makes retries idempotent: ONE compose
+      // per inbound message.
+      const overCap = gate.threadAutoSends >= THREAD_AUTO_SEND_CAP;
+      const requestedMode: 'send' | 'draft' = gate.agent && !overCap ? 'send' : 'draft';
       const externalRef = `${agentMailbox.id}:${msg.threadId}:${msg.receivedAt ?? 'na'}`;
       const staged = await this.email.composeEmail(workspaceId, null, {
         contactId: null,
         toAddress: sender,
         subject: this.replySubject(msg.subject),
-        body,
-        mode: 'draft',
+        body: bodyText,
+        bodyHtml,
+        mode: requestedMode,
         inReplyToThreadId: msg.threadId,
         externalSource: AGENT_REPLY_SOURCE,
         externalRef,
         draftedBy,
+        // Loop guard (a): every runtime send is stamped X-UC-Agent-Autoreply.
+        agentAutoreply: true,
+        // The matrix's not-cold-outbound proof: this IS a reply to a real
+        // inbound from `sender` (the runtime watched it arrive).
+        inboundReplyAttestation: { fromAddress: sender },
+        ...(overCap
+          ? {
+              policyReasons: [
+                {
+                  code: 'thread-rate-cap',
+                  message: `Auto-send cap reached for this thread (${THREAD_AUTO_SEND_CAP} in 24h) — this reply needs a human approval.`,
+                },
+              ],
+            }
+          : {}),
+        transparencyFooter: {
+          text: `\n\n— ${agentName} · AI agent, sent autonomously`,
+          html: `<p style="color:#6b7280;font-size:12px;margin-top:16px">— ${this.escapeHtml(agentName)} · AI agent, sent autonomously</p>`,
+        },
       });
+      const autoSent = staged.mode === 'send';
       this.logger.log(
-        `agent-reply staged draft ${staged.id} for ${agentMailbox.emailAddress} thread=${msg.threadId} ` +
-          `(agent=${draftedBy}, autonomy=${gate.agent?.autonomyLevel ?? 'unregistered'} → approval queue)`,
+        `agent-reply ${autoSent ? `AUTO-SENT (${staged.status})` : 'staged draft → approval queue'} ` +
+          `${staged.id} for ${agentMailbox.emailAddress} thread=${msg.threadId} ` +
+          `(agent=${draftedBy}, autonomy=${gate.agent?.autonomyLevel ?? 'unregistered'}, ` +
+          `requested=${requestedMode}${overCap ? ', thread-rate-cap' : ''})`,
       );
       return staged.id;
     } catch (err) {
@@ -326,7 +430,7 @@ export class AgentReplyService {
     mailboxAccountId: string,
     emailAddress: string,
   ): Promise<ResolvedAgent | null> {
-    const select = { key: true, displayName: true, autonomyLevel: true, paused: true };
+    const select = { key: true, displayName: true, description: true, autonomyLevel: true, paused: true };
     const binding = await tx.agentMailbox.findFirst({
       where: { workspaceId, mailboxAccountId },
       orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
@@ -352,6 +456,64 @@ export class AgentReplyService {
       where: { workspaceId, key: localpart, active: true },
       select,
     });
+  }
+
+  /**
+   * Loop guard (c): is `address` a same-workspace AGENT-LINKED mailbox (Class
+   * B — ownerKind AGENT, the Agent.mailboxAccountId cache, or an AgentMailbox
+   * junction row with an active agent)? An agent must never auto-reply to
+   * another agent's mail — that tasking plane belongs to Brigade.
+   */
+  private async isAgentMailboxAddress(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    address: string,
+  ): Promise<boolean> {
+    const row = await tx.mailboxAccount.findFirst({
+      where: { workspaceId, emailAddress: { equals: address.trim(), mode: 'insensitive' } },
+      select: { id: true, ownerKind: true },
+    });
+    if (!row) return false;
+    if ((row.ownerKind as string) === 'AGENT') return true;
+    const byCache = await tx.agent.findFirst({
+      where: { workspaceId, active: true, mailboxAccountId: row.id },
+      select: { id: true },
+    });
+    if (byCache) return true;
+    const byJoin = await tx.agentMailbox.findFirst({
+      where: { workspaceId, mailboxAccountId: row.id, agent: { active: true } },
+      select: { id: true },
+    });
+    return !!byJoin;
+  }
+
+  /** LLM plain text → minimal clean HTML: escaped, double-newline paragraphs, single-newline breaks. */
+  private paragraphsToHtml(text: string): string {
+    return text
+      .split(/\n{2,}/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map((p) => `<p>${this.escapeHtml(p).replace(/\n/g, '<br>')}</p>`)
+      .join('');
+  }
+
+  /** The minimal generated signature block when the mailbox stores none. */
+  private generatedSignatureHtml(displayName: string, description: string | null): string {
+    const role = (description ?? '').trim();
+    return (
+      `<p style="margin-top:16px">— ${this.escapeHtml(displayName)}` +
+      (role ? `<br><span style="color:#6b7280;font-size:13px">${this.escapeHtml(role)}</span>` : '') +
+      '</p>'
+    );
+  }
+
+  private escapeHtml(s: string): string {
+    return s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   /**

@@ -1,12 +1,19 @@
-import { AgentReplyService, AGENT_REPLY_SOURCE, isAutomatedSender } from './agent-reply.service';
+import {
+  AgentReplyService,
+  AGENT_REPLY_SOURCE,
+  isAutomatedSender,
+  THREAD_AUTO_SEND_CAP,
+} from './agent-reply.service';
 
 /**
  * Pure-unit coverage (no DB, no engines): flag gating, both pause switches, the
- * happy staging path (LLM digest → composeEmail mode:'draft' with the
- * idempotent external_ref + agent attribution), LLM failure modes + the ONE
- * spaced retry, automated-sender (noreply) suppression, the localpart
- * attribution second chance, the empty-thread-detail choice (STILL drafts),
- * loop/sender guards, and the never-throws backstop.
+ * happy compose path (LLM digest → composeEmail requesting 'send' for a
+ * REGISTERED agent — Wave 7: the GATE decides send-vs-draft — with the
+ * idempotent external_ref + agent attribution + the loop-protection stamp/
+ * attestation), LLM failure modes + the ONE spaced retry, automated-sender
+ * (noreply) suppression, the Wave-7 loop guards (auto-reply header, agent-
+ * sender, thread rate cap), the localpart attribution second chance, the
+ * empty-thread-detail choice (STILL composes), and the never-throws backstop.
  */
 describe('AgentReplyService', () => {
   const MAILBOX = { id: 'mb-agent', emailAddress: 'concierge@x.test', workspaceId: 'ws1' };
@@ -19,6 +26,7 @@ describe('AgentReplyService', () => {
   const AGENT_ROW = {
     key: 'concierge',
     displayName: 'Concierge',
+    description: null as string | null,
     autonomyLevel: 'L1_APPROVE_TO_SEND',
     paused: false,
   };
@@ -53,6 +61,12 @@ describe('AgentReplyService', () => {
     compose?: jest.Mock;
     /** Full control of tx.agent.findFirst (attribution second-chance tests). */
     agentFindFirst?: jest.Mock;
+    /** Loop guard (c): the sender resolves to this workspace mailbox row. */
+    senderMailboxRow?: { id: string; ownerKind: string } | null;
+    /** Loop guard (d): runtime auto-sends already counted in this thread. */
+    threadAutoSends?: number;
+    /** A stored default signature row for the agent mailbox. */
+    signature?: { html: string } | null;
   }) {
     const workspaceFindUnique = jest
       .fn()
@@ -63,10 +77,16 @@ describe('AgentReplyService', () => {
     const agentFindFirst =
       opts?.agentFindFirst ??
       jest.fn().mockResolvedValue(opts?.agent === undefined ? AGENT_ROW : opts.agent);
+    const mailboxFindFirst = jest.fn().mockResolvedValue(opts?.senderMailboxRow ?? null);
+    const emailMessageCount = jest.fn().mockResolvedValue(opts?.threadAutoSends ?? 0);
+    const signatureFindFirst = jest.fn().mockResolvedValue(opts?.signature ?? null);
     const tx = {
       workspace: { findUnique: workspaceFindUnique },
       agentMailbox: { findFirst: bindingFindFirst },
       agent: { findFirst: agentFindFirst },
+      mailboxAccount: { findFirst: mailboxFindFirst },
+      emailMessage: { count: emailMessageCount },
+      mailSignature: { findFirst: signatureFindFirst },
     };
     const withWorkspace = jest.fn((_ws: string, _uc: string | null, cb: any) => cb(tx));
     const prisma = { withWorkspace };
@@ -81,7 +101,19 @@ describe('AgentReplyService', () => {
     const svc = new AgentReplyService(prisma as any, stalwart as any, engine as any, email as any);
     // Fake the retry pause so LLM-failure tests don't really wait ~2.5s.
     const sleep = jest.spyOn(svc as any, 'sleep').mockResolvedValue(undefined);
-    return { svc, withWorkspace, getThreadDetail, chat, compose, agentFindFirst, bindingFindFirst, sleep };
+    return {
+      svc,
+      withWorkspace,
+      getThreadDetail,
+      chat,
+      compose,
+      agentFindFirst,
+      bindingFindFirst,
+      mailboxFindFirst,
+      emailMessageCount,
+      signatureFindFirst,
+      sleep,
+    };
   }
 
   beforeEach(() => {
@@ -116,7 +148,7 @@ describe('AgentReplyService', () => {
     expect(compose).not.toHaveBeenCalled();
   });
 
-  it('happy path: LLM gets the thread digest; composeEmail stages a draft with the idempotent ref + agent attribution', async () => {
+  it('happy path: LLM gets the thread digest; composeEmail REQUESTS SEND (Wave 7 — the gate decides) with the idempotent ref + agent attribution + loop stamp', async () => {
     const { svc, chat, compose } = make();
     expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBe('staged-1');
 
@@ -133,19 +165,36 @@ describe('AgentReplyService', () => {
       }),
     ]);
 
-    // The staging lane: mode draft, reply-to the sender, threaded, idempotent
-    // per inbound message, drafted by the REGISTERED agent's key.
-    expect(compose).toHaveBeenCalledWith('ws1', null, {
-      contactId: null,
-      toAddress: 'human@q.test',
-      subject: 'Re: Need help with my order',
-      body: 'Happy to help — checking order #42 now.',
-      mode: 'draft',
-      inReplyToThreadId: 'T1',
-      externalSource: AGENT_REPLY_SOURCE,
-      externalRef: 'mb-agent:T1:2026-07-18T00:00:00Z',
-      draftedBy: 'concierge',
-    });
+    // The ONE canonical compose lane: a REGISTERED agent requests 'send' and the
+    // autonomy MATRIX decides (Wave 7); reply-to the sender, threaded, idempotent
+    // per inbound message, attributed to the registered agent's key, stamped as
+    // an auto-reply (loop guard a) and attested as an in-thread inbound reply.
+    expect(compose).toHaveBeenCalledWith(
+      'ws1',
+      null,
+      expect.objectContaining({
+        contactId: null,
+        toAddress: 'human@q.test',
+        subject: 'Re: Need help with my order',
+        // The body carries the LLM text + the generated signature block.
+        body: expect.stringContaining('Happy to help — checking order #42 now.'),
+        bodyHtml: expect.stringContaining('<p>Happy to help — checking order #42 now.</p>'),
+        mode: 'send',
+        inReplyToThreadId: 'T1',
+        externalSource: AGENT_REPLY_SOURCE,
+        externalRef: 'mb-agent:T1:2026-07-18T00:00:00Z',
+        draftedBy: 'concierge',
+        agentAutoreply: true,
+        inboundReplyAttestation: { fromAddress: 'human@q.test' },
+        transparencyFooter: expect.objectContaining({
+          text: expect.stringContaining('Concierge · AI agent, sent autonomously'),
+        }),
+      }),
+    );
+    // The signature block rides in both bodies.
+    const input = compose.mock.calls[0][2];
+    expect(input.body).toContain('Concierge');
+    expect(input.bodyHtml).toContain('Concierge');
   });
 
   it('LLM failure (rejects) → null, nothing staged, no throw', async () => {
@@ -179,7 +228,8 @@ describe('AgentReplyService', () => {
     expect(compose).toHaveBeenCalledWith(
       'ws1',
       null,
-      expect.objectContaining({ body: 'Second attempt draft.', mode: 'draft' }),
+      // Wave 7: a registered agent requests 'send' (the gate decides).
+      expect.objectContaining({ body: expect.stringContaining('Second attempt draft.'), mode: 'send' }),
     );
   });
 
@@ -222,7 +272,7 @@ describe('AgentReplyService', () => {
     expect(compose).toHaveBeenCalledTimes(1);
   });
 
-  it('no registered agent bound → drafts under runtime defaults (draftedBy = the provenance slug)', async () => {
+  it('no registered agent bound → REQUESTS DRAFT under runtime defaults (nothing unregistered can auto-send)', async () => {
     const { svc, compose } = make({ binding: null, agent: null });
     expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBe('staged-1');
     expect(compose).toHaveBeenCalledWith(
@@ -271,12 +321,103 @@ describe('AgentReplyService', () => {
     );
   });
 
-  it('L2_AUTONOMOUS_AUDIT still stages a DRAFT (v1 never-auto-send doctrine)', async () => {
+  it('Wave 7: a registered L2 agent REQUESTS SEND — the compose gate (not the runtime) decides the outcome', async () => {
     const { svc, compose } = make({
       agent: { ...AGENT_ROW, autonomyLevel: 'L2_AUTONOMOUS_AUDIT' },
     });
     expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBe('staged-1');
-    expect(compose).toHaveBeenCalledWith('ws1', null, expect.objectContaining({ mode: 'draft' }));
+    expect(compose).toHaveBeenCalledWith('ws1', null, expect.objectContaining({ mode: 'send' }));
+  });
+
+  // ── Wave 7 loop protection (all four) ────────────────────────────────────
+
+  it('loop guard (b): an inbound stamped X-UC-Agent-Autoreply is NEVER answered — no gate read, no LLM, no compose', async () => {
+    const { svc, withWorkspace, chat, compose } = make();
+    expect(
+      await svc.draftReplyForInbound('ws1', MAILBOX, { ...MSG, agentAutoreply: true }),
+    ).toBeNull();
+    expect(withWorkspace).not.toHaveBeenCalled();
+    expect(chat).not.toHaveBeenCalled();
+    expect(compose).not.toHaveBeenCalled();
+  });
+
+  it('loop guard (c): a sender that is a same-workspace AGENT mailbox is never answered (ownerKind AGENT)', async () => {
+    const { svc, chat, compose } = make({
+      senderMailboxRow: { id: 'mb-other-agent', ownerKind: 'AGENT' },
+    });
+    expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBeNull();
+    expect(chat).not.toHaveBeenCalled();
+    expect(compose).not.toHaveBeenCalled();
+  });
+
+  it('loop guard (c): an agent-LINKED sender mailbox (Agent.mailboxAccountId cache hit) is suppressed too', async () => {
+    // The sender's box is ownerKind SHARED but an active agent is linked to it:
+    // tx.agent.findFirst answers the mailboxAccountId probe with a row.
+    const agentFindFirst = jest.fn(async ({ where }: any) => {
+      if (where?.mailboxAccountId === 'mb-linked') return { id: 'a-linked' };
+      return AGENT_ROW; // every other lookup (receiving-mailbox resolution)
+    });
+    const { svc, compose } = make({
+      senderMailboxRow: { id: 'mb-linked', ownerKind: 'SHARED' },
+      agentFindFirst,
+    });
+    expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBeNull();
+    expect(compose).not.toHaveBeenCalled();
+  });
+
+  it(`loop guard (d): ${THREAD_AUTO_SEND_CAP}+ runtime auto-sends in the thread window → REQUESTS DRAFT with reason 'thread-rate-cap'`, async () => {
+    const { svc, compose } = make({ threadAutoSends: THREAD_AUTO_SEND_CAP });
+    expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBe('staged-1');
+    expect(compose).toHaveBeenCalledWith(
+      'ws1',
+      null,
+      expect.objectContaining({
+        mode: 'draft',
+        policyReasons: [expect.objectContaining({ code: 'thread-rate-cap' })],
+      }),
+    );
+  });
+
+  it('loop guard (d): under the cap the runtime still requests send (no policyReasons)', async () => {
+    const { svc, compose } = make({ threadAutoSends: THREAD_AUTO_SEND_CAP - 1 });
+    expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBe('staged-1');
+    const input = compose.mock.calls[0][2];
+    expect(input.mode).toBe('send');
+    expect(input.policyReasons).toBeUndefined();
+  });
+
+  // ── Wave 7 outbound quality ──────────────────────────────────────────────
+
+  it('a stored default mailbox signature is RESPECTED (not the generated one)', async () => {
+    const { svc, compose } = make({
+      signature: { html: '<p>Concierge Desk — Acme Support</p>' },
+    });
+    await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+    const input = compose.mock.calls[0][2];
+    expect(input.bodyHtml).toContain('<p>Concierge Desk — Acme Support</p>');
+    expect(input.body).toContain('Concierge Desk — Acme Support');
+  });
+
+  it('the generated signature carries the agent displayName + description role line', async () => {
+    const { svc, compose } = make({
+      agent: { ...AGENT_ROW, description: 'Customer support agent' },
+    });
+    await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+    const input = compose.mock.calls[0][2];
+    expect(input.bodyHtml).toContain('Concierge');
+    expect(input.bodyHtml).toContain('Customer support agent');
+    expect(input.body).toContain('Customer support agent');
+  });
+
+  it('the LLM text becomes clean paragraph HTML (escaped, <p> per blank line, <br> per newline)', async () => {
+    const chat = jest
+      .fn()
+      .mockResolvedValue('First paragraph <script>.\n\nSecond paragraph\nwith a break.');
+    const { svc, compose } = make({ chat });
+    await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+    const input = compose.mock.calls[0][2];
+    expect(input.bodyHtml).toContain('<p>First paragraph &lt;script&gt;.</p>');
+    expect(input.bodyHtml).toContain('<p>Second paragraph<br>with a break.</p>');
   });
 
   it('guards: no sender → skip; self-addressed (loop) → skip', async () => {

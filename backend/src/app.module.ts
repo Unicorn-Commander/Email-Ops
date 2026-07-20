@@ -30,6 +30,7 @@ import { UiCommandsModule } from './ui-commands/ui-commands.module';
 import { AgentViewModule } from './agent-view/agent-view.module';
 import { SchedulingModule } from './scheduling/scheduling.module';
 import { MailRulesModule } from './mail-rules/mail-rules.module';
+import { TrustedCorrespondentsModule } from './trusted-correspondents/trusted-correspondents.module';
 
 @Module({
   imports: [
@@ -110,6 +111,7 @@ import { MailRulesModule } from './mail-rules/mail-rules.module';
     UiCommandsModule,
     SchedulingModule,
     MailRulesModule,
+    TrustedCorrespondentsModule,
     // MCP last so it can consume the contract + agent-inbox + ui_* tools.
     McpModule,
   ],

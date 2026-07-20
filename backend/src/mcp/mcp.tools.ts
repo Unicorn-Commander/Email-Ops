@@ -64,6 +64,8 @@ import { SchedulingService } from '../scheduling/scheduling.service';
 import { AgentViewService } from '../agent-view/agent-view.service';
 import { MailRulesService } from '../mail-rules/mail-rules.service';
 import { MailRuleView } from '../mail-rules/mail-rules.types';
+import { TrustedCorrespondentsService } from '../trusted-correspondents/trusted-correspondents.service';
+import { TrustedCorrespondentView } from '../email/email.types';
 
 export class EmailOpsTools {
   constructor(
@@ -533,7 +535,7 @@ export class EmailOpsTools {
 
   async approveAgentInboxItem(
     user: User,
-    args: { workspace_id?: string; item_id: string; note?: string },
+    args: { workspace_id?: string; item_id: string; note?: string; trust_recipients?: boolean },
   ): Promise<unknown> {
     const workspaceId = await this.resolve(user, args.workspace_id);
     // Gate BY KIND (mirrors the REST approve): peek first so a missing/foreign
@@ -558,6 +560,9 @@ export class EmailOpsTools {
       ucUidOf(user as WithWorkspaceClaim),
       args.item_id,
       args.note ?? null,
+      // Wave 7 learning: default TRUE; trust_recipients:false approves without
+      // trusting the external recipients.
+      args.trust_recipients,
     );
     if (!res) return { ok: false, reason: 'agent-inbox item not found in this workspace' };
     return { ok: true, ...res };
@@ -1226,6 +1231,62 @@ export class MailRulesTools {
       args.rule_id,
     );
     if (!removed) return { ok: false, reason: 'rule not found in this mailbox' };
+    return { ok: true };
+  }
+
+  private async resolve(user: User, requested?: string): Promise<string> {
+    return this.membership.resolveAndAuthorize(user, requested ?? null);
+  }
+}
+
+/**
+ * TrustedCorrespondentTools (Wave 7) — the MCP twin of the trusted-
+ * correspondents REST routes: list the outbound trust allowlist, trust an
+ * address manually, untrust one. Each tool runs AS the calling user through the
+ * membership gate into the SAME TrustedCorrespondentsService the REST
+ * controller uses (one implementation, one RLS path; the service is the
+ * validator — a bad address surfaces as its own BadRequestException).
+ */
+export class TrustedCorrespondentTools {
+  constructor(
+    private readonly membership: MembershipService,
+    private readonly trusted: TrustedCorrespondentsService,
+  ) {}
+
+  /** The workspace's trusted correspondents (the L2 external auto-send allowlist). */
+  async listTrustedCorrespondents(
+    user: User,
+    args: { workspace_id?: string },
+  ): Promise<{ items: TrustedCorrespondentView[]; count: number }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const items = await this.trusted.list(workspaceId, ucUidOf(user as WithWorkspaceClaim));
+    return { items, count: items.length };
+  }
+
+  /** Manually trust an address (source MANUAL; idempotent). */
+  async trustCorrespondent(
+    user: User,
+    args: { workspace_id?: string; address: string; note?: string },
+  ): Promise<TrustedCorrespondentView> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.trusted.add(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
+      address: args.address,
+      note: args.note ?? null,
+    });
+  }
+
+  /** Untrust an address (delete its row). */
+  async untrustCorrespondent(
+    user: User,
+    args: { workspace_id?: string; address: string },
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const removed = await this.trusted.removeByAddress(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.address,
+    );
+    if (!removed) return { ok: false, reason: 'address is not a trusted correspondent in this workspace' };
     return { ok: true };
   }
 

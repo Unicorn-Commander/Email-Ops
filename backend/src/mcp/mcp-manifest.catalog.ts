@@ -1060,7 +1060,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "approve_agent_inbox_item",
-      "description": "Approve a PENDING agent-inbox draft: hand it to the send lane and advance the message to queued/sent. This is the human-in-the-loop SEND, so it requires BOTH customer-ops and email-ops entitlements. Returns the updated inbox item + message.",
+      "description": "Approve a PENDING agent-inbox draft: hand it to the send lane and advance the message to queued/sent. This is the human-in-the-loop SEND, so it requires BOTH customer-ops and email-ops entitlements. By default the approval also TRUSTS the external recipients (Wave 7 learning) so future in-thread agent replies to them can send autonomously; pass trust_recipients:false to approve without learning. Returns the updated inbox item + message.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1073,6 +1073,9 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
           "note": {
             "type": "string",
             "maxLength": 2000
+          },
+          "trust_recipients": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -1112,6 +1115,83 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
       },
       "scopes_required": [
         "write:agent_inbox"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "list_trusted_correspondents",
+      "description": "List the workspace’s trusted correspondents — the OUTBOUND addresses an L2 agent may auto-send to (learned when a human approves a staged draft, or added manually). Read-only / member-level. Returns { items, count }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "trust_correspondent",
+      "description": "Manually add an address to the trusted-correspondent allowlist (source MANUAL; idempotent — re-trusting refreshes the note). After this, an L2 agent’s in-thread replies to the address can send autonomously. Returns the trusted-correspondent row.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 320
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "address"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "untrust_correspondent",
+      "description": "Remove an address from the trusted-correspondent allowlist — the next agent reply to it stages for human approval again. Returns { ok } (ok:false when the address was not trusted).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 320
+          }
+        },
+        "required": [
+          "address"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
       ],
       "tier_required": "free",
       "read_only": false

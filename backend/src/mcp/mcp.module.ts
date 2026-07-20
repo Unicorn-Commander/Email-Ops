@@ -16,6 +16,7 @@ import { MailEngineAdminModule } from '../mail-engine-admin/mail-engine-admin.mo
 import { SchedulingModule } from '../scheduling/scheduling.module';
 import { AgentViewModule } from '../agent-view/agent-view.module';
 import { MailRulesModule } from '../mail-rules/mail-rules.module';
+import { TrustedCorrespondentsModule } from '../trusted-correspondents/trusted-correspondents.module';
 
 @Module({
   // EmailModule exports EmailService so the contract MCP tools run the SAME SoR
@@ -51,6 +52,9 @@ import { MailRulesModule } from '../mail-rules/mail-rules.module';
     // SAME rule CRUD (validation + per-mailbox fence) the human REST routes use
     // (one implementation, one RLS path).
     MailRulesModule,
+    // TrustedCorrespondentsModule exports the Wave-7 trust CRUD service so the
+    // list/trust/untrust MCP tools share the REST implementation + RLS path.
+    TrustedCorrespondentsModule,
   ],
   // McpManifestController is the PUBLIC per-environment federation-manifest route
   // (mcp_endpoint derived from the host / PUBLIC_BASE_URL) — fixes prod advertising

@@ -295,14 +295,28 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       expect(item?.draftedBy).toBe(key);
     });
 
-    it('lets a REGISTERED L2 agent send autonomously (engine handed the send)', async () => {
+    it('lets a REGISTERED L2 agent send autonomously from ITS OWN mailbox to an INTERNAL recipient', async () => {
+      // Wave 7: L2 external requires routine (first-contact gating) — an
+      // autonomous send now needs a Class-B (agent-linked) mailbox AND an
+      // internal recipient (or the full routine-external checklist). This test
+      // pins the internal-autonomous lane.
       const key = `l2-agent-${Date.now()}`;
+      const ownMb = await prisma.mailboxAccount.create({
+        data: {
+          workspaceId: WS,
+          emailAddress: `l2-bot-${Date.now()}@magicunicorn.tech`,
+          isDefault: false,
+          postmarkLane: true,
+        },
+      });
       await prisma.agent.create({
         data: {
           workspaceId: WS,
           key,
           displayName: 'L2 Agent',
           autonomyLevel: AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT,
+          mailboxAccountId: ownMb.id,
+          recipientPolicy: { internalDomains: ['acme.test'] },
         },
       });
       const result = await service.composeEmail(WS, UC_UID, {
@@ -317,6 +331,32 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       expect(result.status).toBe('sent');
       expect(result.mode).toBe('send');
       expect(stalwart.sendCalls).toHaveLength(1);
+    });
+
+    it('Wave 7: an L2 send from the workspace-default (non-agent) mailbox is held — Class A always drafts', async () => {
+      const key = `l2-classa-${Date.now()}`;
+      await prisma.agent.create({
+        data: {
+          workspaceId: WS,
+          key,
+          displayName: 'L2 Class-A Agent',
+          autonomyLevel: AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT,
+        },
+      });
+      const result = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'lead@acme.test',
+        subject: 'Should stage',
+        body: 'The agent has no mailbox of its own — it composes as the shared desk.',
+        mode: 'send',
+        externalSource: key,
+        externalRef: `l2ca-${Date.now()}`,
+      });
+      expect(result).toMatchObject({ status: 'pending_approval', mode: 'draft' });
+      expect(stalwart.sendCalls).toHaveLength(0);
+      const item = await prisma.agentInboxItem.findUnique({ where: { messageId: result.id } });
+      const policy = (item?.payload as { policy?: { reasons?: { code: string }[] } })?.policy;
+      expect(policy?.reasons?.some((r) => r.code === 'class-a-mailbox')).toBe(true);
     });
 
     it('FAIL-SAFES an UNREGISTERED + UNTRUSTED source send → staged draft (injection guard)', async () => {
@@ -385,13 +425,25 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
     });
 
     it('records an AUTONOMOUS_SEND audit event for an L2 agent send', async () => {
+      // Wave 7: L2 external requires routine (first-contact gating) — the
+      // autonomous lane now needs a Class-B mailbox + an internal recipient.
       const key = `l2-audit-${Date.now()}`;
+      const ownMb = await prisma.mailboxAccount.create({
+        data: {
+          workspaceId: WS,
+          emailAddress: `l2-audit-${Date.now()}@magicunicorn.tech`,
+          isDefault: false,
+          postmarkLane: true,
+        },
+      });
       await prisma.agent.create({
         data: {
           workspaceId: WS,
           key,
           displayName: 'L2 Audit',
           autonomyLevel: AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT,
+          mailboxAccountId: ownMb.id,
+          recipientPolicy: { internalDomains: ['acme.test'] },
         },
       });
       await service.composeEmail(WS, UC_UID, {
@@ -428,6 +480,10 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
           displayName: 'Own Mailbox Agent',
           autonomyLevel: AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT,
           mailboxAccountId: ownMb.id,
+          // Wave 7: L2 external requires routine (first-contact gating) — the
+          // recipient is made internal so the send still flows and this test
+          // keeps pinning the send-identity behavior it always pinned.
+          recipientPolicy: { internalDomains: ['acme.test'] },
         },
       });
       const result = await service.composeEmail(WS, UC_UID, {

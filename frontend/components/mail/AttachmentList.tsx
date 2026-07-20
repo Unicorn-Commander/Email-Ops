@@ -107,8 +107,19 @@ function attachmentKind(type?: string | null, name?: string | null): AttachmentK
   return { label: null, badgeClass: neutral };
 }
 
-/** The leading square: image thumbnail when we have one, else a type badge. */
-function AttachmentGlyph({ att, thumbUrl }: { att: MailAttachment; thumbUrl?: string }) {
+/**
+ * The leading square: image thumbnail when we have one, else a type badge.
+ * Exported for the agent-inbox review panel's read-only staged-attachment
+ * chips — the prop is name/type meta only, so a not-yet-sent attachment
+ * (no blob id) renders with the same visual language as a received one.
+ */
+export function AttachmentGlyph({
+  att,
+  thumbUrl,
+}: {
+  att: { name: string | null; type: string | null };
+  thumbUrl?: string;
+}) {
   const [imgOk, setImgOk] = useState(true);
   if (thumbUrl && imgOk) {
     return (

@@ -413,6 +413,7 @@ model Workspace {
   snoozedThreads     SnoozedThread[]
   scheduledSends     ScheduledSend[]
   mailRules          MailRule[]
+  trustedCorrespondents TrustedCorrespondent[]
   spaces             Space[]
   invitations        Invitation[]
   uiCommands         UiCommand[]
@@ -955,6 +956,47 @@ model MailDomain {
   @@unique([domain])
   @@index([workspaceId])
   @@map("mail_domains")
+}
+
+// ============================================================
+// TRUSTED CORRESPONDENT (Email-Ops OWNS this — tenant-scoped; Wave 7)
+// ============================================================
+//
+// The learned "ongoing conversation" allowlist behind the agent-send autonomy
+// matrix: an L2 agent may auto-send EXTERNAL mail only to addresses a human has
+// already vouched for — by approving a staged draft to them (source APPROVAL,
+// the learning loop) or by adding them explicitly (source MANUAL). First contact
+// always needs a human; once approved, the ongoing conversation flows.
+//
+// `address` is the full recipient address, LOWERCASED at write time (the gate
+// compares lowercased). Deliberately NOT SenderPolicy (that is the INBOUND
+// allow/block surface) — this table answers the OUTBOUND question only.
+//
+// RLS-fenced on workspaceId exactly like the other scoped tables. ENABLE +
+// FORCE, identical workspace_isolation policy. A no-GUC read returns zero rows.
+model TrustedCorrespondent {
+  id              String                     @id @default(uuid())
+  workspaceId     String
+  address         String
+  source          TrustedCorrespondentSource @default(APPROVAL)
+  approvalCount   Int                        @default(0)
+  lastApprovedAt  DateTime?
+  addedByUcUid    String?
+  addedByAgentKey String?
+  note            String?
+  createdAt       DateTime                   @default(now())
+  updatedAt       DateTime                   @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, address])
+  @@index([workspaceId])
+  @@map("trusted_correspondents")
+}
+
+enum TrustedCorrespondentSource {
+  MANUAL
+  APPROVAL
 }
 
 // ============================================================

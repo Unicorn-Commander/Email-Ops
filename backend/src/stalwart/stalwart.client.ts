@@ -418,6 +418,10 @@ export class StalwartClient extends StalwartPort {
           TextBody: request.body,
           ...(request.bodyHtml ? { HtmlBody: request.bodyHtml } : {}),
           MessageStream: 'outbound',
+          // Wave 7: custom headers (e.g. the X-UC-Agent-Autoreply loop marker).
+          ...(request.headers?.length
+            ? { Headers: request.headers.map((h) => ({ Name: h.name, Value: h.value })) }
+            : {}),
         }),
       });
     } catch (err) {
@@ -474,6 +478,10 @@ export class StalwartClient extends StalwartPort {
                 : { body: { value: request.body } },
               textBody: [{ partId: 'body', type: 'text/plain' }],
               ...(request.bodyHtml ? { htmlBody: [{ partId: 'html', type: 'text/html' }] } : {}),
+              // Wave 7: custom headers via the RFC 8621 header:{name} form.
+              ...Object.fromEntries(
+                (request.headers ?? []).map((h) => [`header:${h.name}:asText`, h.value]),
+              ),
             },
           },
         },

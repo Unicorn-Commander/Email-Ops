@@ -18,6 +18,14 @@
 import { MessageDisposition } from '@prisma/client';
 
 /**
+ * The stable provenance slug of the agent-reply runtime (Wave 7). Defined here
+ * (not imported from agent-reply.service) so EmailService can recognize
+ * runtime-initiated composes without an import cycle; agent-reply.service
+ * re-exports it as AGENT_REPLY_SOURCE.
+ */
+export const AGENT_REPLY_RUNTIME_SOURCE = 'agent-reply-runtime';
+
+/**
  * A client mail folder. The disposition folders (inbox/archive/trash/spam) are
  * the overlay; sent/drafts derive from the SoR direction/status.
  */
@@ -146,6 +154,29 @@ export interface ComposeInput {
   references?: string[];
   /** The server-side draft id to update/delete for persistent drafts. */
   draftId?: string | null;
+  // ── Wave 7 (agent-send autonomy matrix) — INTERNAL fields. Set only by
+  // first-party runtimes (the agent-reply runtime); the REST/MCP controllers
+  // never map them from wire input, so an external caller cannot forge them.
+  /** Stamp the outbound with X-UC-Agent-Autoreply: 1 (runtime loop protection). */
+  agentAutoreply?: boolean;
+  /**
+   * First-party attestation that this compose is an in-thread reply to a REAL
+   * inbound message from `fromAddress` (the runtime saw it arrive). Feeds the
+   * matrix's not-cold-outbound proof alongside the SoR inbound-row check.
+   */
+  inboundReplyAttestation?: { fromAddress: string } | null;
+  /**
+   * Upstream policy holds (e.g. the runtime's thread-rate-cap): when the
+   * effective mode is 'draft', these merge into the staged item's
+   * payload.policy.reasons so the approver sees WHY it was held.
+   */
+  policyReasons?: { code: string; message: string }[];
+  /**
+   * The transparency footer to append ONLY when the gate decides an AUTONOMOUS
+   * SEND with ≥1 external recipient ("— <Agent> · AI agent, sent autonomously").
+   * Drafts a human approves keep just the normal signature (never appended).
+   */
+  transparencyFooter?: { text: string; html: string } | null;
 }
 
 /** An agent-inbox item view (the approval queue surface). */
@@ -167,6 +198,69 @@ export interface AgentInboxView {
   review_note: string | null;
   created_at: string | null;
   payload?: Record<string, unknown> | null;
+}
+
+/**
+ * The agent-inbox item DETAIL (Wave 7): the queue row + the FULL staged message
+ * (html/text body, all recipients, attachment meta) so the approver reviews the
+ * exact email — plus payload (which carries payload.policy hold reasons).
+ */
+export interface AgentInboxDetailView extends AgentInboxView {
+  message: MessageFullView | null;
+}
+
+/**
+ * The FULL staged/sent message detail (Wave 7 pinned contract): everything the
+ * UI needs to render the exact email — recipients, both bodies, attachment meta.
+ * camelCase per the Wave-7 frontend contract (deliberately unlike the snake_case
+ * federation shapes above — this is the cockpit's own surface, pinned as such).
+ */
+export interface MessageFullView {
+  id: string;
+  threadId: string | null;
+  subject: string | null;
+  fromAddress: string | null;
+  toAddress: string | null;
+  toAddresses: string[];
+  ccAddresses: string[];
+  bccAddresses: string[];
+  /** Plain-text body (also mirrored as textBody — both spellings pinned). */
+  body: string | null;
+  textBody: string | null;
+  /** HTML body (also mirrored as htmlBody — both spellings pinned). */
+  bodyHtml: string | null;
+  htmlBody: string | null;
+  attachments: {
+    blobId: string | null;
+    name: string | null;
+    type: string | null;
+    size?: number | null;
+  }[];
+  status: string;
+  mode: string;
+  sentAt: string | null;
+  createdAt: string | null;
+}
+
+/** One row of the auto-sent audit feed (Wave 7 pinned contract). */
+export interface AutoSentItemView {
+  id: string;
+  agentKey: string | null;
+  createdAt: string | null;
+  detail: string | null;
+  message: MessageFullView | null;
+}
+
+/** One trusted correspondent row (Wave 7 pinned contract; camelCase). */
+export interface TrustedCorrespondentView {
+  id: string;
+  address: string;
+  source: string;
+  approvalCount: number;
+  lastApprovedAt: string | null;
+  addedByUcUid: string | null;
+  note: string | null;
+  createdAt: string | null;
 }
 
 /**

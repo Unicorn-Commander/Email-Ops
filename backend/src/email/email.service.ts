@@ -43,6 +43,7 @@ import {
   MailboxAccount,
   MessageDisposition,
   Prisma,
+  TrustedCorrespondentSource,
 } from '@prisma/client';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { MAX_TARGET_ROWS } from '../connected-accounts/cleanup-targets';
@@ -51,8 +52,11 @@ import { StalwartPort } from '../stalwart/stalwart.port';
 import { StalwartDraftRequest, StalwartMailFolder, StalwartMessageDetail, StalwartThread } from '../stalwart/stalwart.types';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import {
+  AGENT_REPLY_RUNTIME_SOURCE,
+  AgentInboxDetailView,
   AgentInboxView,
   AttachmentView,
+  AutoSentItemView,
   BulkActionResult,
   ComposeInput,
   EngagementCaptureInput,
@@ -60,13 +64,23 @@ import {
   MailboxCountsView,
   MailFolder,
   MessageComposeView,
+  MessageFullView,
   MessageView,
   ParticipantView,
   ThreadView,
 } from './email.types';
 import { shouldAdvanceStatus } from './message-status';
 import { DispositionView } from '../mail-triage/mail-triage.types';
-import { decideComposeMode } from './autonomy';
+import {
+  AgentComposeContext,
+  decideAgentComposeMode,
+  isExternalRecipient,
+  MailboxClass,
+  normalizeAddress,
+  parseRecipientPolicy,
+  PolicyReason,
+  splitRecipients,
+} from './autonomy';
 import { mapWithConcurrency, withTimeout } from '../common/async/concurrency';
 
 /**
@@ -103,7 +117,15 @@ interface SendReq {
   /** The resolved Message-ID header of the message being replied to. */
   inReplyTo?: string | null;
   references?: string[];
+  /** Wave 7: custom outbound headers (the agent auto-reply loop marker). */
+  headers?: { name: string; value: string }[];
 }
+
+/**
+ * Wave 7: the header stamped on every runtime auto-reply send. The runtime
+ * suppresses drafting a reply to any inbound that carries it (loop protection).
+ */
+export const AGENT_AUTOREPLY_HEADER = 'X-UC-Agent-Autoreply';
 
 interface DraftReq {
   toAddress: string;
@@ -1261,14 +1283,35 @@ export class EmailService {
         // TRUSTED first-party source (the human web client + known federation
         // partners); an unknown/attacker-controlled source is fail-safed to a
         // staged draft so prompt-injection can't drive an autonomous send.
+        //
+        // Wave 7: a REGISTERED agent requesting 'send' runs the full autonomy
+        // MATRIX ("first contact needs a human; ongoing conversation flows") over
+        // a context built here — sending-mailbox class, internal domains, trusted
+        // correspondents, and the in-thread-reply-to-inbound proof. Every other
+        // path (human/trusted sources, requested drafts, unregistered provenance)
+        // takes the base gate with ZERO context queries — byte-identical to the
+        // pre-wave behavior.
         const trustedUnregisteredSend =
           !agent && (agentKey == null || this.trustedComposeSources.has(agentKey));
-        const decision = decideComposeMode({
-          requestedMode: input.mode === 'draft' ? 'draft' : 'send',
+        const requestedMode: 'send' | 'draft' = input.mode === 'draft' ? 'draft' : 'send';
+        const agentContext =
+          agent && requestedMode === 'send'
+            ? await this.buildAgentComposeContext(tx, workspaceId, agent, mailbox, input)
+            : null;
+        const decision = decideAgentComposeMode({
+          requestedMode,
           agent,
           toAddress: input.toAddress,
           trustedUnregisteredSend,
+          agentContext,
         });
+        // Upstream policy holds (e.g. the runtime's thread-rate-cap) merge with
+        // the gate's own reasons on the staged item's policy payload.
+        const agentInitiated = !!agent || input.externalSource === AGENT_REPLY_RUNTIME_SOURCE;
+        const policyReasons: PolicyReason[] = [
+          ...(agentInitiated ? input.policyReasons ?? [] : []),
+          ...decision.reasons,
+        ];
         const mode = decision.mode === 'draft' ? EmailMode.DRAFT : EmailMode.SEND;
         if (decision.coerced) {
           this.logger.log(
@@ -1311,13 +1354,27 @@ export class EmailService {
               actorUcUid: ucUid,
             },
           });
+          // Wave 7: persist WHY the send was held (machine+human reasons) on the
+          // staged item — payload.policy is the source of truth the approval UI
+          // renders; the summary carries a cheap one-code suffix. Created fresh
+          // here, so there are no other payload keys to preserve.
+          const held = agentInitiated && policyReasons.length > 0;
           await tx.agentInboxItem.create({
             data: {
               workspaceId,
               messageId: msg.id,
               state: AgentInboxState.PENDING,
               draftedBy: input.draftedBy ?? input.externalSource,
-              summary: this.summary(input.subject, input.toAddress),
+              summary:
+                this.summary(input.subject, input.toAddress) +
+                (held ? ` — held: ${policyReasons[0].code}` : ''),
+              ...(held
+                ? {
+                    payload: {
+                      policy: { decision: 'hold', reasons: policyReasons },
+                    } as unknown as Prisma.InputJsonValue,
+                  }
+                : {}),
             },
           });
           if (mailbox) {
@@ -1340,6 +1397,20 @@ export class EmailService {
           return { done: this.composeView(msg) };
         }
 
+        // Wave 7: the transparency footer rides ONLY on an AUTONOMOUS agent send
+        // with ≥1 external recipient — a draft a human approves keeps just the
+        // normal signature. Applied before the row create so the SoR (and the
+        // auto-sent audit feed) shows exactly what left.
+        let sendBody = input.body;
+        let sendBodyHtml = input.bodyHtml ?? null;
+        if (agent && input.transparencyFooter && agentContext) {
+          const { external } = splitRecipients(agentContext.recipients, agentContext.internalDomains);
+          if (external.length > 0) {
+            sendBody = `${sendBody}${input.transparencyFooter.text}`;
+            if (sendBodyHtml) sendBodyHtml = `${sendBodyHtml}${input.transparencyFooter.html}`;
+          }
+        }
+
         // mode=send — record the SoR row QUEUED now; the external hand-off is
         // phase 2 (outside this tx). The row is durable the instant we commit.
         const msg = await tx.emailMessage.create({
@@ -1357,12 +1428,12 @@ export class EmailService {
             fromAddress,
             toAddress: input.toAddress,
             subject: input.subject,
-            body: input.body,
-            preview: this.snippet(input.body),
+            body: sendBody,
+            preview: this.snippet(sendBody),
             toAddresses: input.toAddresses?.length ? input.toAddresses : [],
             ccAddresses: input.cc ?? [],
             bccAddresses: input.bcc ?? [],
-            bodyHtml: input.bodyHtml ?? null,
+            bodyHtml: sendBodyHtml,
             attachments: input.attachments?.length
               ? (input.attachments as unknown as Prisma.InputJsonValue)
               : Prisma.DbNull,
@@ -1388,8 +1459,8 @@ export class EmailService {
               toAddress: input.toAddress,
               toAddresses: input.toAddresses?.length ? input.toAddresses : undefined,
               subject: input.subject,
-              body: input.body,
-              bodyHtml: input.bodyHtml ?? null,
+              body: sendBody,
+              bodyHtml: sendBodyHtml,
               inReplyToThreadId: input.inReplyToThreadId ?? null,
               transactional: mailbox?.postmarkLane ?? true,
               cc: input.cc?.length ? input.cc : undefined,
@@ -1398,6 +1469,11 @@ export class EmailService {
                 ? input.attachments.map((a) => ({ blobId: a.blob_id, name: a.name, type: a.type }))
                 : undefined,
               references: input.references?.length ? input.references : undefined,
+              // Wave 7 loop protection: runtime auto-replies are stamped so a
+              // receiving agent runtime never answers them back.
+              ...(input.agentAutoreply
+                ? { headers: [{ name: AGENT_AUTOREPLY_HEADER, value: '1' }] }
+                : {}),
             },
           },
         };
@@ -1719,12 +1795,19 @@ export class EmailService {
    * draft to the send lane, advance the message to queued/sent/failed. Returns
    * the updated message view. Idempotent-ish: approving a non-pending item is a
    * no-op that returns the current message view.
+   *
+   * Wave 7 learning: approving an EMAIL item TEACHES the trusted-correspondent
+   * table — every external recipient of the approved send is upserted (source
+   * APPROVAL, approvalCount++), so the NEXT in-thread reply to them can flow
+   * autonomously ("approve once to trust this correspondent"). Pass
+   * `trustRecipients: false` to approve without learning; rejection never learns.
    */
   async approveAgentInboxItem(
     workspaceId: string,
     ucUid: string | null,
     itemId: string,
     note?: string | null,
+    trustRecipients?: boolean,
   ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
     // PHASE 1 — validate + authorize (a short tx). A CLEANUP item executes wholly
     // in-tx as before; an EMAIL item resolves its mailbox + returns the send plan,
@@ -1846,6 +1929,11 @@ export class EmailService {
             attachments: this.parseStoredAttachments(item.message.attachments),
             inReplyToThreadId: item.message.inReplyToThreadId ?? null,
             transactional: mailbox?.postmarkLane ?? true,
+            // Wave 7 loop protection: an approved runtime draft still leaves as
+            // an agent auto-reply — stamp it so no agent runtime answers it back.
+            ...(item.message.externalSource === AGENT_REPLY_RUNTIME_SOURCE
+              ? { headers: [{ name: AGENT_AUTOREPLY_HEADER, value: '1' }] }
+              : {}),
           },
         };
       },
@@ -1885,6 +1973,17 @@ export class EmailService {
     // PHASE 2 — hand the approved draft to the mail engine / provider, OUTSIDE the
     // tx (degrade-clean: a failed send returns accepted:false, never throws).
     const result = await this.callEngine(prep.mailbox, prep.req);
+
+    // Wave 7 learning (default ON): the approval vouches for the external
+    // recipients. Runs in its OWN fenced call, degrade-clean, so a learning
+    // hiccup can never fail an approval whose mail already left.
+    if (trustRecipients !== false) {
+      await this.learnTrustedCorrespondents(workspaceId, ucUid, prep.draftedBy, [
+        ...(prep.req.toAddresses?.length ? prep.req.toAddresses : [prep.req.toAddress]),
+        ...(prep.req.cc ?? []),
+        ...(prep.req.bcc ?? []),
+      ]);
+    }
 
     // PHASE 3 — stamp the send outcome + transition the item to APPROVED + audit
     // (a SHORT tx). The draft was durable; this only records the send result.
@@ -1979,6 +2078,301 @@ export class EmailService {
       });
       return { inbox: this.inboxView(updated, msg), message: this.composeView(msg) };
     });
+  }
+
+  // ── Wave 7: the agent-send autonomy matrix support surface ─────────────
+
+  /**
+   * Build the pure-matrix context for a REGISTERED agent's requested send:
+   * sending-mailbox class (Class B ⇔ an active agent's send identity), internal
+   * domains (workspace MailDomain ∪ the agent recipientPolicy), the trusted-
+   * correspondent subset of the recipients, and the in-thread-reply-to-inbound
+   * proof (runtime attestation OR an SoR RECEIVED row from an external
+   * recipient). Runs inside the caller's fenced tx (DB reads only — no engine
+   * calls). Lookup failures fall back to a FAIL-SAFE Class-A context (→ the
+   * matrix stages a draft); note a hard mid-tx DB failure still aborts the
+   * whole compose, which is safer still — nothing sends.
+   */
+  private async buildAgentComposeContext(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    agent: { recipientPolicy: unknown },
+    mailbox: MailboxAccount | null,
+    input: ComposeInput,
+  ): Promise<AgentComposeContext> {
+    const attachmentCount = input.attachments?.length ?? 0;
+    // EVERY recipient (to + cc + bcc), normalized. bcc counts too — an external
+    // bcc is still external mail (the safer side).
+    const recipients = [
+      ...(input.toAddresses?.length ? input.toAddresses : [input.toAddress]),
+      ...(input.cc ?? []),
+      ...(input.bcc ?? []),
+    ]
+      .map((r) => normalizeAddress(r))
+      .filter(Boolean);
+    const autonomousSendEnabled = process.env.AGENT_AUTONOMOUS_SEND_ENABLED !== 'false';
+    try {
+      // Sending-mailbox class: agent-linked (ownerKind AGENT, the denormalized
+      // Agent.mailboxAccountId cache, or an AgentMailbox junction row with an
+      // active agent) ⇒ Class B; a resolvable non-linked box ⇒ Class A ('user');
+      // no mailbox at all ⇒ 'unknown' (treated as Class A by the matrix).
+      let mailboxClass: MailboxClass = 'unknown';
+      if (mailbox) {
+        if ((mailbox.ownerKind as string) === 'AGENT') {
+          mailboxClass = 'agent';
+        } else {
+          const byCache = await tx.agent.findFirst({
+            where: { workspaceId, active: true, mailboxAccountId: mailbox.id },
+            select: { id: true },
+          });
+          const byJoin = byCache
+            ? null
+            : await tx.agentMailbox.findFirst({
+                where: { workspaceId, mailboxAccountId: mailbox.id, agent: { active: true } },
+                select: { id: true },
+              });
+          mailboxClass = byCache || byJoin ? 'agent' : 'user';
+        }
+      }
+
+      const domainRows = await tx.mailDomain.findMany({
+        where: { workspaceId },
+        select: { domain: true },
+      });
+      const internalDomains = [
+        ...new Set([
+          ...domainRows.map((r) => r.domain.trim().toLowerCase().replace(/^@/, '')).filter(Boolean),
+          ...parseRecipientPolicy(agent.recipientPolicy).internalDomains,
+        ]),
+      ];
+
+      const trustedRows = recipients.length
+        ? await tx.trustedCorrespondent.findMany({
+            where: { workspaceId, address: { in: recipients } },
+            select: { address: true },
+          })
+        : [];
+      const trustedAddresses = new Set(trustedRows.map((r) => r.address.toLowerCase()));
+
+      // In-thread proof: the runtime attests the inbound it is replying to (it
+      // saw the message arrive), OR the SoR carries a RECEIVED row in this
+      // thread from one of the external recipients. Anything less = cold.
+      const externalSet = new Set(splitRecipients(recipients, internalDomains).external);
+      let isInThreadReplyToInbound = false;
+      if (input.inReplyToThreadId && externalSet.size > 0) {
+        const attested = input.inboundReplyAttestation?.fromAddress
+          ? normalizeAddress(input.inboundReplyAttestation.fromAddress)
+          : null;
+        if (attested && externalSet.has(attested)) {
+          isInThreadReplyToInbound = true;
+        } else {
+          const inbound = await tx.emailMessage.findMany({
+            where: {
+              workspaceId,
+              threadId: input.inReplyToThreadId,
+              direction: EmailDirection.RECEIVED,
+            },
+            select: { fromAddress: true },
+            take: 200,
+          });
+          isInThreadReplyToInbound = inbound.some(
+            (r) => r.fromAddress && externalSet.has(normalizeAddress(r.fromAddress)),
+          );
+        }
+      }
+
+      return {
+        mailboxClass,
+        internalDomains,
+        recipients,
+        isInThreadReplyToInbound,
+        attachmentCount,
+        trustedAddresses,
+        autonomousSendEnabled,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `agent compose context build failed (workspace ${workspaceId}) — FAIL-SAFE Class-A context (send will stage): ${(err as Error).message}`,
+      );
+      return {
+        mailboxClass: 'unknown',
+        internalDomains: [],
+        recipients,
+        isInThreadReplyToInbound: false,
+        attachmentCount,
+        trustedAddresses: new Set(),
+        autonomousSendEnabled,
+      };
+    }
+  }
+
+  /**
+   * Approve-path learning (Wave 7): upsert a TrustedCorrespondent row for each
+   * EXTERNAL recipient of an approved send (external per the workspace's
+   * MailDomain rows; with none bound, everything counts as external — exactly
+   * the addresses the gate would hold on). Own fenced call, degrade-clean:
+   * learning must never fail an approval whose mail already left.
+   */
+  private async learnTrustedCorrespondents(
+    workspaceId: string,
+    ucUid: string | null,
+    agentKey: string | null,
+    rawRecipients: string[],
+  ): Promise<void> {
+    try {
+      await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+        const domainRows = await tx.mailDomain.findMany({
+          where: { workspaceId },
+          select: { domain: true },
+        });
+        const internalDomains = domainRows
+          .map((r) => r.domain.trim().toLowerCase().replace(/^@/, ''))
+          .filter(Boolean);
+        const addresses = [
+          ...new Set(rawRecipients.map((r) => normalizeAddress(r)).filter(Boolean)),
+        ].filter((addr) => isExternalRecipient(addr, internalDomains));
+        const now = new Date();
+        for (const address of addresses) {
+          await tx.trustedCorrespondent.upsert({
+            where: { workspaceId_address: { workspaceId, address } },
+            create: {
+              workspaceId,
+              address,
+              source: TrustedCorrespondentSource.APPROVAL,
+              approvalCount: 1,
+              lastApprovedAt: now,
+              addedByUcUid: ucUid,
+              addedByAgentKey: agentKey ?? null,
+            },
+            update: { approvalCount: { increment: 1 }, lastApprovedAt: now },
+          });
+        }
+        if (addresses.length) {
+          this.logger.log(
+            `trust learning: approval by ${ucUid ?? '(unknown)'} vouched for ${addresses.length} external correspondent(s) (workspace ${workspaceId})`,
+          );
+        }
+      });
+    } catch (err) {
+      this.logger.warn(
+        `trust learning failed for workspace ${workspaceId} (approval already sent — nothing lost): ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * The auto-sent audit feed (Wave 7): AUTONOMOUS_SEND events newest-first,
+   * each joined to its FULL-fidelity message so the audit surface renders the
+   * exact email that left without a human in the loop.
+   */
+  async listAutoSentFeed(
+    workspaceId: string,
+    ucUid: string | null,
+    limit = 50,
+  ): Promise<AutoSentItemView[]> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const events = await tx.agentActionEvent.findMany({
+        // Explicit workspaceId predicate (RLS is inert under the owner role) +
+        // a hard bound, mirroring listAgentInbox.
+        where: { workspaceId, kind: AgentActionKind.AUTONOMOUS_SEND },
+        orderBy: { createdAt: 'desc' },
+        take: Math.min(Math.max(Math.trunc(limit) || 50, 1), 200),
+      });
+      const ids = [...new Set(events.map((e) => e.messageId).filter((v): v is string => !!v))];
+      const messages = ids.length
+        ? await tx.emailMessage.findMany({ where: { workspaceId, id: { in: ids } } })
+        : [];
+      const byId = new Map(messages.map((m) => [m.id, m]));
+      return events.map((e) => ({
+        id: e.id,
+        agentKey: e.agentKey ?? null,
+        createdAt: e.createdAt ? e.createdAt.toISOString() : null,
+        detail: e.detail ?? null,
+        message: e.messageId ? this.messageFullView(byId.get(e.messageId) ?? null) : null,
+      }));
+    });
+  }
+
+  /**
+   * One agent-inbox item + the FULL staged message (Wave 7 detail read): the
+   * approval surface renders the exact email — both bodies, every recipient,
+   * attachment meta — plus payload.policy (why the gate held it). Workspace-
+   * fenced like the other item lookups; a foreign id resolves to null (→ 404).
+   */
+  async getAgentInboxItemDetail(
+    workspaceId: string,
+    ucUid: string | null,
+    itemId: string,
+  ): Promise<AgentInboxDetailView | null> {
+    const item = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      tx.agentInboxItem.findFirst({
+        where: { id: itemId, workspaceId },
+        include: { message: true },
+      }),
+    );
+    if (!item) return null;
+    return {
+      ...this.inboxView(item, item.message),
+      message: this.messageFullView(item.message),
+    };
+  }
+
+  /** An EmailMessage row → the Wave-7 full-fidelity wire shape (null-safe). */
+  private messageFullView(
+    m: {
+      id: string;
+      threadId: string | null;
+      subject: string | null;
+      fromAddress: string | null;
+      toAddress: string | null;
+      toAddresses: string[];
+      ccAddresses: string[];
+      bccAddresses: string[];
+      body: string | null;
+      bodyHtml: string | null;
+      attachments: unknown;
+      status: EmailMessageStatus;
+      mode: EmailMode;
+      sentAt: Date | null;
+      createdAt: Date;
+    } | null,
+  ): MessageFullView | null {
+    if (!m) return null;
+    return {
+      id: m.id,
+      threadId: m.threadId ?? null,
+      subject: m.subject ?? null,
+      fromAddress: m.fromAddress ?? null,
+      toAddress: m.toAddress ?? null,
+      toAddresses: m.toAddresses ?? [],
+      ccAddresses: m.ccAddresses ?? [],
+      bccAddresses: m.bccAddresses ?? [],
+      body: m.body ?? null,
+      textBody: m.body ?? null,
+      bodyHtml: m.bodyHtml ?? null,
+      htmlBody: m.bodyHtml ?? null,
+      attachments: this.attachmentsMeta(m.attachments),
+      status: this.statusWire(m.status),
+      mode: this.modeWire(m.mode),
+      sentAt: m.sentAt ? m.sentAt.toISOString() : null,
+      createdAt: m.createdAt ? m.createdAt.toISOString() : null,
+    };
+  }
+
+  /** Stored attachments JSON → display meta [{blobId,name,type,size?}] (tolerant of both key spellings). */
+  private attachmentsMeta(
+    value: unknown,
+  ): { blobId: string | null; name: string | null; type: string | null; size?: number | null }[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((a): a is Record<string, unknown> => !!a && typeof a === 'object' && !Array.isArray(a))
+      .map((a) => ({
+        blobId:
+          typeof a.blobId === 'string' ? a.blobId : typeof a.blob_id === 'string' ? a.blob_id : null,
+        name: typeof a.name === 'string' ? a.name : null,
+        type: typeof a.type === 'string' ? a.type : null,
+        ...(typeof a.size === 'number' ? { size: a.size } : {}),
+      }));
   }
 
   /**
@@ -2275,6 +2669,7 @@ export class EmailService {
         attachments: req.attachments,
         inReplyTo: req.inReplyTo,
         references: req.references,
+        headers: req.headers,
       },
       req.transactional,
     );
@@ -2519,7 +2914,10 @@ export class EmailService {
       reviewed_at: it.reviewedAt ? it.reviewedAt.toISOString() : null,
       review_note: it.reviewNote ?? null,
       created_at: it.createdAt ? it.createdAt.toISOString() : null,
-      payload: isCleanup ? payload : null,
+      // Wave 7: EMAIL items now carry payload too (payload.policy — why the
+      // gate held the send). Additive: pre-wave EMAIL items had a null payload
+      // in the DB, so they keep rendering null here.
+      payload: isCleanup || (it.payload && typeof it.payload === 'object') ? payload : null,
     };
   }
 

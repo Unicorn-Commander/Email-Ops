@@ -181,6 +181,12 @@ export interface StalwartSendRequest {
   inReplyTo?: string | null;
   /** The References header chain (oldest first), for correct thread linking. */
   references?: string[];
+  /**
+   * Additional custom headers to stamp on the outbound message (Wave 7: the
+   * agent-reply runtime's X-UC-Agent-Autoreply loop-protection marker). Set by
+   * the service layer only — never mapped from wire input.
+   */
+  headers?: { name: string; value: string }[];
 }
 
 /**
@@ -234,6 +240,13 @@ export interface InboundMessageRef {
   toAddresses?: string[];
   subject: string | null;
   receivedAt: string; // ISO
+  /**
+   * True when the message carries the X-UC-Agent-Autoreply header — it was
+   * auto-sent by an Email-Ops agent runtime, so the agent-reply runtime must
+   * NEVER auto-reply to it (Wave 7 loop protection). Optional: absent when the
+   * engine didn't/couldn't read the header (fail-open to the OTHER guards).
+   */
+  agentAutoreply?: boolean;
 }
 
 /**

@@ -28,6 +28,7 @@ import {
   EmailOpsTools,
   MailRulesTools,
   SchedulingTools,
+  TrustedCorrespondentTools,
   UiControlTools,
 } from './mcp.tools';
 import { AgentsService } from '../agents/agents.service';
@@ -42,6 +43,7 @@ import { MailDomainService } from '../mail-engine-admin/mail-domain.service';
 import { SchedulingService } from '../scheduling/scheduling.service';
 import { AgentViewService } from '../agent-view/agent-view.service';
 import { MailRulesService } from '../mail-rules/mail-rules.service';
+import { TrustedCorrespondentsService } from '../trusted-correspondents/trusted-correspondents.service';
 import { enforceMcpToolScope, McpToolName, PatTaggedIdentity } from './mcp-scopes';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
@@ -69,6 +71,7 @@ export class McpService {
     private readonly scheduling: SchedulingService,
     private readonly agentView: AgentViewService,
     private readonly mailRules: MailRulesService,
+    private readonly trustedCorrespondents: TrustedCorrespondentsService,
   ) {}
 
   /**
@@ -142,6 +145,7 @@ export class McpService {
     const schedulingTools = new SchedulingTools(this.membership, this.scheduling);
     const agentViewTools = new AgentViewTools(this.membership, this.agentView);
     const mailRulesTools = new MailRulesTools(this.membership, this.mailRules);
+    const trustedTools = new TrustedCorrespondentTools(this.membership, this.trustedCorrespondents);
 
     // ── Foundation tools ──
 
@@ -725,12 +729,17 @@ export class McpService {
         description:
           'Approve a PENDING agent-inbox draft: hand it to the send lane and advance the ' +
           'message to queued/sent. This is the human-in-the-loop SEND, so it requires ' +
-          'BOTH customer-ops and email-ops entitlements. Returns the updated inbox item ' +
-          '+ message.',
+          'BOTH customer-ops and email-ops entitlements. By default the approval also ' +
+          'TRUSTS the external recipients (Wave 7 learning) so future in-thread agent ' +
+          'replies to them can send autonomously; pass trust_recipients:false to approve ' +
+          'without learning. Returns the updated inbox item + message.',
         inputSchema: {
           workspace_id: z.string().optional(),
           item_id: z.string(),
           note: z.string().max(2000).optional(),
+          // Wave 7 learning: default TRUE — the approval trusts the external
+          // recipients; pass false to approve without learning.
+          trust_recipients: z.boolean().optional(),
         },
       },
       async (args: any) => wrap(await tools.approveAgentInboxItem(user, args)),
@@ -750,6 +759,57 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await tools.rejectAgentInboxItem(user, args)),
+    );
+
+    // ── Trusted-correspondent tools (Wave 7: the outbound trust allowlist) ──
+
+    registerTool(
+      'list_trusted_correspondents',
+      {
+        title: 'List trusted correspondents',
+        description:
+          'List the workspace’s trusted correspondents — the OUTBOUND addresses an ' +
+          'L2 agent may auto-send to (learned when a human approves a staged draft, ' +
+          'or added manually). Read-only / member-level. Returns { items, count }.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await trustedTools.listTrustedCorrespondents(user, args ?? {})),
+    );
+
+    registerTool(
+      'trust_correspondent',
+      {
+        title: 'Trust a correspondent',
+        description:
+          'Manually add an address to the trusted-correspondent allowlist (source ' +
+          'MANUAL; idempotent — re-trusting refreshes the note). After this, an L2 ' +
+          'agent’s in-thread replies to the address can send autonomously. Returns ' +
+          'the trusted-correspondent row.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          address: z.string().min(3).max(320),
+          note: z.string().max(500).optional(),
+        },
+      },
+      async (args: any) => wrap(await trustedTools.trustCorrespondent(user, args)),
+    );
+
+    registerTool(
+      'untrust_correspondent',
+      {
+        title: 'Untrust a correspondent',
+        description:
+          'Remove an address from the trusted-correspondent allowlist — the next ' +
+          'agent reply to it stages for human approval again. Returns { ok } ' +
+          '(ok:false when the address was not trusted).',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          address: z.string().min(3).max(320),
+        },
+      },
+      async (args: any) => wrap(await trustedTools.untrustCorrespondent(user, args)),
     );
 
     // ── Mail-engine admin tools (control-plane; OWNER-gated writes) ──

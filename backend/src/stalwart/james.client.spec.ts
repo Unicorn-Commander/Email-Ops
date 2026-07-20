@@ -337,6 +337,9 @@ describe('JamesClient', () => {
         toAddresses: ['sales@unicorncommander.ai', 'ops+lists@unicorncommander.ai'],
         subject: 'B',
         receivedAt: '2026-02-02T00:00:00Z',
+        // Wave 7: no X-UC-Agent-Autoreply header on the fixture → not an
+        // agent auto-reply (the runtime's loop guard reads this flag).
+        agentAutoreply: false,
       });
       // A message with no To header degrades to an empty list (header unknown).
       expect(res?.newMessages[1]?.toAddresses).toEqual([]);

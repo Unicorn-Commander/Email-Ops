@@ -415,16 +415,30 @@ export async function listAgentInbox(
   return apiGet<AgentInboxListResponse>(`${inboxBase(workspaceId)}${qs}`, token);
 }
 
+/** Optional knobs on an approve (Wave 7). */
+export interface ApproveOptions {
+  /**
+   * Whether approving should also TRUST the external recipient(s) so future
+   * agent replies to them can auto-send under policy. The server defaults to
+   * true; the UI sends an explicit value only when it surfaced the choice.
+   */
+  trustRecipients?: boolean;
+}
+
 /** Approve a pending draft (this SENDS it). */
 export async function approveAgentInboxItem(
   workspaceId: string,
   itemId: string,
   note?: string,
+  opts?: ApproveOptions,
   token?: string,
 ): Promise<ReviewResult> {
   return apiPost<ReviewResult>(
     `${inboxBase(workspaceId)}/${encodeURIComponent(itemId)}/approve`,
-    note ? { note } : {},
+    {
+      ...(note ? { note } : {}),
+      ...(opts?.trustRecipients !== undefined ? { trustRecipients: opts.trustRecipients } : {}),
+    },
     token,
   );
 }
@@ -441,6 +455,338 @@ export async function rejectAgentInboxItem(
     note ? { note } : {},
     token,
   );
+}
+
+// ── Agent-inbox full-fidelity review (Wave 7) ─────────────────────────────
+//
+// The approval queue's review panel shows THE FULL staged email — rendered
+// body, every recipient, attachments — before a human approves. The wire
+// shapes here tolerate both snake_case (house style) and camelCase (the
+// staging payloads) key spellings, normalizing to snake_case for the UI.
+// Endpoints ship with the Wave-7 backend; every fetcher lives behind a small
+// helper so a path is one-line adjustable, and callers feature-detect with
+// 404/501 (absent = degrade, never crash).
+
+/** One machine-readable WHY on a held draft (payload.policy.reasons[]). */
+export interface HoldReasonView {
+  code: string;
+  message: string;
+}
+
+/** The send-policy verdict stamped on a staged draft (payload.policy). */
+export interface HoldPolicyView {
+  decision: string;
+  reasons: HoldReasonView[];
+}
+
+/** One attachment on a staged (not yet sent) message. Meta only; `blob_id` when downloadable. */
+export interface StagedAttachmentView {
+  name: string | null;
+  type: string | null;
+  size: number | null;
+  blob_id: string | null;
+  cid: string | null;
+}
+
+/**
+ * The FULL staged message behind an agent-inbox EMAIL item (or an auto-sent
+ * audit row) — everything the review panel renders: subject, sender, all
+ * recipients, both bodies, attachment meta, and the thread it belongs to.
+ */
+export interface StagedMessageView {
+  subject: string | null;
+  from_address: string | null;
+  to_addresses: string[];
+  cc_addresses: string[];
+  html_body: string | null;
+  text_body: string | null;
+  attachments: StagedAttachmentView[];
+  thread_id: string | null;
+  /** The mailbox the draft sends from, when the wire exposes it — routes blob fetches. */
+  mailbox_id: string | null;
+}
+
+function asRec(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function asStr(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const t = value.trim();
+  return t || null;
+}
+
+function asNum(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** "jane@acme.com" | { address, name? } | mixed array → normalized address list. */
+function asAddressList(value: unknown): string[] {
+  const one = (v: unknown): string | null => {
+    const s = asStr(v);
+    if (s) return s;
+    const rec = asRec(v);
+    if (rec) {
+      const addr = asStr(rec.address) ?? asStr(rec.email);
+      if (!addr) return null;
+      const name = asStr(rec.name);
+      return name ? `${name} <${addr}>` : addr;
+    }
+    return null;
+  };
+  const arr = Array.isArray(value) ? value : value != null ? [value] : [];
+  const out: string[] = [];
+  for (const v of arr) {
+    const s = one(v);
+    // A comma-joined to_address string is still one wire value — split it.
+    if (s) {
+      for (const part of s.includes(',') && !s.includes('<') ? s.split(',') : [s]) {
+        const t = part.trim();
+        if (t && !out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t);
+      }
+    }
+  }
+  return out;
+}
+
+function coerceStagedAttachment(raw: unknown): StagedAttachmentView | null {
+  const rec = asRec(raw);
+  if (!rec) return null;
+  const name = asStr(rec.name) ?? asStr(rec.filename);
+  const type = asStr(rec.type) ?? asStr(rec.content_type) ?? asStr(rec.contentType);
+  if (!name && !type) return null;
+  return {
+    name,
+    type,
+    size: asNum(rec.size),
+    blob_id: asStr(rec.blob_id) ?? asStr(rec.blobId),
+    cid: asStr(rec.cid),
+  };
+}
+
+/**
+ * Normalize a full-fidelity staged-message wire object (either key spelling)
+ * to the UI shape. Returns null when the object carries nothing renderable —
+ * callers then fall back to the queue item's summary fields.
+ */
+export function coerceStagedMessage(raw: unknown): StagedMessageView | null {
+  const rec = asRec(raw);
+  if (!rec) return null;
+  const to = asAddressList(
+    rec.to_addresses ?? rec.toAddresses ?? rec.to_address ?? rec.toAddress ?? rec.to,
+  );
+  const cc = asAddressList(rec.cc_addresses ?? rec.ccAddresses ?? rec.cc);
+  const fromRaw =
+    rec.from_address ?? rec.fromAddress ?? rec.from ?? rec.from_mailbox_address ?? null;
+  const from = asAddressList(fromRaw)[0] ?? null;
+  const html = asStr(rec.html_body) ?? asStr(rec.htmlBody) ?? asStr(rec.body_html) ?? asStr(rec.bodyHtml);
+  const text = asStr(rec.text_body) ?? asStr(rec.textBody) ?? asStr(rec.body);
+  const subject = asStr(rec.subject);
+  const attachments = (Array.isArray(rec.attachments) ? rec.attachments : [])
+    .map(coerceStagedAttachment)
+    .filter((a): a is StagedAttachmentView => a !== null);
+  // Nothing renderable → not a staged message (guards against coercing e.g. a bare {}).
+  if (!subject && !from && to.length === 0 && !html && !text && attachments.length === 0) {
+    return null;
+  }
+  return {
+    subject,
+    from_address: from,
+    to_addresses: to,
+    cc_addresses: cc,
+    html_body: html,
+    text_body: text,
+    attachments,
+    thread_id: asStr(rec.thread_id) ?? asStr(rec.threadId),
+    mailbox_id:
+      asStr(rec.mailbox_id) ??
+      asStr(rec.mailboxId) ??
+      asStr(rec.from_mailbox_id) ??
+      asStr(rec.fromMailboxId) ??
+      asStr(rec.mailbox_account_id) ??
+      asStr(rec.mailboxAccountId),
+  };
+}
+
+/** Read the send-policy verdict off an item/detail payload (tolerant; null when absent). */
+export function holdPolicyOf(payload: unknown): HoldPolicyView | null {
+  const rec = asRec(payload);
+  const policy = rec ? asRec(rec.policy) : null;
+  if (!policy) return null;
+  const reasonsRaw = Array.isArray(policy.reasons) ? policy.reasons : [];
+  const reasons: HoldReasonView[] = [];
+  for (const r of reasonsRaw) {
+    const s = asStr(r);
+    if (s) {
+      reasons.push({ code: 'hold', message: s });
+      continue;
+    }
+    const rr = asRec(r);
+    if (!rr) continue;
+    const message = asStr(rr.message) ?? asStr(rr.detail);
+    if (message) reasons.push({ code: asStr(rr.code) ?? 'hold', message });
+  }
+  return { decision: asStr(policy.decision) ?? 'hold', reasons };
+}
+
+/** The detail read for one agent-inbox item: the item + its FULL staged message. */
+export interface AgentInboxItemDetail {
+  item: AgentInboxItemView | null;
+  message: StagedMessageView | null;
+}
+
+/**
+ * Fetch the full-fidelity detail for one agent-inbox item. Tolerates the
+ * response arriving as `{ item, message }`, `{ inbox, message }`, or a flat
+ * item-with-message object. 404 from a pre-Wave-7 backend → the caller keeps
+ * the degraded (list-shaped) view.
+ */
+export async function getAgentInboxItemDetail(
+  workspaceId: string,
+  itemId: string,
+  token?: string,
+): Promise<AgentInboxItemDetail> {
+  const raw = await apiGet<Record<string, unknown>>(
+    `${inboxBase(workspaceId)}/${encodeURIComponent(itemId)}`,
+    token,
+  );
+  const itemRaw = asRec(raw.item) ?? asRec(raw.inbox) ?? asRec(raw);
+  const item =
+    itemRaw && typeof itemRaw.id === 'string' && typeof itemRaw.state === 'string'
+      ? (itemRaw as unknown as AgentInboxItemView)
+      : null;
+  const message =
+    coerceStagedMessage(raw.message) ??
+    coerceStagedMessage(itemRaw?.message) ??
+    coerceStagedMessage(asRec(itemRaw?.payload)?.message) ??
+    coerceStagedMessage(raw) ??
+    null;
+  return { item, message };
+}
+
+// ── Auto-sent audit lane (Wave 7) ─────────────────────────────────────────
+
+/** One policy-auto-sent email (no human approved it) — the after-the-fact audit row. */
+export interface AutoSentItemView {
+  id: string;
+  agent_key: string | null;
+  created_at: string | null;
+  detail: string | null;
+  message: StagedMessageView | null;
+}
+
+export interface AutoSentListResponse {
+  items: AutoSentItemView[];
+}
+
+/**
+ * List the workspace's policy-auto-sent agent mail, newest-first. 404/501 →
+ * the lane isn't deployed yet; callers show the "not available" state.
+ */
+export async function listAutoSent(
+  workspaceId: string,
+  token?: string,
+): Promise<AutoSentListResponse> {
+  const raw = await apiGet<{ items?: unknown[] }>(`${inboxBase(workspaceId)}/auto-sent`, token);
+  const items: AutoSentItemView[] = (Array.isArray(raw.items) ? raw.items : [])
+    .map((it) => {
+      const rec = asRec(it);
+      if (!rec) return null;
+      const id = asStr(rec.id);
+      if (!id) return null;
+      return {
+        id,
+        agent_key: asStr(rec.agent_key) ?? asStr(rec.agentKey),
+        created_at: asStr(rec.created_at) ?? asStr(rec.createdAt),
+        detail: asStr(rec.detail),
+        message: coerceStagedMessage(rec.message),
+      };
+    })
+    .filter((it): it is AutoSentItemView => it !== null);
+  return { items };
+}
+
+// ── Trusted correspondents (Wave 7) ───────────────────────────────────────
+
+/** How an address earned trust: added by hand, or via an approval's trust checkbox. */
+export type TrustedCorrespondentSource = 'MANUAL' | 'APPROVAL';
+
+/** One trusted external correspondent (agents may auto-reply to them under policy). */
+export interface TrustedCorrespondentView {
+  id: string;
+  address: string;
+  source: TrustedCorrespondentSource;
+  approval_count: number;
+  last_approved_at: string | null;
+  added_by_uc_uid: string | null;
+  note: string | null;
+  created_at: string | null;
+}
+
+export interface TrustedCorrespondentsResponse {
+  items: TrustedCorrespondentView[];
+}
+
+const trustedBase = (workspaceId: string) =>
+  `/workspaces/${encodeURIComponent(workspaceId)}/trusted-correspondents`;
+
+function coerceTrustedCorrespondent(raw: unknown): TrustedCorrespondentView | null {
+  const rec = asRec(raw);
+  if (!rec) return null;
+  const id = asStr(rec.id);
+  const address = asStr(rec.address);
+  if (!id || !address) return null;
+  const source = asStr(rec.source)?.toUpperCase() === 'MANUAL' ? 'MANUAL' : 'APPROVAL';
+  return {
+    id,
+    address,
+    source,
+    approval_count: asNum(rec.approval_count ?? rec.approvalCount) ?? 0,
+    last_approved_at: asStr(rec.last_approved_at) ?? asStr(rec.lastApprovedAt),
+    added_by_uc_uid: asStr(rec.added_by_uc_uid) ?? asStr(rec.addedByUcUid),
+    note: asStr(rec.note),
+    created_at: asStr(rec.created_at) ?? asStr(rec.createdAt),
+  };
+}
+
+/** List the workspace's trusted correspondents. 404/501 → feature not deployed. */
+export async function listTrustedCorrespondents(
+  workspaceId: string,
+  token?: string,
+): Promise<TrustedCorrespondentsResponse> {
+  const raw = await apiGet<{ items?: unknown[] }>(trustedBase(workspaceId), token);
+  const items = (Array.isArray(raw.items) ? raw.items : [])
+    .map(coerceTrustedCorrespondent)
+    .filter((it): it is TrustedCorrespondentView => it !== null);
+  return { items };
+}
+
+/** Trust an address by hand (agents may then auto-reply to it under policy). */
+export async function addTrustedCorrespondent(
+  workspaceId: string,
+  address: string,
+  note?: string,
+  token?: string,
+): Promise<TrustedCorrespondentView | null> {
+  const raw = await apiPost<Record<string, unknown>>(
+    trustedBase(workspaceId),
+    { address, ...(note ? { note } : {}) },
+    token,
+  );
+  return coerceTrustedCorrespondent(asRec(raw.item) ?? raw);
+}
+
+/** Revoke trust for a correspondent by row id (future agent replies to them hold for approval). */
+export async function removeTrustedCorrespondent(
+  workspaceId: string,
+  id: string,
+  token?: string,
+): Promise<{ removed: boolean }> {
+  await apiDelete(`${trustedBase(workspaceId)}/${encodeURIComponent(id)}`, token);
+  return { removed: true };
 }
 
 // ── Agent registry (Phase 6) ──────────────────────────────────────────────

@@ -24,11 +24,26 @@ import {
   ApiError,
   type AgentInboxItemView,
   type AgentInboxState,
+  type ApproveOptions,
   type MyWorkspace,
 } from '@/lib/api';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 
 export type AgentInboxLoad = 'loading' | 'ready' | 'error';
+
+/**
+ * Which slice of the queue is shown. The wire knows pending/approved/rejected;
+ * 'history' is a client-side view that merges approved + rejected newest-first
+ * (the Wave-7 History tab) — the hook fans out both list calls for it.
+ */
+export type AgentInboxSlice = AgentInboxState | 'history';
+
+/** When the decided slice(s) were reviewed, for the merged history ordering. */
+function decidedAt(item: AgentInboxItemView): number {
+  const iso = item.reviewed_at ?? item.created_at;
+  const ts = iso ? Date.parse(iso) : NaN;
+  return Number.isNaN(ts) ? 0 : ts;
+}
 
 /** Result of an approve/reject — lets the card show inline per-item feedback. */
 export interface ReviewOutcome {
@@ -39,9 +54,9 @@ export interface ReviewOutcome {
 export interface UseAgentInbox {
   /** The workspace the queue is scoped to (null = caller has no membership). */
   workspace: MyWorkspace | null;
-  /** Which slice is shown. */
-  state: AgentInboxState;
-  setState: (next: AgentInboxState) => void;
+  /** Which slice is shown ('history' = approved + rejected merged). */
+  state: AgentInboxSlice;
+  setState: (next: AgentInboxSlice) => void;
   /** Items for the active `state`. */
   items: AgentInboxItemView[];
   /** Count of PENDING items, regardless of the active `state` (tab badge). */
@@ -50,8 +65,12 @@ export interface UseAgentInbox {
   error: string | null;
   /** Re-fetch the active slice + the pending count. */
   refresh: () => Promise<void>;
-  /** Approve (EMAIL → sends; CLEANUP → executes the batch). Refreshes on success. */
-  approve: (itemId: string, note?: string) => Promise<ReviewOutcome>;
+  /**
+   * Approve (EMAIL → sends; CLEANUP → executes the batch). Refreshes on
+   * success. `opts.trustRecipients` rides along when the review UI surfaced
+   * the first-contact trust choice.
+   */
+  approve: (itemId: string, note?: string, opts?: ApproveOptions) => Promise<ReviewOutcome>;
   /** Reject (never sends / never executes). Refreshes on success. */
   reject: (itemId: string, note?: string) => Promise<ReviewOutcome>;
 }
@@ -65,7 +84,7 @@ function messageOf(err: unknown, fallback: string): string {
 export function useAgentInbox(): UseAgentInbox {
   const router = useRouter();
   const [workspace, setWorkspace] = useState<MyWorkspace | null>(null);
-  const [state, setState] = useState<AgentInboxState>('pending');
+  const [state, setState] = useState<AgentInboxSlice>('pending');
   const [items, setItems] = useState<AgentInboxItemView[]>([]);
   const [pendingCount, setPendingCount] = useState(0);
   const [load, setLoad] = useState<AgentInboxLoad>('loading');
@@ -88,17 +107,30 @@ export function useAgentInbox(): UseAgentInbox {
    * flash so a post-action refresh stays calm.
    */
   const fetchFor = useCallback(
-    async (ws: MyWorkspace, slice: AgentInboxState, silent = false) => {
+    async (ws: MyWorkspace, slice: AgentInboxSlice, silent = false) => {
       if (!silent) setLoad('loading');
       try {
-        const [active, pending] = await Promise.all([
-          listAgentInbox(ws.workspace_id, slice),
-          slice === 'pending'
-            ? Promise.resolve(null)
-            : listAgentInbox(ws.workspace_id, 'pending'),
-        ]);
-        setItems(active.items);
-        setPendingCount(slice === 'pending' ? active.count : (pending?.count ?? 0));
+        if (slice === 'history') {
+          // The merged decided view: both decided slices + the pending count.
+          const [approved, rejected, pending] = await Promise.all([
+            listAgentInbox(ws.workspace_id, 'approved'),
+            listAgentInbox(ws.workspace_id, 'rejected'),
+            listAgentInbox(ws.workspace_id, 'pending'),
+          ]);
+          setItems(
+            [...approved.items, ...rejected.items].sort((a, b) => decidedAt(b) - decidedAt(a)),
+          );
+          setPendingCount(pending.count);
+        } else {
+          const [active, pending] = await Promise.all([
+            listAgentInbox(ws.workspace_id, slice),
+            slice === 'pending'
+              ? Promise.resolve(null)
+              : listAgentInbox(ws.workspace_id, 'pending'),
+          ]);
+          setItems(active.items);
+          setPendingCount(slice === 'pending' ? active.count : (pending?.count ?? 0));
+        }
         setError(null);
         setLoad('ready');
       } catch (err) {
@@ -132,7 +164,7 @@ export function useAgentInbox(): UseAgentInbox {
   }, [workspace, state, fetchFor]);
 
   const changeState = useCallback(
-    (next: AgentInboxState) => {
+    (next: AgentInboxSlice) => {
       setState(next);
       if (workspace) void fetchFor(workspace, next);
     },
@@ -144,11 +176,12 @@ export function useAgentInbox(): UseAgentInbox {
       kind: 'approve' | 'reject',
       itemId: string,
       note?: string,
+      opts?: ApproveOptions,
     ): Promise<ReviewOutcome> => {
       if (!workspace) return { ok: false, error: 'No active workspace.' };
       try {
         if (kind === 'approve') {
-          await approveAgentInboxItem(workspace.workspace_id, itemId, note);
+          await approveAgentInboxItem(workspace.workspace_id, itemId, note, opts);
         } else {
           await rejectAgentInboxItem(workspace.workspace_id, itemId, note);
         }
@@ -168,7 +201,7 @@ export function useAgentInbox(): UseAgentInbox {
   );
 
   const approve = useCallback(
-    (itemId: string, note?: string) => act('approve', itemId, note),
+    (itemId: string, note?: string, opts?: ApproveOptions) => act('approve', itemId, note, opts),
     [act],
   );
   const reject = useCallback(

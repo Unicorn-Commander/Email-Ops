@@ -1090,6 +1090,10 @@ export class JamesClient extends StalwartPort {
     if (request.references?.length) {
       headers.push({ Name: 'References', Value: request.references.map((r) => this.angleWrap(r)).join(' ') });
     }
+    // Wave 7: custom outbound headers (e.g. the X-UC-Agent-Autoreply loop marker).
+    for (const h of request.headers ?? []) {
+      headers.push({ Name: h.name, Value: h.value });
+    }
     let res: Response;
     try {
       res = await this.fetchWithTimeout('https://api.postmarkapp.com/email', {
@@ -1207,6 +1211,11 @@ export class JamesClient extends StalwartPort {
     if (request.inReplyTo) outbound.inReplyTo = [request.inReplyTo.replace(/^<|>$/g, '')];
     if (request.references?.length) {
       outbound.references = request.references.map((r) => r.replace(/^<|>$/g, ''));
+    }
+    // Wave 7: custom outbound headers via the RFC 8621 header:{name} property
+    // form (e.g. the X-UC-Agent-Autoreply loop-protection marker).
+    for (const h of request.headers ?? []) {
+      outbound[`header:${h.name}:asText`] = h.value;
     }
     if (request.attachments?.length) {
       outbound.attachments = request.attachments.map((a) => ({
@@ -1343,7 +1352,17 @@ export class JamesClient extends StalwartPort {
           'Email/get',
           {
             '#ids': { resultOf: '0', name: 'Email/query', path: '/ids' },
-            properties: ['id', 'threadId', 'subject', 'from', 'to', 'receivedAt'],
+            // The header:… property (RFC 8621 §4.1.3) reads the Wave-7 agent
+            // auto-reply loop marker so the runtime can suppress reply loops.
+            properties: [
+              'id',
+              'threadId',
+              'subject',
+              'from',
+              'to',
+              'receivedAt',
+              'header:X-UC-Agent-Autoreply:asText',
+            ],
           },
           '1',
         ],
@@ -1365,6 +1384,10 @@ export class JamesClient extends StalwartPort {
           : [],
         subject: typeof m?.subject === 'string' ? m.subject : null,
         receivedAt: typeof m?.receivedAt === 'string' ? m.receivedAt : '',
+        // Present + non-empty header value ⇒ an agent runtime auto-sent this.
+        agentAutoreply:
+          typeof m?.['header:X-UC-Agent-Autoreply:asText'] === 'string' &&
+          m['header:X-UC-Agent-Autoreply:asText'].trim() !== '',
       }))
       .filter((r) => r.threadId && r.receivedAt);
 
