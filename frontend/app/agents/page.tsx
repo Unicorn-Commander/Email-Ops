@@ -252,12 +252,21 @@ function Hero({
   );
 }
 
-/** The subtle "this is the policy you set; enforcement is a follow-up" note. */
+/** The one-line summary of the LIVE autonomy enforcement (Wave 7 matrix). */
 function PolicyNote() {
   return (
     <p className="max-w-2xl text-[11px] leading-5 text-muted">
-      Autonomy is the policy you set per agent and is recorded here. Enforcement in the send path is
-      a follow-up — for now every send still flows through the approval queue.
+      Autonomy is enforced in the send path: from their own mailboxes, L1+ agents send internal mail
+      autonomously, and L2 agents also send routine external replies to correspondents you have
+      approved once. First contact, attachments, and cold outreach always wait in{' '}
+      <a href="/agent-inbox" className="underline decoration-dotted underline-offset-2">
+        Approvals
+      </a>
+      {' — '}
+      <a href="/help#autonomy-trust" className="underline decoration-dotted underline-offset-2">
+        how it works
+      </a>
+      .
     </p>
   );
 }
