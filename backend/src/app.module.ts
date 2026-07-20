@@ -31,6 +31,7 @@ import { AgentViewModule } from './agent-view/agent-view.module';
 import { SchedulingModule } from './scheduling/scheduling.module';
 import { MailRulesModule } from './mail-rules/mail-rules.module';
 import { TrustedCorrespondentsModule } from './trusted-correspondents/trusted-correspondents.module';
+import { NotifyModule } from './notify/notify.module';
 
 @Module({
   imports: [
@@ -112,6 +113,10 @@ import { TrustedCorrespondentsModule } from './trusted-correspondents/trusted-co
     SchedulingModule,
     MailRulesModule,
     TrustedCorrespondentsModule,
+    // Wave 9: approval notifications to Unicorn Stable — the StableNotifierService
+    // the compose/cleanup staging paths fire, plus the hourly stale-approval
+    // escalation sweep. Dormant unless the notify env is wired.
+    NotifyModule,
     // MCP last so it can consume the contract + agent-inbox + ui_* tools.
     McpModule,
   ],

@@ -10,9 +10,10 @@ import { AssistantController } from './assistant.controller';
 import { ConnectedAccountsService } from './connected-accounts.service';
 import { ArchiveStorageService } from './archive-storage.service';
 import { ArchiveRetentionService } from './archive-retention.service';
+import { NotifyModule } from '../notify/notify.module';
 
 @Module({
-  imports: [AuthModule, WorkspaceModule, PrismaModule, ScheduleModule.forRoot()],
+  imports: [AuthModule, WorkspaceModule, PrismaModule, ScheduleModule.forRoot(), NotifyModule],
   controllers: [ConnectedAccountsController, AssistantController],
   providers: [
     ConnectedAccountsService,

@@ -21,6 +21,7 @@ import { checkCleanerEntitlement, checkVaultEntitlement } from './entitlement';
 import { cleanupTargetsFromPlan } from './cleanup-targets';
 import { ArchiveStorageService } from './archive-storage.service';
 import { ConnectedAccountsEnginePort } from './connected-accounts.port';
+import { StableNotifierService } from '../notify/stable-notifier.service';
 import {
   CleanupBatchView,
   CleanupExecutionBackupRef,
@@ -69,6 +70,9 @@ export class ConnectedAccountsService {
     private readonly engine: ConnectedAccountsEnginePort,
     private readonly prisma: PrismaService,
     private readonly archiveStorage: ArchiveStorageService,
+    // Wave 9: the Stable approval-notification seam. Optional (last) so the
+    // positional-construction unit specs stay valid; guarded on every use.
+    private readonly notifier?: StableNotifierService,
   ) {}
 
   async listConnectedAccounts(user: User): Promise<ConnectedAccountsListResult> {
@@ -474,7 +478,8 @@ export class ConnectedAccountsService {
     }
 
     const requestedByUcUid = ucUidOf(user as WithWorkspaceClaim);
-    return this.prisma.withWorkspace(workspaceId, requestedByUcUid, async (tx) => {
+    const summary = this.batchSummary(mode, provider, plan.safe.length, null);
+    const staged = await this.prisma.withWorkspace(workspaceId, requestedByUcUid, async (tx) => {
       const batch = await tx.cleanupBatch.create({
         data: {
           workspaceId,
@@ -485,7 +490,7 @@ export class ConnectedAccountsService {
           criteria: plan.criteria as any,
           plan: plan as any,
           requestedByUcUid,
-          summary: this.batchSummary(mode, provider, plan.safe.length, null),
+          summary,
           params: this.batchParams(criteria),
         },
       });
@@ -509,7 +514,7 @@ export class ConnectedAccountsService {
           },
           state: AgentInboxState.PENDING,
           draftedBy: 'email-ops-agent',
-          summary: this.batchSummary(mode, provider, plan.safe.length, null),
+          summary,
         },
       });
 
@@ -518,25 +523,46 @@ export class ConnectedAccountsService {
         data: { agentInboxItemId: item.id },
       });
 
-      return {
-        ok: true,
-        provider,
-        mode,
-        batch_id: batch.id,
-        action,
-        plan,
-        result: this.cleanupResult({
-          completed: 0,
-          failed: 0,
-          bytesFreed: 0,
-          totalAttempted: plan.safe.length,
-        }),
-        status: 'pending',
-        staged: true,
-        staged_item_id: item.id,
-        reason: 'staged into agent inbox for human approval',
-      };
+      return { batchId: batch.id, itemId: item.id };
     });
+
+    // Wave 9: the agent staged a destructive cleanup — notify Stable AFTER the tx
+    // commits so a human sees it in the queue. Fire-and-forget/degrade-clean: the
+    // notifier never throws, and this must never affect the staged batch.
+    if (this.notifier) {
+      void this.notifier
+        .notifyApprovalPending({
+          id: staged.itemId,
+          workspaceId,
+          kind: AgentInboxKind.CLEANUP,
+          summary,
+          draftedBy: 'email-ops-agent',
+        })
+        .catch((err) =>
+          this.logger.warn(
+            `approval notify failed for cleanup item ${staged.itemId}: ${(err as Error).message}`,
+          ),
+        );
+    }
+
+    return {
+      ok: true,
+      provider,
+      mode,
+      batch_id: staged.batchId,
+      action,
+      plan,
+      result: this.cleanupResult({
+        completed: 0,
+        failed: 0,
+        bytesFreed: 0,
+        totalAttempted: plan.safe.length,
+      }),
+      status: 'pending',
+      staged: true,
+      staged_item_id: staged.itemId,
+      reason: 'staged into agent inbox for human approval',
+    };
   }
 
   async approveCleanupBatch(

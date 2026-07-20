@@ -27,3 +27,19 @@ function truthy(value: string | undefined | null, fallback: boolean): boolean {
 export function agentReplyRuntimeEnabled(getEnv: EnvGetter = defaultGetter): boolean {
   return truthy(getEnv('AGENT_REPLY_RUNTIME_ENABLED'), false);
 }
+
+/** Default per-mailbox runtime-draft ceiling (composes/day) when env is unset. */
+export const DEFAULT_AGENT_DRAFTS_PER_MAILBOX_PER_DAY = 20;
+
+/**
+ * The spam-blast guard: at most this many runtime composes per AGENT MAILBOX per
+ * rolling 24h. Over it, the runtime skips ENTIRELY (no thread read, no LLM cost,
+ * no draft). Distinct from the per-THREAD auto-send cap (loop guard d).
+ * EMAIL_OPS_AGENT_DRAFTS_PER_MAILBOX_PER_DAY overrides; a non-positive/garbage
+ * value falls back to the default (never disables the guard by accident).
+ */
+export function agentDraftsPerMailboxPerDay(getEnv: EnvGetter = defaultGetter): number {
+  const raw = getEnv('EMAIL_OPS_AGENT_DRAFTS_PER_MAILBOX_PER_DAY');
+  const n = raw == null || raw === '' ? NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_AGENT_DRAFTS_PER_MAILBOX_PER_DAY;
+}

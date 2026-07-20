@@ -82,6 +82,7 @@ import {
   splitRecipients,
 } from './autonomy';
 import { mapWithConcurrency, withTimeout } from '../common/async/concurrency';
+import { ApprovalPendingNotice, StableNotifierService } from '../notify/stable-notifier.service';
 
 /**
  * Fan-out bounds for the multi-mailbox webmail endpoints (unified inbox +
@@ -153,7 +154,7 @@ interface EngineSendResult {
  * staged draft — nothing to send); `send` carries the QUEUED row + the plan.
  */
 type ComposePrep =
-  | { done: MessageComposeView }
+  | { done: MessageComposeView; notify?: ApprovalPendingNotice }
   | {
       send: {
         messageId: string;
@@ -211,7 +212,24 @@ export class EmailService {
     private readonly stalwart: StalwartPort,
     private readonly connectedAccounts: ConnectedAccountsService,
     private readonly mailProvider: MailProviderPort,
+    // Wave 9: the Stable approval-notification seam. Optional (last) so the
+    // positional-construction unit specs stay valid; guarded on every use.
+    // Dormant unless the notify webhook env is wired.
+    private readonly notifier?: StableNotifierService,
   ) {}
+
+  /**
+   * Fire-and-forget an approval-pending ping to Stable (Wave 9). Called ONLY after
+   * the staging tx has COMMITTED — a notify failure must never roll back mail
+   * state, and a rolled-back stage must never have notified. The notifier itself
+   * is degrade-clean/never-throws; this .catch is belt-and-braces.
+   */
+  private fireApprovalNotice(notice: ApprovalPendingNotice): void {
+    if (!this.notifier) return;
+    void this.notifier.notifyApprovalPending(notice).catch((err) =>
+      this.logger.warn(`approval notify failed for item ${notice.id}: ${(err as Error).message}`),
+    );
+  }
 
   // ── status mapping ─────────────────────────────────────────────────────
 
@@ -1359,15 +1377,16 @@ export class EmailService {
           // renders; the summary carries a cheap one-code suffix. Created fresh
           // here, so there are no other payload keys to preserve.
           const held = agentInitiated && policyReasons.length > 0;
-          await tx.agentInboxItem.create({
+          const itemSummary =
+            this.summary(input.subject, input.toAddress) +
+            (held ? ` — held: ${policyReasons[0].code}` : '');
+          const inboxItem = await tx.agentInboxItem.create({
             data: {
               workspaceId,
               messageId: msg.id,
               state: AgentInboxState.PENDING,
               draftedBy: input.draftedBy ?? input.externalSource,
-              summary:
-                this.summary(input.subject, input.toAddress) +
-                (held ? ` — held: ${policyReasons[0].code}` : ''),
+              summary: itemSummary,
               ...(held
                 ? {
                     payload: {
@@ -1394,7 +1413,23 @@ export class EmailService {
             actorUcUid: ucUid,
             detail: decision.coerced ? `staged by dial (${decision.reason})` : (input.subject ?? null),
           });
-          return { done: this.composeView(msg) };
+          // Wave 9: notify Stable ONLY for an agent-initiated HELD draft (a send
+          // the agent wanted that the gate held for a human). A human "save as
+          // draft" (no agent provenance / no hold reasons) is NOT held → no ping.
+          // Fired AFTER the tx commits (see the phase-1 return handler below).
+          const notify: ApprovalPendingNotice | undefined = held
+            ? {
+                id: inboxItem.id,
+                workspaceId,
+                kind: AgentInboxKind.EMAIL,
+                summary: itemSummary,
+                draftedBy: input.draftedBy ?? input.externalSource,
+                reasons: policyReasons,
+                toAddress: input.toAddress,
+                subject: input.subject,
+              }
+            : undefined;
+          return { done: this.composeView(msg), notify };
         }
 
         // Wave 7: the transparency footer rides ONLY on an AUTONOMOUS agent send
@@ -1480,8 +1515,13 @@ export class EmailService {
       },
     );
 
-    // Idempotent hit OR the draft path: nothing left to send.
-    if ('done' in prep) return prep.done;
+    // Idempotent hit OR the draft path: nothing left to send. The staging tx has
+    // COMMITTED here, so it is safe to fire the (agent-initiated held) approval
+    // ping — a notify failure can no longer roll back mail state.
+    if ('done' in prep) {
+      if (prep.notify) this.fireApprovalNotice(prep.notify);
+      return prep.done;
+    }
 
     // PHASE 1.5 — resolve the REAL Message-ID/References for a reply, OUTSIDE
     // any tx (an external JMAP call). `input.inReplyToMessageId` is an INTERNAL
@@ -1664,8 +1704,9 @@ export class EmailService {
     // The agent's stated WHY, shown beside the targets on the approval card —
     // "what + why" is the minimum a human needs to trust a destructive batch.
     const reason = String(opts?.reason ?? '').trim().slice(0, 300) || null;
-    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const item = await tx.agentInboxItem.create({
+    const draftedBy = opts?.agentKey ?? 'email-ops-assistant';
+    const item = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      return tx.agentInboxItem.create({
         data: {
           workspaceId,
           messageId: null,
@@ -1681,12 +1722,22 @@ export class EmailService {
             ...(reason ? { reason } : {}),
           },
           state: AgentInboxState.PENDING,
-          draftedBy: opts?.agentKey ?? 'email-ops-assistant',
+          draftedBy,
           summary,
         },
       });
-      return this.inboxView(item, null);
     });
+    // Wave 9: agent-staged cleanup is inherently agent-initiated + destructive —
+    // notify Stable AFTER the tx commits. The summary ("Archive N threads …") is
+    // the human-facing content; degrade-clean (never affects the staged batch).
+    this.fireApprovalNotice({
+      id: item.id,
+      workspaceId,
+      kind: AgentInboxKind.CLEANUP,
+      summary,
+      draftedBy,
+    });
+    return this.inboxView(item, null);
   }
 
   /**

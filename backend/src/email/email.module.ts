@@ -3,6 +3,7 @@ import { EmailService } from './email.service';
 import { StalwartModule } from '../stalwart/stalwart.module';
 import { ConnectedAccountsModule } from '../connected-accounts/connected-accounts.module';
 import { MailProviderModule } from '../mail-provider/mail-provider.module';
+import { NotifyModule } from '../notify/notify.module';
 
 /**
  * The Email-Ops core domain: the SoR + the EmailOpsPort contract logic + the
@@ -11,7 +12,7 @@ import { MailProviderModule } from '../mail-provider/mail-provider.module';
  * to the SAME implementation — one set of rules, one RLS path.
  */
 @Module({
-  imports: [StalwartModule, ConnectedAccountsModule, MailProviderModule],
+  imports: [StalwartModule, ConnectedAccountsModule, MailProviderModule, NotifyModule],
   providers: [EmailService],
   exports: [EmailService],
 })

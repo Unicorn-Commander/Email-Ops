@@ -55,7 +55,7 @@ import { AGENT_REPLY_RUNTIME_SOURCE } from '../email/email.types';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { StalwartMessageDetail } from '../stalwart/stalwart.types';
-import { agentReplyRuntimeEnabled } from './agent-reply.flags';
+import { agentDraftsPerMailboxPerDay, agentReplyRuntimeEnabled } from './agent-reply.flags';
 
 /** The stable provenance slug for composes staged/sent by this runtime. */
 export const AGENT_REPLY_SOURCE = AGENT_REPLY_RUNTIME_SOURCE;
@@ -66,6 +66,12 @@ export const AGENT_REPLY_SOURCE = AGENT_REPLY_RUNTIME_SOURCE;
  */
 export const THREAD_AUTO_SEND_CAP = 5;
 const THREAD_AUTO_SEND_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** The per-MAILBOX runtime-draft cap window (rolling 24h) — the spam-blast guard. */
+const MAILBOX_DRAFT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Reply-quoting: hard cap on the quoted original (a "…" marker follows a truncation). */
+const MAX_QUOTE_CHARS = 2000;
 
 /** Thread-context caps: last N messages, bounded per-message and in total. */
 const MAX_CONTEXT_MESSAGES = 5;
@@ -217,6 +223,7 @@ export class AgentReplyService {
       // thread read and no LLM call — and we skip quietly instead of catching a
       // ForbiddenException.
       const capSince = new Date(Date.now() - THREAD_AUTO_SEND_WINDOW_MS);
+      const mailboxSince = new Date(Date.now() - MAILBOX_DRAFT_WINDOW_MS);
       const gate = await this.prisma.withWorkspace(workspaceId, null, async (tx) => {
         const ws = await tx.workspace.findUnique({
           where: { id: workspaceId },
@@ -243,6 +250,19 @@ export class AgentReplyService {
               mode: EmailMode.SEND,
               inReplyToThreadId: msg.threadId,
               createdAt: { gt: capSince },
+            },
+          }),
+          // Wave 9 spam-blast guard: ALL runtime composes (any mode) for THIS
+          // agent mailbox in the last 24h. externalRef is `${mailboxId}:...` for
+          // every runtime compose off this box, so a prefix match is the cheapest
+          // CORRECT "this mailbox" predicate (equality-pinned workspace+source
+          // range-scan on externalRef) and covers registered + unregistered alike.
+          mailboxComposes24h: await tx.emailMessage.count({
+            where: {
+              workspaceId,
+              externalSource: AGENT_REPLY_SOURCE,
+              externalRef: { startsWith: `${agentMailbox.id}:` },
+              createdAt: { gt: mailboxSince },
             },
           }),
           // Wave 7 outbound quality: respect a stored default signature for the
@@ -275,6 +295,19 @@ export class AgentReplyService {
       if (gate.senderIsAgentMailbox) {
         this.logger.log(
           `agent-reply skip: sender '${sender}' is an agent-linked mailbox in this workspace (loop guard) — thread=${msg.threadId}`,
+        );
+        return null;
+      }
+      // Wave 9 spam-blast guard: this mailbox has already produced its daily cap
+      // of runtime composes. Skip ENTIRELY here (before the thread read + LLM) so a
+      // looping/compromised agent burns no LLM cost and stages no further drafts.
+      // Distinct from loop guard (d): that caps per-THREAD auto-SENDS; this caps
+      // per-MAILBOX total composes (any mode) in 24h.
+      const mailboxCap = agentDraftsPerMailboxPerDay();
+      if (gate.mailboxComposes24h >= mailboxCap) {
+        this.logger.warn(
+          `agent-reply skip: mailbox draft cap reached for ${agentMailbox.emailAddress} ` +
+            `(${gate.mailboxComposes24h}/${mailboxCap} runtime composes in 24h) — thread=${msg.threadId}`,
         );
         return null;
       }
@@ -360,8 +393,15 @@ export class AgentReplyService {
       const signatureText = gate.signature?.html
         ? this.stripHtml(gate.signature.html)
         : `${agentName} · AI agent`;
-      const bodyText = `${body}\n\n--\n${signatureText}`;
-      const bodyHtml = `${this.paragraphsToHtml(body)}${signatureHtml}`;
+      // Wave 9: quote the original below the reply, mail-convention style. The
+      // quote sits BETWEEN the body and the signature block (the transparency
+      // footer placement, appended later by composeEmail, is unchanged). No quote
+      // source (empty thread detail) → body flows straight into the signature.
+      const quoted = this.buildQuotedOriginal(detail ?? [], msg);
+      const bodyText = quoted
+        ? `${body}\n\n${quoted.text}\n\n--\n${signatureText}`
+        : `${body}\n\n--\n${signatureText}`;
+      const bodyHtml = `${this.paragraphsToHtml(body)}${quoted ? quoted.html : ''}${signatureHtml}`;
 
       // Compose through the ONE canonical lane and LET THE GATE DECIDE (Wave 7):
       // a REGISTERED agent requests 'send' — the autonomy matrix sends internal
@@ -618,6 +658,72 @@ export class AgentReplyService {
     if (m.textBody && m.textBody.trim()) return m.textBody.trim();
     if (m.htmlBody && m.htmlBody.trim()) return this.stripHtml(m.htmlBody);
     return (m.preview ?? '').trim();
+  }
+
+  /**
+   * Wave 9: the quoted-original block that rides BELOW the reply body (and ABOVE
+   * the signature). Sources the message being replied to from the thread detail,
+   * takes its best body text (text > stripped HTML > preview), truncates at
+   * MAX_QUOTE_CHARS with a "…" marker, and formats both mail parts:
+   *   text: `On <date>, <from> wrote:\n> line\n> line…`
+   *   html: an "On …, … wrote:" line + a bordered <blockquote> (escaped, <br>/line).
+   * Returns null when there is nothing to quote (empty detail / empty source body).
+   */
+  private buildQuotedOriginal(
+    detail: StalwartMessageDetail[],
+    msg: AgentReplyInboundMsg,
+  ): { text: string; html: string } | null {
+    const source = this.quotedSourceMessage(detail, msg);
+    if (!source) return null;
+    const raw = this.extractBody(source);
+    if (!raw) return null;
+
+    const truncated = raw.length > MAX_QUOTE_CHARS ? `${raw.slice(0, MAX_QUOTE_CHARS)}…` : raw;
+    const fromLabel = source.from
+      ? source.from.name
+        ? `${source.from.name} <${source.from.address}>`
+        : source.from.address
+      : (msg.fromAddress ?? '(unknown sender)');
+    const attribution = `On ${this.humanDate(source.sentAt)}, ${fromLabel} wrote:`;
+    const lines = truncated.split('\n');
+
+    const text = `${attribution}\n${lines.map((l) => `> ${l}`).join('\n')}`;
+    const html =
+      `<p style="margin:16px 0 0;color:#6b7280;font-size:13px">${this.escapeHtml(attribution)}</p>` +
+      `<blockquote style="margin:12px 0 0;padding-left:12px;border-left:2px solid #d1d5db;color:#6b7280">` +
+      `${lines.map((l) => this.escapeHtml(l)).join('<br>')}` +
+      `</blockquote>`;
+    return { text, html };
+  }
+
+  /** The message being replied to: newest from the inbound sender, else newest overall. */
+  private quotedSourceMessage(
+    detail: StalwartMessageDetail[],
+    msg: AgentReplyInboundMsg,
+  ): StalwartMessageDetail | null {
+    if (!detail.length) return null;
+    const byTimeDesc = [...detail].sort(
+      (a, b) => new Date(b.sentAt ?? 0).getTime() - new Date(a.sentAt ?? 0).getTime(),
+    );
+    const sender = (msg.fromAddress ?? '').trim().toLowerCase();
+    if (sender) {
+      const fromSender = byTimeDesc.find(
+        (m) => (m.from?.address ?? '').trim().toLowerCase() === sender,
+      );
+      if (fromSender) return fromSender;
+    }
+    return byTimeDesc[0] ?? null;
+  }
+
+  /** A stable, TZ-independent human date for a quote attribution ("Jul 20, 2026 at 15:45 UTC"). */
+  private humanDate(iso: string | null | undefined): string {
+    if (!iso) return 'an earlier message';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return 'an earlier message';
+    const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const hh = String(d.getUTCHours()).padStart(2, '0');
+    const mm = String(d.getUTCMinutes()).padStart(2, '0');
+    return `${MON[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()} at ${hh}:${mm} UTC`;
   }
 
   /** Minimal HTML→text: drop style/script, strip tags, unescape, collapse. */

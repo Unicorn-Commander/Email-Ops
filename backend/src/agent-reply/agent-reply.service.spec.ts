@@ -66,6 +66,8 @@ describe('AgentReplyService', () => {
     senderMailboxRow?: { id: string; ownerKind: string } | null;
     /** Loop guard (d): runtime auto-sends already counted in this thread. */
     threadAutoSends?: number;
+    /** Wave 9 spam-blast guard: runtime composes already counted for this mailbox. */
+    mailboxComposes?: number;
     /** A stored default signature row for the agent mailbox. */
     signature?: { html: string } | null;
   }) {
@@ -79,7 +81,13 @@ describe('AgentReplyService', () => {
       opts?.agentFindFirst ??
       jest.fn().mockResolvedValue(opts?.agent === undefined ? AGENT_ROW : opts.agent);
     const mailboxFindFirst = jest.fn().mockResolvedValue(opts?.senderMailboxRow ?? null);
-    const emailMessageCount = jest.fn().mockResolvedValue(opts?.threadAutoSends ?? 0);
+    // Route the count by query shape: the per-THREAD auto-send query carries
+    // inReplyToThreadId; the Wave-9 per-MAILBOX query carries externalRef.startsWith.
+    const emailMessageCount = jest.fn((args?: any) => {
+      const where = args?.where ?? {};
+      if (where.inReplyToThreadId !== undefined) return Promise.resolve(opts?.threadAutoSends ?? 0);
+      return Promise.resolve(opts?.mailboxComposes ?? 0);
+    });
     const signatureFindFirst = jest.fn().mockResolvedValue(opts?.signature ?? null);
     const tx = {
       workspace: { findUnique: workspaceFindUnique },
@@ -577,6 +585,129 @@ describe('AgentReplyService', () => {
     // Chronological order preserved; the LAST entry is the newest message.
     expect(context.thread[4].body).toContain('message number 7');
     expect(context.thread[0].body).toContain('message number 3');
+  });
+
+  // ── Wave 9: per-MAILBOX runtime draft cap (spam-blast guard) ─────────────
+
+  describe('per-mailbox draft cap', () => {
+    afterEach(() => delete process.env.EMAIL_OPS_AGENT_DRAFTS_PER_MAILBOX_PER_DAY);
+
+    it('UNDER the default cap (20): drafts normally', async () => {
+      const { svc, chat, compose } = make({ mailboxComposes: 19 });
+      expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBe('staged-1');
+      expect(chat).toHaveBeenCalledTimes(1);
+      expect(compose).toHaveBeenCalledTimes(1);
+    });
+
+    it('AT/OVER the default cap (20): skips ENTIRELY — no thread read, no LLM, no compose', async () => {
+      const { svc, getThreadDetail, chat, compose } = make({ mailboxComposes: 20 });
+      expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBeNull();
+      expect(getThreadDetail).not.toHaveBeenCalled();
+      expect(chat).not.toHaveBeenCalled();
+      expect(compose).not.toHaveBeenCalled();
+    });
+
+    it('env override LOWERS the cap (EMAIL_OPS_AGENT_DRAFTS_PER_MAILBOX_PER_DAY=2)', async () => {
+      process.env.EMAIL_OPS_AGENT_DRAFTS_PER_MAILBOX_PER_DAY = '2';
+      const { svc, chat, compose } = make({ mailboxComposes: 2 });
+      expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBeNull();
+      expect(chat).not.toHaveBeenCalled();
+      expect(compose).not.toHaveBeenCalled();
+    });
+
+    it('env override RAISES the cap: a count the default would block now drafts', async () => {
+      process.env.EMAIL_OPS_AGENT_DRAFTS_PER_MAILBOX_PER_DAY = '50';
+      const { svc, compose } = make({ mailboxComposes: 25 });
+      expect(await svc.draftReplyForInbound('ws1', MAILBOX, MSG)).toBe('staged-1');
+      expect(compose).toHaveBeenCalledTimes(1);
+    });
+
+    it('the mailbox-cap query is scoped to THIS mailbox by the externalRef prefix', async () => {
+      const { svc, emailMessageCount } = make({ mailboxComposes: 0 });
+      await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+      const mailboxCall = emailMessageCount.mock.calls.find(
+        (c: any[]) => c[0]?.where?.externalRef !== undefined,
+      );
+      expect(mailboxCall?.[0].where).toMatchObject({
+        externalSource: AGENT_REPLY_SOURCE,
+        externalRef: { startsWith: 'mb-agent:' },
+      });
+    });
+  });
+
+  // ── Wave 9: reply quoting (original quoted between body and signature) ────
+
+  describe('reply quoting', () => {
+    it('TEXT part: "On <date>, <from> wrote:" + "> " lines, ordered body → quote → signature', async () => {
+      const { svc, compose } = make();
+      await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+      const body: string = compose.mock.calls[0][2].body;
+
+      expect(body).toContain('On Jul 17, 2026 at 23:59 UTC, Pat Human <human@q.test> wrote:');
+      expect(body).toContain('> Hi, my order #42 never arrived. Can you check?');
+
+      const iBody = body.indexOf('Happy to help');
+      const iQuote = body.indexOf('On Jul 17, 2026');
+      const iSig = body.indexOf('--\nConcierge · AI agent');
+      expect(iBody).toBeGreaterThanOrEqual(0);
+      expect(iBody).toBeLessThan(iQuote);
+      expect(iQuote).toBeLessThan(iSig);
+    });
+
+    it('HTML part: bordered blockquote (pinned style) + attribution line, ordered body → quote → signature', async () => {
+      const { svc, compose } = make();
+      await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+      const html: string = compose.mock.calls[0][2].bodyHtml;
+
+      expect(html).toContain(
+        '<blockquote style="margin:12px 0 0;padding-left:12px;border-left:2px solid #d1d5db;color:#6b7280">',
+      );
+      expect(html).toContain('On Jul 17, 2026 at 23:59 UTC, Pat Human &lt;human@q.test&gt; wrote:');
+
+      const iBody = html.indexOf('<p>Happy to help');
+      const iQuote = html.indexOf('<blockquote');
+      const iSig = html.indexOf('<table role="presentation"');
+      expect(iBody).toBeGreaterThanOrEqual(0);
+      expect(iBody).toBeLessThan(iQuote);
+      expect(iQuote).toBeLessThan(iSig);
+    });
+
+    it('ESCAPES the quoted HTML and puts <br> per line (text part stays raw)', async () => {
+      const detail = [
+        {
+          ...DETAIL[0],
+          textBody: 'Line one <script>alert(1)</script>\nLine two & more',
+        },
+      ];
+      const { svc, compose } = make({ detail });
+      await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+      const input = compose.mock.calls[0][2];
+
+      expect(input.bodyHtml).toContain(
+        'Line one &lt;script&gt;alert(1)&lt;/script&gt;<br>Line two &amp; more',
+      );
+      // The text part is not HTML-escaped (it is a text/plain body).
+      expect(input.body).toContain('> Line one <script>alert(1)</script>');
+      expect(input.body).toContain('> Line two & more');
+    });
+
+    it('TRUNCATES the quote at 2,000 chars with a "…" marker', async () => {
+      const long = 'A'.repeat(2500);
+      const { svc, compose } = make({ detail: [{ ...DETAIL[0], textBody: long }] });
+      await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+      const body: string = compose.mock.calls[0][2].body;
+      expect(body).toContain('A'.repeat(2000) + '…');
+      expect(body).not.toContain('A'.repeat(2001));
+    });
+
+    it('EMPTY thread detail → NO quote block (body flows straight into the signature)', async () => {
+      const { svc, compose } = make({ detail: [] });
+      await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+      const input = compose.mock.calls[0][2];
+      expect(input.body).not.toContain('wrote:');
+      expect(input.bodyHtml).not.toContain('<blockquote');
+      expect(input.body).toContain('--\nConcierge · AI agent');
+    });
   });
 });
 
