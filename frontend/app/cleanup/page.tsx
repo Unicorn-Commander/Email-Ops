@@ -1,8 +1,10 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useConnectedAccounts } from '@/components/ConnectedAccountsProvider';
+import { Tooltip } from '@/components/Tooltip';
 import {
   Badge,
   Button,
@@ -241,7 +243,10 @@ export default function CleanupPage() {
           <p className="mt-2 max-w-2xl text-sm leading-6 text-tertiary">
             The safety workbench splits protected mail from safe mail before anything executes.
             <span className="text-primary"> Trash is reversible.</span> Archive &amp; purge exports
-            a restorable archive first, verifies it, then permanently frees quota.
+            a restorable archive first, verifies it, then permanently frees quota.{' '}
+            <Link href="/help#cleanup" className="font-medium text-accent hover:underline">
+              How cleanup works →
+            </Link>
           </p>
           {message && <p className="mt-3 text-sm text-warning">{message}</p>}
         </div>
@@ -300,10 +305,18 @@ export default function CleanupPage() {
             <p className="mt-1 text-sm text-tertiary">{banner}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="keep">keep</Badge>
-            <Badge variant="review">review</Badge>
-            <Badge variant="delete">delete</Badge>
-            <Badge variant="protected">protected</Badge>
+            <Tooltip content="Keep — mail the plan leaves untouched">
+              <span><Badge variant="keep">keep</Badge></span>
+            </Tooltip>
+            <Tooltip content="Review — flagged for your judgment before anything runs">
+              <span><Badge variant="review">review</Badge></span>
+            </Tooltip>
+            <Tooltip content="Delete — safe candidates you can trash or purge after review">
+              <span><Badge variant="delete">delete</Badge></span>
+            </Tooltip>
+            <Tooltip content="Protected — locked out of every cleanup action (starred, recent, important)">
+              <span><Badge variant="protected">protected</Badge></span>
+            </Tooltip>
           </div>
         </div>
       </Card>
@@ -372,35 +385,39 @@ export default function CleanupPage() {
           </div>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-          <Button
-            onClick={() => void runTrash()}
-            disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
-          >
-            Trash {selectedSafe.length || ''} (reversible)
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={() => void runOrganize()}
-            disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
-          >
-            Organize
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={() => void runUnsubscribe()}
-            disabled
-            title="Coming with the archive release"
-          >
-            Unsubscribe · soon
-          </Button>
-          <Button
-            variant="secondary"
-            disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
-            title="Exports a verified restorable archive, then permanently purges to free mailbox quota."
-            onClick={() => setDeleteDialogOpen(true)}
-          >
-            Archive &amp; purge
-          </Button>
+          <Tooltip content="Move the selected messages to the provider's Trash — recoverable there">
+            <Button
+              onClick={() => void runTrash()}
+              disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
+            >
+              Trash {selectedSafe.length || ''} (reversible)
+            </Button>
+          </Tooltip>
+          <Tooltip content="Label and archive matching messages instead of deleting them">
+            <Button
+              variant="secondary"
+              onClick={() => void runOrganize()}
+              disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
+            >
+              Organize
+            </Button>
+          </Tooltip>
+          <Tooltip content="Coming with the archive release">
+            <span className="inline-flex">
+              <Button variant="secondary" onClick={() => void runUnsubscribe()} disabled>
+                Unsubscribe · soon
+              </Button>
+            </span>
+          </Tooltip>
+          <Tooltip content="Permanent lane: exports and verifies a restorable archive first, then purges to free quota. Typed confirmation required.">
+            <Button
+              variant="secondary"
+              disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
+              onClick={() => setDeleteDialogOpen(true)}
+            >
+              Archive &amp; purge
+            </Button>
+          </Tooltip>
         </div>
         {archiveUrl && (
           <div className="rounded-token border border-subtle bg-surface-base p-3 text-sm">
@@ -449,15 +466,24 @@ export default function CleanupPage() {
                     </p>
                   )}
                 </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={!row.undoable || busy === `undo:${row.id}`}
-                  title={row.undoable ? 'Restore from the verified archive.' : 'No live cloud archive is available.'}
-                  onClick={() => void runUndo(row.id)}
+                <Tooltip
+                  content={
+                    row.undoable
+                      ? 'Restore this batch from its verified archive'
+                      : 'No live cloud archive is available — use your downloaded file to re-import'
+                  }
                 >
-                  Restore
-                </Button>
+                  <span className="inline-flex shrink-0">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={!row.undoable || busy === `undo:${row.id}`}
+                      onClick={() => void runUndo(row.id)}
+                    >
+                      Restore
+                    </Button>
+                  </span>
+                </Tooltip>
               </Card>
             ))
           )}
@@ -535,7 +561,11 @@ function CleanupRow({
       )}
     >
       {disabled ? (
-        <span className="mt-1 text-[11px] text-info">Locked</span>
+        <Tooltip content="Protected — cleanup never touches this message, whatever you select">
+          <span className="mt-1 text-[11px] text-info" tabIndex={0}>
+            Locked
+          </span>
+        </Tooltip>
       ) : (
         <input
           type="checkbox"

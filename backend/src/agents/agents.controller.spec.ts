@@ -76,6 +76,31 @@ describe('AgentsController (delegation + RBAC gate)', () => {
     );
   });
 
+  it('POST create + PATCH map avatar_url → avatarUrl (and PATCH null clears it)', async () => {
+    const createAgent = jest.fn().mockResolvedValue({ id: 'a1' });
+    await make({ createAgent }).create(WS, user(), WorkspaceRole.OWNER, {
+      key: 'perry',
+      display_name: 'Perrywinkle Spector',
+      avatar_url: '/agent-avatars/perry.svg',
+    } as never);
+    expect(createAgent).toHaveBeenCalledWith(
+      WS,
+      'kc-sub-aaron',
+      expect.objectContaining({ avatarUrl: '/agent-avatars/perry.svg' }),
+    );
+
+    const updateAgent = jest.fn().mockResolvedValue({ id: 'a1' });
+    const ctl = make({ updateAgent });
+    await ctl.update(WS, user(), WorkspaceRole.OWNER, 'a1', {
+      avatar_url: 'https://cdn.x/perry.png',
+    } as never);
+    expect(updateAgent).toHaveBeenCalledWith(WS, 'kc-sub-aaron', 'a1', {
+      avatarUrl: 'https://cdn.x/perry.png',
+    });
+    await ctl.update(WS, user(), WorkspaceRole.OWNER, 'a1', { avatar_url: null } as never);
+    expect(updateAgent).toHaveBeenLastCalledWith(WS, 'kc-sub-aaron', 'a1', { avatarUrl: null });
+  });
+
   it('POST create is BLOCKED (403) when the provisioning policy denies — service never reached', async () => {
     const createAgent = jest.fn();
     await expect(

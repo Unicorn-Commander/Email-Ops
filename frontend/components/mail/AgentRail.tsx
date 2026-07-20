@@ -23,6 +23,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { cn } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 import { agentLabel } from '@/lib/agents';
 import { AgentChat } from './AgentChat';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
@@ -101,10 +102,25 @@ const TONE_ICON: Record<EventTone, { bg: string; fg: string; Glyph: (p: { classN
   neutral: { bg: 'bg-accent/15', fg: 'text-accent', Glyph: SlidersIcon },
 };
 
-const AUTONOMY_STEPS: { level: AutonomyLevel; short: string; label: string }[] = [
-  { level: 'L0_DRAFT_ONLY', short: 'L0', label: 'Draft only' },
-  { level: 'L1_APPROVE_TO_SEND', short: 'L1', label: 'Approve to send' },
-  { level: 'L2_AUTONOMOUS_AUDIT', short: 'L2', label: 'Autonomous' },
+const AUTONOMY_STEPS: { level: AutonomyLevel; short: string; label: string; hint: string }[] = [
+  {
+    level: 'L0_DRAFT_ONLY',
+    short: 'L0',
+    label: 'Draft only',
+    hint: 'L0 — the agent only drafts; every send needs your approval.',
+  },
+  {
+    level: 'L1_APPROVE_TO_SEND',
+    short: 'L1',
+    label: 'Approve to send',
+    hint: 'L1 — sends internal mail on its own; anything external waits for your approval.',
+  },
+  {
+    level: 'L2_AUTONOMOUS_AUDIT',
+    short: 'L2',
+    label: 'Autonomous',
+    hint: 'L2 — also auto-sends routine external replies to trusted correspondents (no attachments, max 5 recipients, never first contact). Everything is audited in Auto-sent.',
+  },
 ];
 
 export function AgentRail({
@@ -218,11 +234,11 @@ export function AgentRail({
   if (collapsed) {
     return (
       <aside className="hidden h-full w-full flex-col items-center gap-3 border-l border-subtle bg-surface-raised py-3 lg:flex">
+        <Tooltip content="Expand the agent rail — chat and the live activity timeline" side="left">
         <button
           type="button"
           onClick={onExpand}
           aria-label="Expand agent activity"
-          title="Expand agent activity"
           className="relative grid h-8 w-8 place-items-center rounded-lg text-tertiary transition-colors hover:bg-surface-overlay hover:text-primary"
         >
           <RobotIcon className="h-[18px] w-[18px]" />
@@ -236,6 +252,7 @@ export function AgentRail({
             </span>
           )}
         </button>
+        </Tooltip>
         <span
           className="mt-1 text-[10px] font-medium uppercase tracking-[0.08em] text-tertiary [writing-mode:vertical-rl]"
           aria-hidden
@@ -253,55 +270,82 @@ export function AgentRail({
         <div className={cn('flex items-center gap-2', mode === 'activity' && 'mb-3')}>
           <div className="flex flex-1 items-center gap-0.5 rounded-lg bg-surface-overlay p-0.5">
             {(['chat', 'activity'] as const).map((m) => (
-              <button
+              <Tooltip
                 key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                className={cn(
-                  'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium capitalize transition-colors',
-                  mode === m
-                    ? 'bg-surface-raised text-primary shadow-token'
-                    : 'text-tertiary hover:text-secondary',
-                )}
+                content={
+                  m === 'chat'
+                    ? 'Ask your agents about the mail on screen'
+                    : 'The live audit timeline of what agents staged, sent, and had approved'
+                }
               >
-                {m === 'chat' ? (
-                  <RobotIcon className="h-[13px] w-[13px]" />
-                ) : (
-                  <ClockIcon className="h-[13px] w-[13px]" />
-                )}
-                {m === 'chat' ? 'Chat' : 'Activity'}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setMode(m)}
+                  aria-pressed={mode === m}
+                  className={cn(
+                    'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium capitalize transition-colors',
+                    mode === m
+                      ? 'bg-surface-raised text-primary shadow-token'
+                      : 'text-tertiary hover:text-secondary',
+                  )}
+                >
+                  {m === 'chat' ? (
+                    <RobotIcon className="h-[13px] w-[13px]" />
+                  ) : (
+                    <ClockIcon className="h-[13px] w-[13px]" />
+                  )}
+                  {m === 'chat' ? 'Chat' : 'Activity'}
+                </button>
+              </Tooltip>
             ))}
           </div>
           {mode === 'activity' &&
             (paused ? (
-              <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.07em] text-warning/90">
-                <span className="h-[5px] w-[5px] rounded-full bg-warning" />
-                Paused
-              </span>
+              <Tooltip content="The workspace kill switch is on — agents can't compose or send until resumed from the top bar">
+                <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.07em] text-warning/90">
+                  <span className="h-[5px] w-[5px] rounded-full bg-warning" />
+                  Paused
+                </span>
+              </Tooltip>
             ) : (
-              <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.07em] text-tertiary">
-                <span className="h-[5px] w-[5px] rounded-full bg-success eops-live-pulse" />
-                Live
-              </span>
+              <Tooltip content="Agents are active — this feed updates as they work">
+                <span className="inline-flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-[0.07em] text-tertiary">
+                  <span className="h-[5px] w-[5px] rounded-full bg-success eops-live-pulse" />
+                  Live
+                </span>
+              </Tooltip>
             ))}
-          <button
-            type="button"
-            onClick={onCollapse}
-            aria-label="Collapse agent panel"
-            title="Collapse"
-            className="grid h-6 w-6 place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-primary"
-          >
-            <ChevronLeftIcon className="h-[15px] w-[15px] rotate-180" />
-          </button>
+          <Tooltip content="Collapse the agent rail">
+            <button
+              type="button"
+              onClick={onCollapse}
+              aria-label="Collapse agent panel"
+              className="grid h-6 w-6 place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-primary"
+            >
+              <ChevronLeftIcon className="h-[15px] w-[15px] rotate-180" />
+            </button>
+          </Tooltip>
         </div>
         {mode === 'activity' && (
           <div className="flex items-stretch rounded-[10px] border border-subtle bg-surface-base/40">
-            <Stat n={triaged} label="Triaged" />
+            <Stat
+              n={triaged}
+              label="Triaged"
+              hint="Threads agents filed into folders in the last 7 days — your own triage isn't counted"
+            />
             <span className="my-2.5 w-px bg-border-subtle" />
-            <Stat n={sent} label="Sent" />
+            <Stat
+              n={sent}
+              label="Sent"
+              hint="Agent sends in the last 7 days — autonomous sends plus drafts you approved"
+            />
             <span className="my-2.5 w-px bg-border-subtle" />
-            <Stat n={pendingCount} label="Awaiting" warn />
+            <Stat
+              n={pendingCount}
+              label="Awaiting"
+              warn
+              hint="Drafts and cleanup batches waiting for your approval right now"
+            />
           </div>
         )}
       </div>
@@ -340,7 +384,14 @@ export function AgentRail({
       {agentsAvailable && dialAgent && (
         <div className="border-t border-subtle px-4 pb-3.5 pt-3">
           <div className="mb-2.5 flex items-center justify-between">
-            <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-tertiary">Autonomy</span>
+            <Tooltip content="How far this agent may go in the send path — open Help for the full matrix">
+              <a
+                href="/help#autonomy-trust"
+                className="text-[11px] font-semibold uppercase tracking-[0.06em] text-tertiary hover:text-secondary hover:underline"
+              >
+                Autonomy
+              </a>
+            </Tooltip>
             <span className="inline-flex items-center gap-1.5 text-[12px] font-medium text-secondary">
               <i className="inline-block h-1.5 w-1.5 rounded-full bg-accent" />
               {dialAgent.display_name || agentLabel(dialAgent.key)}
@@ -350,21 +401,23 @@ export function AgentRail({
             {AUTONOMY_STEPS.map((step) => {
               const on = dialAgent.autonomy_level === step.level;
               return (
-                <button
-                  key={step.level}
-                  type="button"
-                  disabled={dialBusy}
-                  onClick={() => void setLevel(step.level)}
-                  className={cn(
-                    'flex-1 rounded-[7px] px-1 py-1.5 text-center text-[11px] font-semibold leading-tight transition-colors disabled:opacity-70',
-                    on
-                      ? 'bg-accent text-white shadow-[0_2px_6px_-1px_rgb(var(--accent)/0.5)]'
-                      : 'text-tertiary hover:text-secondary',
-                  )}
-                >
-                  {step.short}
-                  <small className="mt-px block text-[9px] font-medium opacity-70">{step.label}</small>
-                </button>
+                <Tooltip key={step.level} content={step.hint}>
+                  <button
+                    type="button"
+                    disabled={dialBusy}
+                    aria-pressed={on}
+                    onClick={() => void setLevel(step.level)}
+                    className={cn(
+                      'flex-1 rounded-[7px] px-1 py-1.5 text-center text-[11px] font-semibold leading-tight transition-colors disabled:opacity-70',
+                      on
+                        ? 'bg-accent text-white shadow-[0_2px_6px_-1px_rgb(var(--accent)/0.5)]'
+                        : 'text-tertiary hover:text-secondary',
+                    )}
+                  >
+                    {step.short}
+                    <small className="mt-px block text-[9px] font-medium opacity-70">{step.label}</small>
+                  </button>
+                </Tooltip>
               );
             })}
           </div>
@@ -376,21 +429,23 @@ export function AgentRail({
   );
 }
 
-function Stat({ n, label, warn }: { n: number; label: string; warn?: boolean }) {
+function Stat({ n, label, warn, hint }: { n: number; label: string; warn?: boolean; hint?: string }) {
   return (
-    <div className="flex-1 px-1 py-2 text-center">
-      <div
-        className={cn(
-          'text-[19px] font-bold leading-none tracking-[-0.02em] mono',
-          warn && n > 0 ? 'text-warning' : 'text-primary',
-        )}
-      >
-        {n}
+    <Tooltip content={hint} disabled={!hint}>
+      <div className="flex-1 px-1 py-2 text-center" tabIndex={hint ? 0 : undefined}>
+        <div
+          className={cn(
+            'text-[19px] font-bold leading-none tracking-[-0.02em] mono',
+            warn && n > 0 ? 'text-warning' : 'text-primary',
+          )}
+        >
+          {n}
+        </div>
+        <div className="mt-1.5 text-[9px] font-medium uppercase tracking-[0.09em] text-tertiary">
+          {label}
+        </div>
       </div>
-      <div className="mt-1.5 text-[9px] font-medium uppercase tracking-[0.09em] text-tertiary">
-        {label}
-      </div>
-    </div>
+    </Tooltip>
   );
 }
 

@@ -34,9 +34,18 @@ import {
   type RefObject,
 } from 'react';
 import { Button, Skeleton, cn } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
+import { HelpHintBar } from '@/components/mail/HelpHintBar';
 import { useActiveSpace } from '@/components/ActiveSpaceProvider';
 import { useUiCommands } from '@/components/UiCommandProvider';
 import { useMailboxCollapsed, useRailCollapsed } from '@/state/uiCollapse';
+import {
+  mailFoldersPane,
+  mailRailPane,
+  mailThreadListPane,
+  usePaneWidth,
+} from '@/state/paneWidths';
+import { ResizableEdge } from '@/components/ResizableEdge';
 import { useTheme } from '@/state/theme';
 import { useAgentInbox } from '@/components/useAgentInbox';
 import { useAgents } from '@/components/useAgents';
@@ -185,6 +194,120 @@ function draftPrefillFromMessage(message: MessageView): ComposePrefill {
 }
 
 type SegFilter = 'all' | 'unread' | 'starred' | 'agent';
+
+/**
+ * The 4-column desktop grid (folders · list · reader · rail) plus its three
+ * drag-resizable edges. iconnav is a flex sibling. Collapsed, the folders pane
+ * becomes a slim 56px avatar rail (never 0) so the webmail never fully
+ * vanishes; expanded tracks take the user-resized, persisted widths; the list
+ * keeps a minmax() so over-constrained viewports degrade exactly like the old
+ * fixed layout; and the reader always flexes to fill.
+ *
+ * Isolated in its own component ON PURPOSE: width previews land here every
+ * animation frame during a drag, and the pane contents arrive as STABLE element
+ * props from MailPage — so React bails out of reconciling the (large) folder /
+ * list / reader / rail subtrees and the drag stays smooth.
+ */
+function MailPanesGrid({
+  foldersCollapsed,
+  railCollapsed,
+  threadOpen,
+  folders,
+  list,
+  reader,
+  rail,
+}: {
+  foldersCollapsed: boolean;
+  railCollapsed: boolean;
+  threadOpen: boolean;
+  folders: ReactNode;
+  list: ReactNode;
+  reader: ReactNode;
+  rail: ReactNode;
+}) {
+  // Persisted pane widths. Collapse always wins: the collapsed tracks keep
+  // their fixed slim widths and expanding restores the stored width.
+  // `threadListW === null` means the fluid fr-based default.
+  const foldersW = usePaneWidth(mailFoldersPane) ?? 236;
+  const threadListW = usePaneWidth(mailThreadListPane);
+  const railW = usePaneWidth(mailRailPane) ?? 320;
+  // While a handle is engaged the grid transition pauses so tracks follow the
+  // pointer 1:1 instead of easing behind it.
+  const [paneResizing, setPaneResizing] = useState(false);
+
+  const gridCols = `${foldersCollapsed ? '56px' : `${foldersW}px`} ${
+    threadListW === null ? 'minmax(300px,1.15fr)' : `minmax(300px,${threadListW}px)`
+  } minmax(360px,1.9fr) ${railCollapsed ? '44px' : `${railW}px`}`;
+
+  return (
+    <div
+      className={cn(
+        'grid min-h-0 flex-1 grid-cols-1 lg:[grid-template-columns:var(--cols)]',
+        !paneResizing && 'transition-[grid-template-columns] duration-token ease-token',
+      )}
+      style={{ '--cols': gridCols } as CSSProperties}
+    >
+      {/* (2) accounts + folders — hidden on mobile. Collapses to a slim
+          avatar rail (never fully vanishes) instead of disappearing. */}
+      <div className="overflow-hidden max-lg:hidden">{folders}</div>
+
+      {/* (3) conversation list — the only left pane on mobile until a thread opens. */}
+      <section
+        className={cn(
+          'relative flex min-w-0 flex-col overflow-hidden border-r border-subtle bg-surface-base',
+          threadOpen && 'max-lg:hidden',
+        )}
+      >
+        {/* Resizes the FOLDERS column (prev sibling): the folders pane scrolls
+            under its own right edge, so its handle lives on this boundary's
+            clean side. */}
+        {!foldersCollapsed && (
+          <ResizableEdge
+            store={mailFoldersPane}
+            edge="left"
+            target="prev-sibling"
+            label="Resize folders pane"
+            onDraggingChange={setPaneResizing}
+          />
+        )}
+        {list}
+      </section>
+
+      {/* (4) reader — the only pane shown on mobile when a thread is open. */}
+      <section
+        className={cn(
+          'relative flex min-w-0 flex-col overflow-hidden border-l border-subtle',
+          !threadOpen && 'max-lg:hidden',
+        )}
+      >
+        {/* Resizes the CONVERSATION-LIST column (prev sibling); the reader
+            itself always flexes to fill. */}
+        <ResizableEdge
+          store={mailThreadListPane}
+          edge="left"
+          target="prev-sibling"
+          label="Resize conversation list"
+          onDraggingChange={setPaneResizing}
+        />
+        {reader}
+      </section>
+
+      {/* (5) right agent-activity rail — desktop only. */}
+      <div className="relative hidden overflow-hidden lg:block">
+        {!railCollapsed && (
+          <ResizableEdge
+            store={mailRailPane}
+            edge="left"
+            target="parent"
+            label="Resize agent activity rail"
+            onDraggingChange={setPaneResizing}
+          />
+        )}
+        {rail}
+      </div>
+    </div>
+  );
+}
 
 export default function MailPage() {
   const mail = useMailClient();
@@ -1010,14 +1133,23 @@ export default function MailPage() {
     }
 
     // Help
-    list.push({
-      id: 'help:shortcuts',
-      label: 'Keyboard shortcuts',
-      group: 'Help',
-      hint: '?',
-      keywords: 'help keyboard shortcuts keys cheatsheet',
-      run: () => setHelpOpen(true),
-    });
+    list.push(
+      {
+        id: 'help:shortcuts',
+        label: 'Keyboard shortcuts',
+        group: 'Help',
+        hint: '?',
+        keywords: 'help keyboard shortcuts keys cheatsheet',
+        run: () => setHelpOpen(true),
+      },
+      {
+        id: 'help:guide',
+        label: 'Open the Help guide',
+        group: 'Help',
+        keywords: 'help guide manual docs documentation how to autonomy trust directions',
+        run: () => router.push('/help'),
+      },
+    );
 
     return list;
   }, [
@@ -1066,13 +1198,6 @@ export default function MailPage() {
             : visibleMailboxes.length === 0
               ? 'no-space'
               : null;
-
-  // The 4-column grid (folders · list · reader · rail). iconnav is a flex sibling.
-  // Collapsed, the folders pane becomes a slim 56px avatar rail (never 0) so the
-  // webmail never fully vanishes.
-  const gridCols = `${foldersCollapsed ? '56px' : '236px'} minmax(300px,1.15fr) minmax(360px,1.9fr) ${
-    railCollapsed ? '44px' : '320px'
-  }`;
 
   const listTitle = mail.unified
     ? 'All inboxes'
@@ -1179,17 +1304,18 @@ export default function MailPage() {
         onCommandPalette={() => setPaletteOpen(true)}
       />
 
+      {/* One-time orientation strip — localStorage-dismissed, quiet. */}
+      <HelpHintBar />
+
       <div className="flex min-h-0 flex-1">
         <MailIconNav pendingCount={inbox.pendingCount} />
 
-        <div
-          className="grid min-h-0 flex-1 grid-cols-1 transition-[grid-template-columns] duration-token ease-token lg:[grid-template-columns:var(--cols)]"
-          style={{ '--cols': gridCols } as CSSProperties}
-        >
-          {/* (2) accounts + folders — hidden on mobile. Collapses to a slim
-              avatar rail (never fully vanishes) instead of disappearing. */}
-          <div className="overflow-hidden max-lg:hidden">
-            {foldersCollapsed ? (
+        <MailPanesGrid
+          foldersCollapsed={foldersCollapsed}
+          railCollapsed={railCollapsed}
+          threadOpen={threadOpen}
+          folders={
+            foldersCollapsed ? (
               <FoldersRail
                 mailboxes={visibleMailboxes}
                 selectedId={
@@ -1252,16 +1378,9 @@ export default function MailPage() {
                 onOpenScheduled={() => setScheduledOpen(true)}
                 onOpenRules={() => setRulesOpen(true)}
               />
-            )}
-          </div>
-
-          {/* (3) conversation list — the only left pane on mobile until a thread opens. */}
-          <section
-            className={cn(
-              'flex min-w-0 flex-col overflow-hidden border-r border-subtle bg-surface-base',
-              threadOpen && 'max-lg:hidden',
-            )}
-          >
+            )
+          }
+          list={
             <ConversationList
               banner={banner}
               error={mail.threadsError ?? mail.error}
@@ -1304,15 +1423,8 @@ export default function MailPage() {
                   : undefined
               }
             />
-          </section>
-
-          {/* (4) reader — the only pane shown on mobile when a thread is open. */}
-          <section
-            className={cn(
-              'flex min-w-0 flex-col overflow-hidden border-l border-subtle',
-              !threadOpen && 'max-lg:hidden',
-            )}
-          >
+          }
+          reader={
             <Reader
               workspaceId={mail.workspace?.workspace_id ?? null}
               mailbox={threadMailbox}
@@ -1365,10 +1477,8 @@ export default function MailPage() {
                 setComposeOpen(true);
               }}
             />
-          </section>
-
-          {/* (5) right agent-activity rail — desktop only. */}
-          <div className={cn('hidden lg:block', 'overflow-hidden')}>
+          }
+          rail={
             <AgentRail
               collapsed={railCollapsed}
               onExpand={toggleRail}
@@ -1383,8 +1493,8 @@ export default function MailPage() {
               }
               getChatContext={getChatContext}
             />
-          </div>
-        </div>
+          }
+        />
       </div>
 
       {/* Floating bulk bar (Wave-2 bulk endpoint; hidden when not deployed). */}
@@ -1589,15 +1699,16 @@ function CustomFoldersSection({
         <h3 className="text-[11px] font-semibold uppercase tracking-[0.09em] text-tertiary">
           Custom folders
         </h3>
-        <button
-          type="button"
-          onClick={() => (creating ? closeCreate() : setCreating(true))}
-          aria-label={creating ? 'Cancel new folder' : 'New folder'}
-          title={creating ? 'Cancel' : 'New folder'}
-          className="grid h-[20px] w-[20px] place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
-        >
-          {creating ? <CloseIcon className="h-3.5 w-3.5" /> : <PlusIcon className="h-3.5 w-3.5" />}
-        </button>
+        <Tooltip content={creating ? 'Cancel' : 'New folder — create a custom folder to file mail into'}>
+          <button
+            type="button"
+            onClick={() => (creating ? closeCreate() : setCreating(true))}
+            aria-label={creating ? 'Cancel new folder' : 'New folder'}
+            className="grid h-[20px] w-[20px] place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+          >
+            {creating ? <CloseIcon className="h-3.5 w-3.5" /> : <PlusIcon className="h-3.5 w-3.5" />}
+          </button>
+        </Tooltip>
       </div>
 
       {creating && (
@@ -1689,28 +1800,30 @@ function CustomFoldersSection({
                 )}
                 {/* focus-within parity so the actions are keyboard/SR reachable, not hover-only */}
                 <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRenamingId(f.id);
-                      setRenameDraft(f.name);
-                      setConfirmDeleteId(null);
-                    }}
-                    aria-label={`Rename ${f.name}`}
-                    title="Rename"
-                    className="grid h-[22px] w-[22px] place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
-                  >
-                    <PencilIcon className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmDeleteId(f.id)}
-                    aria-label={`Delete ${f.name}`}
-                    title="Delete"
-                    className="grid h-[22px] w-[22px] place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-danger"
-                  >
-                    <TrashIcon className="h-3.5 w-3.5" />
-                  </button>
+                  <Tooltip content="Rename folder">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRenamingId(f.id);
+                        setRenameDraft(f.name);
+                        setConfirmDeleteId(null);
+                      }}
+                      aria-label={`Rename ${f.name}`}
+                      className="grid h-[22px] w-[22px] place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+                    >
+                      <PencilIcon className="h-3.5 w-3.5" />
+                    </button>
+                  </Tooltip>
+                  <Tooltip content="Delete folder — mail it already filed stays where it is">
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteId(f.id)}
+                      aria-label={`Delete ${f.name}`}
+                      className="grid h-[22px] w-[22px] place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-danger"
+                    >
+                      <TrashIcon className="h-3.5 w-3.5" />
+                    </button>
+                  </Tooltip>
                 </span>
               </>
             )}
@@ -1777,21 +1890,23 @@ function FoldersColumn({
   onOpenScheduled: () => void;
   onOpenRules: () => void;
 }) {
+  // w-full: the grid track (resizable, persisted) owns this pane's width.
   return (
-    <aside className="flex h-full w-[236px] flex-col overflow-y-auto border-r border-subtle bg-surface-raised">
+    <aside className="flex h-full w-full flex-col overflow-y-auto border-r border-subtle bg-surface-raised">
       <div className="flex items-center justify-between px-3.5 pb-1.5 pt-3.5">
         <h3 className="text-[11px] font-semibold uppercase tracking-[0.09em] text-tertiary">
           Accounts
         </h3>
-        <button
-          type="button"
-          onClick={onCollapse}
-          aria-label="Collapse accounts & folders"
-          title="Collapse"
-          className="grid h-[22px] w-[22px] place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
-        >
-          <ChevronLeftIcon className="h-3.5 w-3.5" />
-        </button>
+        <Tooltip content="Collapse this pane to a slim rail">
+          <button
+            type="button"
+            onClick={onCollapse}
+            aria-label="Collapse accounts & folders"
+            className="grid h-[22px] w-[22px] place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+          >
+            <ChevronLeftIcon className="h-3.5 w-3.5" />
+          </button>
+        </Tooltip>
       </div>
 
       {showAllInboxes && (
@@ -1832,18 +1947,23 @@ function FoldersColumn({
         </h3>
       </div>
       {/* Needs approval — the human-in-the-loop queue (real pending count). */}
-      <Link
-        href="/agent-inbox"
-        className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-secondary transition-colors hover:bg-surface-overlay"
+      <Tooltip
+        content="The approval queue — agent drafts and cleanup batches waiting on you"
+        side="right"
       >
-        <CheckSquareIcon className="h-4 w-4 shrink-0 text-tertiary" />
-        <span className="flex-1 text-[13px]">Needs approval</span>
-        {pendingCount > 0 && (
-          <span className="rounded-full bg-warning/[0.14] px-1.5 py-px text-[11px] font-semibold text-warning mono">
-            {pendingCount}
-          </span>
-        )}
-      </Link>
+        <Link
+          href="/agent-inbox"
+          className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-secondary transition-colors hover:bg-surface-overlay"
+        >
+          <CheckSquareIcon className="h-4 w-4 shrink-0 text-tertiary" />
+          <span className="flex-1 text-[13px]">Needs approval</span>
+          {pendingCount > 0 && (
+            <span className="rounded-full bg-warning/[0.14] px-1.5 py-px text-[11px] font-semibold text-warning mono">
+              {pendingCount}
+            </span>
+          )}
+        </Link>
+      </Tooltip>
       {FOLDERS.map((f) => {
         const Glyph = FOLDER_GLYPH[f.id];
         // A live custom folder owns the active highlight; de-select the system row.
@@ -1870,30 +1990,39 @@ function FoldersColumn({
       {/* Snoozed + Scheduled — action rows (open a manager), sovereign mailbox only. */}
       {schedulingEnabled && (
         <>
-          <button
-            type="button"
-            onClick={onOpenSnoozed}
-            className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
+          <Tooltip content="Conversations hidden until later — wake or re-time them" side="right">
+            <button
+              type="button"
+              onClick={onOpenSnoozed}
+              className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
+            >
+              <ClockIcon className="h-4 w-4 shrink-0 text-tertiary" />
+              <span className="flex-1 text-[13px]">Snoozed</span>
+            </button>
+          </Tooltip>
+          <Tooltip content="Messages queued to send later — cancel any before they leave" side="right">
+            <button
+              type="button"
+              onClick={onOpenScheduled}
+              className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
+            >
+              <SendIcon className="h-4 w-4 shrink-0 text-tertiary" />
+              <span className="flex-1 text-[13px]">Scheduled</span>
+            </button>
+          </Tooltip>
+          <Tooltip
+            content="Rules file mail as it arrives — conditions over sender/subject, actions like move or archive"
+            side="right"
           >
-            <ClockIcon className="h-4 w-4 shrink-0 text-tertiary" />
-            <span className="flex-1 text-[13px]">Snoozed</span>
-          </button>
-          <button
-            type="button"
-            onClick={onOpenScheduled}
-            className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
-          >
-            <SendIcon className="h-4 w-4 shrink-0 text-tertiary" />
-            <span className="flex-1 text-[13px]">Scheduled</span>
-          </button>
-          <button
-            type="button"
-            onClick={onOpenRules}
-            className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
-          >
-            <FunnelIcon className="h-4 w-4 shrink-0 text-tertiary" />
-            <span className="flex-1 text-[13px]">Rules</span>
-          </button>
+            <button
+              type="button"
+              onClick={onOpenRules}
+              className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
+            >
+              <FunnelIcon className="h-4 w-4 shrink-0 text-tertiary" />
+              <span className="flex-1 text-[13px]">Rules</span>
+            </button>
+          </Tooltip>
         </>
       )}
 
@@ -2031,15 +2160,16 @@ function FoldersRail({
 }) {
   return (
     <aside className="flex h-full w-[56px] flex-col items-center gap-1 overflow-y-auto overflow-x-visible border-r border-subtle bg-surface-raised py-2.5">
-      <button
-        type="button"
-        onClick={onExpand}
-        aria-label="Expand accounts & folders"
-        title="Expand accounts & folders"
-        className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
-      >
-        <ChevronRightIcon className="h-[18px] w-[18px]" />
-      </button>
+      <Tooltip content="Expand the accounts & folders pane" side="right">
+        <button
+          type="button"
+          onClick={onExpand}
+          aria-label="Expand accounts & folders"
+          className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+        >
+          <ChevronRightIcon className="h-[18px] w-[18px]" />
+        </button>
+      </Tooltip>
 
       {/* Accounts — one avatar per mailbox. */}
       {showAllInboxes && (
@@ -2070,74 +2200,78 @@ function FoldersRail({
       <div className="my-1 h-px w-6 shrink-0 bg-border-subtle" />
 
       {/* Needs approval — the human-in-the-loop queue. */}
-      <Link
-        href="/agent-inbox"
-        title="Needs approval"
-        aria-label="Needs approval"
-        className="relative grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
-      >
-        <CheckSquareIcon className="h-[18px] w-[18px]" />
-        {pendingCount > 0 && (
-          <span className="absolute -right-0.5 -top-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-lg border-2 border-surface-raised bg-warning px-[3px] text-[9px] font-bold leading-none text-white mono">
-            {pendingCount > 99 ? '99+' : pendingCount}
-          </span>
-        )}
-      </Link>
+      <Tooltip content="Needs approval — the queue of agent work waiting on you" side="right">
+        <Link
+          href="/agent-inbox"
+          aria-label="Needs approval"
+          className="relative grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+        >
+          <CheckSquareIcon className="h-[18px] w-[18px]" />
+          {pendingCount > 0 && (
+            <span className="absolute -right-0.5 -top-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-lg border-2 border-surface-raised bg-warning px-[3px] text-[9px] font-bold leading-none text-white mono">
+              {pendingCount > 99 ? '99+' : pendingCount}
+            </span>
+          )}
+        </Link>
+      </Tooltip>
 
       {/* Folders — icon-only, active glyph filled. */}
       {FOLDERS.map((f) => {
         const Glyph = FOLDER_GLYPH[f.id];
         const active = f.id === folder && !activeCustomFolderId;
         return (
-          <button
-            key={f.id}
-            type="button"
-            onClick={() => onSelectFolder(f.id)}
-            aria-current={active}
-            aria-label={f.label}
-            title={f.label}
-            className={cn(
-              'grid h-9 w-9 shrink-0 place-items-center rounded-[9px] transition-colors',
-              active
-                ? 'bg-accent/[0.13] text-accent'
-                : 'text-tertiary hover:bg-surface-overlay hover:text-secondary',
-            )}
-          >
-            <Glyph className="h-[18px] w-[18px]" />
-          </button>
+          <Tooltip key={f.id} content={f.label} side="right">
+            <button
+              type="button"
+              onClick={() => onSelectFolder(f.id)}
+              aria-current={active}
+              aria-label={f.label}
+              className={cn(
+                'grid h-9 w-9 shrink-0 place-items-center rounded-[9px] transition-colors',
+                active
+                  ? 'bg-accent/[0.13] text-accent'
+                  : 'text-tertiary hover:bg-surface-overlay hover:text-secondary',
+              )}
+            >
+              <Glyph className="h-[18px] w-[18px]" />
+            </button>
+          </Tooltip>
         );
       })}
 
       {/* Snoozed + Scheduled — icon-only openers (sovereign mailbox only). */}
       {schedulingEnabled && (
         <>
-          <button
-            type="button"
-            onClick={onOpenSnoozed}
-            aria-label="Snoozed"
-            title="Snoozed"
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
-          >
-            <ClockIcon className="h-[18px] w-[18px]" />
-          </button>
-          <button
-            type="button"
-            onClick={onOpenScheduled}
-            aria-label="Scheduled"
-            title="Scheduled"
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
-          >
-            <SendIcon className="h-[18px] w-[18px]" />
-          </button>
-          <button
-            type="button"
-            onClick={onOpenRules}
-            aria-label="Rules"
-            title="Rules"
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
-          >
-            <FunnelIcon className="h-[18px] w-[18px]" />
-          </button>
+          <Tooltip content="Snoozed — conversations hidden until later" side="right">
+            <button
+              type="button"
+              onClick={onOpenSnoozed}
+              aria-label="Snoozed"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+            >
+              <ClockIcon className="h-[18px] w-[18px]" />
+            </button>
+          </Tooltip>
+          <Tooltip content="Scheduled — messages queued to send later" side="right">
+            <button
+              type="button"
+              onClick={onOpenScheduled}
+              aria-label="Scheduled"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+            >
+              <SendIcon className="h-[18px] w-[18px]" />
+            </button>
+          </Tooltip>
+          <Tooltip content="Rules — file mail automatically as it arrives" side="right">
+            <button
+              type="button"
+              onClick={onOpenRules}
+              aria-label="Rules"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+            >
+              <FunnelIcon className="h-[18px] w-[18px]" />
+            </button>
+          </Tooltip>
         </>
       )}
 
@@ -2148,13 +2282,12 @@ function FoldersRail({
       {customFolders.map((f) => {
         const active = f.id === activeCustomFolderId;
         return (
+          <Tooltip key={f.id} content={f.name} side="right">
           <button
-            key={f.id}
             type="button"
             onClick={() => onSelectCustomFolder(f.id)}
             aria-current={active}
             aria-label={f.name}
-            title={f.name}
             className={cn(
               'relative grid h-9 w-9 shrink-0 place-items-center rounded-[9px] transition-colors',
               active
@@ -2169,6 +2302,7 @@ function FoldersRail({
               </span>
             )}
           </button>
+          </Tooltip>
         );
       })}
     </aside>
@@ -2194,11 +2328,12 @@ function RailAvatar({
 }) {
   const hasUnread = unread != null && unread > 0;
   return (
+    <Tooltip content={title} side="right">
     <button
       type="button"
       onClick={onClick}
       aria-current={active}
-      title={title}
+      aria-label={title}
       className="relative grid h-9 w-9 shrink-0 place-items-center"
     >
       <span
@@ -2222,6 +2357,7 @@ function RailAvatar({
         </span>
       )}
     </button>
+    </Tooltip>
   );
 }
 
@@ -2323,19 +2459,32 @@ function ConversationList({
         </div>
         <div className="flex shrink-0 gap-0.5 rounded-lg bg-surface-overlay p-0.5">
           {(['all', 'unread', 'starred', 'agent'] as SegFilter[]).map((seg) => (
-            <button
+            <Tooltip
               key={seg}
-              type="button"
-              onClick={() => onFilter(seg)}
-              className={cn(
-                'rounded-md px-2.5 py-1 text-[12px] font-medium capitalize transition-colors',
-                filter === seg
-                  ? 'bg-surface-raised text-primary shadow-token'
-                  : 'text-tertiary hover:text-secondary',
-              )}
+              content={
+                seg === 'all'
+                  ? 'Show every conversation in this view'
+                  : seg === 'unread'
+                    ? 'Only unread conversations'
+                    : seg === 'starred'
+                      ? 'Only starred conversations'
+                      : 'Only conversations with an agent draft waiting for your approval'
+              }
             >
-              {seg}
-            </button>
+              <button
+                type="button"
+                onClick={() => onFilter(seg)}
+                aria-pressed={filter === seg}
+                className={cn(
+                  'rounded-md px-2.5 py-1 text-[12px] font-medium capitalize transition-colors',
+                  filter === seg
+                    ? 'bg-surface-raised text-primary shadow-token'
+                    : 'text-tertiary hover:text-secondary',
+                )}
+              >
+                {seg}
+              </button>
+            </Tooltip>
           ))}
         </div>
       </div>
@@ -2528,23 +2677,24 @@ function ConversationRow({
           />
         </span>
       )}
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggleFlag(thread.id, !thread.flagged);
-        }}
-        aria-label={thread.flagged ? 'Unstar conversation' : 'Star conversation'}
-        title={thread.flagged ? 'Unstar' : 'Star'}
-        className={cn(
-          'mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-md transition-colors',
-          thread.flagged
-            ? 'text-warning hover:bg-surface-overlay'
-            : 'text-muted opacity-0 hover:bg-surface-overlay hover:text-secondary group-hover:opacity-100 focus:opacity-100 max-lg:opacity-100',
-        )}
-      >
-        <StarIcon className={cn('h-4 w-4', thread.flagged && 'fill-current')} />
-      </button>
+      <Tooltip content={thread.flagged ? 'Unstar' : 'Star — keep this in the Starred filter'}>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleFlag(thread.id, !thread.flagged);
+          }}
+          aria-label={thread.flagged ? 'Unstar conversation' : 'Star conversation'}
+          className={cn(
+            'mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-md transition-colors',
+            thread.flagged
+              ? 'text-warning hover:bg-surface-overlay'
+              : 'text-muted opacity-0 hover:bg-surface-overlay hover:text-secondary group-hover:opacity-100 focus:opacity-100 max-lg:opacity-100',
+          )}
+        >
+          <StarIcon className={cn('h-4 w-4', thread.flagged && 'fill-current')} />
+        </button>
+      </Tooltip>
       <span
         className={cn(
           'mt-0.5 grid h-[34px] w-[34px] shrink-0 place-items-center rounded-full text-[12px] font-semibold text-white transition-opacity duration-token ease-token',
@@ -2564,6 +2714,7 @@ function ConversationRow({
       >
         <span className="flex items-baseline gap-2">
           <span
+            title={who}
             className={cn(
               'min-w-0 flex-1 truncate text-[13px]',
               thread.unread ? 'font-semibold text-primary' : 'font-medium text-secondary',
@@ -2585,6 +2736,7 @@ function ConversationRow({
         {/* Subject sits one weight-step below the sender so the two lines don't
             both peak — sender is the loud anchor, subject the supporting line. */}
         <span
+          title={thread.subject?.trim() || undefined}
           className={cn(
             'mt-0.5 block truncate text-[13px]',
             thread.unread ? 'font-medium text-primary' : 'font-normal text-tertiary',
@@ -2605,12 +2757,20 @@ function ConversationRow({
         <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
           {/* One chip for a staged draft — "draft ready" and "needs approval"
               are the same state, so showing both was redundant noise. */}
-          {draft && <Chip tone="agent" icon="bot" label="Draft · needs approval" />}
+          {draft && (
+            <Tooltip content="An agent staged a reply on this thread — open it to approve, edit, or discard. Nothing sends until you decide.">
+              <span>
+                <Chip tone="agent" icon="bot" label="Draft · needs approval" />
+              </span>
+            </Tooltip>
+          )}
           {unified && thread.mailbox_address && <AccountChip address={thread.mailbox_address} />}
           {thread.has_attachments && (
-            <span className="inline-flex items-center text-tertiary" aria-label="Has attachment">
-              <Paperclip className="h-3.5 w-3.5" />
-            </span>
+            <Tooltip content="Has attachments">
+              <span className="inline-flex items-center text-tertiary" aria-label="Has attachment">
+                <Paperclip className="h-3.5 w-3.5" />
+              </span>
+            </Tooltip>
           )}
           {thread.message_count > 1 && (
             <span className="rounded bg-surface-overlay px-1.5 text-[10px] text-muted mono">
@@ -2623,13 +2783,25 @@ function ConversationRow({
           mark-read without opening the thread. Keyboard-reachable, hidden until
           hover/focus-within so it never adds resting clutter. */}
       <div className="pointer-events-none absolute right-2 top-2 flex items-center gap-0.5 rounded-lg border border-subtle bg-surface-raised/95 p-0.5 opacity-0 shadow-token backdrop-blur transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
-        <RowAction label="Archive" onClick={() => onQuickTriage(thread.id, 'ARCHIVE')}>
+        <RowAction
+          label="Archive"
+          hint="Archive (e) — kept and searchable, out of the Inbox"
+          onClick={() => onQuickTriage(thread.id, 'ARCHIVE')}
+        >
           <ArchiveIcon className="h-4 w-4" />
         </RowAction>
-        <RowAction label={thread.unread ? 'Mark read' : 'Mark unread'} onClick={() => onQuickMark(thread.id, thread.unread)}>
+        <RowAction
+          label={thread.unread ? 'Mark read' : 'Mark unread'}
+          onClick={() => onQuickMark(thread.id, thread.unread)}
+        >
           <CheckSquareIcon className="h-4 w-4" />
         </RowAction>
-        <RowAction label="Trash" danger onClick={() => onQuickTriage(thread.id, 'TRASH')}>
+        <RowAction
+          label="Trash"
+          hint="Move to Trash (#) — reversible until Trash is emptied"
+          danger
+          onClick={() => onQuickTriage(thread.id, 'TRASH')}
+        >
           <TrashIcon className="h-4 w-4" />
         </RowAction>
       </div>
@@ -2641,31 +2813,35 @@ function ConversationRow({
  *  triage without opening it. Stops propagation so it never selects the row. */
 function RowAction({
   label,
+  hint,
   onClick,
   danger,
   children,
 }: {
   label: string;
+  /** Richer tooltip line; falls back to the accessible label. */
+  hint?: string;
   onClick: () => void;
   danger?: boolean;
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      onClick={(e) => {
-        e.stopPropagation();
-        onClick();
-      }}
-      className={cn(
-        'grid h-7 w-7 place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-elevated',
-        danger ? 'hover:text-danger' : 'hover:text-primary',
-      )}
-    >
-      {children}
-    </button>
+    <Tooltip content={hint ?? label}>
+      <button
+        type="button"
+        aria-label={label}
+        onClick={(e) => {
+          e.stopPropagation();
+          onClick();
+        }}
+        className={cn(
+          'grid h-7 w-7 place-items-center rounded-md text-tertiary transition-colors hover:bg-surface-elevated',
+          danger ? 'hover:text-danger' : 'hover:text-primary',
+        )}
+      >
+        {children}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -2786,6 +2962,11 @@ function EmptyList({ filter }: { filter: SegFilter }) {
       </div>
       <p className="text-[13px] font-semibold text-primary">{copy.t}</p>
       <p className="max-w-[240px] text-[12px] leading-5 text-tertiary">{copy.d}</p>
+      {filter === 'agent' && (
+        <Link href="/help#agent-drafts" className="text-[12px] font-medium text-accent hover:underline">
+          How agent drafts work →
+        </Link>
+      )}
     </div>
   );
 }
@@ -2875,6 +3056,7 @@ function MoveToFolderControl({
     <div ref={ref} className="relative">
       <ReaderTool
         label="Move to folder"
+        hint="Move to folder — file this conversation into one of your custom folders"
         onClick={() => setOpen((v) => !v)}
         disabled={disabled}
       >
@@ -2945,7 +3127,12 @@ function SnoozeControl({
   const presets = useMemo(() => (open ? snoozePresets() : []), [open]);
   return (
     <div ref={ref} className="relative">
-      <ReaderTool label="Snooze" onClick={() => setOpen((v) => !v)} disabled={disabled}>
+      <ReaderTool
+        label="Snooze"
+        hint="Snooze — hide this until a time you pick; it returns to the Inbox then"
+        onClick={() => setOpen((v) => !v)}
+        disabled={disabled}
+      >
         <ClockIcon className="h-[17px] w-[17px]" />
       </ReaderTool>
       {open && (
@@ -3106,30 +3293,49 @@ function Reader({
           >
             <ChevronLeftIcon className="h-[18px] w-[18px]" />
           </button>
-          <h1 className="flex-1 text-[19px] font-bold leading-[1.3] tracking-[-0.015em] text-primary">
+          <h1
+            title={thread?.subject?.trim() || undefined}
+            className="flex-1 text-[19px] font-bold leading-[1.3] tracking-[-0.015em] text-primary"
+          >
             {thread?.subject?.trim() || '(no subject)'}
           </h1>
           <div className="flex shrink-0 items-center gap-1">
             <ReaderTool
               label={thread?.flagged ? 'Unstar conversation' : 'Star conversation'}
+              hint={
+                thread?.flagged
+                  ? 'Unstar — remove from the Starred filter'
+                  : 'Star — keep this in the Starred filter'
+              }
               accent={!!thread?.flagged}
               onClick={() => onToggleFlag(!thread?.flagged)}
             >
               <StarIcon className={cn('h-[17px] w-[17px]', thread?.flagged && 'fill-current')} />
             </ReaderTool>
             {folder !== 'inbox' && (
-              <ReaderTool label="Move to inbox" onClick={() => void runTriage('INBOX')} disabled={triageBusy}>
+              <ReaderTool
+                label="Move to inbox"
+                hint="Return this conversation to the Inbox"
+                onClick={() => void runTriage('INBOX')}
+                disabled={triageBusy}
+              >
                 <InboxTrayIcon className="h-[17px] w-[17px]" />
               </ReaderTool>
             )}
             {folder !== 'archive' && (
-              <ReaderTool label="Archive" onClick={() => void runTriage('ARCHIVE')} disabled={triageBusy}>
+              <ReaderTool
+                label="Archive"
+                hint="Archive (e) — kept and searchable, out of the Inbox"
+                onClick={() => void runTriage('ARCHIVE')}
+                disabled={triageBusy}
+              >
                 <ArchiveIcon className="h-[17px] w-[17px]" />
               </ReaderTool>
             )}
             {folder !== 'spam' && (
               <ReaderTool
                 label="Report spam"
+                hint="Report spam — files it in Spam and blocks the sender"
                 danger
                 onClick={() => void runTriage('SPAM')}
                 disabled={triageBusy}
@@ -3138,7 +3344,13 @@ function Reader({
               </ReaderTool>
             )}
             {folder !== 'trash' && (
-              <ReaderTool label="Trash" danger onClick={() => void runTriage('TRASH')} disabled={triageBusy}>
+              <ReaderTool
+                label="Trash"
+                hint="Move to Trash (#) — reversible until Trash is emptied"
+                danger
+                onClick={() => void runTriage('TRASH')}
+                disabled={triageBusy}
+              >
                 <TrashIcon className="h-[17px] w-[17px]" />
               </ReaderTool>
             )}
@@ -3159,10 +3371,15 @@ function Reader({
             )}
             {/* Divide destructive triage from safe compose actions. */}
             <span aria-hidden className="mx-0.5 h-5 w-px bg-border-subtle" />
-            <ReaderTool label="Reply" onClick={onFocusReply}>
+            <ReaderTool label="Reply" hint="Reply to the latest message (r)" onClick={onFocusReply}>
               <ReplyIcon className="h-[17px] w-[17px]" />
             </ReaderTool>
-            <ReaderTool label="Pop out message" accent onClick={onPopout}>
+            <ReaderTool
+              label="Pop out message"
+              hint="Pop out — read this in an overlay, or eject it to its own window"
+              accent
+              onClick={onPopout}
+            >
               <PopOutIcon className="h-4 w-4" />
             </ReaderTool>
           </div>
@@ -3323,6 +3540,7 @@ function ReplyActionBar({
 
 function ReaderTool({
   label,
+  hint,
   onClick,
   accent,
   danger,
@@ -3330,6 +3548,8 @@ function ReaderTool({
   children,
 }: {
   label: string;
+  /** Richer tooltip line; falls back to the accessible label. */
+  hint?: string;
   onClick: () => void;
   accent?: boolean;
   danger?: boolean;
@@ -3337,23 +3557,24 @@ function ReaderTool({
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={label}
-      aria-label={label}
-      className={cn(
-        'grid h-8 w-8 place-items-center rounded-lg text-tertiary transition-colors disabled:opacity-50',
-        accent
-          ? 'hover:bg-accent/12 hover:text-accent'
-          : danger
-            ? 'hover:bg-danger/10 hover:text-danger'
-            : 'hover:bg-surface-overlay hover:text-primary',
-      )}
-    >
-      {children}
-    </button>
+    <Tooltip content={hint ?? label}>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        aria-label={label}
+        className={cn(
+          'grid h-8 w-8 place-items-center rounded-lg text-tertiary transition-colors disabled:opacity-50',
+          accent
+            ? 'hover:bg-accent/12 hover:text-accent'
+            : danger
+              ? 'hover:bg-danger/10 hover:text-danger'
+              : 'hover:bg-surface-overlay hover:text-primary',
+        )}
+      >
+        {children}
+      </button>
+    </Tooltip>
   );
 }
 

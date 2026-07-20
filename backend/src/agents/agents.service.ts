@@ -78,6 +78,7 @@ export class AgentsService {
         key: input.key,
         displayName: input.displayName,
         description: input.description ?? null,
+        avatarUrl: input.avatarUrl ?? null,
         autonomyLevel: input.autonomyLevel ?? AgentAutonomyLevel.L1_APPROVE_TO_SEND,
         managerAgentKey: input.managerAgentKey ?? null,
       };
@@ -128,6 +129,7 @@ export class AgentsService {
       const data: Prisma.AgentUncheckedUpdateInput = {};
       if (patch.displayName !== undefined) data.displayName = patch.displayName;
       if (patch.description !== undefined) data.description = patch.description;
+      if (patch.avatarUrl !== undefined) data.avatarUrl = patch.avatarUrl;
       if (patch.autonomyLevel !== undefined) data.autonomyLevel = patch.autonomyLevel;
       if (patch.tier !== undefined) data.tier = patch.tier;
       if (patch.managerAgentKey !== undefined) data.managerAgentKey = patch.managerAgentKey;
@@ -418,6 +420,7 @@ export class AgentsService {
       key: agent.key,
       display_name: agent.displayName,
       description: agent.description,
+      avatar_url: agent.avatarUrl,
       mailbox_account_id: agent.mailboxAccountId,
       mailbox_address: agent.mailboxAccountId ? (addrById.get(agent.mailboxAccountId) ?? null) : null,
       mailboxes,

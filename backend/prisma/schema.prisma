@@ -1160,6 +1160,10 @@ model Agent {
   key              String
   displayName      String
   description      String?
+  // Presentation identity: an explicit avatar image URL (absolute, or app-relative
+  // like /agent-avatars/perry.svg). NULL → the app resolves the shipped per-key
+  // placeholder, then /agent-avatars/default.svg (see src/agents/agent-avatar.ts).
+  avatarUrl        String?
   mailboxAccountId String?
   autonomyLevel    AgentAutonomyLevel @default(L1_APPROVE_TO_SEND)
   recipientPolicy  Json?

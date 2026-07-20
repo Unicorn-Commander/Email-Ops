@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { Badge, Button, Card, CardParts, Select, Skeleton, useConfirm } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 import { listMailboxes, type MailboxView } from '@/lib/mailboxApi';
 import {
@@ -179,12 +180,16 @@ export default function ConnectDevicePage() {
                 <CardParts.Title>Apple iPhone / iPad / Mac</CardParts.Title>
                 <p className="mt-1 text-xs text-tertiary">{connection?.email ?? selectedMailbox?.email_address}</p>
               </div>
-              <Badge variant="warning">Unsigned</Badge>
+              <Tooltip content="The profile isn't code-signed, so Apple shows a warning during install — expected, and safe to accept">
+                <span tabIndex={0}><Badge variant="warning">Unsigned</Badge></span>
+              </Tooltip>
             </CardParts.Header>
             <CardParts.Body className="space-y-4">
-              <Button onClick={() => void downloadProfile()} disabled={!connection || busy === 'download'}>
-                {busy === 'download' ? 'Downloading...' : 'Download config profile'}
-              </Button>
+              <Tooltip content="A .mobileconfig with the exact IMAP/SMTP settings — open it on the Apple device to add the account">
+                <Button onClick={() => void downloadProfile()} disabled={!connection || busy === 'download'}>
+                  {busy === 'download' ? 'Downloading...' : 'Download config profile'}
+                </Button>
+              </Tooltip>
               <ol className="list-decimal space-y-2 pl-5 text-sm leading-6 text-secondary">
                 <li>Open the downloaded profile on the device.</li>
                 <li>Go to Settings, then Profile Downloaded.</li>
@@ -202,13 +207,15 @@ export default function ConnectDevicePage() {
               </div>
             </CardParts.Header>
             <CardParts.Body className="space-y-4">
-              <Button
-                variant="danger"
-                onClick={() => void generatePassword()}
-                disabled={!connection || busy === 'password'}
-              >
-                {busy === 'password' ? 'Generating...' : 'Generate mail password'}
-              </Button>
+              <Tooltip content="Mints the app password native mail clients use — shown once, and it replaces the previous one (update existing devices)">
+                <Button
+                  variant="danger"
+                  onClick={() => void generatePassword()}
+                  disabled={!connection || busy === 'password'}
+                >
+                  {busy === 'password' ? 'Generating...' : 'Generate mail password'}
+                </Button>
+              </Tooltip>
               {password ? (
                 <div className="rounded-token border border-subtle bg-surface-base p-3">
                   <p className="text-xs font-semibold uppercase tracking-wide text-warning">

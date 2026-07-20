@@ -15,8 +15,10 @@
  * 404/501 → `load: 'absent'` and every surface degrades to an honest notice.
  */
 
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Badge, Button, Dialog, Input, useConfirm } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 import { isValidEmail } from '@/components/mail/RecipientChips';
 import {
   addTrustedCorrespondent,
@@ -290,10 +292,18 @@ export function TrustedCorrespondentsDialog({
             </Button>
           </div>
         ) : trusted.items.length === 0 ? (
-          <p className="py-2 text-sm text-tertiary">
-            No trusted correspondents yet. Approving a first-contact draft with the trust box
-            checked adds its recipient here.
-          </p>
+          <div className="py-2">
+            <p className="text-sm text-tertiary">
+              No trusted correspondents yet. Approving a first-contact draft with the trust box
+              checked adds its recipient here.
+            </p>
+            <Link
+              href="/help#trusted-senders"
+              className="mt-1.5 inline-block text-sm font-medium text-accent hover:underline"
+            >
+              How trust works →
+            </Link>
+          </div>
         ) : (
           <ul className="max-h-[42dvh] space-y-1.5 overflow-y-auto pr-0.5">
             {trusted.items.map((row) => (
@@ -322,14 +332,16 @@ export function TrustedCorrespondentsDialog({
                     </p>
                   )}
                 </div>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  disabled={busy !== null}
-                  onClick={() => void handleRemove(row)}
-                >
-                  {busy === row.id ? 'Revoking…' : 'Revoke'}
-                </Button>
+                <Tooltip content="Revoke trust — future agent replies to this address go back through your approval queue">
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    disabled={busy !== null}
+                    onClick={() => void handleRemove(row)}
+                  >
+                    {busy === row.id ? 'Revoking…' : 'Revoke'}
+                  </Button>
+                </Tooltip>
               </li>
             ))}
           </ul>

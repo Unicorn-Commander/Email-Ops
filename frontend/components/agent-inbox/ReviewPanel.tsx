@@ -37,7 +37,8 @@ import {
   CleanupTargetsList,
   cleanupTargetsSentence,
 } from '@/components/mail/CleanupTargetsList';
-import { RobotIcon, CloseIcon, PopOutIcon } from '@/components/mail/icons';
+import { CloseIcon, PopOutIcon } from '@/components/mail/icons';
+import { AgentAvatar } from '@/components/AgentAvatar';
 import { formatWhen } from '@/components/mail/useMailClient';
 import { useUiCommands } from '@/components/UiCommandProvider';
 import { agentLabel } from '@/lib/agents';
@@ -703,9 +704,12 @@ export function ReviewPanel({
           )}
           {queueItem && <StateBadge state={queueItem.state} />}
           <span className="inline-flex min-w-0 items-center gap-1.5 text-[11px] text-tertiary">
-            <span className="grid h-[18px] w-[18px] shrink-0 place-items-center rounded-md bg-accent text-white">
-              <RobotIcon className="h-[11px] w-[11px]" />
-            </span>
+            <AgentAvatar
+              agentKey={agent?.key ?? agentKey}
+              avatarUrl={agent?.avatar_url}
+              size={18}
+              className="ring-1 ring-border"
+            />
             <span className="truncate font-mono">{agentLabel(agentKey)}</span>
             {agent && (
               <span className="hidden rounded-md bg-warning/[0.14] px-1.5 py-0.5 font-mono text-[9.5px] font-bold uppercase tracking-[0.04em] text-warning sm:inline">
@@ -902,12 +906,19 @@ export function ReviewPanel({
                   onChange={(e) => setTrustChoice(e.target.checked)}
                   className="mt-0.5 h-4 w-4 shrink-0 rounded border-border accent-[rgb(var(--accent))]"
                 />
-                <span>
+                <span title="Approving with this checked lets routine agent replies to this correspondent send without approval next time. Revocable any time under Trusted senders.">
                   Trust{' '}
                   <span className="font-mono text-[11.5px] text-primary">
                     {trustAddresses.join(', ')}
                   </span>{' '}
                   for future auto-replies
+                  {' · '}
+                  <a
+                    href="/help#autonomy-trust"
+                    className="text-accent underline decoration-dotted underline-offset-2 hover:opacity-80"
+                  >
+                    how trust works
+                  </a>
                 </span>
               </label>
             )}

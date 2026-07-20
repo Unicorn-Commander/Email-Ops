@@ -32,6 +32,7 @@ import {
   type BadgeVariant,
 } from '@/components/ui';
 import { EmailHealthPanel } from '@/components/EmailHealthPanel';
+import { Tooltip } from '@/components/Tooltip';
 import {
   ApiError,
   type MyWorkspace,
@@ -59,10 +60,22 @@ import {
 type Load = 'loading' | 'ready' | 'error';
 
 /** Owner-kind copy + badge tone (single source of truth). */
-const OWNER: Record<MailboxOwnerKind, { label: string; tone: BadgeVariant }> = {
-  HUMAN: { label: 'Human', tone: 'info' },
-  AGENT: { label: 'Agent', tone: 'accent' },
-  SHARED: { label: 'Shared', tone: 'protected' },
+const OWNER: Record<MailboxOwnerKind, { label: string; tone: BadgeVariant; hint: string }> = {
+  HUMAN: {
+    label: 'Human',
+    tone: 'info',
+    hint: 'A person owns this address — agent-initiated mail from it always needs a human approval',
+  },
+  AGENT: {
+    label: 'Agent',
+    tone: 'accent',
+    hint: "An AI agent's own send identity — its autonomy level (L0/L1/L2) governs what sends without approval",
+  },
+  SHARED: {
+    label: 'Shared',
+    tone: 'protected',
+    hint: 'A team address — treated like a human mailbox: agent sends from it always need approval',
+  },
 };
 
 const OWNER_ORDER: MailboxOwnerKind[] = ['HUMAN', 'AGENT', 'SHARED'];
@@ -75,11 +88,27 @@ const GROUP_HEADING: Record<MailboxOwnerKind, string> = {
 };
 
 /** Provisioning state → human copy + badge tone. */
-const PROVISION: Record<MailboxProvisionState, { label: string; tone: BadgeVariant }> = {
-  REGISTERED: { label: 'registered', tone: 'neutral' },
-  PROVISIONING: { label: 'provisioning', tone: 'info' },
-  PROVISIONED: { label: 'provisioned', tone: 'success' },
-  PROVISION_FAILED: { label: 'provision failed', tone: 'danger' },
+const PROVISION: Record<MailboxProvisionState, { label: string; tone: BadgeVariant; hint: string }> = {
+  REGISTERED: {
+    label: 'registered',
+    tone: 'neutral',
+    hint: 'Recorded here but not yet created on the mail engine',
+  },
+  PROVISIONING: {
+    label: 'provisioning',
+    tone: 'info',
+    hint: 'Being created on the mail engine right now',
+  },
+  PROVISIONED: {
+    label: 'provisioned',
+    tone: 'success',
+    hint: 'Live on the mail engine — it can receive and send',
+  },
+  PROVISION_FAILED: {
+    label: 'provision failed',
+    tone: 'danger',
+    hint: 'Creating it on the mail engine failed — retry or check the engine configuration',
+  },
 };
 
 const DEFAULT_OWNER_KIND: MailboxOwnerKind = 'HUMAN';
@@ -383,15 +412,39 @@ function MailboxCard({
             <span className="truncate font-mono text-sm font-semibold text-primary">
               {mailbox.email_address}
             </span>
-            <Badge variant={owner.tone}>{owner.label}</Badge>
-            <Badge variant={provision.tone} dot>
-              {provision.label}
-            </Badge>
-            <Badge variant={mailbox.active ? 'success' : 'neutral'} dot>
-              {mailbox.active ? 'active' : 'inactive'}
-            </Badge>
-            {mailbox.is_default && <Badge variant="info">default</Badge>}
-            {mailbox.postmark_lane && <Badge variant="accent">Postmark lane</Badge>}
+            <Tooltip content={owner.hint} bubbleClassName="max-w-[300px]">
+              <span tabIndex={0}><Badge variant={owner.tone}>{owner.label}</Badge></span>
+            </Tooltip>
+            <Tooltip content={provision.hint}>
+              <span tabIndex={0}>
+                <Badge variant={provision.tone} dot>
+                  {provision.label}
+                </Badge>
+              </span>
+            </Tooltip>
+            <Tooltip
+              content={
+                mailbox.active
+                  ? 'Active — this mailbox can send and receive'
+                  : 'Inactive — parked; it stops sending until reactivated (records are kept)'
+              }
+            >
+              <span tabIndex={0}>
+                <Badge variant={mailbox.active ? 'success' : 'neutral'} dot>
+                  {mailbox.active ? 'active' : 'inactive'}
+                </Badge>
+              </span>
+            </Tooltip>
+            {mailbox.is_default && (
+              <Tooltip content="The workspace's fallback send address when no mailbox is specified">
+                <span tabIndex={0}><Badge variant="info">default</Badge></span>
+              </Tooltip>
+            )}
+            {mailbox.postmark_lane && (
+              <Tooltip content="Outbound delivery for this address rides the Postmark lane">
+                <span tabIndex={0}><Badge variant="accent">Postmark lane</Badge></span>
+              </Tooltip>
+            )}
           </div>
 
           {editingName ? (

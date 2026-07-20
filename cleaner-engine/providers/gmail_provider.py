@@ -32,7 +32,10 @@ from providers.mail_client import (
 )
 
 SCOPES = [
-    'https://www.googleapis.com/auth/gmail.modify',
+    # Full Gmail scope: batch_delete uses users.messages.batchDelete, which
+    # Google only permits under https://mail.google.com/ (gmail.modify is NOT
+    # sufficient). Must match the Keycloak google IdP defaultScope.
+    'https://mail.google.com/',
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.send',
 ]

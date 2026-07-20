@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 import {
   fetchMailBlob,
   isMissingEndpoint,
@@ -454,21 +455,22 @@ export function AttachButton({
           e.target.value = ''; // allow re-picking the same file
         }}
       />
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => inputRef.current?.click()}
-        className={cn(
-          'inline-flex items-center gap-1.5 rounded-token px-2 py-1 text-xs font-medium text-tertiary',
-          'transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary',
-          'disabled:pointer-events-none disabled:opacity-50',
-          className,
-        )}
-        title="Attach files"
-      >
-        <PaperclipIcon className="h-3.5 w-3.5" />
-        Attach
-      </button>
+      <Tooltip content="Attach files — or drop them anywhere on the message">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => inputRef.current?.click()}
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-token px-2 py-1 text-xs font-medium text-tertiary',
+            'transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary',
+            'disabled:pointer-events-none disabled:opacity-50',
+            className,
+          )}
+        >
+          <PaperclipIcon className="h-3.5 w-3.5" />
+          Attach
+        </button>
+      </Tooltip>
     </>
   );
 }

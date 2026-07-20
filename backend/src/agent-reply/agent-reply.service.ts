@@ -47,6 +47,7 @@
 
 import { Injectable, Logger } from '@nestjs/common';
 import { EmailMode } from '@prisma/client';
+import { agentAvatarAbsoluteUrl } from '../agents/agent-avatar';
 import { withTimeout } from '../common/async/concurrency';
 import { ConnectedAccountsEnginePort } from '../connected-accounts/connected-accounts.port';
 import { EmailService } from '../email/email.service';
@@ -133,6 +134,7 @@ interface ResolvedAgent {
   key: string;
   displayName: string;
   description?: string | null;
+  avatarUrl?: string | null;
   autonomyLevel: string;
   paused: boolean;
 }
@@ -340,19 +342,24 @@ export class AgentReplyService {
         return null;
       }
 
-      // Wave 7 outbound quality: clean simple HTML (paragraphs from the LLM
+      // Wave 7/8 outbound quality: clean simple HTML (paragraphs from the LLM
       // text) + a signature block — the mailbox's stored default signature when
-      // one exists, else a minimal generated one (displayName ONLY: the registry
-      // description is internal documentation, not correspondence identity). The
-      // transparency footer is handed separately: composeEmail appends it ONLY
-      // when the gate decides an AUTONOMOUS send to an external recipient
+      // one exists, else the generated avatar card (displayName ONLY: the
+      // registry description is internal documentation, not correspondence
+      // identity — NEVER reintroduce it) with the agent's avatar + an AI tag.
+      // The transparency footer is handed separately: composeEmail appends it
+      // ONLY when the gate decides an AUTONOMOUS send to an external recipient
       // (a human-approved draft keeps just the normal signature).
+      const avatarIdentity = {
+        key: gate.agent?.key ?? agentMailbox.emailAddress.split('@')[0] ?? null,
+        avatarUrl: gate.agent?.avatarUrl ?? null,
+      };
       const signatureHtml = gate.signature?.html
         ? gate.signature.html
-        : this.generatedSignatureHtml(agentName);
+        : this.generatedSignatureHtml(agentName, avatarIdentity);
       const signatureText = gate.signature?.html
         ? this.stripHtml(gate.signature.html)
-        : agentName;
+        : `${agentName} · AI agent`;
       const bodyText = `${body}\n\n--\n${signatureText}`;
       const bodyHtml = `${this.paragraphsToHtml(body)}${signatureHtml}`;
 
@@ -433,7 +440,14 @@ export class AgentReplyService {
     mailboxAccountId: string,
     emailAddress: string,
   ): Promise<ResolvedAgent | null> {
-    const select = { key: true, displayName: true, description: true, autonomyLevel: true, paused: true };
+    const select = {
+      key: true,
+      displayName: true,
+      description: true,
+      avatarUrl: true,
+      autonomyLevel: true,
+      paused: true,
+    };
     const binding = await tx.agentMailbox.findFirst({
       where: { workspaceId, mailboxAccountId },
       orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
@@ -501,12 +515,37 @@ export class AgentReplyService {
   }
 
   /**
-   * The minimal generated signature block when the mailbox stores none.
+   * The generated signature block when the mailbox stores none (Wave 8): a
+   * small email-client-safe card — table layout + inline styles only (no
+   * flex/grid) — [round 40×40 avatar, ABSOLUTE URL] · displayName (semibold) ·
+   * a subtle bordered "AI AGENT" pill. One clean line, nothing else:
    * displayName ONLY — the agent registry description is internal governance
    * documentation and must never ride along on outbound correspondence.
+   *
+   * Mail clients often block remote images: the block still reads fine with
+   * images off (alt text carries the name; the name cell renders regardless).
+   * The transparency footer stays separate (email.service appends it on
+   * autonomous external sends only) — no duplicate AI tagging there.
    */
-  private generatedSignatureHtml(displayName: string): string {
-    return `<p style="margin-top:16px">— ${this.escapeHtml(displayName)}</p>`;
+  private generatedSignatureHtml(
+    displayName: string,
+    identity: { key?: string | null; avatarUrl?: string | null },
+  ): string {
+    const name = this.escapeHtml(displayName);
+    const avatarUrl = this.escapeHtml(agentAvatarAbsoluteUrl(identity));
+    return (
+      `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:16px;border-collapse:collapse">` +
+      `<tr>` +
+      `<td style="padding:0 10px 0 0;vertical-align:middle">` +
+      `<img src="${avatarUrl}" width="40" height="40" alt="${name}" style="display:block;width:40px;height:40px;border-radius:50%;border:0" />` +
+      `</td>` +
+      `<td style="vertical-align:middle;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif">` +
+      `<span style="font-size:14px;font-weight:600;color:#111827">${name}</span>` +
+      `<span style="display:inline-block;margin-left:8px;padding:1px 7px;border:1px solid #d1d5db;border-radius:999px;font-size:10px;font-weight:600;letter-spacing:0.05em;color:#6b7280;vertical-align:2px">AI AGENT</span>` +
+      `</td>` +
+      `</tr>` +
+      `</table>`
+    );
   }
 
   private escapeHtml(s: string): string {

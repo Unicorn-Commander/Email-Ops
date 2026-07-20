@@ -102,6 +102,35 @@ describe('AgentsService', () => {
     });
   });
 
+  it('createAgent stores avatarUrl and the view exposes avatar_url (null when unset)', async () => {
+    const tx = makeTx();
+    const row = agentRow({ avatarUrl: '/agent-avatars/custom.svg' });
+    tx.agent.create.mockResolvedValue(row);
+    tx.agent.findFirstOrThrow.mockResolvedValue(row);
+    const svc = makeService(tx);
+
+    const view = await svc.createAgent(WS, UID, {
+      key: 'customer-ops',
+      displayName: 'Customer-Ops',
+      avatarUrl: '/agent-avatars/custom.svg',
+    });
+
+    expect(tx.agent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ avatarUrl: '/agent-avatars/custom.svg' }),
+    });
+    expect(view).toMatchObject({ avatar_url: '/agent-avatars/custom.svg' });
+
+    // Unset → stored + projected as null (renderers then use the placeholders).
+    const bare = makeTx();
+    bare.agent.create.mockResolvedValue(agentRow({ avatarUrl: null }));
+    bare.agent.findFirstOrThrow.mockResolvedValue(agentRow({ avatarUrl: null }));
+    const view2 = await makeService(bare).createAgent(WS, UID, { key: 'k', displayName: 'K' });
+    expect(bare.agent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ avatarUrl: null }),
+    });
+    expect(view2.avatar_url).toBeNull();
+  });
+
   it('createAgent maps a duplicate key (P2002) to 409 Conflict', async () => {
     const tx = makeTx();
     tx.agent.create.mockRejectedValue(
@@ -148,6 +177,34 @@ describe('AgentsService', () => {
     expect(tx.agent.update).toHaveBeenCalledWith({
       where: { id: 'agent-1' },
       data: { autonomyLevel: 'L0_DRAFT_ONLY', recipientPolicy: Prisma.DbNull },
+    });
+  });
+
+  it('updateAgent forwards avatarUrl (set + explicit-null clear); undefined leaves it', async () => {
+    const tx = makeTx();
+    tx.agent.findFirst.mockResolvedValue(agentRow());
+    tx.agent.update.mockResolvedValue(agentRow({ avatarUrl: null }));
+    const svc = makeService(tx);
+
+    await svc.updateAgent(WS, UID, 'agent-1', { avatarUrl: null });
+    expect(tx.agent.update).toHaveBeenCalledWith({
+      where: { id: 'agent-1' },
+      data: { avatarUrl: null },
+    });
+
+    tx.agent.update.mockClear();
+    await svc.updateAgent(WS, UID, 'agent-1', { avatarUrl: 'https://cdn.x/a.png' });
+    expect(tx.agent.update).toHaveBeenCalledWith({
+      where: { id: 'agent-1' },
+      data: { avatarUrl: 'https://cdn.x/a.png' },
+    });
+
+    // Not mentioned → not in the update payload.
+    tx.agent.update.mockClear();
+    await svc.updateAgent(WS, UID, 'agent-1', { paused: true });
+    expect(tx.agent.update).toHaveBeenCalledWith({
+      where: { id: 'agent-1' },
+      data: { paused: true },
     });
   });
 

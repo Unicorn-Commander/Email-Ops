@@ -11,8 +11,10 @@
  * sends; Edit opens the draft in the composer so a human can adjust and send).
  */
 
+import Link from 'next/link';
 import { useState } from 'react';
 import { cn } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 import { agentLabel } from '@/lib/agents';
 import type { AgentInboxItemView } from '@/lib/api';
 import { RobotIcon, SendSolidIcon } from './icons';
@@ -57,9 +59,17 @@ export function AgentDraftCard({
         <span className="text-[13px] font-semibold text-primary">
           {agentLabel(item.drafted_by)} drafted a reply
         </span>
-        <span className="ml-auto rounded-md bg-warning/[0.14] px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.04em] text-warning mono">
-          {autonomyLabel}
-        </span>
+        <Tooltip
+          content="The drafting agent's autonomy level — why this draft is waiting on you. Click for the full autonomy & trust guide."
+          bubbleClassName="max-w-[300px]"
+        >
+          <Link
+            href="/help#autonomy-trust"
+            className="ml-auto rounded-md bg-warning/[0.14] px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.04em] text-warning transition-colors hover:bg-warning/[0.22] mono"
+          >
+            {autonomyLabel}
+          </Link>
+        </Tooltip>
       </div>
 
       <div className="px-4 py-3.5 text-[13px] leading-[1.6] text-secondary">
@@ -73,31 +83,37 @@ export function AgentDraftCard({
       </div>
 
       <div className="flex flex-wrap items-center gap-2 px-4 pb-3.5">
-        <button
-          type="button"
-          disabled={busy !== null}
-          onClick={() => void run('approve', onApprove)}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accent px-3.5 text-[12px] font-semibold text-white shadow-[0_2px_8px_-2px_rgb(var(--accent)/0.5)] transition-colors hover:bg-accent-hover disabled:opacity-50"
-        >
-          <SendSolidIcon className="h-[14px] w-[14px]" />
-          {busy === 'approve' ? 'Sending…' : 'Approve & send'}
-        </button>
-        <button
-          type="button"
-          disabled={busy !== null}
-          onClick={onEdit}
-          className="inline-flex h-8 items-center rounded-lg border border-border px-3.5 text-[12px] font-semibold text-secondary transition-colors hover:border-muted hover:text-primary disabled:opacity-50"
-        >
-          Edit
-        </button>
-        <button
-          type="button"
-          disabled={busy !== null}
-          onClick={() => void run('discard', onDiscard)}
-          className="inline-flex h-8 items-center rounded-lg border border-transparent px-3.5 text-[12px] font-semibold text-secondary transition-colors hover:text-primary disabled:opacity-50"
-        >
-          {busy === 'discard' ? 'Discarding…' : 'Discard'}
-        </button>
+        <Tooltip content="Send exactly this text to the recipient — it can't be unsent">
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => void run('approve', onApprove)}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-accent px-3.5 text-[12px] font-semibold text-white shadow-[0_2px_8px_-2px_rgb(var(--accent)/0.5)] transition-colors hover:bg-accent-hover disabled:opacity-50"
+          >
+            <SendSolidIcon className="h-[14px] w-[14px]" />
+            {busy === 'approve' ? 'Sending…' : 'Approve & send'}
+          </button>
+        </Tooltip>
+        <Tooltip content="Open the draft in the composer — adjust it and send it yourself">
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={onEdit}
+            className="inline-flex h-8 items-center rounded-lg border border-border px-3.5 text-[12px] font-semibold text-secondary transition-colors hover:border-muted hover:text-primary disabled:opacity-50"
+          >
+            Edit
+          </button>
+        </Tooltip>
+        <Tooltip content="Reject the draft — it never sends; the decision is kept for audit">
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => void run('discard', onDiscard)}
+            className="inline-flex h-8 items-center rounded-lg border border-transparent px-3.5 text-[12px] font-semibold text-secondary transition-colors hover:text-primary disabled:opacity-50"
+          >
+            {busy === 'discard' ? 'Discarding…' : 'Discard'}
+          </button>
+        </Tooltip>
         {error && <span className={cn('text-[11px] text-danger')}>{error}</span>}
       </div>
     </div>

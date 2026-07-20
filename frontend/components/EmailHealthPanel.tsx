@@ -18,6 +18,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Badge, Button, Card, Skeleton, cn, type BadgeVariant } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 import {
   getEmailHealth,
   type EmailHealthReport,
@@ -113,9 +114,21 @@ export function EmailHealthPanel() {
         <div className="flex flex-wrap items-center gap-2">
           <h2 className="text-sm font-semibold text-primary">Email health</h2>
           {report && (
-            <Badge variant={OVERALL[report.status].tone} dot>
-              {OVERALL[report.status].label}
-            </Badge>
+            <Tooltip
+              content={
+                report.status === 'ok'
+                  ? 'All signals pass — the fleet can send mail right now'
+                  : report.status === 'attention'
+                    ? 'Something needs a look — check the signals below'
+                    : 'A signal is failing — sending may be impaired until it is fixed'
+              }
+            >
+              <span tabIndex={0}>
+                <Badge variant={OVERALL[report.status].tone} dot>
+                  {OVERALL[report.status].label}
+                </Badge>
+              </span>
+            </Tooltip>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -164,16 +177,22 @@ function SetupRow({ setup }: { setup: EmailHealthReport['setup'] }) {
         label="Engine"
         value={setup.engine_configured ? 'configured' : 'not configured'}
         tone={setup.engine_configured ? 'ok' : 'warn'}
+        hint="Whether the mail engine is wired up — without it, composes record but nothing leaves"
       />
       <Stat
         label="Default mailbox"
         value={setup.default_mailbox ?? 'none'}
         mono={!!setup.default_mailbox}
         tone={setup.default_mailbox ? 'plain' : 'warn'}
+        hint="The workspace's fallback send address when no mailbox is specified"
       />
-      <Stat label="Mailboxes" value={String(setup.mailbox_count)} />
-      <Stat label="Agents" value={String(setup.agent_count)} />
-      <Stat label="Autonomous" value={String(setup.autonomous_agents)} />
+      <Stat label="Mailboxes" value={String(setup.mailbox_count)} hint="Addresses this workspace owns" />
+      <Stat label="Agents" value={String(setup.agent_count)} hint="Registered agents in the fleet" />
+      <Stat
+        label="Autonomous"
+        value={String(setup.autonomous_agents)}
+        hint="Agents at L2 — allowed to auto-send routine mail, audited in Auto-sent"
+      />
     </div>
   );
 }
@@ -186,12 +205,18 @@ function QueueRow({ queue }: { queue: EmailHealthReport['queue'] }) {
         label="Pending approvals"
         value={String(queue.pending_approvals)}
         tone={queue.pending_approvals > 0 ? 'warn' : 'ok'}
+        hint="Agent drafts and cleanup batches waiting on a human right now"
       />
-      <Stat label="Oldest pending" value={ageLabel(queue.oldest_pending_age_hours)} />
+      <Stat
+        label="Oldest pending"
+        value={ageLabel(queue.oldest_pending_age_hours)}
+        hint="How long the oldest unreviewed item has been waiting"
+      />
       <Stat
         label="Failed sends · 7d"
         value={String(queue.failed_sends_7d)}
         tone={queue.failed_sends_7d > 0 ? 'fail' : 'ok'}
+        hint="Messages that errored on their way out in the last 7 days"
       />
     </div>
   );
@@ -203,11 +228,13 @@ function Stat({
   value,
   mono,
   tone = 'plain',
+  hint,
 }: {
   label: string;
   value: string;
   mono?: boolean;
   tone?: 'plain' | 'ok' | 'warn' | 'fail';
+  hint?: string;
 }) {
   const valueTone =
     tone === 'ok'
@@ -218,10 +245,12 @@ function Stat({
           ? 'text-danger'
           : 'text-secondary';
   return (
-    <span className="inline-flex items-baseline gap-1.5">
-      <span className="text-muted">{label}</span>
-      <span className={cn('font-medium', mono && 'truncate font-mono', valueTone)}>{value}</span>
-    </span>
+    <Tooltip content={hint} disabled={!hint}>
+      <span className="inline-flex items-baseline gap-1.5" tabIndex={hint ? 0 : undefined}>
+        <span className="text-muted">{label}</span>
+        <span className={cn('font-medium', mono && 'truncate font-mono', valueTone)}>{value}</span>
+      </span>
+    </Tooltip>
   );
 }
 

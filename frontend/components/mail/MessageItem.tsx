@@ -13,6 +13,7 @@
 
 import { useCallback, useMemo } from 'react';
 import { Badge, cn, type BadgeVariant } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 import { fetchMailBlob, type MailAttachment, type MessageView } from '@/lib/mailApi';
 import { formatWhen, participantLabel } from './useMailClient';
 import { HtmlEmailBody } from './HtmlEmailBody';
@@ -209,16 +210,17 @@ function MessageAction({
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        'inline-flex items-center gap-1.5 rounded-token px-2 py-1 text-xs font-medium text-tertiary',
-        'transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary',
-      )}
-      title={hint ? `${label} (${hint})` : label}
-    >
-      {label}
-    </button>
+    <Tooltip content={hint ? `${label} (${hint})` : label}>
+      <button
+        type="button"
+        onClick={onClick}
+        className={cn(
+          'inline-flex items-center gap-1.5 rounded-token px-2 py-1 text-xs font-medium text-tertiary',
+          'transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary',
+        )}
+      >
+        {label}
+      </button>
+    </Tooltip>
   );
 }

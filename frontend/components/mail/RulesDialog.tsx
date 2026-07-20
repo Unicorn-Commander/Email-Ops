@@ -17,9 +17,11 @@
  * those conditions wholesale.
  */
 
+import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button, Dialog, Input, Select, cn, useConfirm } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 import { ApiError } from '@/lib/api';
 import {
   MAX_MATCH_CONDITIONS_PER_GROUP,
@@ -228,14 +230,18 @@ function EnabledSwitch({
   checked,
   disabled,
   label,
+  hint,
   onToggle,
 }: {
   checked: boolean;
   disabled: boolean;
   label: string;
+  /** Tooltip line shown on hover/focus (the switch itself is icon-only). */
+  hint?: string;
   onToggle: () => void;
 }) {
   return (
+    <Tooltip content={hint} disabled={!hint}>
     <button
       type="button"
       role="switch"
@@ -258,6 +264,7 @@ function EnabledSwitch({
         )}
       />
     </button>
+    </Tooltip>
   );
 }
 
@@ -662,9 +669,17 @@ export function RulesDialog({
           title="No rules yet"
           hint="Rules automatically file, archive, or mark mail as it arrives — so your inbox sorts itself."
           action={
-            <Button size="sm" leading={<PlusIcon className="h-3.5 w-3.5" />} onClick={openCreate}>
-              Create a rule
-            </Button>
+            <div className="flex flex-col items-center gap-2">
+              <Button size="sm" leading={<PlusIcon className="h-3.5 w-3.5" />} onClick={openCreate}>
+                Create a rule
+              </Button>
+              <Link
+                href="/help#rules"
+                className="text-[12px] font-medium text-accent hover:underline"
+              >
+                How rules work →
+              </Link>
+            </div>
           }
         />
       ) : (
@@ -675,6 +690,11 @@ export function RulesDialog({
                 checked={rule.enabled}
                 disabled={busyId === rule.id}
                 label={`${rule.enabled ? 'Turn off' : 'Turn on'} “${rule.name}”`}
+                hint={
+                  rule.enabled
+                    ? 'Rule is on — turn off to stop filing new mail (nothing is deleted)'
+                    : 'Rule is off — turn on to file new mail again'
+                }
                 onToggle={() => void toggleEnabled(rule)}
               />
               <div className="min-w-0 flex-1">
@@ -696,24 +716,28 @@ export function RulesDialog({
                 )}
               </div>
               <div className="flex shrink-0 items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  aria-label={`Edit “${rule.name}”`}
-                  disabled={busyId === rule.id}
-                  onClick={() => openEdit(rule)}
-                >
-                  <PencilIcon className="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  aria-label={`Delete “${rule.name}”`}
-                  disabled={busyId === rule.id}
-                  onClick={() => void removeRule(rule)}
-                >
-                  <TrashIcon className="h-3.5 w-3.5" />
-                </Button>
+                <Tooltip content="Edit rule">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    aria-label={`Edit “${rule.name}”`}
+                    disabled={busyId === rule.id}
+                    onClick={() => openEdit(rule)}
+                  >
+                    <PencilIcon className="h-3.5 w-3.5" />
+                  </Button>
+                </Tooltip>
+                <Tooltip content="Delete rule — mail it already filed stays where it is">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    aria-label={`Delete “${rule.name}”`}
+                    disabled={busyId === rule.id}
+                    onClick={() => void removeRule(rule)}
+                  >
+                    <TrashIcon className="h-3.5 w-3.5" />
+                  </Button>
+                </Tooltip>
               </div>
             </li>
           ))}
@@ -769,21 +793,29 @@ export function RulesDialog({
             className="flex shrink-0 items-center gap-0.5 rounded-full border border-subtle p-0.5"
           >
             {(['all', 'any'] as const).map((mode) => (
-              <button
+              <Tooltip
                 key={mode}
-                type="button"
-                aria-pressed={matchMode === mode}
-                onClick={() => setMatchMode(mode)}
-                className={cn(
-                  'rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors duration-fast ease-token',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
-                  matchMode === mode
-                    ? 'bg-surface-overlay text-primary'
-                    : 'text-tertiary hover:text-secondary',
-                )}
+                content={
+                  mode === 'all'
+                    ? 'Every condition must match (AND)'
+                    : 'At least one condition must match (OR)'
+                }
               >
-                {mode === 'all' ? 'All of' : 'Any of'}
-              </button>
+                <button
+                  type="button"
+                  aria-pressed={matchMode === mode}
+                  onClick={() => setMatchMode(mode)}
+                  className={cn(
+                    'rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors duration-fast ease-token',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+                    matchMode === mode
+                      ? 'bg-surface-overlay text-primary'
+                      : 'text-tertiary hover:text-secondary',
+                  )}
+                >
+                  {mode === 'all' ? 'All of' : 'Any of'}
+                </button>
+              </Tooltip>
             ))}
           </div>
         </div>

@@ -23,6 +23,12 @@ export interface AgentView {
   key: string;
   display_name: string;
   description: string | null;
+  /**
+   * Explicit avatar image URL (absolute or app-relative), null when unset —
+   * renderers then fall back per the one resolution rule (agent-avatar.ts):
+   * /agent-avatars/<key>.svg when shipped, else /agent-avatars/default.svg.
+   */
+  avatar_url: string | null;
   /** The PRIMARY send mailbox (the isPrimary binding's mailbox; a cache). */
   mailbox_account_id: string | null;
   mailbox_address: string | null;
@@ -47,6 +53,7 @@ export interface CreateAgentInput {
   key: string;
   displayName: string;
   description?: string | null;
+  avatarUrl?: string | null;
   mailboxAccountId?: string | null;
   autonomyLevel?: AgentAutonomyLevel;
   recipientPolicy?: Record<string, unknown> | null;
@@ -61,6 +68,7 @@ export interface CreateAgentInput {
 export interface UpdateAgentInput {
   displayName?: string;
   description?: string | null;
+  avatarUrl?: string | null;
   mailboxAccountId?: string | null;
   autonomyLevel?: AgentAutonomyLevel;
   recipientPolicy?: Record<string, unknown> | null;

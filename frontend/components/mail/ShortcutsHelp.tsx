@@ -9,6 +9,7 @@
  * Dialog: focus trap + Escape). Content-rich but not gaudy.
  */
 
+import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { Dialog } from '@/components/ui';
 
@@ -87,6 +88,21 @@ export function ShortcutsHelp({ open, onClose }: { open: boolean; onClose: () =>
       className="max-w-2xl"
     >
       <div className="max-h-[70vh] space-y-6 overflow-y-auto pr-1">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-token border border-accent/30 bg-accent/[0.06] px-3.5 py-2.5">
+          <p className="text-[12px] leading-5 text-secondary">
+            This is the quick reference. The <b className="text-primary">full manual</b> — every
+            feature, the autonomy matrix, trust, cleanup, troubleshooting — lives on the Help
+            page.
+          </p>
+          <Link
+            href="/help"
+            onClick={onClose}
+            className="shrink-0 text-[12px] font-semibold text-accent hover:underline"
+          >
+            Open the full guide →
+          </Link>
+        </div>
+
         <Section title="The agent activity rail & its metrics">
           <p className="text-tertiary">
             The right rail is a live timeline of what the fleet did with mail. Toggle

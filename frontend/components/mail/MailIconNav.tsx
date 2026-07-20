@@ -17,9 +17,11 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { cn } from '@/components/ui';
 import { useSectionRailExpanded } from '@/state/uiCollapse';
+import { sectionNavPane, usePaneWidth } from '@/state/paneWidths';
+import { ResizableEdge } from '@/components/ResizableEdge';
 import {
   GridIcon,
   MailIcon,
@@ -31,6 +33,7 @@ import {
   DeviceIcon,
   BarChartIcon,
   ChevronRightIcon,
+  QuestionIcon,
 } from './icons';
 
 type NavItem = {
@@ -53,11 +56,15 @@ const BOTTOM: NavItem[] = [
   { href: '/cleanup', label: 'Cleanup', icon: TrashIcon },
   { href: '/connect-device', label: 'Connect device', icon: DeviceIcon },
   { href: '/accounts', label: 'Accounts', icon: GearIcon },
+  { href: '/help', label: 'Help', icon: QuestionIcon },
 ];
 
 export function MailIconNav({ pendingCount }: { pendingCount: number }) {
   const pathname = usePathname();
   const [expanded, toggleExpanded] = useSectionRailExpanded();
+  // Expanded width is drag-resizable + persisted; compact stays a fixed 52px.
+  const navWidth = usePaneWidth(sectionNavPane) ?? 208;
+  const [resizing, setResizing] = useState(false);
 
   const renderItem = (item: NavItem) => {
     const active = pathname === item.href || pathname?.startsWith(`${item.href}/`);
@@ -102,9 +109,11 @@ export function MailIconNav({ pendingCount }: { pendingCount: number }) {
   return (
     <nav
       aria-label="Sections"
+      style={expanded ? { width: navWidth } : undefined}
       className={cn(
-        'flex shrink-0 flex-col gap-1 border-r border-subtle bg-surface-raised py-2.5 transition-[width] duration-token ease-token',
-        expanded ? 'w-[208px] items-stretch px-2.5' : 'w-[52px] items-center',
+        'relative flex shrink-0 flex-col gap-1 border-r border-subtle bg-surface-raised py-2.5',
+        !resizing && 'transition-[width] duration-token ease-token',
+        expanded ? 'items-stretch px-2.5' : 'w-[52px] items-center',
       )}
     >
       <button
@@ -131,6 +140,16 @@ export function MailIconNav({ pendingCount }: { pendingCount: number }) {
       {TOP.map(renderItem)}
       <div className="flex-1" />
       {BOTTOM.map(renderItem)}
+
+      {expanded && (
+        <ResizableEdge
+          store={sectionNavPane}
+          edge="right"
+          target="parent"
+          label="Resize navigation"
+          onDraggingChange={setResizing}
+        />
+      )}
     </nav>
   );
 }

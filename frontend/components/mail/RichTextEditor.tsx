@@ -3,6 +3,7 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import DOMPurify from 'dompurify';
 import { cn } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 
 export function htmlToText(html: string): string {
   if (typeof window === 'undefined') return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -85,16 +86,17 @@ function Tool({
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      disabled={disabled}
-      onMouseDown={(e) => e.preventDefault()}
-      onClick={onClick}
-      className="min-w-7 rounded-md px-2 py-1 text-xs font-semibold text-secondary transition-colors hover:bg-surface-raised hover:text-primary disabled:opacity-50"
-    >
-      {children}
-    </button>
+    <Tooltip content={label}>
+      <button
+        type="button"
+        aria-label={label}
+        disabled={disabled}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={onClick}
+        className="min-w-7 rounded-md px-2 py-1 text-xs font-semibold text-secondary transition-colors hover:bg-surface-raised hover:text-primary disabled:opacity-50"
+      >
+        {children}
+      </button>
+    </Tooltip>
   );
 }

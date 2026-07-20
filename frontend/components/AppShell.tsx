@@ -1,8 +1,10 @@
 'use client';
 
+import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ThemeToggle } from '@/components/ThemeToggle';
+import { Tooltip } from '@/components/Tooltip';
 import { Badge, Button, Select, Skeleton, cn } from '@/components/ui';
 import { ConnectedAccountsProvider, useConnectedAccounts } from './ConnectedAccountsProvider';
 import { ActiveWorkspaceProvider } from './ActiveWorkspaceProvider';
@@ -13,6 +15,8 @@ import { WorkspaceSwitcher } from './WorkspaceSwitcher';
 import { SpaceSwitcher } from './SpaceSwitcher';
 import { MailIconNav } from './mail/MailIconNav';
 import { AccountMenu } from './account/AccountMenu';
+import { ResizableEdge } from './ResizableEdge';
+import { shellRailPane, usePaneWidth } from '@/state/paneWidths';
 import { useAgentInboxPendingCount } from './useAgentInbox';
 import { useAgentControls } from './useAgentControls';
 import {
@@ -73,6 +77,9 @@ export function AppShell({ children }: { children: ReactNode }) {
 function ProductChrome({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [railOpen, setRailOpen] = useState(true);
+  // Drag-resizable + persisted width for the right Agent Activity rail (the
+  // aside has no width transition, so no resizing flag is needed here).
+  const railWidth = usePaneWidth(shellRailPane) ?? 320;
   const { agentsPaused, setPaused } = useAgentControls();
   const agentPending = useAgentInboxPendingCount();
 
@@ -110,7 +117,16 @@ function ProductChrome({ children }: { children: ReactNode }) {
         </div>
 
         {railOpen && (
-          <aside className="hidden w-[320px] shrink-0 border-l border-subtle bg-surface-base/88 backdrop-blur xl:block">
+          <aside
+            style={{ width: railWidth }}
+            className="relative hidden shrink-0 border-l border-subtle bg-surface-base/88 backdrop-blur xl:block"
+          >
+            <ResizableEdge
+              store={shellRailPane}
+              edge="left"
+              target="parent"
+              label="Resize agent activity rail"
+            />
             <AgentRail paused={agentsPaused} onPause={() => setPaused(true)} />
           </aside>
         )}
@@ -191,24 +207,45 @@ function Topbar({
         </div>
 
         <div className="ml-auto flex items-center gap-2">
-          <div className="hidden rounded-token border border-subtle bg-surface-raised px-2.5 py-1.5 text-xs text-tertiary lg:block">
-            Cmd+K
-          </div>
+          <Tooltip content="Command menu — jump anywhere, run any action (⌘K on the Mail page)">
+            <div className="hidden rounded-token border border-subtle bg-surface-raised px-2.5 py-1.5 text-xs text-tertiary lg:block">
+              Cmd+K
+            </div>
+          </Tooltip>
+          <Tooltip content="Help — the full guide to mail, agents, approvals, and autonomy">
+            <Link
+              href="/help"
+              aria-label="Open the help guide"
+              className="grid h-8 w-8 place-items-center rounded-token text-[15px] font-semibold text-tertiary transition-colors hover:bg-surface-overlay hover:text-primary"
+            >
+              ?
+            </Link>
+          </Tooltip>
           <ThemeToggle />
-          <Button
-            variant={agentsPaused ? 'secondary' : 'ghost'}
-            size="sm"
-            onClick={onTogglePause}
-            className={cn(
-              'hidden sm:inline-flex',
-              agentsPaused && 'border-warning/30 bg-warning-subtle text-warning',
-            )}
+          <Tooltip
+            content={
+              agentsPaused
+                ? 'Resume the fleet — agents can draft and (per their level) send again'
+                : 'Workspace kill switch: stop every agent from composing or sending until resumed'
+            }
           >
-            {agentsPaused ? 'Agents paused' : 'Pause all agents'}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={onToggleRail} className="hidden xl:inline-flex">
-            {railOpen ? 'Hide rail' : 'Show rail'}
-          </Button>
+            <Button
+              variant={agentsPaused ? 'secondary' : 'ghost'}
+              size="sm"
+              onClick={onTogglePause}
+              className={cn(
+                'hidden sm:inline-flex',
+                agentsPaused && 'border-warning/30 bg-warning-subtle text-warning',
+              )}
+            >
+              {agentsPaused ? 'Agents paused' : 'Pause all agents'}
+            </Button>
+          </Tooltip>
+          <Tooltip content={railOpen ? 'Hide the agent activity rail' : 'Show the agent activity rail'}>
+            <Button variant="ghost" size="sm" onClick={onToggleRail} className="hidden xl:inline-flex">
+              {railOpen ? 'Hide rail' : 'Show rail'}
+            </Button>
+          </Tooltip>
           <AccountMenu size={30} />
         </div>
       </div>

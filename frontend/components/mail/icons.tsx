@@ -41,6 +41,14 @@ export const FolderIcon = (p: SVGProps<SVGSVGElement>) => (
   </Svg>
 );
 
+export const QuestionIcon = (p: SVGProps<SVGSVGElement>) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M9.4 9.2a2.7 2.7 0 0 1 5.25.9c0 1.8-2.65 2.4-2.65 3.9" />
+    <path d="M12 17.2h.01" />
+  </Svg>
+);
+
 export const PencilIcon = (p: SVGProps<SVGSVGElement>) => (
   <Svg {...p}>
     <path d="M12 20h9" />

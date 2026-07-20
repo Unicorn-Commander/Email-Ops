@@ -819,6 +819,8 @@ export interface AgentView {
   key: string; // stable slug, unique per workspace, e.g. "customer-ops"
   display_name: string;
   description: string | null;
+  /** Explicit avatar URL when set; renderers fall back to /agent-avatars/<key>.svg → default.svg. */
+  avatar_url?: string | null;
   mailbox_account_id: string | null;
   mailbox_address: string | null; // resolved email address of the mailbox, for display
   autonomy_level: AutonomyLevel;
@@ -849,6 +851,7 @@ export interface CreateAgentBody {
 export interface UpdateAgentBody {
   display_name?: string;
   description?: string | null;
+  avatar_url?: string | null;
   mailbox_account_id?: string | null;
   autonomy_level?: AutonomyLevel;
   recipient_policy?: Record<string, unknown> | null;

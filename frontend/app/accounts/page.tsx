@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import DOMPurify from 'dompurify';
 import { Button, Badge, Card, Skeleton, cn } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 import { useConnectedAccounts } from '@/components/ConnectedAccountsProvider';
 import { useInboxStats } from '@/components/useInboxStats';
 import { RichTextEditor } from '@/components/mail/RichTextEditor';
@@ -701,20 +702,33 @@ function AccountCard({
         </section>
 
         <div className="flex flex-col gap-2 sm:flex-row">
-          <Button
-            variant={account.linked ? 'secondary' : 'primary'}
-            onClick={() => void connect()}
-            disabled={linking}
+          <Tooltip
+            content={
+              account.linked
+                ? `Re-run the ${meta.shortLabel} sign-in to refresh the broker token — the fix when reading or analysis stops working. Deletes nothing.`
+                : `Sign in with ${meta.shortLabel} via the identity broker and grant mail consent`
+            }
+            bubbleClassName="max-w-[300px]"
           >
-            {linking
-              ? 'Opening…'
-              : account.linked
-                ? `Reconnect ${meta.shortLabel}`
-                : `Connect ${meta.shortLabel}`}
-          </Button>
-          <Button variant="ghost" disabled title="Disconnect endpoint is not part of Phase 1.">
-            Disconnect
-          </Button>
+            <Button
+              variant={account.linked ? 'secondary' : 'primary'}
+              onClick={() => void connect()}
+              disabled={linking}
+            >
+              {linking
+                ? 'Opening…'
+                : account.linked
+                  ? `Reconnect ${meta.shortLabel}`
+                  : `Connect ${meta.shortLabel}`}
+            </Button>
+          </Tooltip>
+          <Tooltip content="Disconnect isn't available yet — unlink from your identity provider's security settings meanwhile">
+            <span className="inline-flex">
+              <Button variant="ghost" disabled>
+                Disconnect
+              </Button>
+            </span>
+          </Tooltip>
         </div>
 
         {/* Unified inbox: register this connected account as a /mail mailbox. */}
@@ -780,20 +794,30 @@ function AccountCard({
 
 function ScopeChip({ label, state }: { label: string; state: 'on' | 'off' | 'locked' }) {
   return (
-    <div className="rounded-token border border-subtle bg-surface-base p-3">
-      <div className="flex items-center gap-2">
-        <span
-          className={cn(
-            'h-2 w-2 rounded-full',
-            state === 'on' ? 'bg-success' : state === 'locked' ? 'bg-info' : 'bg-muted',
-          )}
-        />
-        <span className="text-xs font-medium text-primary">{label}</span>
+    <Tooltip
+      content={
+        state === 'on'
+          ? 'Active — the linked broker token grants this access'
+          : state === 'locked'
+            ? 'Hard privacy rail: analysis reads headers and metadata only, never message bodies'
+            : 'Not granted yet — link the account to enable this'
+      }
+    >
+      <div className="rounded-token border border-subtle bg-surface-base p-3" tabIndex={0}>
+        <div className="flex items-center gap-2">
+          <span
+            className={cn(
+              'h-2 w-2 rounded-full',
+              state === 'on' ? 'bg-success' : state === 'locked' ? 'bg-info' : 'bg-muted',
+            )}
+          />
+          <span className="text-xs font-medium text-primary">{label}</span>
+        </div>
+        <p className="mt-1 text-[11px] text-tertiary">
+          {state === 'on' ? 'Granted by broker' : state === 'locked' ? 'Privacy rail' : 'Pending'}
+        </p>
       </div>
-      <p className="mt-1 text-[11px] text-tertiary">
-        {state === 'on' ? 'Granted by broker' : state === 'locked' ? 'Privacy rail' : 'Pending'}
-      </p>
-    </div>
+    </Tooltip>
   );
 }
 

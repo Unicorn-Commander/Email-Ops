@@ -220,6 +220,9 @@ export class AgentViewService {
       id: agent.id,
       name: agent.displayName,
       handle: agent.key,
+      // The stored avatar URL when set; renderers fall back per the one
+      // resolution rule (agents/agent-avatar.ts → per-key placeholder → default).
+      avatarUrl: agent.avatarUrl ?? undefined,
       mailbox: mailbox ? this.mailboxSummary(mailbox) : null,
     };
   }

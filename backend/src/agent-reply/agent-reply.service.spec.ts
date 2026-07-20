@@ -27,6 +27,7 @@ describe('AgentReplyService', () => {
     key: 'concierge',
     displayName: 'Concierge',
     description: null as string | null,
+    avatarUrl: null as string | null,
     autonomyLevel: 'L1_APPROVE_TO_SEND',
     paused: false,
   };
@@ -398,6 +399,10 @@ describe('AgentReplyService', () => {
     const input = compose.mock.calls[0][2];
     expect(input.bodyHtml).toContain('<p>Concierge Desk — Acme Support</p>');
     expect(input.body).toContain('Concierge Desk — Acme Support');
+    // The stored signature stands ALONE — no generated avatar card rides along.
+    expect(input.bodyHtml).not.toContain('AI AGENT');
+    expect(input.bodyHtml).not.toContain('/agent-avatars/');
+    expect(input.body).not.toContain('AI agent');
   });
 
   // Wave 7 follow-up: the registry description is internal governance
@@ -411,6 +416,71 @@ describe('AgentReplyService', () => {
     expect(input.bodyHtml).toContain('Concierge');
     expect(input.bodyHtml).not.toContain('Customer support agent');
     expect(input.body).not.toContain('Customer support agent');
+  });
+
+  // ── Wave 8: the generated avatar-card signature ─────────────────────────
+
+  it('the generated signature is the avatar card: absolute avatar URL + alt/displayName + the AI pill; text part is "name · AI agent"', async () => {
+    const { svc, compose } = make();
+    await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+    const input = compose.mock.calls[0][2];
+    // Email-client-safe block: table + inline styles, 40×40 round img by
+    // ABSOLUTE URL ('concierge' has no shipped per-key file → default.svg on
+    // the default public base), alt carries the name for images-off clients.
+    expect(input.bodyHtml).toContain('<table role="presentation"');
+    expect(input.bodyHtml).toContain(
+      'src="https://email-ops.magicunicorn.dev/agent-avatars/default.svg"',
+    );
+    expect(input.bodyHtml).toContain('width="40" height="40" alt="Concierge"');
+    expect(input.bodyHtml).toContain('border-radius:50%');
+    // displayName (semibold) + the subtle bordered AI pill — and nothing else.
+    expect(input.bodyHtml).toContain('font-weight:600;color:#111827">Concierge</span>');
+    expect(input.bodyHtml).toContain('AI AGENT');
+    // Text part: displayName · AI agent (after the -- separator).
+    expect(input.body).toContain('--\nConcierge · AI agent');
+  });
+
+  it('a shipped per-key placeholder is used when the agent key has one (perry)', async () => {
+    const { svc, compose } = make({
+      agent: { ...AGENT_ROW, key: 'perry', displayName: 'Perrywinkle Spector' },
+    });
+    await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+    const input = compose.mock.calls[0][2];
+    expect(input.bodyHtml).toContain(
+      'src="https://email-ops.magicunicorn.dev/agent-avatars/perry.svg"',
+    );
+    expect(input.bodyHtml).toContain('alt="Perrywinkle Spector"');
+    expect(input.body).toContain('Perrywinkle Spector · AI agent');
+  });
+
+  it('agents.avatarUrl WINS when set: absolute passes through; relative is rooted on EMAIL_OPS_PUBLIC_BASE_URL', async () => {
+    const abs = make({ agent: { ...AGENT_ROW, avatarUrl: 'https://cdn.x/concierge.png' } });
+    await abs.svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+    expect(abs.compose.mock.calls[0][2].bodyHtml).toContain('src="https://cdn.x/concierge.png"');
+
+    process.env.EMAIL_OPS_PUBLIC_BASE_URL = 'https://mail.example.test/';
+    try {
+      const rel = make({ agent: { ...AGENT_ROW, avatarUrl: '/agent-avatars/custom.svg' } });
+      await rel.svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+      expect(rel.compose.mock.calls[0][2].bodyHtml).toContain(
+        'src="https://mail.example.test/agent-avatars/custom.svg"',
+      );
+    } finally {
+      delete process.env.EMAIL_OPS_PUBLIC_BASE_URL;
+    }
+  });
+
+  it('the Wave-7 transparency footer is UNCHANGED: name-free, separate from the signature (no duplicate AI tagging)', async () => {
+    const { svc, compose } = make();
+    await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
+    const input = compose.mock.calls[0][2];
+    expect(input.transparencyFooter).toEqual({
+      text: '\n\nSent autonomously · AI agent',
+      html: '<p style="color:#6b7280;font-size:12px;margin-top:16px">Sent autonomously · AI agent</p>',
+    });
+    // The footer never names the agent, and the pill lives ONLY in the signature.
+    expect(input.transparencyFooter.text).not.toContain('Concierge');
+    expect(input.transparencyFooter.html).not.toContain('AI AGENT');
   });
 
   it('the LLM text becomes clean paragraph HTML (escaped, <p> per blank line, <br> per newline)', async () => {

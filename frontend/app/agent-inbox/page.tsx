@@ -20,8 +20,10 @@
  * the header dialog. House rule: nothing shows as done until the API confirms.
  */
 
+import Link from 'next/link';
 import { useCallback, useMemo, useState } from 'react';
 import { Badge, Button, Card, Skeleton, SkeletonText, cn, useConfirm } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 import { useAgentInbox } from '@/components/useAgentInbox';
 import { useAgents } from '@/components/useAgents';
 import { useAutoSent } from '@/components/agent-inbox/useAutoSent';
@@ -38,10 +40,22 @@ import { holdPolicyOf, type AgentInboxItemView, type AgentView, type AutoSentIte
 
 type QueueTab = 'pending' | 'auto-sent' | 'history';
 
-const TABS: Array<{ value: QueueTab; label: string }> = [
-  { value: 'pending', label: 'Pending' },
-  { value: 'auto-sent', label: 'Auto-sent' },
-  { value: 'history', label: 'History' },
+const TABS: Array<{ value: QueueTab; label: string; hint: string }> = [
+  {
+    value: 'pending',
+    label: 'Pending',
+    hint: 'The queue — drafts and cleanup batches waiting for your approve/reject',
+  },
+  {
+    value: 'auto-sent',
+    label: 'Auto-sent',
+    hint: 'Mail policy let an agent send without per-message approval — review it after the fact, revoke trust in one click',
+  },
+  {
+    value: 'history',
+    label: 'History',
+    hint: 'Every approval and rejection, attributed and kept for audit',
+  },
 ];
 
 export default function AgentInboxPage() {
@@ -234,12 +248,16 @@ function Hero({
             </p>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row lg:items-center">
-            <Button variant="secondary" onClick={onOpenTrusted}>
-              Trusted senders
-            </Button>
-            <Button variant="secondary" onClick={onRefresh} disabled={loading}>
-              Refresh queue
-            </Button>
+            <Tooltip content="The allowlist behind auto-replies — who agents may answer without per-message approval">
+              <Button variant="secondary" onClick={onOpenTrusted}>
+                Trusted senders
+              </Button>
+            </Tooltip>
+            <Tooltip content="Refetch the active tab from the server">
+              <Button variant="secondary" onClick={onRefresh} disabled={loading}>
+                Refresh queue
+              </Button>
+            </Tooltip>
           </div>
         </div>
       </div>
@@ -266,29 +284,30 @@ function Tabs({
         const active = t.value === tab;
         const count = counts(t.value);
         return (
-          <button
-            key={t.value}
-            type="button"
-            role="tab"
-            aria-selected={active}
-            onClick={() => onChange(t.value)}
-            className={cn(
-              'inline-flex min-h-[36px] items-center gap-2 rounded-token px-3 text-sm font-medium transition-colors duration-fast ease-token',
-              active
-                ? 'bg-surface-overlay text-primary shadow-token'
-                : 'text-tertiary hover:text-primary',
-            )}
-          >
-            {t.label}
-            {t.value === 'pending' && count !== null && count > 0 && (
-              <Badge variant="review" className="font-mono">
-                {count}
-              </Badge>
-            )}
-            {t.value !== 'pending' && count !== null && count > 0 && (
-              <span className="font-mono text-[10.5px] text-muted">{count}</span>
-            )}
-          </button>
+          <Tooltip key={t.value} content={t.hint} bubbleClassName="max-w-[300px]">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => onChange(t.value)}
+              className={cn(
+                'inline-flex min-h-[36px] items-center gap-2 rounded-token px-3 text-sm font-medium transition-colors duration-fast ease-token',
+                active
+                  ? 'bg-surface-overlay text-primary shadow-token'
+                  : 'text-tertiary hover:text-primary',
+              )}
+            >
+              {t.label}
+              {t.value === 'pending' && count !== null && count > 0 && (
+                <Badge variant="review" className="font-mono">
+                  {count}
+                </Badge>
+              )}
+              {t.value !== 'pending' && count !== null && count > 0 && (
+                <span className="font-mono text-[10.5px] text-muted">{count}</span>
+              )}
+            </button>
+          </Tooltip>
         );
       })}
     </div>
@@ -433,7 +452,16 @@ function ReviewCard({
           {pending && policy && policy.reasons.length > 0 && (
             <p className="mt-1.5 flex items-start gap-1.5 text-xs leading-5 text-warning">
               <span aria-hidden className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-warning" />
-              <span className="min-w-0">{policy.reasons[0].message}</span>
+              <span className="min-w-0">
+                {policy.reasons[0].message}{' '}
+                <Link
+                  href="/help#autonomy-trust"
+                  onClick={(e) => e.stopPropagation()}
+                  className="whitespace-nowrap font-medium text-accent hover:underline"
+                >
+                  Learn more
+                </Link>
+              </span>
             </p>
           )}
 
@@ -530,6 +558,12 @@ function AutoSentList({
           When a policy lets an agent send without per-message approval — for example to a
           trusted correspondent — the sent email lands here for after-the-fact review.
         </p>
+        <Link
+          href="/help#autonomy-trust"
+          className="mt-2 inline-block text-sm font-medium text-accent hover:underline"
+        >
+          When do agents auto-send? →
+        </Link>
       </Card>
     );
   }
@@ -658,6 +692,12 @@ function EmptyState({ tab }: { tab: QueueTab }) {
               When an agent drafts an email or stages a cleanup, it lands here for your approval
               before anything is sent.
             </p>
+            <Link
+              href="/help#approvals"
+              className="mt-2 inline-block text-sm font-medium text-accent hover:underline"
+            >
+              How the approval queue works →
+            </Link>
           </div>
         </div>
       </Card>

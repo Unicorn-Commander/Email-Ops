@@ -20,6 +20,7 @@
 
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { Button, Dialog, Input, cn } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 import {
   createMailDraft,
   listMailSignatures,
@@ -409,15 +410,19 @@ export function ComposeDialog({
                 })}`
               : 'Saved'}
           </span>
-          <Button variant="secondary" size="sm" disabled={sending} onClick={() => void saveAndClose()}>
-            Save draft & close
-          </Button>
+          <Tooltip content="Keep this as a draft (it autosaves anyway) and close the composer">
+            <Button variant="secondary" size="sm" disabled={sending} onClick={() => void saveAndClose()}>
+              Save draft & close
+            </Button>
+          </Tooltip>
           {canSchedule && onScheduleSend && (
             <SendLaterMenu disabled={!canSend} onPick={(at) => void handleSchedule(at)} />
           )}
-          <kbd className="hidden min-w-[18px] items-center justify-center rounded-[5px] border border-border bg-surface-overlay px-1.5 py-px text-[11px] leading-none text-secondary sm:inline-flex mono">
-            ⌘↵
-          </kbd>
+          <Tooltip content="⌘+Enter sends from anywhere in the composer">
+            <kbd className="hidden min-w-[18px] items-center justify-center rounded-[5px] border border-border bg-surface-overlay px-1.5 py-px text-[11px] leading-none text-secondary sm:inline-flex mono">
+              ⌘↵
+            </kbd>
+          </Tooltip>
           <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
             {sending ? 'Sending…' : uploads.uploading ? 'Uploading…' : 'Send'}
           </Button>
@@ -451,13 +456,15 @@ export function ComposeDialog({
           <div className="mb-1 flex items-center justify-between">
             <span className="block text-[11px] font-medium text-tertiary">To</span>
             {!showCcBcc && (
-              <button
-                type="button"
-                onClick={() => setShowCcBcc(true)}
-                className="rounded-token px-1.5 py-0.5 text-[11px] font-medium text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary"
-              >
-                Cc Bcc
-              </button>
+              <Tooltip content="Add Cc (visible copy) and Bcc (hidden copy) recipient fields">
+                <button
+                  type="button"
+                  onClick={() => setShowCcBcc(true)}
+                  className="rounded-token px-1.5 py-0.5 text-[11px] font-medium text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary"
+                >
+                  Cc Bcc
+                </button>
+              </Tooltip>
             )}
           </div>
           <RecipientChips
@@ -600,9 +607,11 @@ function SendLaterMenu({ disabled, onPick }: { disabled?: boolean; onPick: (at: 
 
   return (
     <div ref={ref} className="relative">
-      <Button variant="secondary" size="sm" disabled={disabled} onClick={() => setOpen((v) => !v)}>
-        Send later
-      </Button>
+      <Tooltip content="Queue this message to leave at a time you pick — cancel it from the Scheduled view">
+        <Button variant="secondary" size="sm" disabled={disabled} onClick={() => setOpen((v) => !v)}>
+          Send later
+        </Button>
+      </Tooltip>
       {open && (
         <div
           ref={menuRef}

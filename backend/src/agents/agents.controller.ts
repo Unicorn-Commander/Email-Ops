@@ -68,6 +68,12 @@ class CreateAgentDto {
   @MaxLength(500)
   description?: string;
 
+  /** Explicit avatar image URL (absolute or app-relative, e.g. /agent-avatars/perry.svg). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  avatar_url?: string;
+
   @IsOptional()
   @IsString()
   mailbox_account_id?: string;
@@ -102,6 +108,12 @@ class UpdateAgentDto {
   @IsString()
   @MaxLength(500)
   description?: string | null;
+
+  /** Explicit avatar image URL; null clears it (renderers fall back to placeholders). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  avatar_url?: string | null;
 
   @IsOptional()
   @IsString()
@@ -189,6 +201,7 @@ export class AgentsController {
       key: body.key,
       displayName: body.display_name,
       description: body.description ?? null,
+      avatarUrl: body.avatar_url ?? null,
       mailboxAccountId: body.mailbox_account_id ?? null,
       autonomyLevel: body.autonomy_level,
       recipientPolicy: body.recipient_policy ?? null,
@@ -256,6 +269,7 @@ export class AgentsController {
     const patch: UpdateAgentInput = {};
     if (body.display_name !== undefined) patch.displayName = body.display_name;
     if (body.description !== undefined) patch.description = body.description;
+    if (body.avatar_url !== undefined) patch.avatarUrl = body.avatar_url;
     if (body.mailbox_account_id !== undefined) patch.mailboxAccountId = body.mailbox_account_id;
     if (body.autonomy_level !== undefined) patch.autonomyLevel = body.autonomy_level;
     if (body.recipient_policy !== undefined) patch.recipientPolicy = body.recipient_policy;

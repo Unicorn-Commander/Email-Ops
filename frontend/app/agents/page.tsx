@@ -28,6 +28,7 @@ import {
   useConfirm,
   type BadgeVariant,
 } from '@/components/ui';
+import { AgentAvatar } from '@/components/AgentAvatar';
 import { useAgents } from '@/components/useAgents';
 import { useActiveSpace } from '@/components/ActiveSpaceProvider';
 import { EmailHealthPanel } from '@/components/EmailHealthPanel';
@@ -59,14 +60,15 @@ const AUTONOMY: Record<
     desc: 'Stages drafts; never sends, even autonomously.',
     tone: 'neutral',
   },
+  // Wave 7 semantics: "first contact needs a human; ongoing conversation flows."
   L1_APPROVE_TO_SEND: {
     label: 'Approve to send',
-    desc: 'Drafts; a human approves each send.',
+    desc: 'Sends internal mail on its own; anything external waits for your approval.',
     tone: 'info',
   },
   L2_AUTONOMOUS_AUDIT: {
     label: 'Autonomous',
-    desc: 'May send without per-message approval; every send is audited.',
+    desc: 'Also sends routine external replies to correspondents you have approved once; first contact, attachments, and cold outreach still wait for you. Every send is audited.',
     tone: 'warning',
   },
 };
@@ -320,7 +322,14 @@ function AgentCard({
   return (
     <Card className="overflow-hidden">
       <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 flex-1 items-start gap-3">
+          <AgentAvatar
+            agentKey={agent.key}
+            avatarUrl={agent.avatar_url}
+            size={40}
+            className="mt-0.5 ring-1 ring-border"
+          />
+          <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="truncate text-sm font-semibold text-primary">
               {agent.display_name || agentLabel(agent.key)}
@@ -369,10 +378,11 @@ function AgentCard({
           <AgentMailboxes agent={agent} workspaceId={workspaceId} onRefresh={onRefresh} />
 
           {cardError && <p className="mt-3 text-xs text-danger">{cardError}</p>}
+          </div>
         </div>
 
         <div className="flex shrink-0 flex-col items-stretch gap-2 sm:w-[200px]">
-          <label className="block">
+          <label className="block" title={`${autonomy.label} — ${autonomy.desc}`}>
             <span className="mb-1 block text-[11px] font-medium text-tertiary">Autonomy</span>
             <Select
               aria-label={`Autonomy for ${agent.display_name}`}
