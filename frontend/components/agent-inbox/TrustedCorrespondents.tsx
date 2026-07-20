@@ -200,7 +200,15 @@ export function TrustedCorrespondentsDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const canAdd = isValidEmail(addr) && busy === null && trusted.load !== 'absent';
+  // A bare domain (no '@', or a leading '@') trusts everyone at it; anything with
+  // a real localpart is an address. The server is the validator — this only
+  // shapes the button label / hint and the enable gate.
+  const trimmedAddr = addr.trim().toLowerCase();
+  const addWillBeDomain =
+    trimmedAddr !== '' && !/^[^\s@]+@[^\s@]+$/.test(trimmedAddr);
+  const isValidDomain = /^[^\s@]+\.[^\s@]+$/.test(trimmedAddr.replace(/^@/, ''));
+  const addIsValid = addWillBeDomain ? isValidDomain : isValidEmail(addr);
+  const canAdd = addIsValid && busy === null && trusted.load !== 'absent';
 
   async function handleAdd() {
     if (!canAdd) return;
@@ -245,15 +253,14 @@ export function TrustedCorrespondentsDialog({
         {/* Manual add */}
         <div className="rounded-token border border-subtle bg-surface-base/50 p-3">
           <label className="block text-[11px] font-medium text-tertiary" htmlFor="trust-add-address">
-            Trust an address
+            Trust an address or a whole domain
           </label>
           <div className="mt-1.5 flex flex-col gap-2 sm:flex-row">
             <Input
               id="trust-add-address"
               value={addr}
               onChange={(e) => setAddr(e.target.value)}
-              placeholder="name@example.com"
-              inputMode="email"
+              placeholder="jane@acme.com  or  acme.com"
               autoComplete="off"
               spellCheck={false}
               disabled={busy !== null || trusted.load === 'absent'}
@@ -263,9 +270,20 @@ export function TrustedCorrespondentsDialog({
               }}
             />
             <Button size="sm" disabled={!canAdd} onClick={() => void handleAdd()}>
-              {busy === 'add' ? 'Trusting…' : 'Trust'}
+              {busy === 'add'
+                ? 'Trusting…'
+                : addWillBeDomain
+                  ? 'Trust domain'
+                  : 'Trust'}
             </Button>
           </div>
+          {addr.trim() !== '' && (
+            <p className="mt-1 text-[11px] text-tertiary">
+              {addWillBeDomain
+                ? `Trusts everyone at ${addr.trim().toLowerCase().replace(/^@/, '')}.`
+                : 'Trusts this one address.'}
+            </p>
+          )}
           <Input
             value={note}
             onChange={(e) => setNote(e.target.value)}
@@ -312,8 +330,15 @@ export function TrustedCorrespondentsDialog({
                 className="flex items-start justify-between gap-3 rounded-token border border-subtle bg-surface-raised px-3 py-2"
               >
                 <div className="min-w-0">
-                  <p className="truncate font-mono text-xs text-primary">{row.address}</p>
+                  <p className="truncate font-mono text-xs text-primary">
+                    {row.scope === 'DOMAIN' ? `@${row.address}` : row.address}
+                  </p>
                   <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10.5px] text-muted">
+                    {row.scope === 'DOMAIN' && (
+                      <Tooltip content="Everyone at this domain is trusted for routine agent auto-replies.">
+                        <Badge variant="warning">whole domain</Badge>
+                      </Tooltip>
+                    )}
                     <Badge variant={row.source === 'MANUAL' ? 'info' : 'success'}>
                       {row.source === 'MANUAL' ? 'added by hand' : 'via approval'}
                     </Badge>

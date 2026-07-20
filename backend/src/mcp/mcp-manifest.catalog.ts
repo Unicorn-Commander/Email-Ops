@@ -1140,7 +1140,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "trust_correspondent",
-      "description": "Manually add an address to the trusted-correspondent allowlist (source MANUAL; idempotent — re-trusting refreshes the note). After this, an L2 agent’s in-thread replies to the address can send autonomously. Returns the trusted-correspondent row.",
+      "description": "Manually add an address (jane@acme.com) OR a whole domain (acme.com) to the trusted-correspondent allowlist (source MANUAL; idempotent — re-trusting refreshes the note). scope is inferred from the value when omitted (an \"@\"-address → address; a bare domain → domain). After this, an L2 agent’s in-thread replies to the address (or any address at the trusted domain) can send autonomously. Returns the trusted-correspondent row.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1155,6 +1155,13 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
           "note": {
             "type": "string",
             "maxLength": 500
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "address",
+              "domain"
+            ]
           }
         },
         "required": [

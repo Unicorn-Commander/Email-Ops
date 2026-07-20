@@ -16,6 +16,7 @@ describe('TrustedCorrespondentTools', () => {
   const ROW = {
     id: 'tc-1',
     address: 'jane@ext.test',
+    scope: 'ADDRESS',
     source: 'MANUAL',
     approvalCount: 2,
     lastApprovedAt: '2026-07-19T00:00:00.000Z',
@@ -47,7 +48,7 @@ describe('TrustedCorrespondentTools', () => {
     expect(trusted.list).toHaveBeenCalledWith('ws-1', 'uc-user-1');
   });
 
-  it('trust_correspondent passes address + note into the service (the validator)', async () => {
+  it('trust_correspondent passes address + note + scope into the service (the validator)', async () => {
     (trusted.add as jest.Mock).mockResolvedValue(ROW);
     await expect(
       tools().trustCorrespondent(user, { address: 'jane@ext.test', note: 'partner' }),
@@ -55,6 +56,17 @@ describe('TrustedCorrespondentTools', () => {
     expect(trusted.add).toHaveBeenCalledWith('ws-1', 'uc-user-1', {
       address: 'jane@ext.test',
       note: 'partner',
+      scope: null,
+    });
+  });
+
+  it('trust_correspondent forwards an explicit domain scope (Wave 10)', async () => {
+    (trusted.add as jest.Mock).mockResolvedValue({ ...ROW, address: 'acme.com', scope: 'DOMAIN' });
+    await tools().trustCorrespondent(user, { address: 'acme.com', scope: 'domain' });
+    expect(trusted.add).toHaveBeenCalledWith('ws-1', 'uc-user-1', {
+      address: 'acme.com',
+      note: null,
+      scope: 'domain',
     });
   });
 

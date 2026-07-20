@@ -41,7 +41,7 @@ describe('TrustedCorrespondentsController (delegation)', () => {
     expect(list).toHaveBeenCalledWith(WS, 'kc-sub-aaron');
   });
 
-  it('POST add delegates { address, note } and returns the row', async () => {
+  it('POST add delegates { address, note, scope } and returns the row', async () => {
     const add = jest.fn().mockResolvedValue(ROW);
     const ctrl = make({ add });
     await expect(
@@ -50,6 +50,18 @@ describe('TrustedCorrespondentsController (delegation)', () => {
     expect(add).toHaveBeenCalledWith(WS, 'kc-sub-aaron', {
       address: 'Jane <jane@ext.test>',
       note: 'partner',
+      scope: null,
+    });
+  });
+
+  it('POST add forwards an explicit domain scope (Wave 10)', async () => {
+    const add = jest.fn().mockResolvedValue(ROW);
+    const ctrl = make({ add });
+    await ctrl.add(WS, user, { address: 'acme.com', note: undefined, scope: 'domain' });
+    expect(add).toHaveBeenCalledWith(WS, 'kc-sub-aaron', {
+      address: 'acme.com',
+      note: null,
+      scope: 'domain',
     });
   });
 

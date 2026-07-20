@@ -44,6 +44,7 @@ import {
   MessageDisposition,
   Prisma,
   TrustedCorrespondentSource,
+  TrustedCorrespondentScope,
 } from '@prisma/client';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { MAX_TARGET_ROWS } from '../connected-accounts/cleanup-targets';
@@ -2197,13 +2198,40 @@ export class EmailService {
         ]),
       ];
 
+      // A recipient is trusted when its FULL address is trusted (ADDRESS scope)
+      // OR its DOMAIN is trusted (DOMAIN scope — "trust everyone @acme.com").
+      // We resolve both to the set of effectively-trusted recipient addresses so
+      // the downstream all-external-trusted gate (autonomy.ts) is unchanged.
+      const domainOf = (addr: string): string => addr.slice(addr.lastIndexOf('@') + 1);
+      const recipientDomains = [...new Set(recipients.map(domainOf).filter(Boolean))];
       const trustedRows = recipients.length
         ? await tx.trustedCorrespondent.findMany({
-            where: { workspaceId, address: { in: recipients } },
-            select: { address: true },
+            where: {
+              workspaceId,
+              OR: [
+                { scope: TrustedCorrespondentScope.ADDRESS, address: { in: recipients } },
+                { scope: TrustedCorrespondentScope.DOMAIN, address: { in: recipientDomains } },
+              ],
+            },
+            select: { address: true, scope: true },
           })
         : [];
-      const trustedAddresses = new Set(trustedRows.map((r) => r.address.toLowerCase()));
+      const trustedExact = new Set(
+        trustedRows
+          .filter((r) => r.scope === TrustedCorrespondentScope.ADDRESS)
+          .map((r) => r.address.toLowerCase()),
+      );
+      const trustedDomains = new Set(
+        trustedRows
+          .filter((r) => r.scope === TrustedCorrespondentScope.DOMAIN)
+          .map((r) => r.address.toLowerCase()),
+      );
+      const trustedAddresses = new Set(
+        recipients.filter((addr) => {
+          const dom = domainOf(addr);
+          return trustedExact.has(addr) || (!!dom && trustedDomains.has(dom));
+        }),
+      );
 
       // In-thread proof: the runtime attests the inbound it is replying to (it
       // saw the message arrive), OR the SoR carries a RECEIVED row in this
@@ -2284,11 +2312,20 @@ export class EmailService {
         ].filter((addr) => isExternalRecipient(addr, internalDomains));
         const now = new Date();
         for (const address of addresses) {
+          // Approval learning is ALWAYS address-exact (ADDRESS scope) — vouching
+          // for one person must never silently trust their whole domain.
           await tx.trustedCorrespondent.upsert({
-            where: { workspaceId_address: { workspaceId, address } },
+            where: {
+              workspaceId_scope_address: {
+                workspaceId,
+                scope: TrustedCorrespondentScope.ADDRESS,
+                address,
+              },
+            },
             create: {
               workspaceId,
               address,
+              scope: TrustedCorrespondentScope.ADDRESS,
               source: TrustedCorrespondentSource.APPROVAL,
               approvalCount: 1,
               lastApprovedAt: now,

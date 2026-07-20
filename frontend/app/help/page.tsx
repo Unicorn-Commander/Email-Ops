@@ -695,6 +695,14 @@ function AutonomySection() {
         agent replies to that address go back through your queue; nothing already sent is
         affected.
       </P>
+      <P>
+        You can trust a <B>whole domain</B> as well as a single address: type a bare domain
+        (<span className="font-mono text-[0.95em]">acme.com</span>) into the add box instead of an
+        address, and every current and future person at that company counts as trusted for routine
+        auto-replies. Domain rows are tagged <B>whole domain</B> in the list. Approving a
+        first-contact draft only ever trusts the exact address — trusting an entire domain is
+        always a deliberate manual choice.
+      </P>
       <H3 id="loop-protection">Loop protection</H3>
       <P>The auto-reply runtime refuses to spiral, by construction:</P>
       <Ul>

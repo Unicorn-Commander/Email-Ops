@@ -783,14 +783,17 @@ export class McpService {
       {
         title: 'Trust a correspondent',
         description:
-          'Manually add an address to the trusted-correspondent allowlist (source ' +
-          'MANUAL; idempotent — re-trusting refreshes the note). After this, an L2 ' +
-          'agent’s in-thread replies to the address can send autonomously. Returns ' +
-          'the trusted-correspondent row.',
+          'Manually add an address (jane@acme.com) OR a whole domain (acme.com) to ' +
+          'the trusted-correspondent allowlist (source MANUAL; idempotent — ' +
+          're-trusting refreshes the note). scope is inferred from the value when ' +
+          'omitted (an "@"-address → address; a bare domain → domain). After this, ' +
+          'an L2 agent’s in-thread replies to the address (or any address at the ' +
+          'trusted domain) can send autonomously. Returns the trusted-correspondent row.',
         inputSchema: {
           workspace_id: z.string().optional(),
           address: z.string().min(3).max(320),
           note: z.string().max(500).optional(),
+          scope: z.enum(['address', 'domain']).optional(),
         },
       },
       async (args: any) => wrap(await trustedTools.trustCorrespondent(user, args)),

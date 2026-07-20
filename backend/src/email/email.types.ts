@@ -255,6 +255,8 @@ export interface AutoSentItemView {
 export interface TrustedCorrespondentView {
   id: string;
   address: string;
+  /** 'ADDRESS' (one address) or 'DOMAIN' (every address at a bare domain). */
+  scope: string;
   source: string;
   approvalCount: number;
   lastApprovedAt: string | null;

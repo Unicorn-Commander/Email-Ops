@@ -23,7 +23,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import { User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -33,8 +33,11 @@ import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util'
 import { TrustedCorrespondentsService } from './trusted-correspondents.service';
 
 class AddTrustedCorrespondentDto {
+  // An address (jane@acme.com) or a bare domain (acme.com). scope is inferred
+  // from the value when omitted; pass it explicitly to disambiguate.
   @IsString() @MaxLength(320) address!: string;
   @IsOptional() @IsString() @MaxLength(500) note?: string;
+  @IsOptional() @IsIn(['address', 'domain']) scope?: 'address' | 'domain';
 }
 
 @ApiTags('trusted-correspondents')
@@ -67,6 +70,7 @@ export class TrustedCorrespondentsController {
     return this.trusted.add(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
       address: body.address,
       note: body.note ?? null,
+      scope: body.scope ?? null,
     });
   }
 

@@ -1266,12 +1266,13 @@ export class TrustedCorrespondentTools {
   /** Manually trust an address (source MANUAL; idempotent). */
   async trustCorrespondent(
     user: User,
-    args: { workspace_id?: string; address: string; note?: string },
+    args: { workspace_id?: string; address: string; note?: string; scope?: 'address' | 'domain' },
   ): Promise<TrustedCorrespondentView> {
     const workspaceId = await this.resolve(user, args.workspace_id);
     return this.trusted.add(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
       address: args.address,
       note: args.note ?? null,
+      scope: args.scope ?? null,
     });
   }
 

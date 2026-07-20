@@ -79,7 +79,13 @@ describe('TrustedCorrespondentsService — cross-tenant fence (integration)', ()
     expect(await service.removeByAddress(A, 'uc-a', 'target@ext.test')).toBe(false);
 
     const still = await prisma.trustedCorrespondent.findUnique({
-      where: { workspaceId_address: { workspaceId: B, address: 'target@ext.test' } },
+      where: {
+        workspaceId_scope_address: {
+          workspaceId: B,
+          scope: 'ADDRESS',
+          address: 'target@ext.test',
+        },
+      },
     });
     expect(still).toBeTruthy();
   });
@@ -98,9 +104,35 @@ describe('TrustedCorrespondentsService — cross-tenant fence (integration)', ()
   it('normalizes + validates: "Name <ADDR>" forms are stored bare-lowercase; junk is rejected', async () => {
     const row = await service.add(A, 'uc-a', { address: 'Jane Doe <Jane@EXT.test>' });
     expect(row.address).toBe('jane@ext.test');
+    expect(row.scope).toBe('ADDRESS');
     expect(row.source).toBe('MANUAL');
     await expect(service.add(A, 'uc-a', { address: 'not-an-email' })).rejects.toBeInstanceOf(
       BadRequestException,
     );
+  });
+
+  it('Wave 10: infers DOMAIN scope from a bare domain, strips a leading @, and ADDRESS+DOMAIN coexist', async () => {
+    const dom = await service.add(A, 'uc-a', { address: '@Acme.COM' });
+    expect(dom.address).toBe('acme.com');
+    expect(dom.scope).toBe('DOMAIN');
+
+    // An explicit address at the same domain is an independent row (distinct scope).
+    const addr = await service.add(A, 'uc-a', { address: 'jane@acme.com' });
+    expect(addr.scope).toBe('ADDRESS');
+    const rows = await service.list(A, 'uc-a');
+    expect(rows.filter((r) => r.address.endsWith('acme.com')).length).toBe(2);
+
+    // An explicit scope:'domain' on a bare token is honored; junk domain rejected.
+    const d2 = await service.add(A, 'uc-a', { address: 'beta.io', scope: 'domain' });
+    expect(d2.scope).toBe('DOMAIN');
+    await expect(service.add(A, 'uc-a', { address: 'nodomain', scope: 'domain' })).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+
+    // Untrust by bare domain removes the DOMAIN row, leaving the ADDRESS row.
+    expect(await service.removeByAddress(A, 'uc-a', 'acme.com')).toBe(true);
+    const after = await service.list(A, 'uc-a');
+    expect(after.some((r) => r.address === 'acme.com')).toBe(false);
+    expect(after.some((r) => r.address === 'jane@acme.com')).toBe(true);
   });
 });

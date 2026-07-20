@@ -977,7 +977,12 @@ model MailDomain {
 model TrustedCorrespondent {
   id              String                     @id @default(uuid())
   workspaceId     String
+  // ADDRESS scope: a full lowercased address (jane@acme.com). DOMAIN scope: a
+  // bare lowercased domain (acme.com, no leading '@') that trusts EVERY address
+  // at it. Mirrors SenderPolicy's ADDRESS|DOMAIN pattern so the two allowlists
+  // read the same way.
   address         String
+  scope           TrustedCorrespondentScope  @default(ADDRESS)
   source          TrustedCorrespondentSource @default(APPROVAL)
   approvalCount   Int                        @default(0)
   lastApprovedAt  DateTime?
@@ -989,7 +994,9 @@ model TrustedCorrespondent {
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
-  @@unique([workspaceId, address])
+  // One verdict per (scope,value): an ADDRESS row and a DOMAIN row can coexist
+  // (jane@acme.com explicitly trusted AND acme.com domain-trusted).
+  @@unique([workspaceId, scope, address])
   @@index([workspaceId])
   @@map("trusted_correspondents")
 }
@@ -997,6 +1004,11 @@ model TrustedCorrespondent {
 enum TrustedCorrespondentSource {
   MANUAL
   APPROVAL
+}
+
+enum TrustedCorrespondentScope {
+  ADDRESS
+  DOMAIN
 }
 
 // ============================================================

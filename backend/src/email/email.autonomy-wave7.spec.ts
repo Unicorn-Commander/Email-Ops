@@ -293,6 +293,52 @@ describe('EmailService — Wave 7 autonomy matrix (verify DB; engine MOCKED)', (
     expect(stalwart.sendCalls).toHaveLength(1);
   });
 
+  it('Wave 10: L2 + DOMAIN trust (acme.com) → in-thread reply to a NEVER-seen address at that domain AUTONOMOUS SENDS', async () => {
+    const threadId = `w10-thread-${Date.now()}-d`;
+    await prisma.emailMessage.create({
+      data: {
+        workspaceId: WS,
+        threadId,
+        direction: EmailDirection.RECEIVED,
+        status: EmailMessageStatus.SENT,
+        mode: EmailMode.SEND,
+        fromAddress: 'newbie@acme.com',
+        subject: 'inbound',
+      },
+    });
+    // Only the DOMAIN is trusted — newbie@acme.com was never individually approved.
+    await prisma.trustedCorrespondent.create({
+      data: { workspaceId: WS, address: 'acme.com', scope: 'DOMAIN', source: 'MANUAL' },
+    });
+    const res = await compose(L2_KEY, { toAddress: 'newbie@acme.com', inReplyToThreadId: threadId });
+    expect(res.status).toBe('sent');
+  });
+
+  it('Wave 10: DOMAIN trust for acme.com does NOT trust a recipient at a different domain (still HELD)', async () => {
+    const threadId = `w10-thread-${Date.now()}-x`;
+    await prisma.emailMessage.create({
+      data: {
+        workspaceId: WS,
+        threadId,
+        direction: EmailDirection.RECEIVED,
+        status: EmailMessageStatus.SENT,
+        mode: EmailMode.SEND,
+        fromAddress: 'someone@other.test',
+        subject: 'inbound',
+      },
+    });
+    await prisma.trustedCorrespondent.create({
+      data: { workspaceId: WS, address: 'acme.com', scope: 'DOMAIN', source: 'MANUAL' },
+    });
+    const res = await compose(L2_KEY, {
+      toAddress: 'someone@other.test',
+      inReplyToThreadId: threadId,
+    });
+    expect(res.status).toBe('pending_approval');
+    const { policy } = await policyOf(res.id);
+    expect(policy?.reasons?.map((r) => r.code)).toContain('first-contact');
+  });
+
   it('L2 TRUSTED + runtime ATTESTATION (no SoR row) → AUTONOMOUS SEND, footer + loop stamp applied', async () => {
     await prisma.trustedCorrespondent.create({
       data: { workspaceId: WS, address: 'jane@ext.test', source: 'MANUAL' },
@@ -446,7 +492,13 @@ describe('EmailService — Wave 7 autonomy matrix (verify DB; engine MOCKED)', (
       const { item: item2 } = await policyOf(again.id);
       await service.approveAgentInboxItem(WS, 'uc-approver', item2!.id, null);
       const row = await prisma.trustedCorrespondent.findUnique({
-        where: { workspaceId_address: { workspaceId: WS, address: 'learn-me@ext.test' } },
+        where: {
+          workspaceId_scope_address: {
+            workspaceId: WS,
+            scope: 'ADDRESS',
+            address: 'learn-me@ext.test',
+          },
+        },
       });
       expect(row?.approvalCount).toBe(2);
     });

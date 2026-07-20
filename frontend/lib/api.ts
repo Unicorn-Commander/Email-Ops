@@ -714,10 +714,14 @@ export async function listAutoSent(
 /** How an address earned trust: added by hand, or via an approval's trust checkbox. */
 export type TrustedCorrespondentSource = 'MANUAL' | 'APPROVAL';
 
+/** ADDRESS = one address; DOMAIN = every address at a bare domain (Wave 10). */
+export type TrustedCorrespondentScope = 'ADDRESS' | 'DOMAIN';
+
 /** One trusted external correspondent (agents may auto-reply to them under policy). */
 export interface TrustedCorrespondentView {
   id: string;
   address: string;
+  scope: TrustedCorrespondentScope;
   source: TrustedCorrespondentSource;
   approval_count: number;
   last_approved_at: string | null;
@@ -740,9 +744,11 @@ function coerceTrustedCorrespondent(raw: unknown): TrustedCorrespondentView | nu
   const address = asStr(rec.address);
   if (!id || !address) return null;
   const source = asStr(rec.source)?.toUpperCase() === 'MANUAL' ? 'MANUAL' : 'APPROVAL';
+  const scope = asStr(rec.scope)?.toUpperCase() === 'DOMAIN' ? 'DOMAIN' : 'ADDRESS';
   return {
     id,
     address,
+    scope,
     source,
     approval_count: asNum(rec.approval_count ?? rec.approvalCount) ?? 0,
     last_approved_at: asStr(rec.last_approved_at) ?? asStr(rec.lastApprovedAt),
@@ -764,16 +770,21 @@ export async function listTrustedCorrespondents(
   return { items };
 }
 
-/** Trust an address by hand (agents may then auto-reply to it under policy). */
+/**
+ * Trust an address OR a whole domain by hand (agents may then auto-reply under
+ * policy). `scope` is inferred server-side from the value when omitted — pass a
+ * bare domain (acme.com) to trust everyone at it.
+ */
 export async function addTrustedCorrespondent(
   workspaceId: string,
   address: string,
   note?: string,
   token?: string,
+  scope?: 'address' | 'domain',
 ): Promise<TrustedCorrespondentView | null> {
   const raw = await apiPost<Record<string, unknown>>(
     trustedBase(workspaceId),
-    { address, ...(note ? { note } : {}) },
+    { address, ...(note ? { note } : {}), ...(scope ? { scope } : {}) },
     token,
   );
   return coerceTrustedCorrespondent(asRec(raw.item) ?? raw);
