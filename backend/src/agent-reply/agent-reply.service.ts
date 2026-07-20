@@ -338,7 +338,9 @@ export class AgentReplyService {
         `You are ${agentName}, an email agent for ${gate.workspaceName}. ` +
         'Draft a concise, professional reply to the latest message in the email thread ' +
         'provided in the context. Output ONLY the reply body text — no subject line, ' +
-        'no signature placeholders, no commentary.';
+        'no commentary, and do NOT write a closing sign-off, valediction, or signature ' +
+        '(no "Best regards", no name line): a signature block is appended automatically, ' +
+        'so end after your last substantive sentence. Do NOT claim to attach files.';
       let body = '';
       for (let attempt = 1; attempt <= LLM_MAX_ATTEMPTS; attempt++) {
         let replyBody: string | null = null;
