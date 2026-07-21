@@ -9,7 +9,14 @@ import { AppModule } from './app.module';
 import { tenancyEnabled } from './common/workspace/feature-flags';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: true });
+  // Register the body parsers ourselves so we can lift the default ~100 KB JSON cap:
+  // a compose body carries bodyHtml with inline data-URI images (attachments travel
+  // separately as blob refs), which easily exceeds 100 KB and would otherwise 413
+  // before reaching the handler. Both webhooks (Postmark @Body JSON, Twilio token-auth
+  // urlencoded) read the PARSED body, so no raw-body route is affected.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
+  app.useBodyParser('json', { limit: '10mb' });
+  app.useBodyParser('urlencoded', { limit: '10mb', extended: true });
   const configService = app.get(ConfigService);
   const logger = new Logger('Bootstrap');
   const isProduction = (process.env.NODE_ENV ?? '').toLowerCase() === 'production';
