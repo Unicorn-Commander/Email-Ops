@@ -442,6 +442,25 @@ def test_cleanup_organize(client, fake_provider_factory):
     )
 
 
+def test_cleanup_trash_surfaces_provider_failure_as_502(client, monkeypatch):
+    # A mutating cleanup verb must NOT swallow a provider error into a 200 {"count": 0}
+    # (indistinguishable from "0 matched" — the backend would then record a COMPLETED
+    # cleanup that silently did nothing). It surfaces a clean 502 instead.
+    class RaisingProvider(FakeProvider):
+        def batch_trash(self, message_ids):
+            raise RuntimeError("gmail 429 rate limited")
+
+    factory = FakeProviderFactory(provider_cls=RaisingProvider)
+    monkeypatch.setattr(app.provider_factory, "create_provider", factory.create_provider)
+
+    response = client.post(
+        "/cleanup/trash",
+        headers=_auth_headers(),
+        json={"provider": "gmail", "credentials": {"token": "abc"}, "message_ids": ["a", "b"]},
+    )
+    assert response.status_code == 502
+
+
 def test_backup_create_and_verify(client, tmp_path):
     backup_path = tmp_path / "backup"
     response = client.post(

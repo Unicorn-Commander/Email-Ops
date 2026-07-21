@@ -466,7 +466,11 @@ class GmailProvider(EmailProvider):
 
     def batch_archive(self, message_ids: List[str], label: Optional[str] = None) -> int:
         changed = 0
-        add_labels = [label] if label else []
+        # Archiving in Gmail = remove INBOX (done below). A reserved canonical folder
+        # name (e.g. 'archive') is NOT a Gmail label id — real user labels are
+        # 'Label_N' and system labels are UPPERCASE — so sending it as addLabelIds
+        # would 400. Only a genuine label id is added on top of the archive.
+        add_labels = [label] if label and label not in _FOLDER_QUERY else []
         for i in range(0, len(message_ids), 100):
             batch = message_ids[i:i + 100]
             self.service.users().messages().batchModify(

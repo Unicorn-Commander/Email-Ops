@@ -435,24 +435,49 @@ def messages_get(request: GetMessageRequest) -> dict[str, Any]:
     return _dataclass_to_dict(message)
 
 
+# Cleanup verbs MUTATE the mailbox, so — unlike the read-only /mail/* routes that
+# degrade to an empty list — they must NOT swallow a provider failure into a 200
+# ``count: 0`` (indistinguishable from "0 matched", which the backend would then
+# record as a COMPLETED cleanup that silently did nothing). On any provider error we
+# log and surface a clean 502 so the backend sees an explicit failure, marks the
+# batch FAILED, and leaves the approval retryable.
+
+
+def _cleanup_failed(verb: str, provider_name: str, exc: Exception) -> HTTPException:
+    logger.warning("cleanup/%s failed for %s: %s", verb, provider_name, exc)
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail=f"cleanup {verb} failed: {exc}",
+    )
+
+
 @app.post("/cleanup/trash", dependencies=[Depends(_require_engine_token)])
 def cleanup_trash(request: MessageIdsRequest) -> CountResponse:
-    provider = _create_authenticated_provider(request.provider, request.credentials.model_dump())
-    count = provider.batch_trash(request.message_ids)
+    try:
+        provider = _create_authenticated_provider(request.provider, request.credentials.model_dump())
+        count = provider.batch_trash(request.message_ids)
+    except Exception as exc:  # noqa: BLE001 - surface as a clean 502, never a silent 0
+        raise _cleanup_failed("trash", request.provider, exc) from exc
     return CountResponse(count=count)
 
 
 @app.post("/cleanup/delete", dependencies=[Depends(_require_engine_token)])
 def cleanup_delete(request: MessageIdsRequest) -> CountResponse:
-    provider = _create_authenticated_provider(request.provider, request.credentials.model_dump())
-    count = provider.batch_delete(request.message_ids)
+    try:
+        provider = _create_authenticated_provider(request.provider, request.credentials.model_dump())
+        count = provider.batch_delete(request.message_ids)
+    except Exception as exc:  # noqa: BLE001 - surface as a clean 502, never a silent 0
+        raise _cleanup_failed("delete", request.provider, exc) from exc
     return CountResponse(count=count)
 
 
 @app.post("/cleanup/organize", dependencies=[Depends(_require_engine_token)])
 def cleanup_organize(request: OrganizeRequest) -> CountResponse:
-    provider = _create_authenticated_provider(request.provider, request.credentials.model_dump())
-    count = provider.batch_archive(request.message_ids, label=request.label)
+    try:
+        provider = _create_authenticated_provider(request.provider, request.credentials.model_dump())
+        count = provider.batch_archive(request.message_ids, label=request.label)
+    except Exception as exc:  # noqa: BLE001 - surface as a clean 502, never a silent 0
+        raise _cleanup_failed("organize", request.provider, exc) from exc
     return CountResponse(count=count)
 
 
