@@ -86,6 +86,7 @@ export const ReplyComposer = forwardRef<
   const [signatures, setSignatures] = useState<MailSignature[]>([]);
   const [selectedSignatureId, setSelectedSignatureId] = useState<string>('none');
   const [signatureError, setSignatureError] = useState<string | null>(null);
+  const [confirmEmpty, setConfirmEmpty] = useState(false);
 
   const bodyRef = useRef<HTMLLabelElement>(null);
   const appliedSignature = useRef<string>('');
@@ -220,6 +221,10 @@ export const ReplyComposer = forwardRef<
     return () => window.clearTimeout(t);
   }, [draftSavedAt]);
 
+  useEffect(() => {
+    setConfirmEmpty(false);
+  }, [subject, body]);
+
   const invalidCount = [...to, ...cc].filter((a) => !isValidEmail(a)).length;
   const canSend =
     to.length > 0 && invalidCount === 0 && htmlToText(body).length > 0 && !sending && !uploads.uploading;
@@ -231,6 +236,11 @@ export const ReplyComposer = forwardRef<
 
   async function handleSend() {
     if (!canSend) return;
+    if (subject.trim() === '' && !confirmEmpty) {
+      setConfirmEmpty(true);
+      return;
+    }
+    setConfirmEmpty(false);
     setSending(true);
     setError(null);
     setStatus(null);
@@ -422,8 +432,17 @@ export const ReplyComposer = forwardRef<
           <Button variant="secondary" size="sm" disabled={sending} onClick={() => void saveAndCollapse()}>
             Save draft & close
           </Button>
+          {confirmEmpty && (
+            <span className="mr-1 text-xs text-warning">This email has no subject.</span>
+          )}
           <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
-            {sending ? 'Sending…' : uploads.uploading ? 'Uploading…' : 'Send'}
+            {sending
+              ? 'Sending…'
+              : uploads.uploading
+                ? 'Uploading…'
+                : confirmEmpty
+                  ? 'Send anyway'
+                  : 'Send'}
           </Button>
         </div>
       </div>

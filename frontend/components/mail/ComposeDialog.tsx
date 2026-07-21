@@ -130,6 +130,7 @@ export function ComposeDialog({
   const [signatures, setSignatures] = useState<MailSignature[]>([]);
   const [selectedSignatureId, setSelectedSignatureId] = useState<string>('none');
   const [signatureError, setSignatureError] = useState<string | null>(null);
+  const [confirmEmpty, setConfirmEmpty] = useState(false);
 
   const uploads = useAttachmentUploads(workspaceId, mailboxId);
   const { reset: resetUploads } = uploads;
@@ -158,6 +159,7 @@ export function ComposeDialog({
     setSignatures([]);
     setSelectedSignatureId('none');
     setSignatureError(null);
+    setConfirmEmpty(false);
     appliedSignature.current = '';
     lastSavedSnapshot.current = JSON.stringify({
       to: toList(initial?.to),
@@ -284,9 +286,15 @@ export function ComposeDialog({
     return () => window.clearTimeout(t);
   }, [draftSavedAt]);
 
+  useEffect(() => {
+    setConfirmEmpty(false);
+  }, [subject, body]);
+
   const allRecipients = [...to, ...cc, ...bcc];
   const invalidCount = allRecipients.filter((a) => !isValidEmail(a)).length;
   const canSend = to.length > 0 && invalidCount === 0 && !sending && !uploads.uploading;
+  const noSubject = subject.trim() === '';
+  const noBody = htmlToText(body).trim() === '';
 
   async function saveAndClose() {
     await persistDraft();
@@ -320,6 +328,11 @@ export function ComposeDialog({
 
   async function handleSend() {
     if (!canSend) return;
+    if ((noSubject || noBody) && !confirmEmpty) {
+      setConfirmEmpty(true);
+      return;
+    }
+    setConfirmEmpty(false);
     setSending(true);
     setError(null);
     setStatus(null);
@@ -341,10 +354,12 @@ export function ComposeDialog({
   }
 
   async function handleSchedule(sendAt: Date) {
-    // Same guard as Send — valid recipients, not mid-upload/mid-send — plus a
-    // strictly-future time (the menu only offers future times, but a custom pick
-    // could be stale by the time it's confirmed).
     if (!canSend || !onScheduleSend) return;
+    if ((noSubject || noBody) && !confirmEmpty) {
+      setConfirmEmpty(true);
+      return;
+    }
+    setConfirmEmpty(false);
     if (!Number.isFinite(sendAt.getTime()) || sendAt.getTime() <= Date.now()) {
       setError('Pick a time in the future.');
       return;
@@ -423,8 +438,23 @@ export function ComposeDialog({
               ⌘↵
             </kbd>
           </Tooltip>
+          {confirmEmpty && (
+            <span className="mr-1 text-xs text-warning">
+              {noSubject && noBody
+                ? 'This email has no subject or body.'
+                : noSubject
+                  ? 'This email has no subject.'
+                  : 'This email has no message body.'}
+            </span>
+          )}
           <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
-            {sending ? 'Sending…' : uploads.uploading ? 'Uploading…' : 'Send'}
+            {sending
+              ? 'Sending…'
+              : uploads.uploading
+                ? 'Uploading…'
+                : confirmEmpty
+                  ? 'Send anyway'
+                  : 'Send'}
           </Button>
         </>
       }
