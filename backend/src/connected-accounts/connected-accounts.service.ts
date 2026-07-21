@@ -308,6 +308,9 @@ export class ConnectedAccountsService {
         throw new BadRequestException(`"${mode}" cleanup is not implemented for direct execution.`);
       }
 
+      // NOTE: The engine returns a single count for batch operations, not per-ID failures.
+      // Therefore, "failed" is an estimate: requested - completed. This is the best available
+      // metric for partial successes (e.g. some IDs already gone).
       const result = this.cleanupResult({
         completed: completedCount,
         failed: Math.max(0, requested.length - completedCount),
@@ -384,6 +387,9 @@ export class ConnectedAccountsService {
       ),
       'organize',
     );
+    // NOTE: The engine returns a single count for batch operations, not per-ID failures.
+    // Therefore, "failed" is an estimate: requested - completed. This is the best available
+    // metric for partial successes (e.g. some IDs already gone).
     const result = this.cleanupResult({
       completed: count.count,
       failed: Math.max(0, requested.length - count.count),
@@ -847,6 +853,9 @@ export class ConnectedAccountsService {
         await this.engine.batchDelete(provider, this.credentialsFor(provider, accessToken), requested),
         'delete',
       );
+      // NOTE: The engine returns a single count for batch operations, not per-ID failures.
+      // Therefore, "failed" is an estimate: requested - completed. This is the best available
+      // metric for partial successes (e.g. some IDs already gone).
       const result = this.cleanupResult({
         completed: count?.count ?? 0,
         failed: Math.max(0, requested.length - (count?.count ?? 0)),
@@ -867,6 +876,9 @@ export class ConnectedAccountsService {
     } else {
       throw new BadRequestException(`"${mode}" cleanup is not implemented — no messages were changed.`);
     }
+    // NOTE: The engine returns a single count for batch operations, not per-ID failures.
+    // Therefore, "failed" is an estimate: requested - completed. This is the best available
+    // metric for partial successes (e.g. some IDs already gone).
     const result = this.cleanupResult({
       completed: count?.count ?? 0,
       failed: Math.max(0, requested.length - (count?.count ?? 0)),

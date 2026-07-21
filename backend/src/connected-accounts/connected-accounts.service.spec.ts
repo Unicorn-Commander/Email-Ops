@@ -212,6 +212,25 @@ describe('ConnectedAccountsService', () => {
     expect(result.backup_ref?.verified).toBe(true);
   });
 
+  it('reports partial engine counts correctly (completed vs failed)', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false },
+        { id: 'm-2', sender: 'Promo <promo2@example.com>', size_bytes: 100, is_starred: false },
+      ],
+      next_token: null,
+    });
+    // Engine only completed 1 of 2 requested
+    (engine.batchTrash as jest.Mock).mockResolvedValue({ count: 1 });
+
+    const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
+    const result = await service().executeCleanup(user, 'gmail', plan, 'trash');
+
+    expect(result.result.completed).toBe(1);
+    expect(result.result.failed).toBe(1);
+    expect(result.result.total_attempted).toBe(2);
+  });
+
   it('does not purge when archive verification fails', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
       messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
