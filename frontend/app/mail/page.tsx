@@ -1390,6 +1390,7 @@ export default function MailPage() {
               unreadCount={listUnread}
               filter={filter}
               onFilter={setFilter}
+              searching={mail.query.trim().length > 0}
               folder={mail.folder}
               spaceName={activeSpace?.name ?? null}
               load={mail.threadsLoad}
@@ -2393,6 +2394,7 @@ function ConversationList({
   unreadCount,
   filter,
   onFilter,
+  searching,
   folder,
   spaceName,
   load,
@@ -2423,6 +2425,7 @@ function ConversationList({
   unreadCount: number | null;
   filter: SegFilter;
   onFilter: (f: SegFilter) => void;
+  searching: boolean;
   folder: MailFolder;
   spaceName: string | null;
   load: Load;
@@ -2541,7 +2544,7 @@ function ConversationList({
             </Button>
           </div>
         ) : threads.length === 0 ? (
-          <EmptyList filter={filter} />
+          <EmptyList filter={filter} searching={searching} />
         ) : (
           <>
             <WindowedThreadList
@@ -2940,9 +2943,10 @@ function RowSkeleton() {
   );
 }
 
-function EmptyList({ filter }: { filter: SegFilter }) {
-  const copy =
-    filter === 'unread'
+function EmptyList({ filter, searching }: { filter: SegFilter; searching: boolean }) {
+  const copy = searching
+    ? { t: 'No matches', d: 'No conversations match your search in this view. Try a different term or clear the search.' }
+    : filter === 'unread'
       ? { t: 'All caught up', d: 'No unread conversations in this view.' }
       : filter === 'starred'
         ? { t: 'No starred mail', d: 'Star conversations to keep them in this view.' }
@@ -3274,11 +3278,21 @@ function Reader({
   const lastMsg = messages[messages.length - 1] ?? null;
 
   const [triageBusy, setTriageBusy] = useState(false);
-  const runTriage = async (d: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM', opts?: { blockSender?: boolean }) => {
+  const runTriage = async (
+    d: 'INBOX' | 'ARCHIVE' | 'TRASH' | 'SPAM',
+    opts?: { blockSender?: boolean; trustSender?: boolean; senderAddress?: string },
+  ) => {
     if (!threadId || triageBusy) return;
     setTriageBusy(true);
-    const res = await onTriage(threadId, d, opts);
-    if (!res.ok) setTriageBusy(false);
+    // Always clear busy when the op settles — on success the reader advances to the
+    // next thread and its buttons must be live again; on failure (or a throw) we stay
+    // on this thread and must not be frozen. The guard above still blocks double-fire
+    // while the await is in flight.
+    try {
+      await onTriage(threadId, d, opts);
+    } finally {
+      setTriageBusy(false);
+    }
   };
 
   if (!threadId) return <DailyBrief brief={brief} />;
@@ -3339,7 +3353,12 @@ function Reader({
                 label="Report spam"
                 hint="Report spam — files it in Spam and blocks the sender"
                 danger
-                onClick={() => void runTriage('SPAM')}
+                onClick={() =>
+                  void runTriage('SPAM', {
+                    blockSender: true,
+                    ...(sender?.address ? { senderAddress: sender.address } : {}),
+                  })
+                }
                 disabled={triageBusy}
               >
                 <BanIcon className="h-[17px] w-[17px]" />
