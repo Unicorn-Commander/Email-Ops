@@ -86,9 +86,12 @@ export default function CleanupPage() {
     }
   }, [activeAccount.linked, activeProvider, criteriaQuery, meta.label, refreshActivity]);
 
+  // The audit (past runs) loads on mount — it's cheap. The PLAN scans the live
+  // mailbox, so it runs ONLY when the user asks (the Build button) or on a
+  // schedule — never automatically on navigation.
   useEffect(() => {
-    void refreshPlan();
-  }, [refreshPlan]);
+    void refreshActivity();
+  }, [refreshActivity]);
 
   const selectedSafe = useMemo(
     () => plan?.safe.filter((row) => selectedSafeIds.includes(row.id)) ?? [],
@@ -293,11 +296,31 @@ export default function CleanupPage() {
             />
           </div>
           <Button onClick={() => void refreshPlan()} disabled={loading || busy !== null}>
-            Rebuild plan
+            {loading ? 'Scanning…' : plan ? 'Rebuild plan' : 'Build plan'}
           </Button>
         </div>
       </Card>
 
+      {activeAccount.linked && !plan && !loading && (
+        <Card padded className="border-accent/25 bg-accent/[0.04]">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div className="min-w-0">
+              <p className="font-medium text-primary">Ready when you are</p>
+              <p className="mt-1 max-w-2xl text-sm text-tertiary">
+                Building a plan scans your linked {meta.label} inbox and previews what&apos;s safe
+                to delete. It doesn&apos;t run automatically — press the button so a scan happens
+                only when you want one. Scheduled sweeps are coming next.
+              </p>
+            </div>
+            <Button onClick={() => void refreshPlan()} disabled={busy !== null}>
+              Build cleanup plan
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {(loading || plan) && (
+        <>
       <Card padded className="border-protected/25 bg-surface-raised">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
@@ -432,6 +455,8 @@ export default function CleanupPage() {
           </div>
         )}
       </section>
+      </>
+      )}
 
       <section className="space-y-3">
         <div className="flex items-center justify-between gap-3">

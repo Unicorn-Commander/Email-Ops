@@ -60,6 +60,17 @@ interface CleanupExecutionOptions {
   archiveRetained?: boolean;
 }
 
+/**
+ * How many messages one interactive (on-demand) cleanup plan reviews. The plan
+ * is a bounded preview the user acts on, then re-runs — capping it keeps a run
+ * to seconds and the response small. A comprehensive sweep is the scheduled
+ * path, not this one.
+ */
+const REVIEW_PREVIEW_CAP = 500;
+
+/** Concurrent metadata fetches while building a plan (serial was the ~4min hang). */
+const ENRICH_CONCURRENCY = 8;
+
 @Injectable()
 export class ConnectedAccountsService {
   private readonly logger = new Logger(ConnectedAccountsService.name);
@@ -969,12 +980,21 @@ export class ConnectedAccountsService {
   ): Promise<EngineMessageSummary[]> {
     const credentials = this.credentialsFor(provider, accessToken);
     const query = this.backupQueryFor(criteria);
-    const limit = Math.max(1, Math.min(Number(criteria.max_results ?? criteria.maxResults ?? 200), 500));
+    const perPage = Math.max(1, Math.min(Number(criteria.max_results ?? criteria.maxResults ?? 200), 500));
+    // An interactive plan is a bounded PREVIEW: cap how many messages a single
+    // run reviews so the button returns in seconds, not minutes, on large
+    // mailboxes. (Reviewing 2000 messages via serial metadata fetches took ~4min
+    // and the client then aborted → the "cleanup does nothing" symptom.) A
+    // comprehensive sweep is the scheduled/agent path, not this on-demand one.
+    const reviewCap = Math.max(
+      1,
+      Math.min(Number(criteria.max_results ?? criteria.maxResults ?? REVIEW_PREVIEW_CAP), REVIEW_PREVIEW_CAP),
+    );
     const messages: EngineMessageSummary[] = [];
     let pageToken: string | null | undefined = null;
 
-    for (let page = 0; page < 10; page += 1) {
-      const res = await this.engine.listMessages(provider, credentials, query, limit, pageToken ?? null);
+    for (let page = 0; page < 10 && messages.length < reviewCap; page += 1) {
+      const res = await this.engine.listMessages(provider, credentials, query, perPage, pageToken ?? null);
       if (!res) break;
       const pageMessages = Array.isArray(res.messages) ? res.messages : [];
       messages.push(...pageMessages);
@@ -982,13 +1002,26 @@ export class ConnectedAccountsService {
       if (!pageToken) break;
     }
 
-    const enriched: EngineMessageSummary[] = [];
-    for (const message of messages) {
-      if (this.needsEnrichment(message)) {
-        const full = await this.engine.getMessage(provider, credentials, message.id, 'metadata');
-        enriched.push(full ?? message);
-      } else {
-        enriched.push(message);
+    const capped = messages.slice(0, reviewCap);
+
+    // Enrich message metadata in bounded-concurrency batches. Serial per-message
+    // fetches of hundreds of messages were the difference between a ~5s plan and
+    // a ~4min one; concurrency keeps the mailbox scan responsive without blowing
+    // the provider rate limit.
+    const enriched: EngineMessageSummary[] = new Array(capped.length);
+    for (let i = 0; i < capped.length; i += ENRICH_CONCURRENCY) {
+      const batch = capped.slice(i, i + ENRICH_CONCURRENCY);
+      const results = await Promise.all(
+        batch.map(async (message) => {
+          if (this.needsEnrichment(message)) {
+            const full = await this.engine.getMessage(provider, credentials, message.id, 'metadata');
+            return full ?? message;
+          }
+          return message;
+        }),
+      );
+      for (let j = 0; j < results.length; j += 1) {
+        enriched[i + j] = results[j];
       }
     }
     return enriched;
