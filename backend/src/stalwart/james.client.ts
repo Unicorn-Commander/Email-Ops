@@ -1065,12 +1065,20 @@ export class JamesClient extends StalwartPort {
       return this.sendViaJames(request);
     }
     if (this.postmarkConfigured) {
-      // No JMAP configured to carry the blob reference — best-effort Postmark
-      // send WITHOUT the attachment rather than failing outright.
-      this.logger.warn(
-        'send: attachments requested but JAMES_JMAP_URL unset — sending via Postmark WITHOUT attachments',
+      // Reached only with attachments present AND JAMES_JMAP_URL unset (a misconfig):
+      // the Postmark lane cannot carry the blob reference. FAIL LOUD rather than
+      // silently sending without the attachment — an accepted:true that dropped the
+      // file is worse than a clear failure the caller can surface and retry.
+      this.logger.error(
+        'send: attachments requested but JAMES_JMAP_URL unset — refusing to send WITHOUT them',
       );
-      return this.sendViaPostmark(request);
+      return {
+        accepted: false,
+        providerMessageId: null,
+        threadId: request.inReplyToThreadId ?? null,
+        lane: null,
+        reason: 'attachments require the JMAP lane, but JAMES_JMAP_URL is not configured',
+      };
     }
     return {
       accepted: false,

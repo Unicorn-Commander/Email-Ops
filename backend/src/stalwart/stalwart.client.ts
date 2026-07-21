@@ -355,6 +355,19 @@ export class StalwartClient extends StalwartPort {
     request: StalwartSendRequest,
     transactional: boolean,
   ): Promise<StalwartSendResult> {
+    // Neither Stalwart lane carries attachments. Fail loud rather than silently drop
+    // the file (accepted:true with a missing attachment). uploadBlob returns null for
+    // Stalwart mailboxes so no blob_id is normally minted — this guards a stale/forged
+    // ref or a draft staged under James then approved after an engine switch.
+    if ((request.attachments?.length ?? 0) > 0) {
+      return {
+        accepted: false,
+        providerMessageId: null,
+        threadId: request.inReplyToThreadId ?? null,
+        lane: null,
+        reason: 'the Stalwart engine cannot carry attachments — nothing was sent',
+      };
+    }
     // Transactional → Postmark (high-rep) when configured.
     if (transactional && this.postmarkConfigured) {
       return this.sendViaPostmark(request);

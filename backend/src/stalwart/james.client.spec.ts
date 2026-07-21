@@ -664,6 +664,26 @@ describe('JamesClient', () => {
       ]);
     });
 
+    it('FAILS LOUD on an attachment send when JMAP is unset — never silently drops the file', async () => {
+      // JMAP dormant + Postmark configured + attachments present: the Postmark lane
+      // cannot carry the blob, so send() must return accepted:false rather than send
+      // WITHOUT the attachment (an accepted:true that dropped the file is worse).
+      const client = new JamesClient(makeConfig({ POSTMARK_SERVER_TOKEN: 'pm-token' }));
+      const r = await client.send(
+        'sales@unicorncommander.ai',
+        {
+          fromAddress: 'sales@unicorncommander.ai',
+          toAddress: 'jane@acme.test',
+          subject: 's',
+          body: 'b',
+          attachments: [{ blobId: 'blob-1', name: 'f.pdf', type: 'application/pdf' }],
+        },
+        false,
+      );
+      expect(r.accepted).toBe(false);
+      expect(r.reason).toMatch(/attachments require the JMAP lane/i);
+    });
+
     it('a plain send (no attachments) still prefers Postmark when configured, carrying cc/bcc/in-reply-to/references', async () => {
       const CONFIGURED_WITH_POSTMARK = { ...CONFIGURED, POSTMARK_SERVER_TOKEN: 'pm-token' };
       let postmarkBody: any = null;

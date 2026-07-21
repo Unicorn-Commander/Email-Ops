@@ -2766,6 +2766,20 @@ export class EmailService {
 
     private async callEngine(mailbox: MailboxAccount | null, req: SendReq): Promise<EngineSendResult> {
     if (mailbox && this.mailProvider.handles(mailbox)) {
+      // The external-provider send path (Gmail/M365) does not carry attachments yet.
+      // Fail loud rather than deliver a message that silently dropped its attachment —
+      // accepted:true with a missing file is worse than a clear failure. (In practice
+      // uploadAttachment returns null for provider mailboxes, so req.attachments is
+      // normally empty; this guards a stale/forged ref or a post-engine-switch draft.)
+      if (req.attachments?.length) {
+        return {
+          accepted: false,
+          providerMessageId: null,
+          threadId: req.inReplyToThreadId ?? null,
+          lane: null,
+          reason: `attachments are not supported for ${mailbox.provider} sends yet — nothing was sent`,
+        };
+      }
       const r = await this.mailProvider.send(mailbox, {
         from: req.fromAddress,
         to: req.toAddress,
