@@ -3,9 +3,12 @@ Gmail provider - wraps Google Gmail API.
 """
 
 import base64
+import socket
 from email.message import EmailMessage as MimeMessage
 from typing import List, Optional, Tuple
 
+import google_auth_httplib2
+import httplib2
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -30,6 +33,36 @@ from providers.mail_client import (
     parse_address_list,
     to_iso8601,
 )
+
+
+# ---------------------------------------------------------------------------
+# Network hardening: prefer IPv4 for outbound calls (applied once, at import).
+#
+# Google publishes both A and AAAA records, but this engine container has no
+# routable IPv6 (v4-only interfaces). Python's getaddrinfo still returns the
+# AAAA records (it does not apply AI_ADDRCONFIG), and httplib2 has no
+# Happy-Eyeballs — so a Gmail call can attempt an unreachable v6 address and
+# stall, surfacing as the intermittent "SSL handshake operation timed out" 500s
+# that make Cleanup/Insights silently return nothing. Filtering getaddrinfo to
+# IPv4 (only when the caller didn't request a specific family, and only when an
+# A record exists) routes every call down the fast, working v4 path. Safe here:
+# every host this engine reaches — Google, Microsoft, the internal gateway — is
+# reachable over IPv4.
+# ---------------------------------------------------------------------------
+if not getattr(socket, '_uc_ipv4_pref', False):
+    _uc_orig_getaddrinfo = socket.getaddrinfo
+
+    def _uc_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        results = _uc_orig_getaddrinfo(host, port, family, type, proto, flags)
+        if family == 0:
+            v4 = [r for r in results if r[0] == socket.AF_INET]
+            if v4:
+                return v4
+        return results
+
+    socket.getaddrinfo = _uc_ipv4_getaddrinfo
+    socket._uc_ipv4_pref = True
+
 
 SCOPES = [
     # Full Gmail scope: batch_delete uses users.messages.batchDelete, which
@@ -81,7 +114,14 @@ class GmailProvider(EmailProvider):
         if self._credentials.expired and self._credentials.refresh_token:
             self._credentials.refresh(Request())
 
-        self.service = build('gmail', 'v1', credentials=self._credentials)
+        # Explicit-timeout transport: default httplib2 has no socket timeout, so a
+        # stalled TLS handshake would hang the whole request instead of failing
+        # fast. AuthorizedHttp keeps the credentials refreshing transparently.
+        authed_http = google_auth_httplib2.AuthorizedHttp(
+            self._credentials,
+            http=httplib2.Http(timeout=30),
+        )
+        self.service = build('gmail', 'v1', http=authed_http, cache_discovery=False)
         return True
 
     def get_oauth_url(self, redirect_uri: str) -> str:
@@ -121,7 +161,7 @@ class GmailProvider(EmailProvider):
     # ------------------------------------------------------------------
 
     def get_profile(self) -> EmailProfile:
-        profile = self.service.users().getProfile(userId='me').execute()
+        profile = self.service.users().getProfile(userId='me').execute(num_retries=3)
         return EmailProfile(
             email=profile.get('emailAddress', ''),
             total_messages=profile.get('messagesTotal', 0),
@@ -145,7 +185,7 @@ class GmailProvider(EmailProvider):
             try:
                 result = self.service.users().messages().list(
                     userId='me', q=query, maxResults=1
-                ).execute()
+                ).execute(num_retries=3)
                 setattr(stats, attr, result.get('resultSizeEstimate', 0))
             except Exception:
                 pass
@@ -167,7 +207,7 @@ class GmailProvider(EmailProvider):
             q=query,
             maxResults=min(max_results, 500),
             pageToken=page_token,
-        ).execute()
+        ).execute(num_retries=3)
 
         messages = []
         for msg in result.get('messages', []):
@@ -183,11 +223,11 @@ class GmailProvider(EmailProvider):
                 id=message_id,
                 format='metadata',
                 metadataHeaders=['From', 'To', 'Subject', 'Date', 'List-Unsubscribe'],
-            ).execute()
+            ).execute(num_retries=3)
         else:
             msg = self.service.users().messages().get(
                 userId='me', id=message_id, format=gmail_format
-            ).execute()
+            ).execute(num_retries=3)
 
         headers = {
             h['name']: h['value']
