@@ -131,6 +131,7 @@ export function ComposeDialog({
   const [selectedSignatureId, setSelectedSignatureId] = useState<string>('none');
   const [signatureError, setSignatureError] = useState<string | null>(null);
   const [confirmEmpty, setConfirmEmpty] = useState(false);
+  const [confirmExternal, setConfirmExternal] = useState(false);
 
   const uploads = useAttachmentUploads(workspaceId, mailboxId);
   const { reset: resetUploads } = uploads;
@@ -160,6 +161,7 @@ export function ComposeDialog({
     setSelectedSignatureId('none');
     setSignatureError(null);
     setConfirmEmpty(false);
+    setConfirmExternal(false);
     appliedSignature.current = '';
     lastSavedSnapshot.current = JSON.stringify({
       to: toList(initial?.to),
@@ -288,7 +290,8 @@ export function ComposeDialog({
 
   useEffect(() => {
     setConfirmEmpty(false);
-  }, [subject, body]);
+    setConfirmExternal(false);
+  }, [subject, body, canSchedule]);
 
   const allRecipients = [...to, ...cc, ...bcc];
   const invalidCount = allRecipients.filter((a) => !isValidEmail(a)).length;
@@ -332,7 +335,12 @@ export function ComposeDialog({
       setConfirmEmpty(true);
       return;
     }
+    if (!canSchedule && !confirmExternal) {
+      setConfirmExternal(true);
+      return;
+    }
     setConfirmEmpty(false);
+    setConfirmExternal(false);
     setSending(true);
     setError(null);
     setStatus(null);
@@ -438,7 +446,9 @@ export function ComposeDialog({
               ⌘↵
             </kbd>
           </Tooltip>
-          {confirmEmpty && (
+          {confirmExternal ? (
+            <span className="mr-1 text-xs text-warning">Send now? External sends can&apos;t be undone.</span>
+          ) : confirmEmpty ? (
             <span className="mr-1 text-xs text-warning">
               {noSubject && noBody
                 ? 'This email has no subject or body.'
@@ -446,15 +456,17 @@ export function ComposeDialog({
                   ? 'This email has no subject.'
                   : 'This email has no message body.'}
             </span>
-          )}
+          ) : null}
           <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
             {sending
               ? 'Sending…'
               : uploads.uploading
                 ? 'Uploading…'
-                : confirmEmpty
+                : confirmExternal
                   ? 'Send anyway'
-                  : 'Send'}
+                  : confirmEmpty
+                    ? 'Send anyway'
+                    : 'Send'}
           </Button>
         </>
       }

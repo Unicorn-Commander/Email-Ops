@@ -66,9 +66,13 @@ export const ReplyComposer = forwardRef<
     ) => Promise<ComposeOutcome>;
     /** Collapse the composer back to the compact reply action bar. */
     onCollapse?: () => void;
+    /** When true (default), the send has an undo window; no confirm needed.
+     *  Pass false for external providers (Gmail/M365) whose sends are immediate
+     *  and irreversible, to show a brief inline confirm before sending. */
+    hasUndoWindow?: boolean;
   }
 >(function ReplyComposer(
-  { defaultTo, defaultCc, defaultSubject, workspaceId, mailboxId, inReplyTo, onSend, onCollapse },
+  { defaultTo, defaultCc, defaultSubject, workspaceId, mailboxId, inReplyTo, onSend, onCollapse, hasUndoWindow = true },
   ref,
 ) {
   const [to, setTo] = useState<string[]>(defaultTo.filter(Boolean));
@@ -87,6 +91,7 @@ export const ReplyComposer = forwardRef<
   const [selectedSignatureId, setSelectedSignatureId] = useState<string>('none');
   const [signatureError, setSignatureError] = useState<string | null>(null);
   const [confirmEmpty, setConfirmEmpty] = useState(false);
+  const [confirmExternal, setConfirmExternal] = useState(false);
 
   const bodyRef = useRef<HTMLLabelElement>(null);
   const appliedSignature = useRef<string>('');
@@ -223,7 +228,8 @@ export const ReplyComposer = forwardRef<
 
   useEffect(() => {
     setConfirmEmpty(false);
-  }, [subject, body]);
+    setConfirmExternal(false);
+  }, [subject, body, hasUndoWindow]);
 
   const invalidCount = [...to, ...cc].filter((a) => !isValidEmail(a)).length;
   const canSend =
@@ -240,7 +246,12 @@ export const ReplyComposer = forwardRef<
       setConfirmEmpty(true);
       return;
     }
+    if (!hasUndoWindow && !confirmExternal) {
+      setConfirmExternal(true);
+      return;
+    }
     setConfirmEmpty(false);
+    setConfirmExternal(false);
     setSending(true);
     setError(null);
     setStatus(null);
@@ -432,17 +443,21 @@ export const ReplyComposer = forwardRef<
           <Button variant="secondary" size="sm" disabled={sending} onClick={() => void saveAndCollapse()}>
             Save draft & close
           </Button>
-          {confirmEmpty && (
+          {confirmExternal ? (
+            <span className="mr-1 text-xs text-warning">Send now? External sends can&apos;t be undone.</span>
+          ) : confirmEmpty ? (
             <span className="mr-1 text-xs text-warning">This email has no subject.</span>
-          )}
+          ) : null}
           <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
             {sending
               ? 'Sending…'
               : uploads.uploading
                 ? 'Uploading…'
-                : confirmEmpty
+                : confirmExternal
                   ? 'Send anyway'
-                  : 'Send'}
+                  : confirmEmpty
+                    ? 'Send anyway'
+                    : 'Send'}
           </Button>
         </div>
       </div>
