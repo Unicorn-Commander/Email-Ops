@@ -71,6 +71,34 @@ const REVIEW_PREVIEW_CAP = 500;
 /** Concurrent metadata fetches while building a plan (serial was the ~4min hang). */
 const ENRICH_CONCURRENCY = 8;
 
+/**
+ * Cleanup category → provider search term (Gmail syntax). Used to SCOPE the fetch
+ * so a plan only pulls the selected categories, never the whole mailbox.
+ */
+const CATEGORY_QUERY: Record<string, string> = {
+  promotional: 'category:promotions',
+  promotions: 'category:promotions',
+  social: 'category:social',
+  newsletter: 'category:updates',
+  updates: 'category:updates',
+  forums: 'category:forums',
+};
+
+/**
+ * Cleanup category → the message labels that prove membership. The classifier
+ * uses this as a SAFETY GATE: a message is only ever "safe to delete" when it
+ * actually carries one of the selected categories' labels (or the user gave an
+ * explicit free-text query). Without it, personal/Sent mail was marked safe.
+ */
+const CATEGORY_LABELS: Record<string, string[]> = {
+  promotional: ['CATEGORY_PROMOTIONS'],
+  promotions: ['CATEGORY_PROMOTIONS'],
+  social: ['CATEGORY_SOCIAL'],
+  newsletter: ['CATEGORY_UPDATES', 'CATEGORY_FORUMS'],
+  updates: ['CATEGORY_UPDATES'],
+  forums: ['CATEGORY_FORUMS'],
+};
+
 @Injectable()
 export class ConnectedAccountsService {
   private readonly logger = new Logger(ConnectedAccountsService.name);
@@ -191,9 +219,18 @@ export class ConnectedAccountsService {
     }
 
     const fetched = await this.collectMessages(provider, accessToken, criteria);
+    const hasQuery = typeof criteria.query === 'string' && criteria.query.trim().length > 0;
+    const categories = Array.isArray(criteria.categories)
+      ? criteria.categories.map((c) => String(c).toLowerCase())
+      : [];
     const plans = fetched.map((message) => this.classifyMessage(message));
     const protectedRows = plans.filter((row) => row.protected);
-    const safeRows = plans.filter((row) => !row.protected);
+    // SAFETY: a message is "safe to delete" only when the user actually targeted
+    // it (category label match or an explicit query) — never just "not protected",
+    // which had swept in personal and Sent mail.
+    const safeRows = plans.filter(
+      (row) => !row.protected && this.isCleanupCandidate(row, categories, hasQuery),
+    );
 
     return {
       provider,
@@ -227,7 +264,10 @@ export class ConnectedAccountsService {
 
     const serverPlan = await this.planCleanup(user, provider, plan.criteria as CleanupCriteria);
     const safeIds = new Set(serverPlan.safe.map((row) => row.id));
-    const requested = (plan.safe.length ? plan.safe : serverPlan.safe)
+    // Only the ids the client EXPLICITLY selected, intersected with what the fresh
+    // server plan still considers safe. An empty selection means "nothing" — it must
+    // NEVER fall back to trashing/deleting the entire server-planned set.
+    const requested = (Array.isArray(plan.safe) ? plan.safe : [])
       .map((row) => row.id)
       .filter((id) => safeIds.has(id));
 
@@ -1106,7 +1146,39 @@ export class ConnectedAccountsService {
   }
 
   private backupQueryFor(criteria: CleanupCriteria): string {
-    return typeof criteria.query === 'string' ? criteria.query : '';
+    const q = typeof criteria.query === 'string' ? criteria.query.trim() : '';
+    if (q) return q;
+    // No free-text query: SCOPE the fetch to the selected categories so a plan
+    // never pulls (and later classifies as "safe") the whole mailbox — including
+    // personal and Sent mail. If no categories are given either, fall back to
+    // promotions only; NEVER an unbounded all-mail scan.
+    const categories = Array.isArray(criteria.categories) ? criteria.categories : [];
+    const terms = [
+      ...new Set(
+        categories.map((c) => CATEGORY_QUERY[String(c).toLowerCase()]).filter(Boolean),
+      ),
+    ];
+    if (!terms.length) return 'category:promotions';
+    return terms.length === 1 ? terms[0] : `(${terms.join(' OR ')})`;
+  }
+
+  /**
+   * SAFETY GATE for what may be marked "safe to delete". A message qualifies only
+   * when the user actually targeted it: either they gave a free-text query (which
+   * already scoped the fetch to their intent), or the message carries one of the
+   * selected categories' labels. Everything else — personal mail, Sent — is kept.
+   */
+  private isCleanupCandidate(
+    row: CleanupPlanMessageView,
+    categories: string[],
+    hasQuery: boolean,
+  ): boolean {
+    if (hasQuery) return true;
+    if (!categories.length) return false;
+    const wantedLabels = new Set(categories.flatMap((c) => CATEGORY_LABELS[c] ?? []));
+    if (!wantedLabels.size) return false;
+    const labels = Array.isArray(row.labels) ? row.labels.map((l) => String(l).toUpperCase()) : [];
+    return labels.some((l) => wantedLabels.has(l));
   }
 
   private batchSummary(mode: string, provider: ConnectedProvider, count: number, backupRef: string | null): string {
