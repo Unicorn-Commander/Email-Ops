@@ -1285,9 +1285,18 @@ export async function executeCleanup(
   mode: 'trash' | 'delete' | 'archive_purge',
   token?: string,
 ): Promise<CleanupExecutionResponse> {
+  // The server re-plans from `criteria` and only needs the SELECTED message ids.
+  // Sending the full message rows (hundreds of subjects/senders) overflows the
+  // JSON body limit → 413 → "trash doesn't work". Send a slim plan: ids only.
+  const slimPlan = {
+    criteria: plan.criteria,
+    safe: plan.safe.map((row) => ({ id: row.id })),
+    protected: [] as { id: string }[],
+    counts: plan.counts,
+  };
   return apiPost<CleanupExecutionResponse>(
     `/connected-accounts/${encodeURIComponent(provider)}/cleanup/execute`,
-    { plan, mode },
+    { plan: slimPlan, mode },
     token,
   );
 }
