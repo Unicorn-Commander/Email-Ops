@@ -1,4 +1,5 @@
 import {
+  BadGatewayException,
   BadRequestException,
   ForbiddenException,
   Injectable,
@@ -292,11 +293,17 @@ export class ConnectedAccountsService {
           archiveExpiresAt,
           archiveRetained: vault,
         });
-        const count = await this.engine.batchDelete(provider, credentials, requested);
-        completedCount = count?.count ?? 0;
+        const count = this.assertEngineApplied(
+          await this.engine.batchDelete(provider, credentials, requested),
+          'delete',
+        );
+        completedCount = count.count;
       } else if (mode === 'trash') {
-        const count = await this.engine.batchTrash(provider, credentials, requested);
-        completedCount = count?.count ?? 0;
+        const count = this.assertEngineApplied(
+          await this.engine.batchTrash(provider, credentials, requested),
+          'trash',
+        );
+        completedCount = count.count;
       } else {
         throw new BadRequestException(`"${mode}" cleanup is not implemented for direct execution.`);
       }
@@ -368,15 +375,18 @@ export class ConnectedAccountsService {
     const accessToken = await this.requireAccessToken(user, provider);
     const plan = await this.planCleanup(user, provider, criteria);
     const requested = plan.safe.map((row) => row.id);
-    const count = await this.engine.batchArchive(
-      provider,
-      this.credentialsFor(provider, accessToken),
-      requested,
-      typeof plan.criteria.label === 'string' ? plan.criteria.label : null,
+    const count = this.assertEngineApplied(
+      await this.engine.batchArchive(
+        provider,
+        this.credentialsFor(provider, accessToken),
+        requested,
+        typeof plan.criteria.label === 'string' ? plan.criteria.label : null,
+      ),
+      'organize',
     );
     const result = this.cleanupResult({
-      completed: count?.count ?? 0,
-      failed: Math.max(0, requested.length - (count?.count ?? 0)),
+      completed: count.count,
+      failed: Math.max(0, requested.length - count.count),
       bytesFreed: 0,
       totalAttempted: requested.length,
     });
@@ -449,6 +459,36 @@ export class ConnectedAccountsService {
       );
       if (!restored) {
         throw new ForbiddenException('Cleaner Engine unavailable while restoring archive.');
+      }
+      const restoreFailed = Array.isArray(restored.failed)
+        ? restored.failed.length
+        : Number(restored.failed ?? 0);
+      if (restoreFailed > 0) {
+        // A reachable engine that re-imported only SOME (or none) of the archive must
+        // NOT flip the batch to UNDONE: that sets restoredAt, which retires the still-
+        // live archive (archiveLive() => false) and strands whatever failed. Leave the
+        // archive live for a retry and report the partial outcome honestly.
+        this.logger.warn(
+          `undo batch ${batch.id}: restore incomplete (${restored.restored} ok, ${restoreFailed} failed) — archive kept live for retry`,
+        );
+        return {
+          ok: false,
+          provider,
+          mode: 'undo',
+          batch_id: batch.id,
+          action: 'undo',
+          plan: batch.plan as unknown as CleanupPlanResult,
+          result: this.cleanupResult({
+            completed: restored.restored,
+            failed: restoreFailed,
+            bytesFreed: 0,
+            totalAttempted: restored.restored + restoreFailed,
+          }),
+          status: 'failed',
+          reason:
+            `Restore incomplete: ${restored.restored} message(s) came back, ${restoreFailed} could not be ` +
+            `re-imported. The archive is still available — try again, or download it to re-import manually.`,
+        };
       }
       await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
         await tx.cleanupBatch.update({
@@ -734,6 +774,27 @@ export class ConnectedAccountsService {
     };
   }
 
+  /**
+   * The Cleaner Engine returns `null` from a cleanup call when the provider rejected
+   * it (auth expired / rate-limited / transport error) — the engine surfaces that as
+   * a non-2xx, which the client maps to null. That is NOT the same as "0 messages
+   * matched" (a real `{ count: 0 }`). Treating null as 0 is how a failed cleanup used
+   * to be recorded COMPLETED. Throw instead: the interactive path returns 502, and the
+   * approval path's catch records the batch FAILED and keeps it retryable.
+   */
+  private assertEngineApplied(
+    result: { count: number } | null,
+    action: string,
+  ): { count: number } {
+    if (result === null) {
+      throw new BadGatewayException(
+        `The mail provider did not confirm the ${action} — it may be rate-limited or the sign-in ` +
+          `may have expired. Nothing was recorded as done; try again.`,
+      );
+    }
+    return result;
+  }
+
   private async executeCleanupInternal(
     workspaceId: string,
     ucUid: string,
@@ -753,14 +814,20 @@ export class ConnectedAccountsService {
     let action: string;
     if (mode === 'trash') {
       action = 'trash';
-      count = await this.engine.batchTrash(provider, this.credentialsFor(provider, accessToken), requested);
+      count = this.assertEngineApplied(
+        await this.engine.batchTrash(provider, this.credentialsFor(provider, accessToken), requested),
+        'trash',
+      );
     } else if (mode === 'archive') {
       action = 'organize';
-      count = await this.engine.batchArchive(
-        provider,
-        this.credentialsFor(provider, accessToken),
-        requested,
-        typeof serverPlan.criteria.label === 'string' ? serverPlan.criteria.label : null,
+      count = this.assertEngineApplied(
+        await this.engine.batchArchive(
+          provider,
+          this.credentialsFor(provider, accessToken),
+          requested,
+          typeof serverPlan.criteria.label === 'string' ? serverPlan.criteria.label : null,
+        ),
+        'organize',
       );
     } else if (mode === 'delete' || mode === 'archive_purge') {
       action = 'delete';
@@ -776,7 +843,10 @@ export class ConnectedAccountsService {
         archiveExpiresAt,
         archiveRetained,
       });
-      count = await this.engine.batchDelete(provider, this.credentialsFor(provider, accessToken), requested);
+      count = this.assertEngineApplied(
+        await this.engine.batchDelete(provider, this.credentialsFor(provider, accessToken), requested),
+        'delete',
+      );
       const result = this.cleanupResult({
         completed: count?.count ?? 0,
         failed: Math.max(0, requested.length - (count?.count ?? 0)),

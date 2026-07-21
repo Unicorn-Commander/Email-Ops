@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { BadGatewayException, ForbiddenException } from '@nestjs/common';
 import { CleanupActionKind, CleanupBatchState, User } from '@prisma/client';
 import { KeycloakBrokerService } from '../auth/keycloak-broker.service';
 import { MembershipService } from '../common/workspace/membership.service';
@@ -140,6 +140,26 @@ describe('ConnectedAccountsService', () => {
     expect(result.status).toBe('completed');
   });
 
+  it('records FAILED (not a silent COMPLETED) when the engine rejects the trash', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@shop.com>', size_bytes: 100, labels: ['CATEGORY_PROMOTIONS'], is_starred: false },
+      ],
+      next_token: null,
+    });
+    // The engine rejected the call (auth expired / rate-limited / transport) — the
+    // client maps a non-2xx to null. That must NOT collapse to "completed, 0 trashed".
+    (engine.batchTrash as jest.Mock).mockResolvedValue(null);
+
+    const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
+    await expect(service().executeCleanup(user, 'gmail', plan, 'trash')).rejects.toBeInstanceOf(
+      BadGatewayException,
+    );
+    expect(engine.batchTrash).toHaveBeenCalled();
+    // No COMPLETED batch row is written for a cleanup that never happened.
+    expect(tx.cleanupBatch.create).not.toHaveBeenCalled();
+  });
+
   it('SAFETY: personal mail is never "safe", and an empty selection trashes nothing', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
       messages: [
@@ -258,6 +278,37 @@ describe('ConnectedAccountsService', () => {
     expect(res.status).toBe('undone');
     expect(prisma.withWorkspace).toHaveBeenCalledWith('ws-1', 'kc-sub-user', expect.any(Function));
     expect(prisma.cleanupBatch.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('undo does NOT flip to UNDONE when the restore fails — the archive stays live for retry', async () => {
+    (tx.cleanupBatch.findFirst as jest.Mock).mockResolvedValue({
+      id: 'batch-1',
+      provider: 'gmail',
+      mode: 'delete',
+      action: CleanupActionKind.DELETE,
+      plan: { safe: [] },
+      result: { completed: 1 },
+      backupRef: 'archive.zip',
+      backupVerified: true,
+      archiveBucket: 'archives',
+      archiveKey: 'archive.zip',
+      archiveExpiresAt: new Date(Date.now() + 3600_000),
+      archiveRetained: false,
+      restoredAt: null,
+      state: CleanupBatchState.COMPLETED,
+    });
+    // Engine reachable, but nothing re-imported (every id failed). Marking UNDONE here
+    // would set restoredAt and retire the still-live archive, stranding the mail.
+    (engine.archiveRestore as jest.Mock).mockResolvedValue({
+      restored: 0,
+      failed: [{ id: 'm-1', error: 'import rejected' }],
+    });
+
+    const res = await service().undoBatch(user, 'gmail', 'batch-1');
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe('failed');
+    // The batch is NOT written to UNDONE, so archiveLive() stays true and a retry works.
+    expect(tx.cleanupBatch.update).not.toHaveBeenCalled();
   });
 
   it('organize performs real non-destructive archive; unsubscribe remains unsupported', async () => {
