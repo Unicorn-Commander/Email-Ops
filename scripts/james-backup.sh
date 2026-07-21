@@ -30,12 +30,16 @@ log "pg dump OK: ${PGF} ($(du -h "${PGF}" | cut -f1))"
 CFGF="${DIR}/james-conf_${TS}.tar.gz"
 tar czf "${CFGF}" --ignore-failed-read --exclude=jmxremote.password --exclude=jmxremote.access -C /home/deploy james-dev/conf 2>/dev/null && log "conf tar OK ($(du -h "${CFGF}" | cut -f1))" || log "WARN: conf tar skipped"
 
-# 3. Runtime data volume (best-effort; may need root — degrade clean)
+# 3. Runtime data volume (sovereign mailbox store: message bodies + attachments).
+# Tar it via a throwaway container (root INSIDE) streaming to stdout, so host-side
+# root ownership on the docker volume can't block it — the old direct host-path tar
+# ran as muut and silently skipped every backup with "perms". Output stays muut-owned.
 DATAF="${DIR}/james-data_${TS}.tar.gz"
-if tar czf "${DATAF}" -C /var/lib/docker/volumes/james-dev-data/_data . 2>/dev/null; then
+if docker run --rm -v james-dev-data:/data:ro alpine tar czf - -C /data . > "${DATAF}" 2>/dev/null \
+   && [ -s "${DATAF}" ]; then
   log "data-volume tar OK ($(du -h "${DATAF}" | cut -f1))"
 else
-  rm -f "${DATAF}"; log "WARN: data-volume tar skipped (perms)"
+  rm -f "${DATAF}"; log "WARN: data-volume tar FAILED (docker/volume)"
 fi
 
 # 4. Off-DEVICE push to your-prod-host
