@@ -2037,8 +2037,25 @@ export class EmailService {
       ]);
     }
 
-    // PHASE 3 — stamp the send outcome + transition the item to APPROVED + audit
-    // (a SHORT tx). The draft was durable; this only records the send result.
+    // PHASE 3 — record the send outcome + transition the item. Confirm-on-success-
+    // only (mirrors the cleanup branch above): a send the engine did NOT accept must
+    // NOT flip the item to APPROVED, or the approver would believe the reply left when
+    // it silently failed. Stamp the failure truthfully on the message, leave the item
+    // PENDING, and surface the reason so it can be retried or rejected.
+    if (!result.accepted) {
+      await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+        await this.stampSendResult(tx, prep.messageId, result);
+      });
+      this.logger.warn(
+        `agent-inbox item ${prep.itemId} NOT approved — send REJECTED for message ${prep.messageId}` +
+          `${result.reason ? ` (${result.reason})` : ''}; item stays PENDING for retry`,
+      );
+      throw new BadRequestException(
+        result.reason ?? 'The message could not be sent — nothing was approved. Try again or reject.',
+      );
+    }
+
+    // The send was accepted — a SHORT tx to stamp SENT + flip the item to APPROVED.
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const sent = await this.stampSendResult(tx, prep.messageId, result);
       const updated = await tx.agentInboxItem.update({

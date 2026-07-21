@@ -385,6 +385,26 @@ describe('EmailService — Wave 7 autonomy matrix (verify DB; engine MOCKED)', (
     expect(row?.body).not.toContain('FOOTER');
   });
 
+  it('a REJECTED send does NOT approve the item — it stays PENDING, message FAILED, approval throws', async () => {
+    // Confirm-on-success-only regression: if the engine will not accept the send,
+    // approving must surface the failure and leave the draft PENDING for a retry —
+    // never report it approved, which would silently lose the reply.
+    const res = await compose(L2_KEY, { toAddress: 'held@ext.test', inReplyToThreadId: null });
+    expect(res.status).toBe('pending_approval');
+    const { item } = await policyOf(res.id);
+
+    stalwart.acceptSend = false;
+    await expect(service.approveAgentInboxItem(WS, UC_UID, item!.id, null)).rejects.toThrow(
+      /rejected|could not be sent/i,
+    );
+
+    // The item was NOT flipped to APPROVED, and the message is stamped FAILED truthfully.
+    const afterItem = await prisma.agentInboxItem.findUnique({ where: { id: item!.id } });
+    expect(afterItem?.state).toBe('PENDING');
+    const row = await prisma.emailMessage.findUnique({ where: { id: res.id } });
+    expect(row?.status).toBe('FAILED');
+  });
+
   it('L2 attachment → HELD (attachment reason)', async () => {
     await prisma.trustedCorrespondent.create({
       data: { workspaceId: WS, address: 'jane@ext.test', source: 'MANUAL' },
