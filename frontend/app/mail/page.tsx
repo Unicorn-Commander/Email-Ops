@@ -1451,6 +1451,7 @@ export default function MailPage() {
                 mail.selectedMailbox.provider !== 'gmail' &&
                 mail.selectedMailbox.provider !== 'microsoft'
               }
+              replyHasUndoWindow={canSchedule}
               onReload={reloadOpenThread}
               replySeed={activeSeed}
               replyRef={replyRef}
@@ -3188,6 +3189,7 @@ function Reader({
   customFolders,
   onSnooze,
   snoozeEnabled,
+  replyHasUndoWindow,
   onReload,
   replySeed,
   replyRef,
@@ -3228,6 +3230,10 @@ function Reader({
   onSnooze: (threadId: string, until: Date) => Promise<TriageOutcome>;
   /** Whether snooze is available for this mailbox (sovereign James, not external). */
   snoozeEnabled: boolean;
+  /** Whether a reply from here gets an undo-send window (sovereign schedule lane).
+   *  When false (external Gmail/M365 — immediate, irreversible), the composer asks
+   *  a one-tap confirm before sending. Mirrors ComposeDialog's canSchedule. */
+  replyHasUndoWindow: boolean;
   /** Re-run the open thread's messages fetch (reader error-retry). */
   onReload: () => void;
   replySeed: ReplySeed;
@@ -3499,6 +3505,7 @@ function Reader({
                 workspaceId={workspaceId}
                 mailboxId={mailbox?.id ?? null}
                 inReplyTo={replySeed.inReplyTo}
+                hasUndoWindow={replyHasUndoWindow}
                 onSend={onReply}
                 onCollapse={onCollapseComposer}
               />
