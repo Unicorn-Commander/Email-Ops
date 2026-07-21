@@ -127,13 +127,22 @@ class EmailProvider(ABC):
         ...
 
     @abstractmethod
-    def export_messages(self, message_ids: List[str]) -> Iterable[Tuple[str, bytes]]:
-        """Yield raw RFC822/MIME bytes for each message id."""
+    def export_messages(self, message_ids: List[str]) -> Iterable[Tuple[str, bytes, List[str]]]:
+        """Yield (id, raw RFC822/MIME bytes, label_ids) for each message id.
+
+        label_ids captures the provider-side state (read/starred/labels) that the raw
+        MIME cannot carry, so restore can re-apply it. Providers with no label model
+        yield an empty list.
+        """
         ...
 
     @abstractmethod
-    def import_message(self, raw_mime_bytes: bytes) -> str:
-        """Import a raw RFC822/MIME message and return the new provider id."""
+    def import_message(self, raw_mime_bytes: bytes, label_ids: Optional[List[str]] = None) -> str:
+        """Import a raw RFC822/MIME message and return the new provider id.
+
+        label_ids (if given) is re-applied so a restored message keeps its original
+        read/star/label state; providers may ignore it if their import model differs.
+        """
         ...
 
     @abstractmethod

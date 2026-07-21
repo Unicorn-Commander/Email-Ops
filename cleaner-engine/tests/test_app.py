@@ -113,10 +113,10 @@ class FakeProvider:
                 f"Subject: {message_id}\r\n"
                 "\r\n"
                 f"Body for {message_id}\r\n"
-            ).encode("utf-8")
+            ).encode("utf-8"), ["INBOX", "STARRED", f"Label_{message_id}", "TRASH"]
 
-    def import_message(self, raw_mime_bytes: bytes) -> str:
-        self.calls.append(("import_message", (raw_mime_bytes,), {}))
+    def import_message(self, raw_mime_bytes: bytes, label_ids=None) -> str:
+        self.calls.append(("import_message", (raw_mime_bytes,), {"label_ids": label_ids}))
         return f"restored-{len(self.calls)}"
 
     def get_attachment(self, message_id: str, attachment_id: str):
@@ -521,6 +521,11 @@ def test_archive_create_verify_restore_round_trip(client, fake_s3, fake_provider
     assert restore.json() == {"restored": 2, "failed": []}
     restore_calls = [c for c in fake_provider_factory.instances[-1].calls if c[0] == "import_message"]
     assert len(restore_calls) == 2
+    # Restore fidelity: the per-message label/read/star state is captured into the
+    # manifest at archive time and handed back to import_message on restore (the real
+    # provider then filters TRASH/SPAM and re-applies the rest, so a restored message
+    # keeps its labels/star/read instead of coming back as a bare unread).
+    assert restore_calls[0][2]["label_ids"] == ["INBOX", "STARRED", "Label_msg-1", "TRASH"]
 
 
 def test_archive_routes_require_auth(client):

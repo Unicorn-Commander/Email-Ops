@@ -543,18 +543,35 @@ class GmailProvider(EmailProvider):
                 userId='me',
                 id=message_id,
                 format='raw',
-            ).execute()
+            ).execute(num_retries=3)
             raw = msg.get('raw')
             if not raw:
                 raise ValueError(f'Message {message_id} did not include raw RFC822 data')
-            yield message_id, base64.urlsafe_b64decode(raw.encode('ascii'))
+            # Raw RFC822 carries none of Gmail's per-message state (read/starred/labels)
+            # — capture labelIds from the SAME response so restore can re-apply them.
+            label_ids = msg.get('labelIds', []) or []
+            yield message_id, base64.urlsafe_b64decode(raw.encode('ascii')), label_ids
 
-    def import_message(self, raw_mime_bytes: bytes) -> str:
+    # Labels that must NOT be re-applied on restore: re-adding TRASH/SPAM would land
+    # the restored message straight back in trash/spam.
+    _RESTORE_LABEL_DENY = {'TRASH', 'SPAM'}
+
+    def import_message(self, raw_mime_bytes: bytes, label_ids: Optional[List[str]] = None) -> str:
         encoded = base64.urlsafe_b64encode(raw_mime_bytes).decode('ascii')
+        body: dict = {'raw': encoded}
+        if label_ids:
+            # Re-apply the archived label state (INBOX / STARRED / CATEGORY_* / custom
+            # Label_*, and UNREAD only if it was unread at archive time) so a restored
+            # message keeps its read/star/labels instead of coming back as a bare unread.
+            restore = [l for l in label_ids if l not in self._RESTORE_LABEL_DENY]
+            if restore:
+                body['labelIds'] = restore
         result = self.service.users().messages().import_(
             userId='me',
-            body={'raw': encoded},
-        ).execute()
+            body=body,
+            internalDateSource='dateHeader',
+            neverMarkSpam=True,
+        ).execute(num_retries=3)
         return result.get('id', '')
 
     # ------------------------------------------------------------------

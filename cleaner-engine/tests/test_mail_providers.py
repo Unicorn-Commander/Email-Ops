@@ -25,7 +25,7 @@ class _GmailExec:
     def __init__(self, value):
         self._value = value
 
-    def execute(self):
+    def execute(self, **kwargs):
         return self._value
 
 
@@ -56,6 +56,10 @@ class _FakeMessages:
     def batchModify(self, **kwargs):
         self._sink.append(("messages.batchModify", kwargs))
         return _GmailExec({})
+
+    def import_(self, **kwargs):
+        self._sink.append(("messages.import_", kwargs))
+        return _GmailExec({"id": "imported-1"})
 
 
 class _FakeUsers:
@@ -241,6 +245,38 @@ def test_gmail_batch_restore_inbox_adds_inbox_and_drops_spam_trash():
         "addLabelIds": ["INBOX"],
         "removeLabelIds": ["SPAM", "TRASH"],
     }
+
+
+def test_gmail_import_message_reapplies_labels_and_filters_trash():
+    """Restore fidelity: import re-applies the archived label state so read/star/labels
+    survive a permanent-delete undo, but drops TRASH/SPAM so it never lands back in
+    trash/spam. UNREAD is preserved only if it was in the archived set (read stays read).
+    """
+    provider, sink = _make_gmail()
+
+    # A read (no UNREAD), starred, custom-labeled message that had been trashed.
+    new_id = provider.import_message(
+        b"raw-mime-bytes",
+        label_ids=["INBOX", "STARRED", "IMPORTANT", "Label_5", "TRASH", "SPAM"],
+    )
+    assert new_id == "imported-1"
+
+    imports = [c for c in sink if c[0] == "messages.import_"]
+    assert len(imports) == 1
+    body = imports[0][1]["body"]
+    # TRASH + SPAM filtered out; everything else re-applied (order preserved).
+    assert body["labelIds"] == ["INBOX", "STARRED", "IMPORTANT", "Label_5"]
+    assert imports[0][1]["neverMarkSpam"] is True
+    assert imports[0][1]["internalDateSource"] == "dateHeader"
+
+
+def test_gmail_import_message_without_labels_omits_labelids():
+    """A legacy (<=2.0) archive entry has no labels → import must not send an empty
+    labelIds (which would strip the message to no labels)."""
+    provider, sink = _make_gmail()
+    provider.import_message(b"raw", label_ids=None)
+    body = [c for c in sink if c[0] == "messages.import_"][0][1]["body"]
+    assert "labelIds" not in body
 
 
 # ---------------------------------------------------------------------------

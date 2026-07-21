@@ -568,15 +568,21 @@ class MicrosoftGraphProvider(EmailProvider):
         return changed
 
     def export_messages(self, message_ids: List[str]):
+        # Third tuple element = label_ids, for parity with the provider contract.
+        # Graph's read/flag/category state isn't in the $value MIME; re-applying it on
+        # restore is a follow-up (would need a metadata fetch + a post-create PATCH), so
+        # yield an empty list for now — no worse than before, and interface-consistent.
         for message_id in message_ids:
             url = f'{GRAPH_BASE}/me/messages/{message_id}/$value'
             resp = requests.get(url, headers=self._auth_headers(), timeout=60)
             self._handle_throttle(resp)
             resp.raise_for_status()
-            yield message_id, resp.content
+            yield message_id, resp.content, []
 
-    def import_message(self, raw_mime_bytes: bytes) -> str:
-        # Graph accepts MIME message creation using text/plain base64 content.
+    def import_message(self, raw_mime_bytes: bytes, label_ids: Optional[List[str]] = None) -> str:
+        # Graph accepts MIME message creation using text/plain base64 content. label_ids
+        # is accepted for contract parity but not applied here (Graph has no Gmail-label
+        # model; restoring isRead/flag/categories is a follow-up).
         url = f'{GRAPH_BASE}/me/messages'
         headers = {**self._auth_headers(), 'Content-Type': 'text/plain'}
         resp = requests.post(url, headers=headers, data=base64.b64encode(raw_mime_bytes), timeout=60)

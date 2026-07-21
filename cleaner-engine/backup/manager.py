@@ -229,7 +229,7 @@ class BackupManager:
 
         with NamedTemporaryFile(suffix=".eml.zip") as tmp:
             with zipfile.ZipFile(tmp.name, "w", compression=zipfile.ZIP_STORED) as archive:
-                for message_id, raw_mime in provider.export_messages(message_ids):
+                for message_id, raw_mime, label_ids in provider.export_messages(message_ids):
                     if not isinstance(raw_mime, bytes):
                         raise TypeError(f"export_messages returned non-bytes for {message_id}")
                     digest = hashlib.sha256(raw_mime).hexdigest()
@@ -240,11 +240,14 @@ class BackupManager:
                         "file": filename,
                         "bytes": len(raw_mime),
                         "sha256": digest,
+                        # Provider label/read/star state, so restore re-applies it. Absent
+                        # on legacy (<=2.0) archives → restore just imports without labels.
+                        "labels": list(label_ids or []),
                     })
                     total_bytes += len(raw_mime)
 
                 manifest = {
-                    "version": "2.0",
+                    "version": "2.1",
                     "format": "eml_zip",
                     "created_at": created_at,
                     "query": query,
@@ -340,7 +343,9 @@ class BackupManager:
                         digest = hashlib.sha256(data).hexdigest()
                         if digest != entry.get("sha256"):
                             raise ValueError("sha256 mismatch")
-                        provider.import_message(data)
+                        # Re-apply the archived label/read/star state (v2.1+). Legacy
+                        # archives have no "labels" → None → plain import (unchanged).
+                        provider.import_message(data, label_ids=entry.get("labels"))
                         restored += 1
                     except Exception as e:
                         failed.append({"id": str(entry.get("id", "")), "error": str(e)})
