@@ -570,6 +570,7 @@ export class MailController {
       attachments: attachments.length
         ? attachments.map((a) => ({ blobId: a.blob_id, name: a.name, type: a.type }))
         : undefined,
+      inReplyToMessageId: body.in_reply_to ?? null,
     });
   }
 
@@ -594,6 +595,7 @@ export class MailController {
       attachments: attachments.length
         ? attachments.map((a) => ({ blobId: a.blob_id, name: a.name, type: a.type }))
         : undefined,
+      inReplyToMessageId: body.in_reply_to ?? null,
     });
   }
 

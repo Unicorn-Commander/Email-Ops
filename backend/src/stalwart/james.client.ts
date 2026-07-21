@@ -364,6 +364,13 @@ export class JamesClient extends StalwartPort {
         name: a.name,
       }));
     }
+    // Thread the draft: JMAP Email.inReplyTo / references are arrays of bare RFC
+    // Message-IDs (angle brackets stripped) — mirrors the send lane so James groups a
+    // saved reply-draft under its conversation.
+    if (draft.inReplyTo) outbound.inReplyTo = [draft.inReplyTo.replace(/^<|>$/g, '')];
+    if (draft.references?.length) {
+      outbound.references = draft.references.map((r) => r.replace(/^<|>$/g, ''));
+    }
     return outbound;
   }
 

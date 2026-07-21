@@ -180,7 +180,10 @@ export const ReplyComposer = forwardRef<
       body_html: body.trim() || undefined,
       ...(cc.length > 0 ? { cc } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
-      ...(inReplyTo ? { in_reply_to_thread_id: inReplyTo } : {}),
+      // inReplyTo is the MESSAGE id being replied to — send it as in_reply_to (the
+      // header hint the backend resolves), NOT in_reply_to_thread_id. The backend
+      // resolves it to In-Reply-To/References so a saved reply-draft threads.
+      ...(inReplyTo ? { in_reply_to: inReplyTo } : {}),
       ...(draftId ? { draft_id: draftId } : {}),
     };
     setDraftSaving(true);

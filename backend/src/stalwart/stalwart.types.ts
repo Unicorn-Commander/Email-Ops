@@ -228,6 +228,10 @@ export interface StalwartDraftRequest {
   cc?: string[];
   bcc?: string[];
   attachments?: { blobId: string; name: string; type: string }[];
+  /** RFC Message-ID of the message being replied to (In-Reply-To header). */
+  inReplyTo?: string | null;
+  /** The References header chain (oldest first). */
+  references?: string[];
 }
 
 /** One newly-arrived inbound message the watcher must classify. */

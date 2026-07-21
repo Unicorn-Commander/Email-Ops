@@ -245,4 +245,19 @@ describe('MailController (webmail wave)', () => {
       ).rejects.toBeInstanceOf(BadRequestException);
     });
   });
+
+  describe('POST .../drafts', () => {
+    it('createDraft carries in_reply_to through to saveOrUpdateDraft as inReplyToMessageId (draft threading)', async () => {
+      const saveOrUpdateDraft = jest.fn().mockResolvedValue({ draft_id: 'd1', updated: true });
+      await make({ saveOrUpdateDraft }).createDraft(WS, user(), 'mb-1', {
+        to_address: 'a@acme.test',
+        subject: 'Re: hi',
+        body: 'draft body',
+        in_reply_to: 'internal-msg-id-1',
+      } as never);
+      // saveOrUpdateDraft(workspaceId, ucUid, mailboxId, draftId, draftReq)
+      const draftReq = saveOrUpdateDraft.mock.calls[0][4];
+      expect(draftReq.inReplyToMessageId).toBe('internal-msg-id-1');
+    });
+  });
 });

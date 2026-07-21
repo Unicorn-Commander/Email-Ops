@@ -138,6 +138,9 @@ interface DraftReq {
   cc?: string[];
   bcc?: string[];
   attachments?: { blobId: string; name: string; type: string }[];
+  /** Internal id of the message being replied to — resolved to In-Reply-To /
+   *  References headers so a saved reply-draft threads under the conversation. */
+  inReplyToMessageId?: string | null;
 }
 
 /** The result callEngine() returns (normalized across Stalwart + provider). */
@@ -1147,6 +1150,24 @@ export class EmailService {
     if (!mailbox || this.mailProvider.handles(mailbox)) {
       return { draft_id: draftId, updated: false };
     }
+    // A reply draft carries the internal id of the message it answers; resolve it to
+    // real In-Reply-To / References headers (the same path the send lane uses) so James
+    // threads the draft under the conversation. Degrade-clean: unresolved → no headers,
+    // the draft still saves (just un-threaded), never throws.
+    let inReplyTo: string | null = null;
+    let references: string[] | undefined;
+    if (payload.inReplyToMessageId) {
+      const resolved = await this.resolveReplyHeaders(
+        mailbox,
+        payload.inReplyToMessageId,
+        workspaceId,
+        ucUid,
+      );
+      if (resolved?.messageIdHeader) {
+        inReplyTo = resolved.messageIdHeader;
+        references = resolved.references ?? undefined;
+      }
+    }
     const draft: StalwartDraftRequest = {
       fromAddress: mailbox.emailAddress,
       fromName: mailbox.displayName ?? null,
@@ -1160,6 +1181,8 @@ export class EmailService {
       attachments: payload.attachments?.length
         ? payload.attachments.map((a) => ({ blobId: a.blobId, name: a.name, type: a.type }))
         : undefined,
+      inReplyTo,
+      references,
     };
     const result = draftId
       ? await this.stalwart.updateDraft(mailbox.emailAddress, draftId, draft)
