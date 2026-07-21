@@ -24,6 +24,10 @@ DB_USER="email_ops_admin"     # OWNER role (BYPASSRLS)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Off-box S3/Garage config (bucket, endpoint, key) — mode-600, gitignored.
 [ -f "${SCRIPT_DIR}/.backup.env" ] && { set -a; . "${SCRIPT_DIR}/.backup.env"; set +a; }
+# Fleet encryption lib (P-00084/00956ffc): dumps leave this script only as
+# AES-256 .dump.gpg. Passphrase /home/deploy/.fleet-backup-pass; escrow:
+# Vaultwarden "UC fleet — DB backup passphrase (your-prod-host+your-host)".
+source /home/deploy/backup-lib.sh
 
 BACKUP_DIR="/home/deploy/backups/email-ops-db/${S3_PREFIX}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-14}"
@@ -37,17 +41,13 @@ command -v docker >/dev/null 2>&1 || fail "docker not on PATH"
 docker inspect "${CONTAINER}" >/dev/null 2>&1 || fail "container ${CONTAINER} not found"
 mkdir -p "${BACKUP_DIR}"
 
-log "pg_dump ${DB_NAME} (role ${DB_USER}) from ${CONTAINER}..."
-if ! docker exec "${CONTAINER}" \
-      pg_dump --format=custom --no-owner --no-privileges -U "${DB_USER}" "${DB_NAME}" > "${BACKUP_FILE}"; then
-  rm -f "${BACKUP_FILE}"; fail "pg_dump non-zero"
+log "pg_dump ${DB_NAME} (role ${DB_USER}) from ${CONTAINER} (encrypted)..."
+# dump_encrypted verifies per run: full decrypt (gpg MDC) + pg_restore --list
+# in the db container. Unverified output is deleted and the run fails.
+if ! dump_encrypted "email-ops-${S3_PREFIX}" "${CONTAINER}" "${BACKUP_DIR}" "${DB_USER}" "${DB_NAME}" "emailops_${TS}.dump"; then
+  fail "encrypted dump failed"
 fi
-SIZE="$(stat -c%s "${BACKUP_FILE}" 2>/dev/null || echo 0)"
-[ "${SIZE}" -lt 512 ] && { rm -f "${BACKUP_FILE}"; fail "dump too small (${SIZE}B)"; }
-# TOC integrity — pg_restore --list must parse the custom-format header.
-if ! docker run --rm -i postgres:16-bookworm pg_restore --list < "${BACKUP_FILE}" >/dev/null 2>&1; then
-  fail "dump failed pg_restore --list integrity check"
-fi
+BACKUP_FILE="${DUMP_ENCRYPTED_ARTIFACT}"
 log "dump OK: ${BACKUP_FILE} ($(du -h "${BACKUP_FILE}" | cut -f1))"
 
 # Off-box push to Garage (aws-cli container joins unicorn-network to reach it).
@@ -81,6 +81,6 @@ if [ -n "${BACKUP_OFFSITE_SSH:-}" ]; then
   fi
 fi
 
-DEL="$(find "${BACKUP_DIR}" -name 'emailops_*.dump' -mtime +"${RETENTION_DAYS}" -print -delete 2>/dev/null | wc -l | tr -d ' ')"
+DEL="$(find "${BACKUP_DIR}" \( -name 'emailops_*.dump' -o -name 'emailops_*.dump.gpg' \) -mtime +"${RETENTION_DAYS}" -print -delete 2>/dev/null | wc -l | tr -d ' ')"
 [ "${DEL}" -gt 0 ] && log "rotated ${DEL} old dump(s)"
-log "done. $(find "${BACKUP_DIR}" -name 'emailops_*.dump' | wc -l | tr -d ' ') local dump(s) retained"
+log "done. $(find "${BACKUP_DIR}" \( -name 'emailops_*.dump' -o -name 'emailops_*.dump.gpg' \) | wc -l | tr -d ' ') local dump(s) retained"

@@ -6,6 +6,10 @@
 # + tarballs, verified, rotated, pushed OFF-DEVICE to your-prod-host over Tailscale.
 # =============================================================================
 set -euo pipefail
+# Fleet encryption lib (P-00084/00956ffc): the pg dump leaves this script only
+# as AES-256 .dump.gpg. Passphrase /home/deploy/.fleet-backup-pass; escrow:
+# Vaultwarden "UC fleet — DB backup passphrase (your-prod-host+your-host)".
+source /home/deploy/backup-lib.sh
 TS="$(date +%Y%m%d-%H%M%S)"
 DIR="/home/deploy/backups/james"
 OFFSITE_SSH="deploy@your-prod-host"
@@ -17,13 +21,13 @@ fail(){ log "ERROR: $*"; exit 1; }
 
 docker inspect james-dev-postgres >/dev/null 2>&1 || fail "james-dev-postgres not found"
 
-# 1. Postgres dump (mailboxes + message blobs)
-PGF="${DIR}/james-pg_${TS}.dump"
-if ! docker exec james-dev-postgres sh -lc 'pg_dump --format=custom --no-owner --no-privileges -U "$POSTGRES_USER" "$POSTGRES_DB"' > "${PGF}"; then
-  rm -f "${PGF}"; fail "pg_dump non-zero"
+# 1. Postgres dump (mailboxes + message blobs) — encrypted + verified by the
+# lib (full decrypt MDC + pg_restore --list inside james-dev-postgres);
+# user/db resolved from the container's POSTGRES_USER/POSTGRES_DB env.
+if ! dump_encrypted "james-pg" "james-dev-postgres" "${DIR}" "" "" "james-pg_${TS}.dump"; then
+  fail "encrypted pg dump failed"
 fi
-[ "$(stat -c%s "${PGF}" 2>/dev/null || echo 0)" -lt 512 ] && { rm -f "${PGF}"; fail "dump too small"; }
-docker run --rm -i postgres:16-bookworm pg_restore --list < "${PGF}" >/dev/null 2>&1 || fail "toc integrity check failed"
+PGF="${DUMP_ENCRYPTED_ARTIFACT}"
 log "pg dump OK: ${PGF} ($(du -h "${PGF}" | cut -f1))"
 
 # 2. Config (Sieve scripts, keystores, mailetcontainer, etc.) — muut-owned bind mount
@@ -52,4 +56,4 @@ fi
 
 # 5. Rotate
 find "${DIR}" -name 'james-*' -mtime +"${RETENTION_DAYS}" -delete 2>/dev/null || true
-log "done. $(find "${DIR}" -name 'james-pg_*.dump' | wc -l | tr -d ' ') pg dump(s) retained"
+log "done. $(find "${DIR}" -name 'james-pg_*.dump*' | wc -l | tr -d ' ') pg dump(s) retained"
