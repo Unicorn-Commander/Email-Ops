@@ -300,6 +300,7 @@ def _analyze_inbox(provider: Any, request_id: Any, progress_callback) -> dict[st
             query="",
             max_results=100,
             page_token=page_token,
+            folder="inbox",
         )
         for msg in messages:
             all_messages.append(_dataclass_to_dict(msg))
@@ -358,6 +359,15 @@ def _analyze_inbox(provider: Any, request_id: Any, progress_callback) -> dict[st
     except Exception as e:
         logger.warning("AI recommendations failed (continuing without): %s", e)
         analysis["recommendations"] = []
+
+    # Report AI status honestly: the LLM is only "ready" if it actually produced
+    # something. When every categorization batch fails to parse and no recommendation
+    # comes back, the model effectively did not run — say so, rather than letting the
+    # UI paint a green "AI ready" over an empty result.
+    if analysis.get("ai_categories") or analysis.get("recommendations"):
+        analysis["ai_status"] = "ai_ready"
+    else:
+        analysis["ai_status"] = "ai_unavailable"
 
     progress_callback(request_id, "done", 100, "Analysis complete")
     return analysis

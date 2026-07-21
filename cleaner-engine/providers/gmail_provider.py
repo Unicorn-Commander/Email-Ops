@@ -201,10 +201,16 @@ class GmailProvider(EmailProvider):
         query: str = '',
         max_results: int = 100,
         page_token: Optional[str] = None,
+        folder: Optional[str] = None,
     ) -> Tuple[List[EmailMessage], Optional[str]]:
+        effective_query = query
+        if folder:
+            folder_q = _FOLDER_QUERY.get(folder, '')
+            effective_query = f'{folder_q} {query}'.strip() if query else folder_q
+
         result = self.service.users().messages().list(
             userId='me',
-            q=query,
+            q=effective_query,
             maxResults=min(max_results, 500),
             pageToken=page_token,
         ).execute(num_retries=3)

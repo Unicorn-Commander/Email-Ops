@@ -191,6 +191,7 @@ class MicrosoftGraphProvider(EmailProvider):
         query: str = '',
         max_results: int = 100,
         page_token: Optional[str] = None,
+        folder: Optional[str] = None,
     ) -> Tuple[List[EmailMessage], Optional[str]]:
         params: Dict[str, Any] = {
             '$top': min(max_results, 50),  # Graph limit per page
@@ -201,13 +202,21 @@ class MicrosoftGraphProvider(EmailProvider):
         if query:
             params['$filter'] = self.translate_query(query)
 
+        # Scope to a mail folder the Graph-correct way (an OData path segment),
+        # rather than a $filter — /me/messages spans every folder incl. Sent.
+        if folder:
+            folder_id = _FOLDER_ID.get(folder, folder)
+            endpoint = f'/me/mailFolders/{folder_id}/messages'
+        else:
+            endpoint = '/me/messages'
+
         if page_token:
             # page_token is a full URL for Graph API
             resp = requests.get(page_token, headers=self._headers(), timeout=30)
             resp.raise_for_status()
             data = resp.json()
         else:
-            data = self._graph_get('/me/messages', params=params)
+            data = self._graph_get(endpoint, params=params)
 
         messages = []
         for msg in data.get('value', []):

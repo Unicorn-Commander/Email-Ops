@@ -139,56 +139,86 @@ class LLMAnalyzer:
             raise
 
     def _parse_json_response(self, response: str) -> Any:
-        """Parse a JSON response from the model, handling markdown code blocks."""
+        """Parse a JSON response from the model, tolerating markdown fences, prose
+        around the JSON, and trailing commas. Raises json.JSONDecodeError if no
+        valid JSON can be recovered."""
         text = response.strip()
 
+        # Strip a leading ```json / ``` fence and its closing ```.
         if text.startswith("```"):
-            lines = text.split("\n")
-            lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines)
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.rstrip().endswith("```"):
+                text = text.rstrip()[:-3]
+            text = text.strip()
 
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Recover the outermost JSON array/object emitted amid prose, dropping any
+        # trailing comma a local model may slip in before a closing bracket.
+        match = re.search(r"(\[.*\]|\{.*\})", text, re.S)
+        if not match:
+            raise json.JSONDecodeError("No JSON found in model response", text, 0)
+        candidate = re.sub(r",(\s*[\]}])", r"\1", match.group(1))
+        return json.loads(candidate)
+
+    # Categorize at most this many emails per model call. Small batches keep each
+    # response well under max_tokens (a local model silently truncates a long JSON
+    # array, which then fails to parse) and bound a single parse failure to one chunk.
+    _CATEGORIZE_BATCH = 15
 
     def categorize_emails(self, emails: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Categorize a batch of emails using the LLM.
+        """Categorize emails using the LLM, in small batches.
+
+        Only metadata (id, sender, subject) is ever sent to the model — never the
+        message body or snippet, honoring the "metadata only" promise. Emails whose
+        batch fails to categorize are omitted from the result (a partial list), never
+        back-filled with a fabricated "unknown" verdict: an empty result is what lets
+        the caller honestly report that AI categorization did not run.
 
         Args:
-            emails: List of email dicts with at least 'id', 'subject', 'sender', 'snippet'.
+            emails: List of email dicts with at least 'id', 'subject', 'sender'.
 
         Returns:
-            List of dicts with 'id', 'category', 'confidence', 'reason'.
+            List of dicts with 'id', 'category', 'confidence', 'reason' — one per
+            successfully categorized email. May be shorter than the input (or empty).
         """
         from ai.prompts import CATEGORIZER_PROMPT
 
-        summaries = []
-        for email in emails:
-            summaries.append({
-                "id": email.get("id", ""),
-                "from": email.get("sender", ""),
-                "subject": email.get("subject", ""),
-                "snippet": email.get("snippet", "")[:200],
-            })
-
-        prompt = (
-            "Categorize these emails:\n\n"
-            + json.dumps(summaries, indent=2, ensure_ascii=False)
-        )
-
-        try:
-            response = self._generate(prompt, system_prompt=CATEGORIZER_PROMPT)
-            results = self._parse_json_response(response)
-            if isinstance(results, list):
-                return results
-            logger.warning("Unexpected categorization response format: %s", type(results))
-            return []
-        except (json.JSONDecodeError, Exception) as e:
-            logger.error("Failed to categorize emails: %s", e)
-            return [
-                {"id": email.get("id", ""), "category": "unknown", "confidence": 0.0, "reason": "categorization failed"}
-                for email in emails
+        results: list[dict[str, Any]] = []
+        for start in range(0, len(emails), self._CATEGORIZE_BATCH):
+            batch = emails[start:start + self._CATEGORIZE_BATCH]
+            summaries = [
+                {
+                    "id": email.get("id", ""),
+                    "from": email.get("sender", ""),
+                    "subject": email.get("subject", ""),
+                }
+                for email in batch
             ]
+            prompt = (
+                "Categorize these emails:\n\n"
+                + json.dumps(summaries, indent=2, ensure_ascii=False)
+            )
+
+            try:
+                response = self._generate(prompt, system_prompt=CATEGORIZER_PROMPT)
+                parsed = self._parse_json_response(response)
+            except Exception as e:  # noqa: BLE001 — degrade clean: keep the other batches
+                logger.warning(
+                    "Categorization batch [%d:%d] failed (skipping, not back-filling): %s",
+                    start, start + len(batch), e,
+                )
+                continue
+
+            if isinstance(parsed, list):
+                results.extend(item for item in parsed if isinstance(item, dict))
+            else:
+                logger.warning("Unexpected categorization response format: %s", type(parsed))
+
+        return results
 
     def generate_recommendations(
         self, stats: dict[str, Any], emails: list[dict[str, Any]]

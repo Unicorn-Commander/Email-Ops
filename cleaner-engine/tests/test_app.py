@@ -55,8 +55,8 @@ class FakeProvider:
             storage_used_bytes=6789,
         )
 
-    def list_messages(self, query: str = "", max_results: int = 100, page_token: str | None = None):
-        self.calls.append(("list_messages", (), {"query": query, "max_results": max_results, "page_token": page_token}))
+    def list_messages(self, query: str = "", max_results: int = 100, page_token: str | None = None, folder: str | None = None):
+        self.calls.append(("list_messages", (), {"query": query, "max_results": max_results, "page_token": page_token, "folder": folder}))
         if page_token == "page-2":
             return ([EmailMessage(id="msg-3", subject="Message 3", sender="sender3@example.com", snippet="Snippet 3")], None)
         messages = [

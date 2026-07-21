@@ -93,8 +93,13 @@ class EmailProvider(ABC):
         query: str = '',
         max_results: int = 100,
         page_token: Optional[str] = None,
+        folder: Optional[str] = None,
     ) -> Tuple[List[EmailMessage], Optional[str]]:
         """List messages matching a query.
+
+        folder: optional canonical folder to scope to ('inbox', 'sent', ...). When
+        given, results are restricted to that folder in a provider-correct way
+        (Gmail label query vs. Graph mailFolders), independent of ``query``.
         Returns (messages, next_page_token).
         """
         ...
