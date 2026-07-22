@@ -8,7 +8,14 @@ import { Skeleton } from '@/components/ui';
 export default function Home() {
   const router = useRouter();
   useEffect(() => {
-    router.replace(isAuthenticated() ? '/dashboard' : '/auth/login');
+    if (isAuthenticated()) {
+      router.replace('/dashboard');
+    } else {
+      // Public front door: the marketing landing is a self-contained static page
+      // served from /public, outside the app shell. A hard navigation (not the
+      // SPA router) loads it so its own document/styles fully take over.
+      window.location.replace('/landing.html');
+    }
   }, [router]);
 
   return (
