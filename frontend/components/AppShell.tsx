@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Magic Unicorn Unconventional Technology & Stuff Inc.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 'use client';
 
 import Link from 'next/link';
@@ -35,10 +37,14 @@ export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const isAuthRoute = pathname?.startsWith('/auth');
+  // The root "/" is the public front door: page.tsx decides landing-vs-dashboard.
+  // Treat it (and the /auth pages) as public so the shell's login guard doesn't
+  // bounce a logged-out visitor to /auth/login before the landing redirect runs.
+  const isPublicRoute = isAuthRoute || pathname === '/';
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    if (isAuthRoute) {
+    if (isPublicRoute) {
       setReady(true);
       return;
     }
@@ -47,9 +53,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       return;
     }
     setReady(true);
-  }, [isAuthRoute, router]);
+  }, [isPublicRoute, router]);
 
-  if (isAuthRoute) {
+  if (isPublicRoute) {
     return <>{children}</>;
   }
 

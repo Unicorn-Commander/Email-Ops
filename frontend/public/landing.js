@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Magic Unicorn Unconventional Technology & Stuff Inc.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 (() => {
   // 30 rotating headlines — the payoff of each is wrapped in <em> so it renders
   // in the signature purple→pink→gold gradient. One is chosen at random on every
@@ -82,4 +84,60 @@
   const header = document.querySelector('.site-header');
   menu?.addEventListener('click',()=>{const open=header.classList.toggle('open');menu.setAttribute('aria-expanded',String(open))});
   header?.querySelectorAll('nav a').forEach(a=>a.addEventListener('click',()=>{header.classList.remove('open');menu?.setAttribute('aria-expanded','false')}));
+
+  // --- 06 · capability detail cards ---
+  const CAP = {
+    'mail-engine':{n:'01',icon:'@',c:'#7c4dff',title:'Sovereign mail engine',
+      tag:'You own the mail plane — your domain, your mailboxes, your data — instead of renting an inbox from a provider that quietly reads it.',
+      means:'Email-Ops can run a real mail server for your domain, or ride on the one you already have. Either way the identities, policy, and audit live in one system you control.',
+      stack:['Apache James (JMAP + SMTP)','Your own domain','DKIM · SPF · DMARC aligned','Postmark or your own relay','Managed or self-hosted'],
+      points:['Real MX — not a forwarding hack','Per-domain isolation','Bring-your-own or fully managed']},
+    'approvals':{n:'02',icon:'✓',c:'#43e0ad',title:'Approval-gated sending',
+      tag:'Nothing an agent writes leaves without the authority level you set. Draft → review → approve → send, every step recorded.',
+      means:'Each agent gets an autonomy level. Low-trust agents can only draft; earned trust lets messages move; everything stays on an audit trail you can replay.',
+      stack:['Agent Inbox approval queue','L0 · draft-only','L1 · approve-to-send','L2 · autonomous + audit','Full audit trail'],
+      points:['Trust set per agent','Edit before you approve','Every decision reversible + logged']},
+    'cleanup':{n:'03',icon:'⌁',c:'#50a7ff',title:'Connected inbox cleanup',
+      tag:'Point Email-Ops at the Gmail or Microsoft inbox you already have — it triages and proposes cleanup, but stages every destructive action for your review.',
+      means:'Connect an external mailbox with a brokered token. The stateless Cleaner Engine analyzes it metadata-first and plans batches; deletes and moves wait in the approval queue.',
+      stack:['Google + Microsoft OAuth (brokered)','Stateless Cleaner Engine','Metadata-first analysis','Staged, reviewable batches'],
+      points:['Read-fence on by default','Plan before anything is deleted','Unsubscribe + organize in bulk']},
+    'policy':{n:'04',icon:'⊘',c:'#ffd032',title:'Sender policy',
+      tag:'Decide who can reach a mailbox — and who an agent is allowed to reach — at the address or domain level.',
+      means:'Sender policy applies allow / block rules across triage and filtering, per identity, before an agent ever acts on a message.',
+      stack:['Allow / block rules','Address- or domain-level','Inbound + outbound','Per-mailbox + per-agent'],
+      points:['Stops a runaway Reply-All','Applied before agents act','Same rules on every identity']},
+    'mcp':{n:'05',icon:'M',c:'#e06acb',title:'MCP-native operation',
+      tag:'Agents don\'t screen-scrape your email — they call real, governed tools. Email-Ops is a first-class MCP server.',
+      means:'Mail, threads, cleanup, policy, provisioning, the agent inbox, and even UI actions are exposed as typed MCP tools that enforce the same permissions as the interface.',
+      stack:['Native MCP server','Typed tools, not scraping','Same RBAC as the UI','Works with Claude + any MCP client'],
+      points:['Drop into any agent stack','No brittle automation','Governed by the same policy']},
+    'health':{n:'06',icon:'◎',c:'#b052ff',title:'Health + audit',
+      tag:'One operational view of what the engine is doing, what is queued, what failed, and who did what. Email as an operations discipline, not a mystery.',
+      means:'See engine and queue health, failed sends, approvals, and agent state in one place — with an immutable history of every action for audit.',
+      stack:['Live engine + queue health','Failed-send surfacing','Approval + agent state','Immutable audit log'],
+      points:['Know the moment delivery breaks','Nothing happens off the record','Operational history you can replay']}
+  };
+  const capModal = document.querySelector('.cap-modal');
+  const capBody = capModal && capModal.querySelector('.cap-modal-body');
+  const openCap = key => {
+    const d = CAP[key]; if(!d || !capModal || !capBody) return;
+    capModal.style.setProperty('--c', d.c);
+    capBody.innerHTML =
+      '<div class="cm-top"><div class="cm-icon">'+d.icon+'</div><div><div class="cm-num">'+d.n+' / CAPABILITY</div><h3>'+d.title+'</h3></div></div>'+
+      '<p class="cm-tag">'+d.tag+'</p>'+
+      '<h4>What it means</h4><p class="cm-means">'+d.means+'</p>'+
+      '<h4>What runs under it</h4><div class="cm-stack">'+d.stack.map(s=>'<span>'+s+'</span>').join('')+'</div>'+
+      '<h4>In practice</h4><ul class="cm-points">'+d.points.map(p=>'<li>'+p+'</li>').join('')+'</ul>';
+    capModal.showModal();
+  };
+  document.querySelectorAll('.cap-card[data-cap]').forEach(card => {
+    const key = card.dataset.cap;
+    card.addEventListener('click', () => openCap(key));
+    card.addEventListener('keydown', e => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openCap(key); } });
+  });
+  capModal?.querySelector('.cap-modal-close')?.addEventListener('click', ()=>capModal.close());
+  capModal?.addEventListener('click', e => { if(e.target===capModal) capModal.close(); });
+
+  window.__eoReady = 1; // signals the safety-net (in landing.html) that this script ran fully
 })();

@@ -1,3 +1,5 @@
+<!-- SPDX-FileCopyrightText: 2026 Magic Unicorn Unconventional Technology & Stuff Inc.
+SPDX-License-Identifier: AGPL-3.0-or-later -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -6,6 +8,21 @@
   <meta name="description" content="Email-Ops is the operational control plane for human, shared, and AI-agent email. Managed cloud, enterprise deployments, and open-source self-hosting.">
   <meta name="theme-color" content="#09090d">
   <title>Email-Ops — Email with a chain of command</title>
+  <link rel="canonical" href="https://email-ops.unicorncommander.ai/">
+  <link rel="icon" type="image/png" href="/landing-assets/email-ops-unicorn.png">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Email-Ops">
+  <meta property="og:url" content="https://email-ops.unicorncommander.ai/">
+  <meta property="og:title" content="Email-Ops — Email with a chain of command">
+  <meta property="og:description" content="The operational control plane for human, shared, and AI-agent email. Agents draft, humans govern, every send is audited — managed, enterprise, or open-source self-hosted.">
+  <meta property="og:image" content="https://email-ops.unicorncommander.ai/landing-assets/og-image.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Email-Ops — email with a chain of command. Agents draft, humans govern, every send audited.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Email-Ops — Email with a chain of command">
+  <meta name="twitter:description" content="Agents draft. Humans govern. Every send audited. The operational layer between your inbox and everything waiting on it.">
+  <meta name="twitter:image" content="https://email-ops.unicorncommander.ai/landing-assets/og-image.jpg">
   <link rel="stylesheet" href="/landing.css">
 </head>
 <body>
@@ -15,7 +32,7 @@
 
   <header class="site-header">
     <a class="brand" href="#top" aria-label="Email-Ops home">
-      <span class="brand-glyph" aria-hidden="true"><i></i></span>
+      <img class="brand-mark" src="/landing-assets/email-ops-unicorn.png" alt="" aria-hidden="true">
       <span>Email-Ops</span>
       <small>by Magic Unicorn</small>
     </a>
@@ -38,7 +55,7 @@
         <div class="hero-copy reveal">
           <div class="status-line"><span class="live-dot"></span> The operational layer between your inbox and the people, agents, and systems waiting on it.</div>
           <p class="hero-overline">Email operations for humans + agents</p>
-          <h1 id="rotating-headline">Email with a <em>chain of command.</em></h1>
+          <h1 id="rotating-headline" aria-live="polite">Email with a <em>chain of command.</em></h1>
           <p class="hero-description">One control plane for personal, shared, and agent mailboxes. Let agents triage and draft. Decide what requires approval. Keep every action visible, reversible, and accountable.</p>
           <div class="hero-cta-row">
             <a class="pill-button" href="#deploy">Choose your deployment <span>↘</span></a>
@@ -95,7 +112,7 @@
         <p class="kicker light">Before Email-Ops</p>
         <h2>Six services in a trench coat pretending to be an email strategy.</h2>
         <div class="service-stack" aria-hidden="true">
-          <span>MAIL HOST</span><span>SMTP RELAY</span><span>INBOX CLEANER</span><span>AUTOMATION</span><span>AI WRITER</span><span>SPAM POLICY</span><span>CRM GLUE</span>
+          <span>MAIL HOST</span><span>SMTP RELAY</span><span>INBOX CLEANER</span><span>AUTOMATION</span><span>AI WRITER</span><span>SPAM POLICY</span>
         </div>
       </div>
       <div class="collapse-line reveal" data-delay="1"><span></span><b>COLLAPSE THE STACK</b><span></span></div>
@@ -185,14 +202,15 @@
       <div class="cap-head reveal">
         <div class="section-count">06 / ONE OPERATING LAYER</div>
         <h2>Not another inbox skin.<br><span>The machinery underneath.</span></h2>
+        <p class="cap-hint">Tap any layer — see what it means, and what runs under it.</p>
       </div>
       <div class="cap-grid">
-        <article class="cap-card reveal"><span>01</span><div class="cap-icon">@</div><h3>Sovereign mail engine</h3><p>Run your own domain and mail infrastructure with Stalwart or Apache James, or let us operate it for you.</p></article>
-        <article class="cap-card reveal" data-delay="1"><span>02</span><div class="cap-icon">✓</div><h3>Approval-gated sending</h3><p>Draft, review, edit, approve, reject, and audit agent-authored messages before they leave.</p></article>
-        <article class="cap-card reveal" data-delay="2"><span>03</span><div class="cap-icon">⌁</div><h3>Connected inbox cleanup</h3><p>Analyze Gmail and Microsoft mailboxes, plan cleanup batches, then stage actions for human review.</p></article>
-        <article class="cap-card reveal"><span>04</span><div class="cap-icon">⊘</div><h3>Sender policy</h3><p>Apply allow and block rules at the address or domain level across triage and filtering workflows.</p></article>
-        <article class="cap-card reveal" data-delay="1"><span>05</span><div class="cap-icon">M</div><h3>MCP-native operation</h3><p>Expose mail, thread, cleanup, policy, provisioning, and UI actions as tools agents can actually use.</p></article>
-        <article class="cap-card reveal" data-delay="2"><span>06</span><div class="cap-icon">◎</div><h3>Health + audit</h3><p>See engine status, queue backlog, failed sends, approvals, agent state, and operational history.</p></article>
+        <article class="cap-card reveal" data-cap="mail-engine" style="--c:#7c4dff" role="button" tabindex="0" aria-haspopup="dialog"><span>01</span><div class="cap-icon">@</div><h3>Sovereign mail engine</h3><p>Run your own domain and mail infrastructure on Apache James, or let us operate it for you.</p><span class="cap-more">See what runs under it →</span></article>
+        <article class="cap-card reveal" data-delay="1" data-cap="approvals" style="--c:#43e0ad" role="button" tabindex="0" aria-haspopup="dialog"><span>02</span><div class="cap-icon">✓</div><h3>Approval-gated sending</h3><p>Draft, review, edit, approve, reject, and audit agent-authored messages before they leave.</p><span class="cap-more">See what runs under it →</span></article>
+        <article class="cap-card reveal" data-delay="2" data-cap="cleanup" style="--c:#50a7ff" role="button" tabindex="0" aria-haspopup="dialog"><span>03</span><div class="cap-icon">⌁</div><h3>Connected inbox cleanup</h3><p>Analyze Gmail and Microsoft mailboxes, plan cleanup batches, then stage actions for human review.</p><span class="cap-more">See what runs under it →</span></article>
+        <article class="cap-card reveal" data-cap="policy" style="--c:#ffd032" role="button" tabindex="0" aria-haspopup="dialog"><span>04</span><div class="cap-icon">⊘</div><h3>Sender policy</h3><p>Apply allow and block rules at the address or domain level across triage and filtering workflows.</p><span class="cap-more">See what runs under it →</span></article>
+        <article class="cap-card reveal" data-delay="1" data-cap="mcp" style="--c:#e06acb" role="button" tabindex="0" aria-haspopup="dialog"><span>05</span><div class="cap-icon">M</div><h3>MCP-native operation</h3><p>Expose mail, thread, cleanup, policy, provisioning, and UI actions as tools agents can actually use.</p><span class="cap-more">See what runs under it →</span></article>
+        <article class="cap-card reveal" data-delay="2" data-cap="health" style="--c:#b052ff" role="button" tabindex="0" aria-haspopup="dialog"><span>06</span><div class="cap-icon">◎</div><h3>Health + audit</h3><p>See engine status, queue backlog, failed sends, approvals, agent state, and operational history.</p><span class="cap-more">See what runs under it →</span></article>
       </div>
     </section>
 
@@ -222,8 +240,8 @@
         <article class="deploy-card reveal" data-delay="2" id="source">
           <div class="ticket-top"><span>03</span><b>OPEN SOURCE</b></div>
           <h3>Self-hosted edition</h3>
-          <p>Inspect it, extend it, integrate it, and run it on your own infrastructure. Community packaging and final license terms will accompany release.</p>
-          <ul><li>Source-available development</li><li>Self-hostable architecture</li><li>MCP-native integration</li><li>Community contribution path</li></ul>
+          <p>Inspect it, extend it, integrate it, and run it on infrastructure you control. Licensed AGPL-3.0, with a commercial option — full source publishes to Forgejo and mirrors to GitHub at launch.</p>
+          <ul><li>AGPL-3.0 + commercial license</li><li>Self-hostable architecture</li><li>MCP-native integration</li><li>Contributor path (CLA)</li></ul>
           <a href="#contact">Follow the release <span>↗</span></a>
         </article>
       </div>
@@ -265,14 +283,40 @@
       </div>
     </section>
 
+    <section class="compare section-pad">
+      <div class="compare-head reveal">
+        <div class="section-count light">10 / HOW WE COMPARE</div>
+        <h2>Everyone can draft.<br><span>Almost no one governs.</span></h2>
+        <p>AI email is table stakes now — Gmail, Outlook, Superhuman, Shortwave, and Front all draft. What none of them put in one platform: agents that answer to an approval queue, their own sending identities, a mail engine you actually own, and open source. <em>Landscape as of July 2026.</em></p>
+      </div>
+      <div class="compare-wrap reveal" data-delay="1">
+        <table class="compare-table">
+          <thead>
+            <tr><th scope="col">Capability</th><th scope="col" class="us">Email-Ops</th><th scope="col">Google Workspace</th><th scope="col">Microsoft 365</th><th scope="col">Superhuman</th><th scope="col">Shortwave</th><th scope="col">Front</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">AI drafting &amp; assist</th><td class="us"><i class="y">✓</i></td><td><i class="y">✓</i></td><td><i class="y">✓</i></td><td><i class="y">✓</i></td><td><i class="y">✓</i></td><td><i class="y">✓</i></td></tr>
+            <tr><th scope="row">Autonomous email agents</th><td class="us"><i class="y">✓</i></td><td><i class="p">~</i></td><td><i class="p">~</i></td><td><i class="p">~</i></td><td><i class="y">✓</i></td><td><i class="y">✓</i></td></tr>
+            <tr class="win"><th scope="row">Approval gate before an agent sends</th><td class="us"><i class="y">✓</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td></tr>
+            <tr class="win"><th scope="row">Per-agent identities &amp; autonomy levels</th><td class="us"><i class="y">✓</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td></tr>
+            <tr class="win"><th scope="row">Runs on your own infrastructure</th><td class="us"><i class="y">✓</i></td><td><i class="n">–</i></td><td><i class="p">~</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td></tr>
+            <tr class="win"><th scope="row">Open source</th><td class="us"><i class="y">✓</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td><td><i class="n">–</i></td></tr>
+            <tr class="win"><th scope="row">MCP-native governed tools</th><td class="us"><i class="y">✓</i></td><td><i class="p">~</i></td><td><i class="p">~</i></td><td><i class="n">–</i></td><td><i class="p">~</i></td><td><i class="n">–</i></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="compare-note reveal">~ partial. Gemini &amp; Copilot draft but don’t send unattended; Microsoft offers on-prem Exchange (proprietary); several now expose some MCP tools — Email-Ops exposes its full governed email surface (approvals, agent inbox, policy, provisioning) as MCP tools.</p>
+      <p class="compare-foot reveal">The new agentic-email startups each hold one piece — approval-first but closed and cloud, or open-source but a single-inbox helper. Email-Ops is the only one with the whole stack. Even Microsoft is now building toward governed agentic inboxes — Email-Ops is already here.</p>
+    </section>
+
     <section class="final-cta" id="contact">
       <div class="final-copy reveal">
         <p class="kicker">The inbox is open.</p>
         <h2>Ready to put email<br><span>under new management?</span></h2>
         <p>Join the managed launch, discuss an enterprise deployment, or follow the open-source release.</p>
         <div class="final-actions">
-          <a class="pill-button light-button" href="mailto:hello@magicunicorn.tech?subject=Email-Ops%20Access">Request access <span>↗</span></a>
-          <a class="outline-button" href="mailto:hello@magicunicorn.tech?subject=Email-Ops%20Enterprise%20Deployment">Talk enterprise</a>
+          <a class="pill-button light-button" href="mailto:email-ops@unicorncommander.ai?subject=Email-Ops%20Access">Request access <span>↗</span></a>
+          <a class="outline-button" href="mailto:email-ops@unicorncommander.ai?subject=Email-Ops%20Enterprise%20Deployment">Talk enterprise</a>
         </div>
       </div>
       <div class="final-mark reveal" data-delay="1"><div class="big-glyph"><i></i></div><span>EMAIL-OPS / 2026</span></div>
@@ -280,9 +324,9 @@
   </main>
 
   <footer>
-    <a class="brand footer-brand" href="#top"><span class="brand-glyph"><i></i></span><span>Email-Ops</span></a>
+    <a class="brand footer-brand" href="#top"><img class="brand-mark" src="/landing-assets/email-ops-unicorn.png" alt="" aria-hidden="true"><span>Email-Ops</span></a>
     <p>Built by Magic Unicorn Unconventional Technology &amp; Stuff Inc.</p>
-    <div><a href="#deploy">Deployments</a><a href="#source">Open source</a><a href="https://magicunicorn.tech">Magic Unicorn</a></div>
+    <div><a href="#deploy">Deployments</a><a href="#source">Open source</a><a href="https://unicorncommander.ai">Unicorn Commander</a></div>
   </footer>
 
   <dialog class="image-modal" aria-label="Expanded product screenshot">
@@ -291,6 +335,21 @@
     <p>Click outside the image or press Escape to close.</p>
   </dialog>
 
+  <dialog class="cap-modal" aria-label="Capability detail">
+    <button class="cap-modal-close" aria-label="Close detail">×</button>
+    <div class="cap-modal-body"></div>
+  </dialog>
+
   <script src="/landing.js"></script>
+  <script>
+    // Resilience: if landing.js ever fails to run, reveal all content anyway so
+    // the page is never blank. No-op when the main script completed (__eoReady).
+    addEventListener('load', function () {
+      setTimeout(function () {
+        if (window.__eoReady) return;
+        document.querySelectorAll('.reveal').forEach(function (el) { el.classList.add('visible'); });
+      }, 800);
+    });
+  </script>
 </body>
 </html>
