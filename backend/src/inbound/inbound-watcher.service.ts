@@ -7,6 +7,7 @@ import { MailRulesService } from '../mail-rules/mail-rules.service';
 import { MailRuleRow } from '../mail-rules/mail-rules.types';
 import { inboundWatcherEnabled } from '../common/workspace/feature-flags';
 import { AgentReplyService } from '../agent-reply/agent-reply.service';
+import { MessageDisposition } from '@prisma/client';
 
 /**
  * The inbound half of the agent-email fabric: a per-mailbox JMAP delta poll that
@@ -121,7 +122,7 @@ export class InboundWatcherService {
     for (const msg of result.newMessages) {
       // The spam/sender-policy seam finally has a caller: ALLOW→INBOX, BLOCK→Spam,
       // else the (dormant-until-engine) SpamPort verdict; stamps the overlay + SoR.
-      await this.triage.classifyInbound(mb.workspaceId, 'inbound-watcher', {
+      const classification = await this.triage.classifyInbound(mb.workspaceId, 'inbound-watcher', {
         threadId: msg.threadId,
         fromAddress: msg.fromAddress,
         subject: msg.subject,
@@ -136,7 +137,13 @@ export class InboundWatcherService {
           this.logger.warn(`rules apply failed for ${mb.emailAddress}: ${(err as Error).message}`);
         }
       }
-      if (mb.ownerKind === 'AGENT') {
+      // Public-contact mail must be classified BEFORE it reaches an agent. A
+      // spam result is retained in the mailbox's Spam disposition for review,
+      // but is never allowed to consume an agent/LLM turn or create a reply
+      // draft. This is the actual routing boundary; the reply service's own
+      // per-mailbox cap remains a second line of defence for mail classified
+      // clean or when the spam engine is dormant.
+      if (mb.ownerKind === 'AGENT' && classification.disposition !== MessageDisposition.SPAM) {
         // Reply-routing seam: an agent received mail. The AGENT-REPLY RUNTIME
         // consumes this hand-off — it drafts a reply into the approval queue
         // (never auto-sends; dormant unless AGENT_REPLY_RUNTIME_ENABLED).

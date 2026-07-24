@@ -103,6 +103,20 @@ describe('InboundWatcherService', () => {
     );
   });
 
+  it('does NOT hand spam delivered to an AGENT mailbox to the reply runtime', async () => {
+    const { svc, classifyInbound, draftReplyForInbound } = make({
+      mailboxes: [{ id: 'mba', workspaceId: 'ws1', emailAddress: 'contact@x.test', inboundCursor: 'c', ownerKind: 'AGENT' }],
+      poll: async () => ({
+        cursor: 'd',
+        newMessages: [{ threadId: 'spam-thread', fromAddress: 'bulk@spam.test', subject: 'buy now', receivedAt: 'd' }],
+      }),
+    });
+    classifyInbound.mockResolvedValueOnce({ disposition: 'SPAM' });
+
+    expect(await svc.runSweep()).toBe(1);
+    expect(draftReplyForInbound).not.toHaveBeenCalled();
+  });
+
   it('does NOT invoke the agent-reply runtime for non-AGENT mailboxes', async () => {
     const { svc, draftReplyForInbound } = make({
       mailboxes: [{ id: 'mb1', workspaceId: 'ws1', emailAddress: 'a@x.test', inboundCursor: 'c', ownerKind: 'SHARED' }],
