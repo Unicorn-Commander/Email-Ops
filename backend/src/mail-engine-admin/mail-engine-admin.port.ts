@@ -67,6 +67,15 @@ export abstract class MailEngineAdminPort {
     opts?: { password?: string | null; quotaBytes?: number | null },
   ): Promise<EngineProvisionResult>;
 
+  /**
+   * Force-overwrite the login password of an EXISTING account. Distinct from
+   * ensureAccount, which does NOT change the password of an account that already
+   * exists (Apache James 409s a plain `PUT /users/{addr}` on an existing user and
+   * leaves the password untouched — so a reset requires `?force`). This is the
+   * app-password reset/reveal path; it does NOT touch quota, folders, or the SoR.
+   */
+  abstract setPassword(address: string, password: string): Promise<EngineProvisionResult>;
+
   /** Remove an engine account (idempotent). */
   abstract removeAccount(address: string): Promise<EngineProvisionResult>;
 

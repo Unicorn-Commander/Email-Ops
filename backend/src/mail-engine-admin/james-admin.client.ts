@@ -206,6 +206,17 @@ export class JamesAdminClient extends MailEngineAdminPort {
     return { provisioned: true, reason: null };
   }
 
+  async setPassword(address: string, password: string): Promise<EngineProvisionResult> {
+    if (!this.isConfigured()) return { provisioned: false, reason: 'james admin not configured' };
+    // `?force` makes James UPDATE the password of an existing user. A plain PUT
+    // 409s on an already-present account and leaves the password unchanged — which
+    // silently breaks app-password reset (it would "reveal" a password James never
+    // accepted). Do NOT re-run ensureAccount here: that would also re-apply the
+    // default quota over any custom one.
+    const res = await this.req('PUT', `/users/${this.seg(address)}?force`, { password });
+    return this.result(res, `setPassword(${address})`, false);
+  }
+
   async removeAccount(address: string): Promise<EngineProvisionResult> {
     if (!this.isConfigured()) return { provisioned: false, reason: 'james admin not configured' };
     const res = await this.req('DELETE', `/users/${this.seg(address)}`);
