@@ -109,7 +109,7 @@ export class MailboxAccountsService {
     if (!this.admin.isConfigured()) {
       throw new ServiceUnavailableException('James WebAdmin is not configured.');
     }
-    const result = await this.admin.ensureAccount(email, { password });
+    const result = await this.admin.setPassword(email, password);
     if (!result.provisioned) {
       throw new ServiceUnavailableException('Could not reset the mailbox password.');
     }
