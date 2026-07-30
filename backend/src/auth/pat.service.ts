@@ -78,6 +78,13 @@ export type PatSummary = Pick<
 export class PatService {
   private readonly logger = new Logger(PatService.name);
 
+  /**
+   * Display prefixes already warned about in this process. Bounded by the
+   * number of distinct never-expiring tokens, which the hardened mint path can
+   * only shrink — so this cannot grow without limit.
+   */
+  private readonly warnedLegacyPrefixes = new Set<string>();
+
   constructor(private readonly prisma: PrismaService) {}
 
   /** sha256 hex digest of the full plaintext token. */
@@ -258,19 +265,34 @@ export class PatService {
    * or the Authorization header.
    */
   private warnLegacyCredential(tokenPrefix: string, record: ResolvedPatRecord): void {
-    const traits: string[] = [];
-    if (record.expiresAt === null) {
-      traits.push('no expiry (never expires)');
-    }
-    if (record.scopes.includes('*')) {
-      traits.push('wildcard scope (*)');
-    }
-    if (traits.length === 0) {
+    // A NULL expiry is the ONLY genuinely legacy trait: the mint path can no
+    // longer produce one, so any token holding it predates the hardening.
+    //
+    // A wildcard scope is deliberately NOT warned on. `*` remains a legal thing
+    // to ask for at mint time, so flagging it would label a compliant token
+    // minted today as "legacy" and tell its owner to rotate to something the
+    // API would have refused to make any differently.
+    if (record.expiresAt !== null) {
       return;
     }
+
+    // This runs on the hot path — resolvePatRecord fires on EVERY PAT-authed
+    // request, and an MCP client polls. One line per credential per process,
+    // not one per request: the operator needs to know the token exists, and
+    // repeating it every few seconds buries every other log line. The set is
+    // bounded by the number of distinct never-expiring tokens, which the mint
+    // path now guarantees can only shrink.
+    if (this.warnedLegacyPrefixes.has(tokenPrefix)) {
+      return;
+    }
+    this.warnedLegacyPrefixes.add(tokenPrefix);
+
+    const scopeNote = record.scopes.includes('*') ? ' It also carries the wildcard scope (*).' : '';
     this.logger.warn(
-      `Legacy PAT ${tokenPrefix}… in use — ${traits.join(' + ')}. ` +
-        'Still honored; rotate it to a scoped, expiring token (new mints require both).',
+      `Legacy PAT ${tokenPrefix}… in use — no expiry (never expires). Still honored.${scopeNote} ` +
+        'It predates the mint hardening and can no longer be reissued in this shape; ' +
+        'rotate it to an expiring token, then revoke this one. ' +
+        '(Logged once per credential per process.)',
     );
   }
 

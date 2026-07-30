@@ -505,5 +505,40 @@ describe('PatService — mint-side hardening', () => {
       expect(warn).not.toHaveBeenCalled();
       warn.mockRestore();
     });
+
+    it('does NOT mislabel a token minted TODAY with a deliberate wildcard scope', async () => {
+      // `*` is still a legal thing to ask for at mint time. Warning on it would
+      // tell the owner of a compliant, expiring token to rotate to something the
+      // API would have refused to make any differently.
+      const { prisma } = makePrisma({ u1: { id: 'u1', isActive: true } });
+      const svc = new PatService(prisma);
+      const warn = jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+
+      const minted = await svc.createPat('u1', 'deliberate-wildcard', {
+        scopes: ['*'],
+        expiresAt: new Date(Date.now() + 30 * PAT_DAY_MS),
+      });
+      await svc.resolvePatRecord(minted.token);
+
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it('warns ONCE per credential, not once per request — this is the hot auth path', async () => {
+      // resolvePatRecord runs on every PAT-authenticated request and an MCP
+      // client polls; one line per request would bury every other log line.
+      const { svc } = await withLegacyToken();
+      const warn = jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+
+      for (let i = 0; i < 5; i++) {
+        await expect(svc.resolvePat(LEGACY)).resolves.toMatchObject({ id: 'u1' });
+      }
+
+      const legacyLines = warn.mock.calls
+        .map((c) => String(c[0]))
+        .filter((l) => l.includes('Legacy PAT'));
+      expect(legacyLines).toHaveLength(1);
+      warn.mockRestore();
+    });
   });
 });
