@@ -37,13 +37,19 @@ mint, list, or revoke another PAT** (no self-perpetuating credential chain — a
 PAT-authenticated call to these routes gets `403`). Authenticate these calls with
 a real uchub login token:
 
+`scopes` is **required** — omitting it is a `400`, never an implicit `*`. You may
+still ask for `"*"` or a `prefix:*` wildcard deliberately. `expires_in_days` is
+optional and defaults to **90** (maximum **365**); a never-expiring token cannot
+be minted.
+
 ```bash
 # Mint (the plaintext token is returned exactly ONCE — store it now):
 curl -sX POST https://email-ops.magicunicorn.dev/api/v1/auth/pats \
   -H "Authorization: Bearer <uchub-jwt>" \
   -H "Content-Type: application/json" \
-  -d '{"name":"claude-code"}'
-# -> { "id": "...", "name": "claude-code", "token": "eo_pat_...", "token_prefix": "eo_pat_...", "created_at": "..." }
+  -d '{"name":"claude-code","scopes":["mail:read","mail:write"],"expires_in_days":90}'
+# -> { "id": "...", "name": "claude-code", "token": "eo_pat_...", "token_prefix": "eo_pat_...",
+#      "scopes": ["mail:read","mail:write"], "expires_at": "...", "created_at": "..." }
 
 # List your tokens (non-secret fields only):
 curl -s https://email-ops.magicunicorn.dev/api/v1/auth/pats -H "Authorization: Bearer <uchub-jwt>"

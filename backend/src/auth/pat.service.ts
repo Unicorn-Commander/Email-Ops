@@ -13,6 +13,19 @@ const PAT_BODY_LENGTH = 32;
 /** How many leading chars of the plaintext are kept as the display prefix. */
 const PAT_DISPLAY_PREFIX_LENGTH = 12;
 
+/** Milliseconds in a day — the unit PAT lifetimes are expressed in. */
+export const PAT_DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Lifetime applied when an HTTP caller does not pick one. This default lives at
+ * the ROUTE layer (PatsController) — `PatService.createPat` itself demands an
+ * explicit expiry so no internal caller can accidentally mint a forever token.
+ */
+export const PAT_DEFAULT_EXPIRY_DAYS = 90;
+
+/** Hard ceiling on a newly minted PAT's lifetime. Not negotiable at mint time. */
+export const PAT_MAX_EXPIRY_DAYS = 365;
+
 // Crockford-ish base32: no I, L, O, U (visually ambiguous with 1/1/0/V).
 const PAT_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
@@ -22,12 +35,20 @@ export interface MintedPat {
   /** Plaintext token — returned ONCE, at mint time. Never retrievable again. */
   token: string;
   tokenPrefix: string;
+  scopes: string[];
+  expiresAt: Date;
   createdAt: Date;
 }
 
 export interface CreatePatOptions {
-  scopes?: string[];
-  expiresAt?: Date | null;
+  /**
+   * REQUIRED. There is no implicit scope set: omitting this is a 400, never a
+   * silent upgrade to `*`. `*` and `prefix:*` remain values a caller may ask
+   * for deliberately.
+   */
+  scopes: string[];
+  /** REQUIRED. A never-expiring PAT cannot be minted (max PAT_MAX_EXPIRY_DAYS). */
+  expiresAt: Date;
 }
 
 export interface ResolvedPatRecord {
@@ -78,10 +99,16 @@ export class PatService {
    * Mint a new PAT for `userId`. Returns the plaintext token ONCE — the
    * caller (the /auth/pats controller) must surface it to the user
    * immediately; it cannot be recovered afterward.
+   *
+   * Least privilege is MANDATORY at mint: `opts.scopes` and `opts.expiresAt`
+   * are both required. Omitting scopes used to mean `['*']` and omitting the
+   * expiry used to mean "never" — both are now 400s. This is a MINT-side rule
+   * only: tokens already issued under the old defaults keep verifying exactly
+   * as before (see `resolvePatRecord`).
    */
-  async createPat(userId: string, name: string, opts: CreatePatOptions = {}): Promise<MintedPat> {
-    const scopes = PatService.normalizeScopes(opts.scopes ?? ['*']);
-    const expiresAt = PatService.normalizeExpiry(opts.expiresAt);
+  async createPat(userId: string, name: string, opts: CreatePatOptions): Promise<MintedPat> {
+    const scopes = PatService.normalizeScopes(opts?.scopes);
+    const expiresAt = PatService.normalizeExpiry(opts?.expiresAt);
     const plaintext = `${PAT_PREFIX}${PatService.randomBody(PAT_BODY_LENGTH)}`;
     const tokenHash = PatService.hash(plaintext);
     const tokenPrefix = plaintext.slice(0, PAT_DISPLAY_PREFIX_LENGTH);
@@ -95,11 +122,25 @@ export class PatService {
       name: row.name,
       token: plaintext,
       tokenPrefix: row.tokenPrefix,
+      scopes,
+      expiresAt,
       createdAt: row.createdAt,
     };
   }
 
-  private static normalizeScopes(scopes: string[]): string[] {
+  /** The lifetime the HTTP route applies when the caller does not pick one. */
+  static defaultExpiry(now: Date = new Date()): Date {
+    return new Date(now.getTime() + PAT_DEFAULT_EXPIRY_DAYS * PAT_DAY_MS);
+  }
+
+  private static normalizeScopes(scopes: string[] | null | undefined): string[] {
+    // A credential-issuing route defaults to LEAST privilege, never full reach:
+    // an omitted / null scope list is refused rather than upgraded to `*`.
+    if (scopes == null) {
+      throw new BadRequestException(
+        'PAT scopes are required — pass an explicit scope list (use ["*"] only if you deliberately want full reach)',
+      );
+    }
     if (!Array.isArray(scopes)) {
       throw new BadRequestException('PAT scopes must be an array');
     }
@@ -122,15 +163,38 @@ export class PatService {
       }
     }
 
+    // An empty array (or one that trims away to nothing) is the same "I did not
+    // choose" signal as omitting the field — refuse it rather than mint a token
+    // whose reach is decided elsewhere.
+    if (normalized.length === 0) {
+      throw new BadRequestException(
+        'PAT scopes must not be empty — pass at least one scope (use ["*"] only if you deliberately want full reach)',
+      );
+    }
+
     return normalized;
   }
 
-  private static normalizeExpiry(expiresAt: Date | null | undefined): Date | null {
+  private static normalizeExpiry(
+    expiresAt: Date | null | undefined,
+    now: Date = new Date(),
+  ): Date {
+    // A live credential that reaches a real mailbox is never permanent.
     if (expiresAt == null) {
-      return null;
+      throw new BadRequestException(
+        `PAT expiry is required — a never-expiring token cannot be minted (default ${PAT_DEFAULT_EXPIRY_DAYS} days, maximum ${PAT_MAX_EXPIRY_DAYS})`,
+      );
     }
     if (!(expiresAt instanceof Date) || !Number.isFinite(expiresAt.getTime())) {
-      throw new BadRequestException('PAT expiry must be a valid Date or null');
+      throw new BadRequestException('PAT expiry must be a valid Date');
+    }
+    if (expiresAt.getTime() <= now.getTime()) {
+      throw new BadRequestException('PAT expiry must be in the future');
+    }
+    if (expiresAt.getTime() > now.getTime() + PAT_MAX_EXPIRY_DAYS * PAT_DAY_MS) {
+      throw new BadRequestException(
+        `PAT expiry must be at most ${PAT_MAX_EXPIRY_DAYS} days from now`,
+      );
     }
     return expiresAt;
   }
@@ -171,6 +235,7 @@ export class PatService {
     // resolve so the guard can return a precise authentication failure.
     const validity = checkPat(resolved, '*', new Date().toISOString());
     if (validity.ok || validity.reason === 'missing-scope') {
+      this.warnLegacyCredential(record.tokenPrefix, resolved);
       this.prisma.personalAccessToken
         .update({ where: { id: record.id }, data: { lastUsedAt: new Date() } })
         .catch((err) => {
@@ -181,6 +246,32 @@ export class PatService {
     }
 
     return resolved;
+  }
+
+  /**
+   * Observability only — NEVER a denial. Tokens minted before the mint-side
+   * hardening can be never-expiring and/or fully wildcard-scoped; they keep
+   * working byte-for-byte as before, but the operator gets a WARN each time one
+   * is presented so the credential can be rotated deliberately.
+   *
+   * Logs the DISPLAY PREFIX only — never the plaintext token, its sha256 hash,
+   * or the Authorization header.
+   */
+  private warnLegacyCredential(tokenPrefix: string, record: ResolvedPatRecord): void {
+    const traits: string[] = [];
+    if (record.expiresAt === null) {
+      traits.push('no expiry (never expires)');
+    }
+    if (record.scopes.includes('*')) {
+      traits.push('wildcard scope (*)');
+    }
+    if (traits.length === 0) {
+      return;
+    }
+    this.logger.warn(
+      `Legacy PAT ${tokenPrefix}… in use — ${traits.join(' + ')}. ` +
+        'Still honored; rotate it to a scoped, expiring token (new mints require both).',
+    );
   }
 
   /** Legacy user-only resolver retained for existing callers. */

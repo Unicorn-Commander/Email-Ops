@@ -24,19 +24,69 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { IsString, MaxLength, MinLength } from 'class-validator';
+import { ApiBearerAuth, ApiOperation, ApiProperty, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ArrayNotEmpty,
+  IsArray,
+  IsInt,
+  IsString,
+  Max,
+  MaxLength,
+  Min,
+  MinLength,
+  ValidateIf,
+} from 'class-validator';
 import { Request } from 'express';
 import { User } from '@prisma/client';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
-import { PatService } from './pat.service';
+import {
+  PatService,
+  PAT_DAY_MS,
+  PAT_DEFAULT_EXPIRY_DAYS,
+  PAT_MAX_EXPIRY_DAYS,
+} from './pat.service';
 
-class CreatePatDto {
+export class CreatePatDto {
   @IsString()
   @MinLength(1)
   @MaxLength(120)
   name!: string;
+
+  /**
+   * REQUIRED — least privilege at mint. Omitting this no longer means `*`.
+   * `*` and `prefix:*` are still values you may ask for deliberately.
+   */
+  @ApiProperty({
+    description:
+      'Required. Explicit scope list, e.g. ["mail:read"]. Pass ["*"] only if you deliberately want full reach.',
+    example: ['mail:read', 'agent-inbox:read'],
+  })
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsString({ each: true })
+  scopes!: string[];
+
+  /**
+   * Optional lifetime in days. Omitted → PAT_DEFAULT_EXPIRY_DAYS. A
+   * never-expiring token cannot be minted at all.
+   */
+  @ApiProperty({
+    required: false,
+    description: `Lifetime in days (default ${PAT_DEFAULT_EXPIRY_DAYS}, maximum ${PAT_MAX_EXPIRY_DAYS}). A never-expiring token cannot be minted.`,
+    minimum: 1,
+    maximum: PAT_MAX_EXPIRY_DAYS,
+    default: PAT_DEFAULT_EXPIRY_DAYS,
+  })
+  // ValidateIf (not IsOptional): class-validator's @IsOptional() also waves
+  // through an explicit `null`, and `"expires_in_days": null` is exactly the
+  // "never expires" request this fix exists to refuse. Only an ABSENT field
+  // means "use the default".
+  @ValidateIf((o: CreatePatDto) => o.expires_in_days !== undefined)
+  @IsInt()
+  @Min(1)
+  @Max(PAT_MAX_EXPIRY_DAYS)
+  expires_in_days?: number;
 }
 
 /** Throws 403 if the current request was itself authenticated via a PAT. */
@@ -59,15 +109,30 @@ export class PatsController {
   @Post()
   @ApiOperation({ summary: 'Mint a new personal access token (plaintext shown once).' })
   @ApiResponse({ status: 201, description: 'The created token — `token` is shown exactly once.' })
+  @ApiResponse({
+    status: 400,
+    description: 'Scopes omitted/empty, or an absent / out-of-range expiry.',
+  })
   @ApiResponse({ status: 403, description: 'Caller authenticated via a PAT, not a real login.' })
   async create(@Req() req: Request, @CurrentUser() user: User, @Body() body: CreatePatDto) {
     assertNotPatAuth(req);
-    const minted = await this.pats.createPat(user.id, body.name);
+    // The ROUTE picks the default lifetime; PatService still demands an
+    // explicit expiry so no code path can mint a forever token.
+    const expiresAt =
+      body.expires_in_days == null
+        ? PatService.defaultExpiry()
+        : new Date(Date.now() + body.expires_in_days * PAT_DAY_MS);
+    const minted = await this.pats.createPat(user.id, body.name, {
+      scopes: body.scopes,
+      expiresAt,
+    });
     return {
       id: minted.id,
       name: minted.name,
       token: minted.token,
       token_prefix: minted.tokenPrefix,
+      scopes: minted.scopes,
+      expires_at: minted.expiresAt,
       created_at: minted.createdAt,
     };
   }
