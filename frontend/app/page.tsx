@@ -15,6 +15,21 @@ export default function Home() {
     // router) loads it so its own document/styles fully take over.
     const toLanding = () => window.location.replace('/landing.html');
 
+    // The bare root is the public landing, but explicit app entry and OIDC
+    // callbacks must stay on the application side of the gate. Although the
+    // current server-owned Email-Ops callback normally arrives at /api/v1,
+    // preserve both response modes here so a Keycloak configuration change
+    // cannot strand a successful login behind the marketing page.
+    const query = new URLSearchParams(window.location.search);
+    const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const hasOidcCallback =
+      (query.has('code') && query.has('state')) ||
+      (fragment.has('code') && fragment.has('state'));
+    if (query.has('app') || hasOidcCallback) {
+      window.location.replace(`/auth/login${window.location.search}${window.location.hash}`);
+      return;
+    }
+
     // No client-side marker at all → straight to the landing.
     if (!isAuthenticated()) {
       toLanding();
