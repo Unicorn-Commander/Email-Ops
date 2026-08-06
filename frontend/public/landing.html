@@ -24,6 +24,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later -->
   <meta name="twitter:description" content="Agents draft. Humans govern. Every send audited. The operational layer between your inbox and everything waiting on it.">
   <meta name="twitter:image" content="https://email-ops.unicorncommander.ai/landing-assets/og-image.jpg">
   <link rel="stylesheet" href="/landing.css">
+<!-- Umami analytics, served FIRST-PARTY through /api/analytics so it satisfies the app CSP script-src 'self' (no CSP widening) and survives ad-blockers. -->
+<script defer src="/api/analytics/script.js?v=1" data-website-id="bd57a9eb-8242-4012-9403-94d0bf5323ee" data-host-url="/api/analytics"></script>
 </head>
 <body>
   <div class="cursor-glow" aria-hidden="true"></div>
