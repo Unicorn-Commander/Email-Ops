@@ -23,12 +23,23 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL('https://email-ops.unicorncommander.ai'),
   title: {
     default: 'Email-Ops',
     template: '%s · Email-Ops',
   },
   description: 'The privacy-first agent email command center for connected mailboxes.',
   applicationName: 'Email-Ops',
+  alternates: {
+    canonical: '/',
+  },
+  openGraph: {
+    url: '/',
+    siteName: 'Email-Ops',
+    title: 'Email-Ops',
+    description: 'The privacy-first agent email command center for connected mailboxes.',
+    type: 'website',
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
