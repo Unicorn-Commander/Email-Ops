@@ -1,11 +1,21 @@
 import { EmailMessageStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { TEST_DATABASE_URL } from '../../test/test-db';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import {
+  StalwartBlobDownload,
+  StalwartDraftRequest,
+  StalwartFolderQuery,
+  StalwartFolderThreadsResult,
+  StalwartMailboxCounts,
   StalwartMessage,
+  StalwartMessageDetail,
+  StalwartMessageHeaders,
   StalwartSendRequest,
   StalwartSendResult,
+  StalwartVacationState,
   StalwartThread,
+  StalwartUploadResult,
 } from '../stalwart/stalwart.types';
 import { EmailService } from '../email/email.service';
 import { mapPostmarkRecord, PostmarkWebhookBody } from './postmark.types';
@@ -31,9 +41,36 @@ import { mapPostmarkRecord, PostmarkWebhookBody } from './postmark.types';
  * NOBYPASSRLS email_ops_app role (incl. the new email_engagement_events table).
  */
 
-const DB_URL = 'postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public';
+// Integration DB URL (verify Postgres). Overridable via TEST_DATABASE_URL (CI service container);
+// defaults to the historical verify DB so local runs are unchanged.
+const DB_URL = TEST_DATABASE_URL;
 
 class FakeStalwart extends StalwartPort {
+  async setThreadFlags(): Promise<boolean> {
+    return false;
+  }
+  async emptyFolder(): Promise<number | null> {
+    return null;
+  }
+
+  async pollInbound(): Promise<null> {
+    return null;
+  }
+  async moveThreadToMailbox(): Promise<boolean> {
+    return false;
+  }
+  async listFolders(): Promise<never[]> {
+    return [];
+  }
+  async createFolder(): Promise<null> {
+    return null;
+  }
+  async renameFolder(): Promise<boolean> {
+    return false;
+  }
+  async deleteFolder(): Promise<boolean> {
+    return false;
+  }
   public acceptSend = true;
   isConfigured(): boolean {
     return true;
@@ -43,6 +80,52 @@ class FakeStalwart extends StalwartPort {
   }
   async listMessages(): Promise<StalwartMessage[]> {
     return [];
+  }
+  async listFolderThreads(
+    _mailbox: string,
+    _query: StalwartFolderQuery,
+  ): Promise<StalwartFolderThreadsResult> {
+    return { threads: [] };
+  }
+  async getThreadDetail(): Promise<StalwartMessageDetail[]> {
+    return [];
+  }
+  async setThreadRead(): Promise<boolean> {
+    return true;
+  }
+  async moveThreadToFolder(): Promise<boolean> {
+    return true;
+  }
+  async getMailboxCounts(): Promise<StalwartMailboxCounts | null> {
+    return null;
+  }
+  async downloadBlob(): Promise<StalwartBlobDownload | null> {
+    return null;
+  }
+  async saveDraft(_mailbox: string, _draft: StalwartDraftRequest): Promise<{ id: string } | null> {
+    return null;
+  }
+  async updateDraft(
+    _mailbox: string,
+    _draftId: string,
+    _draft: StalwartDraftRequest,
+  ): Promise<{ id: string } | null> {
+    return null;
+  }
+  async deleteDraft(): Promise<boolean> {
+    return false;
+  }
+  async getVacation(): Promise<StalwartVacationState | null> {
+    return null;
+  }
+  async setVacation(): Promise<boolean> {
+    return false;
+  }
+  async getMessageHeaders(): Promise<StalwartMessageHeaders | null> {
+    return null;
+  }
+  async uploadBlob(): Promise<StalwartUploadResult | null> {
+    return null;
   }
   async send(
     _mailbox: string,
@@ -130,6 +213,12 @@ describe('Engagement capture (verify DB; Stalwart MOCKED)', () => {
       {
         approveCleanupBatch: jest.fn(),
         undoBatch: jest.fn(),
+      } as any,
+      {
+        handles: () => false,
+        listInbox: async () => [],
+        listThreadMessages: async () => [],
+        send: async () => ({ accepted: false, providerMessageId: null, threadId: null, reason: 'test' }),
       } as any,
     );
   });

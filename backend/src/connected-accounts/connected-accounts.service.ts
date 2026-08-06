@@ -1,4 +1,5 @@
 import {
+  BadGatewayException,
   BadRequestException,
   ForbiddenException,
   Injectable,
@@ -18,8 +19,10 @@ import { MembershipService } from '../common/workspace/membership.service';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { checkCleanerEntitlement, checkVaultEntitlement } from './entitlement';
+import { cleanupTargetsFromPlan } from './cleanup-targets';
 import { ArchiveStorageService } from './archive-storage.service';
 import { ConnectedAccountsEnginePort } from './connected-accounts.port';
+import { StableNotifierService } from '../notify/stable-notifier.service';
 import {
   CleanupBatchView,
   CleanupExecutionBackupRef,
@@ -58,6 +61,45 @@ interface CleanupExecutionOptions {
   archiveRetained?: boolean;
 }
 
+/**
+ * How many messages one interactive (on-demand) cleanup plan reviews. The plan
+ * is a bounded preview the user acts on, then re-runs — capping it keeps a run
+ * to seconds and the response small. A comprehensive sweep is the scheduled
+ * path, not this one.
+ */
+const REVIEW_PREVIEW_CAP = 500;
+
+/** Concurrent metadata fetches while building a plan (serial was the ~4min hang). */
+const ENRICH_CONCURRENCY = 8;
+
+/**
+ * Cleanup category → provider search term (Gmail syntax). Used to SCOPE the fetch
+ * so a plan only pulls the selected categories, never the whole mailbox.
+ */
+const CATEGORY_QUERY: Record<string, string> = {
+  promotional: 'category:promotions',
+  promotions: 'category:promotions',
+  social: 'category:social',
+  newsletter: 'category:updates',
+  updates: 'category:updates',
+  forums: 'category:forums',
+};
+
+/**
+ * Cleanup category → the message labels that prove membership. The classifier
+ * uses this as a SAFETY GATE: a message is only ever "safe to delete" when it
+ * actually carries one of the selected categories' labels (or the user gave an
+ * explicit free-text query). Without it, personal/Sent mail was marked safe.
+ */
+const CATEGORY_LABELS: Record<string, string[]> = {
+  promotional: ['CATEGORY_PROMOTIONS'],
+  promotions: ['CATEGORY_PROMOTIONS'],
+  social: ['CATEGORY_SOCIAL'],
+  newsletter: ['CATEGORY_UPDATES', 'CATEGORY_FORUMS'],
+  updates: ['CATEGORY_UPDATES'],
+  forums: ['CATEGORY_FORUMS'],
+};
+
 @Injectable()
 export class ConnectedAccountsService {
   private readonly logger = new Logger(ConnectedAccountsService.name);
@@ -68,6 +110,9 @@ export class ConnectedAccountsService {
     private readonly engine: ConnectedAccountsEnginePort,
     private readonly prisma: PrismaService,
     private readonly archiveStorage: ArchiveStorageService,
+    // Wave 9: the Stable approval-notification seam. Optional (last) so the
+    // positional-construction unit specs stay valid; guarded on every use.
+    private readonly notifier?: StableNotifierService,
   ) {}
 
   async listConnectedAccounts(user: User): Promise<ConnectedAccountsListResult> {
@@ -175,9 +220,18 @@ export class ConnectedAccountsService {
     }
 
     const fetched = await this.collectMessages(provider, accessToken, criteria);
+    const hasQuery = typeof criteria.query === 'string' && criteria.query.trim().length > 0;
+    const categories = Array.isArray(criteria.categories)
+      ? criteria.categories.map((c) => String(c).toLowerCase())
+      : [];
     const plans = fetched.map((message) => this.classifyMessage(message));
     const protectedRows = plans.filter((row) => row.protected);
-    const safeRows = plans.filter((row) => !row.protected);
+    // SAFETY: a message is "safe to delete" only when the user actually targeted
+    // it (category label match or an explicit query) — never just "not protected",
+    // which had swept in personal and Sent mail.
+    const safeRows = plans.filter(
+      (row) => !row.protected && this.isCleanupCandidate(row, categories, hasQuery),
+    );
 
     return {
       provider,
@@ -211,7 +265,10 @@ export class ConnectedAccountsService {
 
     const serverPlan = await this.planCleanup(user, provider, plan.criteria as CleanupCriteria);
     const safeIds = new Set(serverPlan.safe.map((row) => row.id));
-    const requested = (plan.safe.length ? plan.safe : serverPlan.safe)
+    // Only the ids the client EXPLICITLY selected, intersected with what the fresh
+    // server plan still considers safe. An empty selection means "nothing" — it must
+    // NEVER fall back to trashing/deleting the entire server-planned set.
+    const requested = (Array.isArray(plan.safe) ? plan.safe : [])
       .map((row) => row.id)
       .filter((id) => safeIds.has(id));
 
@@ -236,15 +293,24 @@ export class ConnectedAccountsService {
           archiveExpiresAt,
           archiveRetained: vault,
         });
-        const count = await this.engine.batchDelete(provider, credentials, requested);
-        completedCount = count?.count ?? 0;
+        const count = this.assertEngineApplied(
+          await this.engine.batchDelete(provider, credentials, requested),
+          'delete',
+        );
+        completedCount = count.count;
       } else if (mode === 'trash') {
-        const count = await this.engine.batchTrash(provider, credentials, requested);
-        completedCount = count?.count ?? 0;
+        const count = this.assertEngineApplied(
+          await this.engine.batchTrash(provider, credentials, requested),
+          'trash',
+        );
+        completedCount = count.count;
       } else {
         throw new BadRequestException(`"${mode}" cleanup is not implemented for direct execution.`);
       }
 
+      // NOTE: The engine returns a single count for batch operations, not per-ID failures.
+      // Therefore, "failed" is an estimate: requested - completed. This is the best available
+      // metric for partial successes (e.g. some IDs already gone).
       const result = this.cleanupResult({
         completed: completedCount,
         failed: Math.max(0, requested.length - completedCount),
@@ -312,15 +378,21 @@ export class ConnectedAccountsService {
     const accessToken = await this.requireAccessToken(user, provider);
     const plan = await this.planCleanup(user, provider, criteria);
     const requested = plan.safe.map((row) => row.id);
-    const count = await this.engine.batchArchive(
-      provider,
-      this.credentialsFor(provider, accessToken),
-      requested,
-      typeof plan.criteria.label === 'string' ? plan.criteria.label : null,
+    const count = this.assertEngineApplied(
+      await this.engine.batchArchive(
+        provider,
+        this.credentialsFor(provider, accessToken),
+        requested,
+        typeof plan.criteria.label === 'string' ? plan.criteria.label : null,
+      ),
+      'organize',
     );
+    // NOTE: The engine returns a single count for batch operations, not per-ID failures.
+    // Therefore, "failed" is an estimate: requested - completed. This is the best available
+    // metric for partial successes (e.g. some IDs already gone).
     const result = this.cleanupResult({
-      completed: count?.count ?? 0,
-      failed: Math.max(0, requested.length - (count?.count ?? 0)),
+      completed: count.count,
+      failed: Math.max(0, requested.length - count.count),
       bytesFreed: 0,
       totalAttempted: requested.length,
     });
@@ -374,9 +446,11 @@ export class ConnectedAccountsService {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
 
-    const batch = await this.prisma.cleanupBatch.findFirst({
-      where: { id: batchId, workspaceId, provider },
-    });
+    const batch = await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), (tx) =>
+      tx.cleanupBatch.findFirst({
+        where: { id: batchId, workspaceId, provider },
+      }),
+    );
     if (!batch) {
       throw new NotFoundException('Cleanup batch not found.');
     }
@@ -391,6 +465,36 @@ export class ConnectedAccountsService {
       );
       if (!restored) {
         throw new ForbiddenException('Cleaner Engine unavailable while restoring archive.');
+      }
+      const restoreFailed = Array.isArray(restored.failed)
+        ? restored.failed.length
+        : Number(restored.failed ?? 0);
+      if (restoreFailed > 0) {
+        // A reachable engine that re-imported only SOME (or none) of the archive must
+        // NOT flip the batch to UNDONE: that sets restoredAt, which retires the still-
+        // live archive (archiveLive() => false) and strands whatever failed. Leave the
+        // archive live for a retry and report the partial outcome honestly.
+        this.logger.warn(
+          `undo batch ${batch.id}: restore incomplete (${restored.restored} ok, ${restoreFailed} failed) — archive kept live for retry`,
+        );
+        return {
+          ok: false,
+          provider,
+          mode: 'undo',
+          batch_id: batch.id,
+          action: 'undo',
+          plan: batch.plan as unknown as CleanupPlanResult,
+          result: this.cleanupResult({
+            completed: restored.restored,
+            failed: restoreFailed,
+            bytesFreed: 0,
+            totalAttempted: restored.restored + restoreFailed,
+          }),
+          status: 'failed',
+          reason:
+            `Restore incomplete: ${restored.restored} message(s) came back, ${restoreFailed} could not be ` +
+            `re-imported. The archive is still available — try again, or download it to re-import manually.`,
+        };
       }
       await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
         await tx.cleanupBatch.update({
@@ -471,7 +575,8 @@ export class ConnectedAccountsService {
     }
 
     const requestedByUcUid = ucUidOf(user as WithWorkspaceClaim);
-    return this.prisma.withWorkspace(workspaceId, requestedByUcUid, async (tx) => {
+    const summary = this.batchSummary(mode, provider, plan.safe.length, null);
+    const staged = await this.prisma.withWorkspace(workspaceId, requestedByUcUid, async (tx) => {
       const batch = await tx.cleanupBatch.create({
         data: {
           workspaceId,
@@ -482,7 +587,7 @@ export class ConnectedAccountsService {
           criteria: plan.criteria as any,
           plan: plan as any,
           requestedByUcUid,
-          summary: this.batchSummary(mode, provider, plan.safe.length, null),
+          summary,
           params: this.batchParams(criteria),
         },
       });
@@ -499,10 +604,14 @@ export class ConnectedAccountsService {
             mode,
             criteria: plan.criteria as any,
             plan: plan as any,
+            // A compact, bounded "what would this touch" preview so the approval
+            // surfaces (ReviewCard / in-chat card / MCP) can show the concrete
+            // targets — top senders + counts — not just the one-line summary.
+            targets: cleanupTargetsFromPlan(action, provider, plan) as any,
           },
           state: AgentInboxState.PENDING,
           draftedBy: 'email-ops-agent',
-          summary: this.batchSummary(mode, provider, plan.safe.length, null),
+          summary,
         },
       });
 
@@ -511,25 +620,46 @@ export class ConnectedAccountsService {
         data: { agentInboxItemId: item.id },
       });
 
-      return {
-        ok: true,
-        provider,
-        mode,
-        batch_id: batch.id,
-        action,
-        plan,
-        result: this.cleanupResult({
-          completed: 0,
-          failed: 0,
-          bytesFreed: 0,
-          totalAttempted: plan.safe.length,
-        }),
-        status: 'pending',
-        staged: true,
-        staged_item_id: item.id,
-        reason: 'staged into agent inbox for human approval',
-      };
+      return { batchId: batch.id, itemId: item.id };
     });
+
+    // Wave 9: the agent staged a destructive cleanup — notify Stable AFTER the tx
+    // commits so a human sees it in the queue. Fire-and-forget/degrade-clean: the
+    // notifier never throws, and this must never affect the staged batch.
+    if (this.notifier) {
+      void this.notifier
+        .notifyApprovalPending({
+          id: staged.itemId,
+          workspaceId,
+          kind: AgentInboxKind.CLEANUP,
+          summary,
+          draftedBy: 'email-ops-agent',
+        })
+        .catch((err) =>
+          this.logger.warn(
+            `approval notify failed for cleanup item ${staged.itemId}: ${(err as Error).message}`,
+          ),
+        );
+    }
+
+    return {
+      ok: true,
+      provider,
+      mode,
+      batch_id: staged.batchId,
+      action,
+      plan,
+      result: this.cleanupResult({
+        completed: 0,
+        failed: 0,
+        bytesFreed: 0,
+        totalAttempted: plan.safe.length,
+      }),
+      status: 'pending',
+      staged: true,
+      staged_item_id: staged.itemId,
+      reason: 'staged into agent inbox for human approval',
+    };
   }
 
   async approveCleanupBatch(
@@ -537,9 +667,11 @@ export class ConnectedAccountsService {
     user: User,
     batchId: string,
   ): Promise<CleanupExecutionResult | null> {
-    const batch = await this.prisma.cleanupBatch.findFirst({
-      where: { id: batchId, workspaceId },
-    });
+    const batch = await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), (tx) =>
+      tx.cleanupBatch.findFirst({
+        where: { id: batchId, workspaceId },
+      }),
+    );
     if (!batch) return null;
     if (batch.state !== CleanupBatchState.PENDING) {
       return this.cleanupResultFromBatch(batch);
@@ -620,20 +752,24 @@ export class ConnectedAccountsService {
   async listCleanupActivity(user: User, provider: ConnectedProvider): Promise<CleanupBatchView[]> {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
-    const rows = await this.prisma.cleanupBatch.findMany({
-      where: { workspaceId, provider },
-      orderBy: { createdAt: 'desc' },
-      take: 25,
-    });
+    const rows = await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), (tx) =>
+      tx.cleanupBatch.findMany({
+        where: { workspaceId, provider },
+        orderBy: { createdAt: 'desc' },
+        take: 25,
+      }),
+    );
     return rows.map((row) => this.batchView(row));
   }
 
   async getArchiveDownloadUrl(user: User, provider: ConnectedProvider, batchId: string): Promise<{ url: string; expires_in_seconds: number }> {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
-    const batch = await this.prisma.cleanupBatch.findFirst({
-      where: { id: batchId, workspaceId, provider },
-    });
+    const batch = await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), (tx) =>
+      tx.cleanupBatch.findFirst({
+        where: { id: batchId, workspaceId, provider },
+      }),
+    );
     if (!batch || !this.archiveLive(batch)) {
       throw new NotFoundException('Live archive not found for this batch.');
     }
@@ -642,6 +778,27 @@ export class ConnectedAccountsService {
       url: await this.archiveStorage.presignGet(batch.archiveBucket!, batch.archiveKey!, ttl),
       expires_in_seconds: ttl,
     };
+  }
+
+  /**
+   * The Cleaner Engine returns `null` from a cleanup call when the provider rejected
+   * it (auth expired / rate-limited / transport error) — the engine surfaces that as
+   * a non-2xx, which the client maps to null. That is NOT the same as "0 messages
+   * matched" (a real `{ count: 0 }`). Treating null as 0 is how a failed cleanup used
+   * to be recorded COMPLETED. Throw instead: the interactive path returns 502, and the
+   * approval path's catch records the batch FAILED and keeps it retryable.
+   */
+  private assertEngineApplied(
+    result: { count: number } | null,
+    action: string,
+  ): { count: number } {
+    if (result === null) {
+      throw new BadGatewayException(
+        `The mail provider did not confirm the ${action} — it may be rate-limited or the sign-in ` +
+          `may have expired. Nothing was recorded as done; try again.`,
+      );
+    }
+    return result;
   }
 
   private async executeCleanupInternal(
@@ -663,14 +820,20 @@ export class ConnectedAccountsService {
     let action: string;
     if (mode === 'trash') {
       action = 'trash';
-      count = await this.engine.batchTrash(provider, this.credentialsFor(provider, accessToken), requested);
+      count = this.assertEngineApplied(
+        await this.engine.batchTrash(provider, this.credentialsFor(provider, accessToken), requested),
+        'trash',
+      );
     } else if (mode === 'archive') {
       action = 'organize';
-      count = await this.engine.batchArchive(
-        provider,
-        this.credentialsFor(provider, accessToken),
-        requested,
-        typeof serverPlan.criteria.label === 'string' ? serverPlan.criteria.label : null,
+      count = this.assertEngineApplied(
+        await this.engine.batchArchive(
+          provider,
+          this.credentialsFor(provider, accessToken),
+          requested,
+          typeof serverPlan.criteria.label === 'string' ? serverPlan.criteria.label : null,
+        ),
+        'organize',
       );
     } else if (mode === 'delete' || mode === 'archive_purge') {
       action = 'delete';
@@ -686,7 +849,13 @@ export class ConnectedAccountsService {
         archiveExpiresAt,
         archiveRetained,
       });
-      count = await this.engine.batchDelete(provider, this.credentialsFor(provider, accessToken), requested);
+      count = this.assertEngineApplied(
+        await this.engine.batchDelete(provider, this.credentialsFor(provider, accessToken), requested),
+        'delete',
+      );
+      // NOTE: The engine returns a single count for batch operations, not per-ID failures.
+      // Therefore, "failed" is an estimate: requested - completed. This is the best available
+      // metric for partial successes (e.g. some IDs already gone).
       const result = this.cleanupResult({
         completed: count?.count ?? 0,
         failed: Math.max(0, requested.length - (count?.count ?? 0)),
@@ -707,6 +876,9 @@ export class ConnectedAccountsService {
     } else {
       throw new BadRequestException(`"${mode}" cleanup is not implemented — no messages were changed.`);
     }
+    // NOTE: The engine returns a single count for batch operations, not per-ID failures.
+    // Therefore, "failed" is an estimate: requested - completed. This is the best available
+    // metric for partial successes (e.g. some IDs already gone).
     const result = this.cleanupResult({
       completed: count?.count ?? 0,
       failed: Math.max(0, requested.length - (count?.count ?? 0)),
@@ -774,6 +946,7 @@ export class ConnectedAccountsService {
     provider: string;
     mode: string;
     action: CleanupActionKind;
+    state?: CleanupBatchState;
     plan: unknown;
     result: unknown;
     backupRef: string | null;
@@ -785,8 +958,12 @@ export class ConnectedAccountsService {
     archiveExpiresAt?: Date | null;
     archiveRetained?: boolean;
   }): CleanupExecutionResult {
+    // Reflect the batch's REAL terminal state — a re-read of a FAILED/UNDONE batch
+    // must NOT masquerade as a fresh success (the truthful-UI contract). Only a
+    // COMPLETED batch reports ok:true/completed.
+    const status = this.batchStatusOf(batch.state);
     return {
-      ok: true,
+      ok: status === 'completed' || status === 'undone',
       provider: batch.provider as ConnectedProvider,
       mode: batch.mode as CleanupWriteMode,
       batch_id: batch.id,
@@ -812,8 +989,23 @@ export class ConnectedAccountsService {
             retained: batch.archiveRetained ?? false,
           }
         : undefined,
-      status: 'completed',
+      status,
     };
+  }
+
+  /** Map a persisted batch state → the wire `status` an approve/read returns. */
+  private batchStatusOf(state?: CleanupBatchState): CleanupExecutionResult['status'] {
+    switch (state) {
+      case CleanupBatchState.FAILED:
+        return 'failed';
+      case CleanupBatchState.UNDONE:
+        return 'undone';
+      case CleanupBatchState.PENDING:
+        return 'pending';
+      case CleanupBatchState.COMPLETED:
+      default:
+        return 'completed';
+    }
   }
 
   private batchView(row: {
@@ -910,12 +1102,21 @@ export class ConnectedAccountsService {
   ): Promise<EngineMessageSummary[]> {
     const credentials = this.credentialsFor(provider, accessToken);
     const query = this.backupQueryFor(criteria);
-    const limit = Math.max(1, Math.min(Number(criteria.max_results ?? criteria.maxResults ?? 200), 500));
+    const perPage = Math.max(1, Math.min(Number(criteria.max_results ?? criteria.maxResults ?? 200), 500));
+    // An interactive plan is a bounded PREVIEW: cap how many messages a single
+    // run reviews so the button returns in seconds, not minutes, on large
+    // mailboxes. (Reviewing 2000 messages via serial metadata fetches took ~4min
+    // and the client then aborted → the "cleanup does nothing" symptom.) A
+    // comprehensive sweep is the scheduled/agent path, not this on-demand one.
+    const reviewCap = Math.max(
+      1,
+      Math.min(Number(criteria.max_results ?? criteria.maxResults ?? REVIEW_PREVIEW_CAP), REVIEW_PREVIEW_CAP),
+    );
     const messages: EngineMessageSummary[] = [];
     let pageToken: string | null | undefined = null;
 
-    for (let page = 0; page < 10; page += 1) {
-      const res = await this.engine.listMessages(provider, credentials, query, limit, pageToken ?? null);
+    for (let page = 0; page < 10 && messages.length < reviewCap; page += 1) {
+      const res = await this.engine.listMessages(provider, credentials, query, perPage, pageToken ?? null);
       if (!res) break;
       const pageMessages = Array.isArray(res.messages) ? res.messages : [];
       messages.push(...pageMessages);
@@ -923,13 +1124,26 @@ export class ConnectedAccountsService {
       if (!pageToken) break;
     }
 
-    const enriched: EngineMessageSummary[] = [];
-    for (const message of messages) {
-      if (this.needsEnrichment(message)) {
-        const full = await this.engine.getMessage(provider, credentials, message.id, 'metadata');
-        enriched.push(full ?? message);
-      } else {
-        enriched.push(message);
+    const capped = messages.slice(0, reviewCap);
+
+    // Enrich message metadata in bounded-concurrency batches. Serial per-message
+    // fetches of hundreds of messages were the difference between a ~5s plan and
+    // a ~4min one; concurrency keeps the mailbox scan responsive without blowing
+    // the provider rate limit.
+    const enriched: EngineMessageSummary[] = new Array(capped.length);
+    for (let i = 0; i < capped.length; i += ENRICH_CONCURRENCY) {
+      const batch = capped.slice(i, i + ENRICH_CONCURRENCY);
+      const results = await Promise.all(
+        batch.map(async (message) => {
+          if (this.needsEnrichment(message)) {
+            const full = await this.engine.getMessage(provider, credentials, message.id, 'metadata');
+            return full ?? message;
+          }
+          return message;
+        }),
+      );
+      for (let j = 0; j < results.length; j += 1) {
+        enriched[i + j] = results[j];
       }
     }
     return enriched;
@@ -1014,7 +1228,39 @@ export class ConnectedAccountsService {
   }
 
   private backupQueryFor(criteria: CleanupCriteria): string {
-    return typeof criteria.query === 'string' ? criteria.query : '';
+    const q = typeof criteria.query === 'string' ? criteria.query.trim() : '';
+    if (q) return q;
+    // No free-text query: SCOPE the fetch to the selected categories so a plan
+    // never pulls (and later classifies as "safe") the whole mailbox — including
+    // personal and Sent mail. If no categories are given either, fall back to
+    // promotions only; NEVER an unbounded all-mail scan.
+    const categories = Array.isArray(criteria.categories) ? criteria.categories : [];
+    const terms = [
+      ...new Set(
+        categories.map((c) => CATEGORY_QUERY[String(c).toLowerCase()]).filter(Boolean),
+      ),
+    ];
+    if (!terms.length) return 'category:promotions';
+    return terms.length === 1 ? terms[0] : `(${terms.join(' OR ')})`;
+  }
+
+  /**
+   * SAFETY GATE for what may be marked "safe to delete". A message qualifies only
+   * when the user actually targeted it: either they gave a free-text query (which
+   * already scoped the fetch to their intent), or the message carries one of the
+   * selected categories' labels. Everything else — personal mail, Sent — is kept.
+   */
+  private isCleanupCandidate(
+    row: CleanupPlanMessageView,
+    categories: string[],
+    hasQuery: boolean,
+  ): boolean {
+    if (hasQuery) return true;
+    if (!categories.length) return false;
+    const wantedLabels = new Set(categories.flatMap((c) => CATEGORY_LABELS[c] ?? []));
+    if (!wantedLabels.size) return false;
+    const labels = Array.isArray(row.labels) ? row.labels.map((l) => String(l).toUpperCase()) : [];
+    return labels.some((l) => wantedLabels.has(l));
   }
 
   private batchSummary(mode: string, provider: ConnectedProvider, count: number, backupRef: string | null): string {

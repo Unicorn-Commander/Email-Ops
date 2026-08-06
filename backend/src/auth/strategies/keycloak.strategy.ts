@@ -36,7 +36,7 @@ export class KeycloakStrategy extends PassportStrategy(Strategy, 'keycloak') {
       // X-Forwarded-Proto/Host, so the redirect_uri is https — matching the
       // value registered on the Keycloak client. (Requires `trust proxy` set.)
       proxy: true,
-      scope: ['openid', 'profile', 'email'],
+      scope: ['openid', 'profile', 'email', 'offline_access'],
     });
 
     this.userinfoURL = `${keycloakUrl}/realms/${realm}/protocol/openid-connect/userinfo`;

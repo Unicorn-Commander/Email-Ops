@@ -1,6 +1,6 @@
 {
   "name": "email-ops-frontend",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -10,7 +10,9 @@
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
+    "@types/dompurify": "^3.0.5",
     "clsx": "^2.1.1",
+    "dompurify": "^3.4.11",
     "next": "15.5.19",
     "react": "19.1.0",
     "react-dom": "19.1.0"

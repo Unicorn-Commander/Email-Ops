@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { BadGatewayException, ForbiddenException } from '@nestjs/common';
 import { CleanupActionKind, CleanupBatchState, User } from '@prisma/client';
 import { KeycloakBrokerService } from '../auth/keycloak-broker.service';
 import { MembershipService } from '../common/workspace/membership.service';
@@ -42,7 +42,14 @@ describe('ConnectedAccountsService', () => {
 
   const prisma = {
     withWorkspace: jest.fn(async (_ws: string, _uc: string | null, fn: any) => fn(tx)),
-    cleanupBatch: tx.cleanupBatch,
+    cleanupBatch: {
+      findFirst: jest.fn(async () => {
+        throw new Error('cleanupBatch.findFirst must be called through withWorkspace');
+      }),
+      findMany: jest.fn(async () => {
+        throw new Error('cleanupBatch.findMany must be called through withWorkspace');
+      }),
+    },
   } as unknown as PrismaService;
 
   const engine = {
@@ -126,11 +133,52 @@ describe('ConnectedAccountsService', () => {
     });
     (engine.batchTrash as jest.Mock).mockResolvedValue({ count: 1 });
 
-    const plan = await service().planCleanup(user, 'gmail', { query: '' });
+    const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
     const result = await service().executeCleanup(user, 'gmail', plan, 'trash');
 
     expect(engine.batchTrash).toHaveBeenCalledWith('gmail', { token: 'broker-token' }, ['m-1']);
     expect(result.status).toBe('completed');
+  });
+
+  it('records FAILED (not a silent COMPLETED) when the engine rejects the trash', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@shop.com>', size_bytes: 100, labels: ['CATEGORY_PROMOTIONS'], is_starred: false },
+      ],
+      next_token: null,
+    });
+    // The engine rejected the call (auth expired / rate-limited / transport) — the
+    // client maps a non-2xx to null. That must NOT collapse to "completed, 0 trashed".
+    (engine.batchTrash as jest.Mock).mockResolvedValue(null);
+
+    const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
+    await expect(service().executeCleanup(user, 'gmail', plan, 'trash')).rejects.toBeInstanceOf(
+      BadGatewayException,
+    );
+    expect(engine.batchTrash).toHaveBeenCalled();
+    // No COMPLETED batch row is written for a cleanup that never happened.
+    expect(tx.cleanupBatch.create).not.toHaveBeenCalled();
+  });
+
+  it('SAFETY: personal mail is never "safe", and an empty selection trashes nothing', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@shop.com>', size_bytes: 100, labels: ['CATEGORY_PROMOTIONS'], is_starred: false },
+        { id: 'm-2', sender: 'Friend <friend@example.com>', size_bytes: 200, labels: [], is_starred: false },
+      ],
+      next_token: null,
+    });
+    (engine.batchTrash as jest.Mock).mockResolvedValue({ count: 0 });
+
+    // Category-scoped plan (no free-text query): only the promotions row is "safe";
+    // the personal message is reviewed but NEVER swept into safe-to-delete.
+    const plan = await service().planCleanup(user, 'gmail', { categories: ['promotional'] });
+    expect(plan.counts.reviewed).toBe(2);
+    expect(plan.safe.map((r) => r.id)).toEqual(['m-1']);
+
+    // An empty explicit selection must be a no-op — never fall back to "everything".
+    await service().executeCleanup(user, 'gmail', { ...plan, safe: [] } as never, 'trash');
+    expect(engine.batchTrash).toHaveBeenCalledWith('gmail', { token: 'broker-token' }, []);
   });
 
   it('permanent delete requires a verified Garage archive before purge', async () => {
@@ -156,12 +204,31 @@ describe('ConnectedAccountsService', () => {
     });
     (engine.batchDelete as jest.Mock).mockResolvedValue({ count: 1 });
 
-    const plan = await service().planCleanup(user, 'gmail', { query: '' });
+    const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
     const result = await service().executeCleanup(user, 'gmail', plan, 'delete');
     expect(engine.archiveCreate).toHaveBeenCalled();
     expect(engine.archiveVerify).toHaveBeenCalledWith('archives', 'workspaces/ws-1/archives/gmail/batch.eml.zip');
     expect(engine.batchDelete).toHaveBeenCalledWith('gmail', { token: 'broker-token' }, ['m-1']);
     expect(result.backup_ref?.verified).toBe(true);
+  });
+
+  it('reports partial engine counts correctly (completed vs failed)', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false },
+        { id: 'm-2', sender: 'Promo <promo2@example.com>', size_bytes: 100, is_starred: false },
+      ],
+      next_token: null,
+    });
+    // Engine only completed 1 of 2 requested
+    (engine.batchTrash as jest.Mock).mockResolvedValue({ count: 1 });
+
+    const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
+    const result = await service().executeCleanup(user, 'gmail', plan, 'trash');
+
+    expect(result.result.completed).toBe(1);
+    expect(result.result.failed).toBe(1);
+    expect(result.result.total_attempted).toBe(2);
   });
 
   it('does not purge when archive verification fails', async () => {
@@ -180,7 +247,7 @@ describe('ConnectedAccountsService', () => {
     });
     (engine.archiveVerify as jest.Mock).mockResolvedValue({ success: false, message: 'bad sha' });
 
-    const plan = await service().planCleanup(user, 'gmail', { query: '' });
+    const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
     await expect(service().executeCleanup(user, 'gmail', plan, 'delete')).rejects.toBeInstanceOf(
       ForbiddenException,
     );
@@ -194,7 +261,7 @@ describe('ConnectedAccountsService', () => {
     });
 
     const staged = await service().stageCleanupRequest(user, 'gmail', 'trash', CleanupActionKind.TRASH, {
-      query: '',
+      query: 'category:promotions',
     });
     expect(staged.status).toBe('pending');
     expect(tx.agentInboxItem.create).toHaveBeenCalled();
@@ -202,7 +269,7 @@ describe('ConnectedAccountsService', () => {
   });
 
   it('undo restores from a live archive and flips state to UNDONE', async () => {
-    (prisma.cleanupBatch.findFirst as jest.Mock).mockResolvedValue({
+    (tx.cleanupBatch.findFirst as jest.Mock).mockResolvedValue({
       id: 'batch-1',
       provider: 'gmail',
       mode: 'delete',
@@ -228,6 +295,39 @@ describe('ConnectedAccountsService', () => {
     }));
     expect(res.ok).toBe(true);
     expect(res.status).toBe('undone');
+    expect(prisma.withWorkspace).toHaveBeenCalledWith('ws-1', 'kc-sub-user', expect.any(Function));
+    expect(prisma.cleanupBatch.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('undo does NOT flip to UNDONE when the restore fails — the archive stays live for retry', async () => {
+    (tx.cleanupBatch.findFirst as jest.Mock).mockResolvedValue({
+      id: 'batch-1',
+      provider: 'gmail',
+      mode: 'delete',
+      action: CleanupActionKind.DELETE,
+      plan: { safe: [] },
+      result: { completed: 1 },
+      backupRef: 'archive.zip',
+      backupVerified: true,
+      archiveBucket: 'archives',
+      archiveKey: 'archive.zip',
+      archiveExpiresAt: new Date(Date.now() + 3600_000),
+      archiveRetained: false,
+      restoredAt: null,
+      state: CleanupBatchState.COMPLETED,
+    });
+    // Engine reachable, but nothing re-imported (every id failed). Marking UNDONE here
+    // would set restoredAt and retire the still-live archive, stranding the mail.
+    (engine.archiveRestore as jest.Mock).mockResolvedValue({
+      restored: 0,
+      failed: [{ id: 'm-1', error: 'import rejected' }],
+    });
+
+    const res = await service().undoBatch(user, 'gmail', 'batch-1');
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe('failed');
+    // The batch is NOT written to UNDONE, so archiveLive() stays true and a retry works.
+    expect(tx.cleanupBatch.update).not.toHaveBeenCalled();
   });
 
   it('organize performs real non-destructive archive; unsubscribe remains unsupported', async () => {
@@ -237,7 +337,7 @@ describe('ConnectedAccountsService', () => {
     });
     (engine.batchArchive as jest.Mock).mockResolvedValue({ count: 1 });
 
-    const organized = await service().organize(user, 'gmail', { query: '' });
+    const organized = await service().organize(user, 'gmail', { query: 'category:promotions' });
     expect(organized.ok).toBe(true);
     expect(organized.status).toBe('completed');
     expect(engine.batchArchive).toHaveBeenCalledWith('gmail', { token: 'broker-token' }, ['m-1'], null);

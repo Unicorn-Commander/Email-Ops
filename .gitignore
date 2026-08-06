@@ -1,3 +1,5 @@
 # macOS
 .DS_Store
 **/.DS_Store
+scripts/.backup.env
+__pycache__/

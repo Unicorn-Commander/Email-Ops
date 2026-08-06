@@ -15,13 +15,32 @@ import {
   EngineArchiveRestoreResult,
   EngineArchiveVerifyResult,
   EngineBackupManifest,
+  EngineAccountProfile,
   EngineInboxStats,
   EngineListMessagesResult,
+  EngineMailFolder,
+  EngineMailSendResult,
+  EngineMailThreadActionResult,
+  EngineMailThreadResult,
+  EngineMailThreadsResult,
   EngineMessageSummary,
 } from './connected-accounts.types';
 
 export abstract class ConnectedAccountsEnginePort {
   abstract isConfigured(): boolean;
+
+  abstract chat(message: string, context?: Record<string, unknown>): Promise<string | null>;
+
+  /**
+   * Open a streaming chat turn against the engine. Returns the raw `text/event-stream`
+   * Response (SSE `token` / `actions` / `done` frames) so the caller can proxy it, or
+   * null when the engine is dormant/unreachable. No client-side timeout — the caller
+   * owns the stream lifetime.
+   */
+  abstract chatStream(
+    message: string,
+    context?: Record<string, unknown>,
+  ): Promise<Response | null>;
 
   abstract getInboxStats(
     provider: 'gmail' | 'microsoft',
@@ -92,4 +111,72 @@ export abstract class ConnectedAccountsEnginePort {
   ): Promise<EngineBackupManifest | null>;
 
   abstract backupVerify(path: string): Promise<Record<string, unknown> | null>;
+
+  // ── Unified-inbox verbs (read inbox threads, read a thread, send/reply) ──
+
+  /** The authenticated account's own profile (the authoritative linked address). */
+  abstract getAccountProfile(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+  ): Promise<EngineAccountProfile | null>;
+
+  abstract listMailThreads(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    folder: EngineMailFolder,
+    limit?: number,
+  ): Promise<EngineMailThreadsResult | null>;
+
+  abstract getMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadResult | null>;
+
+  // Thread-level triage verbs — make Archive/Trash/Spam/Inbox-restore/read REAL
+  // in the external mailbox (the disposition overlay stays the UI's source of
+  // truth).
+
+  abstract archiveMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null>;
+
+  abstract trashMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null>;
+
+  abstract spamMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null>;
+
+  abstract restoreMailThreadToInbox(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null>;
+
+  abstract setMailThreadRead(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+    read: boolean,
+  ): Promise<EngineMailThreadActionResult | null>;
+
+  abstract sendMail(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    message: {
+      from: string;
+      to: string;
+      subject: string;
+      body: string;
+      inReplyToThreadId?: string | null;
+    },
+  ): Promise<EngineMailSendResult | null>;
 }

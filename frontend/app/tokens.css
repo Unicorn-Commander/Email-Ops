@@ -2,18 +2,25 @@
 
 :root,
 :root[data-theme='dark'] {
-  --surface-base: 11 11 14;
-  --surface-raised: 19 19 24;
-  --surface-overlay: 26 26 33;
-  --surface-elevated: 32 32 42;
+  /* Surface ramp widened off pure-black: the old 11→19→26→32 steps were below
+     the perceptual threshold near black, so every raised/overlay/elevated plane
+     read as the same flat tone. These larger, lifted steps give real depth. */
+  --surface-base: 12 12 15;
+  --surface-raised: 22 22 28;
+  --surface-overlay: 30 30 38;
+  --surface-elevated: 40 40 50;
 
-  --border-subtle: 32 32 42;
-  --border: 44 44 56;
+  /* Decoupled from the surface ramp (border-subtle used to collide with
+     surface-elevated at 32 32 42, so hairlines vanished on raised surfaces). */
+  --border-subtle: 38 38 48;
+  --border: 52 52 64;
 
   --text-primary: 231 231 234;
   --text-secondary: 180 180 190;
   --text-tertiary: 138 138 150;
-  --text-muted: 95 95 107;
+  /* Lightened from 95 95 107 (~3.2:1 on surface-base) to clear WCAG AA 4.5:1
+     for small snippet/timestamp text (measures ~4.5:1 on --surface-base). */
+  --text-muted: 120 120 133;
 
   --accent: 124 92 255;
   --accent-hover: 143 114 255;
@@ -41,6 +48,7 @@
 
   --shadow: 0 1px 2px 0 rgb(0 0 0 / 0.4);
   --shadow-lg: 0 8px 24px -6px rgb(0 0 0 / 0.5);
+  --shadow-pop: 0 24px 70px -12px rgb(0 0 0 / 0.7);
 
   --radius: 8px;
   --radius-lg: 12px;
@@ -62,7 +70,9 @@
   --text-primary: 27 27 32;
   --text-secondary: 63 63 74;
   --text-tertiary: 92 92 104;
-  --text-muted: 138 138 150;
+  /* Darkened from 138 138 150 (~3.3:1 on light surface-base — 138 is lighter
+     than the ~118 AA threshold) to clear WCAG AA 4.5:1 (measures ~4.7:1). */
+  --text-muted: 112 112 124;
 
   --accent: 124 92 255;
   --accent-hover: 107 69 240;
@@ -91,6 +101,7 @@
   --shadow: 0 1px 2px 0 rgb(16 16 24 / 0.06), 0 1px 3px 0 rgb(16 16 24 / 0.08);
   --shadow-lg: 0 10px 30px -8px rgb(16 16 24 / 0.18),
     0 4px 10px -4px rgb(16 16 24 / 0.1);
+  --shadow-pop: 0 30px 80px -16px rgb(16 16 24 / 0.28);
 }
 
 .lo-dialog-overlay[data-state='open'] {

@@ -37,15 +37,12 @@ export default function DashboardPage() {
                 <Badge variant="protected">metadata only</Badge>
               </div>
               <h1 className="mt-4 text-3xl font-semibold tracking-[-0.02em] text-primary sm:text-5xl">
-                Calm control for{' '}
-                <span className="bg-gradient-to-br from-accent via-[rgb(var(--accent-2))] to-info bg-clip-text text-transparent">
-                  {meta.mailboxLabel.toLowerCase()}
-                </span>
-                .
+                Overview
               </h1>
               <p className="mt-3 max-w-2xl text-sm leading-6 text-tertiary sm:text-base">
-                Read-only stats, prioritized needs-you signals, and no cleanup controls on this
-                screen. Review comes before every write.
+                A read-only snapshot of your {meta.mailboxLabel.toLowerCase()} — storage, unread,
+                and the items that need you. Nothing on this screen sends or deletes; actions live
+                in Cleanup and the Agent Inbox.
               </p>
               {unavailableReason && <p className="mt-3 text-xs text-warning">{unavailableReason}</p>}
               {error && <p className="mt-3 text-xs text-danger">{error}</p>}

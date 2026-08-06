@@ -1,81 +1,61 @@
+// SPDX-FileCopyrightText: 2026 Magic Unicorn Unconventional Technology & Stuff Inc.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 'use client';
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ThemeToggle } from '@/components/ThemeToggle';
-import { Badge, Button, Card, Select, Skeleton, cn } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
+import { Badge, Button, Select, Skeleton, cn } from '@/components/ui';
 import { ConnectedAccountsProvider, useConnectedAccounts } from './ConnectedAccountsProvider';
+import { ActiveWorkspaceProvider } from './ActiveWorkspaceProvider';
+import { ActiveSpaceProvider } from './ActiveSpaceProvider';
+import { UiCommandProvider } from './UiCommandProvider';
+import { UiCommandBridge } from './UiCommandBridge';
+import { WorkspaceSwitcher } from './WorkspaceSwitcher';
+import { SpaceSwitcher } from './SpaceSwitcher';
+import { MailIconNav } from './mail/MailIconNav';
+import { AccountMenu } from './account/AccountMenu';
+import { ResizableEdge } from './ResizableEdge';
+import { shellRailPane, usePaneWidth } from '@/state/paneWidths';
+import { useAgentInboxPendingCount } from './useAgentInbox';
+import { useAgentControls } from './useAgentControls';
 import {
-  clearSession,
   cleanupActivity,
   getStoredUser,
-  getToken,
+  isAuthenticated,
   undoBatch,
   type CleanupBatchView,
   type EmailOpsUser,
 } from '@/lib/api';
 import { providerMeta } from '@/lib/cleaner-model';
 
-type IconName =
-  | 'dashboard'
-  | 'accounts'
-  | 'insights'
-  | 'cleanup'
-  | 'shield'
-  | 'activity'
-  | 'menu'
-  | 'mail';
 
-const NAV = [
-  { href: '/dashboard', label: 'Overview', eyebrow: 'Needs-you', icon: 'dashboard' as const, tone: 'accent' as const },
-  { href: '/accounts', label: 'Accounts', eyebrow: 'Broker access', icon: 'accounts' as const, tone: 'info' as const },
-  { href: '/insights', label: 'Insights', eyebrow: 'Read-only scan', icon: 'insights' as const, tone: 'keep' as const },
-  { href: '/cleanup', label: 'Cleanup', eyebrow: 'Safety workbench', icon: 'cleanup' as const, tone: 'review' as const },
-];
-
-const NAV_TONE: Record<'accent' | 'info' | 'keep' | 'review', { row: string; chipActive: string; chipIdle: string }> = {
-  accent: {
-    row: 'bg-accent/14 ring-accent/30',
-    chipActive: 'bg-gradient-to-br from-accent to-[rgb(var(--accent-2))] text-white shadow-lg shadow-accent/40 ring-1 ring-white/15',
-    chipIdle: 'bg-gradient-to-br from-accent to-accent/55 text-white shadow-md shadow-accent/25 ring-1 ring-white/10',
-  },
-  info: {
-    row: 'bg-info/12 ring-info/30',
-    chipActive: 'bg-gradient-to-br from-info to-info/55 text-white shadow-lg shadow-info/40 ring-1 ring-white/15',
-    chipIdle: 'bg-gradient-to-br from-info to-info/55 text-white shadow-md shadow-info/25 ring-1 ring-white/10',
-  },
-  keep: {
-    row: 'bg-success/12 ring-success/30',
-    chipActive: 'bg-gradient-to-br from-success to-success/55 text-white shadow-lg shadow-success/40 ring-1 ring-white/15',
-    chipIdle: 'bg-gradient-to-br from-success to-success/55 text-white shadow-md shadow-success/25 ring-1 ring-white/10',
-  },
-  review: {
-    row: 'bg-warning/12 ring-warning/30',
-    chipActive: 'bg-gradient-to-br from-warning to-warning/55 text-white shadow-lg shadow-warning/40 ring-1 ring-white/15',
-    chipIdle: 'bg-gradient-to-br from-warning to-warning/55 text-white shadow-md shadow-warning/25 ring-1 ring-white/10',
-  },
-};
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const isAuthRoute = pathname?.startsWith('/auth');
+  // The root "/" is the public front door: page.tsx decides landing-vs-dashboard.
+  // Treat it (and the /auth pages) as public so the shell's login guard doesn't
+  // bounce a logged-out visitor to /auth/login before the landing redirect runs.
+  const isPublicRoute = isAuthRoute || pathname === '/';
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    if (isAuthRoute) {
+    if (isPublicRoute) {
       setReady(true);
       return;
     }
-    if (!getToken()) {
+    if (!isAuthenticated()) {
       router.replace('/auth/login');
       return;
     }
     setReady(true);
-  }, [isAuthRoute, router]);
+  }, [isPublicRoute, router]);
 
-  if (isAuthRoute) {
+  if (isPublicRoute) {
     return <>{children}</>;
   }
 
@@ -85,74 +65,75 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <ConnectedAccountsProvider>
-      <ProductChrome>{children}</ProductChrome>
+      <ActiveWorkspaceProvider>
+        <ActiveSpaceProvider>
+          {/* Phase C: the agent-driven UI seam. The provider holds page-local
+              commands above the routed pages (so they survive router.push); the
+              bridge polls + applies, mounted inside every context it reads. */}
+          <UiCommandProvider>
+            <UiCommandBridge />
+            <ProductChrome>{children}</ProductChrome>
+          </UiCommandProvider>
+        </ActiveSpaceProvider>
+      </ActiveWorkspaceProvider>
     </ConnectedAccountsProvider>
   );
 }
 
 function ProductChrome({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const router = useRouter();
-  const [sidebarExpanded, setSidebarExpanded] = useState(true);
-  const [drawerOpen, setDrawerOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(true);
-  const [agentsPaused, setAgentsPaused] = useState(false);
+  // Drag-resizable + persisted width for the right Agent Activity rail (the
+  // aside has no width transition, so no resizing flag is needed here).
+  const railWidth = usePaneWidth(shellRailPane) ?? 320;
+  const { agentsPaused, setPaused } = useAgentControls();
+  const agentPending = useAgentInboxPendingCount();
 
-  useEffect(() => {
-    setDrawerOpen(false);
-  }, [pathname]);
+  // The webmail client is a full-bleed surface: let it claim the viewport
+  // instead of the default centered max-w-7xl reading column.
+  const wide = pathname === '/mail' || pathname?.startsWith('/mail/');
+
+  // /mail is the Agent Email Command Center: it renders its OWN 5-zone chrome
+  // (top command bar, icon nav, folders, list, reader, agent rail) and claims
+  // the whole viewport. The shared context providers (workspace / space / UI
+  // commands) live above ProductChrome, so we simply hand it the full screen and
+  // skip the global sidebar / top bar / rail here — no double chrome.
+  if (wide) {
+    return <div className="h-screen overflow-hidden bg-surface-base text-primary">{children}</div>;
+  }
 
   return (
-    <div className="min-h-screen bg-surface-base text-primary">
-      <div className="flex min-h-screen">
-        <aside
-          className={cn(
-            'hidden shrink-0 border-r border-subtle bg-surface-base/92 backdrop-blur md:block',
-            'transition-[width] duration-token ease-token',
-            sidebarExpanded ? 'w-[220px]' : 'w-[60px]',
-          )}
-        >
-          <Sidebar
-            expanded={sidebarExpanded}
-            onToggle={() => setSidebarExpanded((value) => !value)}
-          />
-        </aside>
+    <div className="h-screen overflow-hidden bg-surface-base text-primary">
+      <div className="flex h-screen">
+        {/* The shared 52px icon rail — the same nav the /mail cockpit uses, so
+            every page carries one consistent Command-center chrome. */}
+        <MailIconNav pendingCount={agentPending} />
 
-        {drawerOpen && (
-          <div className="fixed inset-0 z-40 flex md:hidden" role="dialog" aria-modal="true">
-            <button
-              type="button"
-              aria-label="Close navigation"
-              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-              onClick={() => setDrawerOpen(false)}
-            />
-            <div className="relative z-10 h-full w-[280px]">
-              <Sidebar expanded mobile onToggle={() => setDrawerOpen(false)} />
-            </div>
-          </div>
-        )}
-
-        <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
           <Topbar
-            onOpenMenu={() => setDrawerOpen(true)}
             onToggleRail={() => setRailOpen((value) => !value)}
             railOpen={railOpen}
             agentsPaused={agentsPaused}
-            onTogglePause={() => setAgentsPaused((value) => !value)}
-            onSignOut={() => {
-              clearSession();
-              router.replace('/auth/login');
-            }}
+            onTogglePause={() => setPaused(!agentsPaused)}
           />
 
-          <main className="px-4 pb-10 pt-5 sm:px-6 lg:px-8">
+          <main className="min-h-0 flex-1 overflow-y-auto px-4 pb-10 pt-5 sm:px-6 lg:px-8">
             <div className="mx-auto max-w-7xl">{children}</div>
           </main>
         </div>
 
         {railOpen && (
-          <aside className="hidden w-[320px] shrink-0 border-l border-subtle bg-surface-base/88 backdrop-blur xl:block">
-            <AgentRail paused={agentsPaused} onPause={() => setAgentsPaused(true)} />
+          <aside
+            style={{ width: railWidth }}
+            className="relative hidden shrink-0 border-l border-subtle bg-surface-base/88 backdrop-blur xl:block"
+          >
+            <ResizableEdge
+              store={shellRailPane}
+              edge="left"
+              target="parent"
+              label="Resize agent activity rail"
+            />
+            <AgentRail paused={agentsPaused} onPause={() => setPaused(true)} />
           </aside>
         )}
       </div>
@@ -160,127 +141,37 @@ function ProductChrome({ children }: { children: ReactNode }) {
   );
 }
 
-function Sidebar({
-  expanded,
-  mobile,
-  onToggle,
-}: {
-  expanded: boolean;
-  mobile?: boolean;
-  onToggle: () => void;
-}) {
-  const pathname = usePathname();
-
-  return (
-    <div className="flex h-full flex-col bg-surface-base">
-      <div className="flex h-16 items-center gap-3 border-b border-subtle px-3">
-        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-token-lg bg-gradient-to-br from-accent to-[rgb(var(--accent-2))] text-sm font-semibold text-accent-contrast shadow-lg shadow-accent/40 ring-1 ring-white/15">
-          EO
-        </div>
-        {expanded && (
-          <div className="min-w-0">
-            <div className="text-sm font-semibold tracking-tight text-primary">Email-Ops</div>
-            <div className="text-[11px] text-tertiary">Cleaner cockpit</div>
-          </div>
-        )}
-        <button
-          type="button"
-          aria-label={mobile ? 'Close navigation' : expanded ? 'Collapse sidebar' : 'Expand sidebar'}
-          onClick={onToggle}
-          className="ml-auto grid h-8 w-8 place-items-center rounded-token text-tertiary transition hover:bg-surface-overlay hover:text-primary"
-        >
-          <Icon name={mobile ? 'menu' : 'shield'} />
-        </button>
-      </div>
-
-      <nav className="flex-1 space-y-1 p-2">
-        {NAV.map((item) => {
-          const active = pathname === item.href || pathname?.startsWith(`${item.href}/`);
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                'group flex min-h-[44px] items-center gap-3 rounded-token px-2.5 text-sm transition-colors duration-fast ease-token',
-                active
-                  ? cn('text-primary ring-1', NAV_TONE[item.tone].row)
-                  : 'text-secondary hover:bg-surface-raised hover:text-primary',
-                !expanded && 'justify-center px-0',
-              )}
-              title={expanded ? undefined : item.label}
-            >
-              <span
-                className={cn(
-                  'grid h-8 w-8 shrink-0 place-items-center rounded-token transition-colors duration-fast',
-                  active ? NAV_TONE[item.tone].chipActive : NAV_TONE[item.tone].chipIdle,
-                )}
-              >
-                <Icon name={item.icon} />
-              </span>
-              {expanded && (
-                <span className="min-w-0">
-                  <span className="block truncate font-medium">{item.label}</span>
-                  <span className="block truncate text-[11px] text-tertiary">{item.eyebrow}</span>
-                </span>
-              )}
-            </Link>
-          );
-        })}
-      </nav>
-
-      <div className="border-t border-subtle p-2">
-        <Card className={cn('overflow-hidden', !expanded && 'p-0')}>
-          <div className={cn('p-3', !expanded && 'grid place-items-center p-2')}>
-            <span className="grid h-8 w-8 place-items-center rounded-token bg-gradient-to-br from-info to-info/55 text-white shadow-md shadow-info/25 ring-1 ring-white/10">
-              <Icon name="shield" />
-            </span>
-            {expanded && (
-              <div className="mt-3">
-                <p className="text-xs font-medium text-primary">Scope boundary</p>
-                <p className="mt-1 text-[11px] leading-4 text-tertiary">
-                  Agents stage; you approve. Trash is reversible — permanent purge stays gated
-                  behind a downloadable backup.
-                </p>
-              </div>
-            )}
-          </div>
-        </Card>
-      </div>
-    </div>
-  );
-}
 
 function Topbar({
-  onOpenMenu,
   onToggleRail,
   railOpen,
   agentsPaused,
   onTogglePause,
-  onSignOut,
 }: {
-  onOpenMenu: () => void;
   onToggleRail: () => void;
   railOpen: boolean;
   agentsPaused: boolean;
   onTogglePause: () => void;
-  onSignOut: () => void;
 }) {
   const { accounts, activeProvider, setActiveProvider, loading } = useConnectedAccounts();
-  const linkedCount = accounts.filter((account) => account.linked).length;
   const activeMeta = providerMeta(activeProvider);
   const user = getStoredUser<EmailOpsUser>();
 
   return (
-    <header className="sticky top-0 z-30 border-b border-subtle bg-surface-base/92 backdrop-blur">
-      <div className="flex h-16 items-center gap-3 px-3 sm:px-4 lg:px-6">
-        <button
-          type="button"
-          aria-label="Open navigation"
-          className="grid h-10 w-10 place-items-center rounded-token text-secondary transition hover:bg-surface-raised hover:text-primary md:hidden"
-          onClick={onOpenMenu}
-        >
-          <Icon name="menu" />
-        </button>
+    <header className="shrink-0 border-b border-subtle bg-surface-raised">
+      <div className="flex h-12 items-center gap-3 pl-3 pr-3.5">
+        {/* Brand mark — the icon rail is brand-less, so identity lives here (matches /mail). */}
+        <div className="flex items-center gap-2.5 pr-1">
+          <div className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-[7px] bg-gradient-to-br from-accent to-[rgb(var(--accent-2))] text-sm font-bold text-white shadow-[0_2px_8px_-1px_rgb(var(--accent)/0.55)]">
+            ◐
+          </div>
+          <div className="hidden text-[14px] font-semibold tracking-[-0.01em] text-primary sm:block">
+            Email-Ops <span className="font-medium text-tertiary">/ Command</span>
+          </div>
+        </div>
+
+        {/* Leading tenant-identity slot: the active organization (outer tenant). */}
+        <WorkspaceSwitcher />
 
         <div className="hidden min-w-0 items-center gap-2 sm:flex">
           <span
@@ -294,9 +185,7 @@ function Topbar({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <p className="truncate text-sm font-medium text-primary">{activeMeta.mailboxLabel}</p>
-              <Badge variant={linkedCount > 0 ? 'success' : 'warning'} dot>
-                {linkedCount > 0 ? `${linkedCount} linked` : 'connect'}
-              </Badge>
+              <SpaceSwitcher />
             </div>
             <p className="truncate text-[11px] text-tertiary">
               {user?.email ?? 'Headers and metadata only'}
@@ -324,27 +213,46 @@ function Topbar({
         </div>
 
         <div className="ml-auto flex items-center gap-2">
-          <div className="hidden rounded-token border border-subtle bg-surface-raised px-2.5 py-1.5 text-xs text-tertiary lg:block">
-            Cmd+K
-          </div>
+          <Tooltip content="Command menu — jump anywhere, run any action (⌘K on the Mail page)">
+            <div className="hidden rounded-token border border-subtle bg-surface-raised px-2.5 py-1.5 text-xs text-tertiary lg:block">
+              Cmd+K
+            </div>
+          </Tooltip>
+          <Tooltip content="Help — the full guide to mail, agents, approvals, and autonomy">
+            <Link
+              href="/help"
+              aria-label="Open the help guide"
+              className="grid h-8 w-8 place-items-center rounded-token text-[15px] font-semibold text-tertiary transition-colors hover:bg-surface-overlay hover:text-primary"
+            >
+              ?
+            </Link>
+          </Tooltip>
           <ThemeToggle />
-          <Button
-            variant={agentsPaused ? 'secondary' : 'ghost'}
-            size="sm"
-            onClick={onTogglePause}
-            className={cn(
-              'hidden sm:inline-flex',
-              agentsPaused && 'border-warning/30 bg-warning-subtle text-warning',
-            )}
+          <Tooltip
+            content={
+              agentsPaused
+                ? 'Resume the fleet — agents can draft and (per their level) send again'
+                : 'Workspace kill switch: stop every agent from composing or sending until resumed'
+            }
           >
-            {agentsPaused ? 'Agents paused' : 'Pause all agents'}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={onToggleRail} className="hidden xl:inline-flex">
-            {railOpen ? 'Hide rail' : 'Show rail'}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={onSignOut}>
-            Sign out
-          </Button>
+            <Button
+              variant={agentsPaused ? 'secondary' : 'ghost'}
+              size="sm"
+              onClick={onTogglePause}
+              className={cn(
+                'hidden sm:inline-flex',
+                agentsPaused && 'border-warning/30 bg-warning-subtle text-warning',
+              )}
+            >
+              {agentsPaused ? 'Agents paused' : 'Pause all agents'}
+            </Button>
+          </Tooltip>
+          <Tooltip content={railOpen ? 'Hide the agent activity rail' : 'Show the agent activity rail'}>
+            <Button variant="ghost" size="sm" onClick={onToggleRail} className="hidden xl:inline-flex">
+              {railOpen ? 'Hide rail' : 'Show rail'}
+            </Button>
+          </Tooltip>
+          <AccountMenu size={30} />
         </div>
       </div>
     </header>
@@ -541,79 +449,3 @@ function ShellSkeleton() {
   );
 }
 
-function Icon({ name }: { name: IconName }) {
-  const path = {
-    dashboard: (
-      <>
-        <path d="M4 11.5 12 5l8 6.5" />
-        <path d="M6 10.5V19h4v-5h4v5h4v-8.5" />
-      </>
-    ),
-    accounts: (
-      <>
-        <rect x="4" y="5" width="16" height="14" rx="2" />
-        <path d="M7 9h10M7 13h6M16 17h1" />
-      </>
-    ),
-    insights: (
-      <>
-        <path d="M4 19V5" />
-        <path d="M8 19V9" />
-        <path d="M12 19V7" />
-        <path d="M16 19v-5" />
-        <path d="M20 19V3" />
-      </>
-    ),
-    cleanup: (
-      <>
-        <path d="M4 6h16" />
-        <path d="M9 6V4h6v2" />
-        <path d="M6 6l1 13h10l1-13" />
-        <path d="M10 10v6" />
-        <path d="M14 10v6" />
-      </>
-    ),
-    shield: (
-      <>
-        <path d="M12 3 19 6v5c0 4.5-2.8 8-7 10-4.2-2-7-5.5-7-10V6l7-3Z" />
-        <path d="m9 12 2 2 4-5" />
-      </>
-    ),
-    activity: (
-      <>
-        <path d="M4 12h4l2-7 4 14 2-7h4" />
-      </>
-    ),
-    menu: (
-      <>
-        <path d="M4 7h16" />
-        <path d="M4 12h16" />
-        <path d="M4 17h16" />
-      </>
-    ),
-    mail: (
-      <>
-        <rect x="3" y="5" width="18" height="14" rx="2" />
-        <path d="m3 7 9 6 9-6" />
-      </>
-    ),
-  } satisfies Record<IconName, ReactNode>;
-
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className="shrink-0"
-    >
-      {path[name]}
-    </svg>
-  );
-}

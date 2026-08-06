@@ -39,9 +39,11 @@ export class WorkspaceMembershipGuard implements CanActivate {
       req?.headers?.['x-workspace-id'] ??
       resolveWorkspaceId(user, defaultWorkspaceId());
 
-    const resolved = await this.membership.resolveAndAuthorize(user, requested);
-    // Stash for downstream handlers + the withWorkspace GUC chokepoint.
-    req.workspaceId = resolved;
+    const { workspaceId, role } = await this.membership.resolveWithRole(user, requested);
+    // Stash for downstream handlers + the withWorkspace GUC chokepoint, and the
+    // caller's role for the provisioning RBAC gates (@WorkspaceRole()).
+    req.workspaceId = workspaceId;
+    req.workspaceRole = role;
     return true;
   }
 }

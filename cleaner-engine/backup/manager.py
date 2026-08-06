@@ -229,7 +229,7 @@ class BackupManager:
 
         with NamedTemporaryFile(suffix=".eml.zip") as tmp:
             with zipfile.ZipFile(tmp.name, "w", compression=zipfile.ZIP_STORED) as archive:
-                for message_id, raw_mime in provider.export_messages(message_ids):
+                for message_id, raw_mime, label_ids in provider.export_messages(message_ids):
                     if not isinstance(raw_mime, bytes):
                         raise TypeError(f"export_messages returned non-bytes for {message_id}")
                     digest = hashlib.sha256(raw_mime).hexdigest()
@@ -240,11 +240,14 @@ class BackupManager:
                         "file": filename,
                         "bytes": len(raw_mime),
                         "sha256": digest,
+                        # Provider label/read/star state, so restore re-applies it. Absent
+                        # on legacy (<=2.0) archives → restore just imports without labels.
+                        "labels": list(label_ids or []),
                     })
                     total_bytes += len(raw_mime)
 
                 manifest = {
-                    "version": "2.0",
+                    "version": "2.1",
                     "format": "eml_zip",
                     "created_at": created_at,
                     "query": query,
@@ -281,15 +284,16 @@ class BackupManager:
 
     def verify_archive(self, bucket: str, key: str, s3_config: dict[str, str]) -> dict[str, Any]:
         """Download and verify a Garage/S3 MIME archive by manifest SHA-256."""
-        with NamedTemporaryFile(suffix=".eml.zip") as tmp:
-            self._s3_client(s3_config).download_file(bucket, key, tmp.name)
-            object_sha = hashlib.sha256()
-            with open(tmp.name, "rb") as f:
-                for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                    object_sha.update(chunk)
-            object_bytes = Path(tmp.name).stat().st_size
+        object_bytes = 0
+        try:
+            with NamedTemporaryFile(suffix=".eml.zip") as tmp:
+                self._s3_client(s3_config).download_file(bucket, key, tmp.name)
+                object_sha = hashlib.sha256()
+                with open(tmp.name, "rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        object_sha.update(chunk)
+                object_bytes = Path(tmp.name).stat().st_size
 
-            try:
                 with zipfile.ZipFile(tmp.name, "r") as archive:
                     manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
                     entries = manifest.get("messages", [])
@@ -303,13 +307,13 @@ class BackupManager:
                                 "bytes": object_bytes,
                                 "message": f"sha256 mismatch for {entry.get('id')}",
                             }
-            except Exception as e:
-                return {
-                    "success": False,
-                    "total_messages": 0,
-                    "bytes": object_bytes,
-                    "message": f"archive verification failed: {e}",
-                }
+        except Exception as e:
+            return {
+                "success": False,
+                "total_messages": 0,
+                "bytes": object_bytes,
+                "message": f"archive verification failed: {e}",
+            }
 
         return {
             "success": True,
@@ -339,7 +343,9 @@ class BackupManager:
                         digest = hashlib.sha256(data).hexdigest()
                         if digest != entry.get("sha256"):
                             raise ValueError("sha256 mismatch")
-                        provider.import_message(data)
+                        # Re-apply the archived label/read/star state (v2.1+). Legacy
+                        # archives have no "labels" → None → plain import (unchanged).
+                        provider.import_message(data, label_ids=entry.get("labels"))
                         restored += 1
                     except Exception as e:
                         failed.append({"id": str(entry.get("id", "")), "error": str(e)})

@@ -3,6 +3,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Badge, Button, Card, Skeleton, SkeletonText, cn } from '@/components/ui';
+import { Tooltip } from '@/components/Tooltip';
 import { useConnectedAccounts } from '@/components/ConnectedAccountsProvider';
 import { useInboxStats } from '@/components/useInboxStats';
 import {
@@ -155,9 +156,20 @@ function InsightsContent() {
             <span className="font-medium text-primary">Privacy line:</span> Analysis reads headers +
             metadata only, never message content.
           </p>
-          <Badge variant={model.aiUnavailable ? 'warning' : 'success'} dot>
-            {model.aiUnavailable ? 'AI unavailable-safe' : 'AI ready'}
-          </Badge>
+          <Tooltip
+            content={
+              model.aiUnavailable
+                ? 'The AI layer is unreachable, so this run degraded safely to statistical insights only — nothing failed silently'
+                : 'The AI layer is reachable — recommendations and category chips include model output'
+            }
+            bubbleClassName="max-w-[300px]"
+          >
+            <span tabIndex={0}>
+              <Badge variant={model.aiUnavailable ? 'warning' : 'success'} dot>
+                {model.aiUnavailable ? 'AI unavailable-safe' : 'AI ready'}
+              </Badge>
+            </span>
+          </Tooltip>
         </div>
       </Card>
 
@@ -284,7 +296,7 @@ function CategoryBars({
 }) {
   return (
     <Card padded>
-      <SectionHead title="Category Bars" badge={`${formatCount(total)} messages`} />
+      <SectionHead title="Category Bars" badge={`${formatCount(total)} messages`} hint="How your visible mail splits across provider categories (promotions, social, updates, …) — from headers only" />
       {loading ? (
         <SkeletonText lines={5} className="mt-5" />
       ) : data.length === 0 ? (
@@ -304,7 +316,7 @@ function UnreadPile({ loading, unread, total }: { loading: boolean; unread: numb
   const ratio = total > 0 ? Math.round((unread / total) * 100) : 0;
   return (
     <Card padded>
-      <SectionHead title="Unread Pile" badge="review only" />
+      <SectionHead title="Unread Pile" badge="review only" hint="How much of the visible mailbox is unread — a decluttering signal, never an action" />
       {loading ? (
         <div className="mt-5 space-y-4">
           <Skeleton w="60%" h={44} />
@@ -342,7 +354,7 @@ function FrequencyTable({
   return (
     <Card className="overflow-hidden">
       <div className="border-b border-subtle p-4">
-        <SectionHead title={title} badge="metadata" />
+        <SectionHead title={title} badge="metadata" hint="Who fills your mailbox most — counts from message headers, ranked highest first" />
       </div>
       {rows.length === 0 ? (
         <div className="p-4">
@@ -383,7 +395,7 @@ function Histogram({
   const max = Math.max(...data.map((item) => item.count), 1);
   return (
     <Card padded>
-      <SectionHead title={title} badge={actionLabel ?? 'distribution'} />
+      <SectionHead title={title} badge={actionLabel ?? 'distribution'} hint="Distribution across buckets — tall bars show where volume (or size) concentrates" />
       <div className="mt-5 flex h-48 items-end gap-3">
         {data.map((bar) => (
           <div key={bar.label} className="flex h-full min-w-0 flex-1 flex-col justify-end gap-2">
@@ -417,7 +429,7 @@ function AiCategoryChips({
 }) {
   return (
     <Card padded>
-      <SectionHead title="AI Categories" badge={unavailable ? 'degraded' : 'available'} />
+      <SectionHead title="AI Categories" badge={unavailable ? 'degraded' : 'available'} hint="Model-suggested groupings of your mail — degrades to statistics-only when the AI layer is unreachable" />
       {unavailable ? (
         <EmptyLine text="AI unavailable. Statistical insights remain usable." />
       ) : chips.length === 0 ? (
@@ -444,7 +456,7 @@ function RecommendationCards({
 }) {
   return (
     <Card padded>
-      <SectionHead title="Recommendations" badge="review gate" />
+      <SectionHead title="Recommendations" badge="review gate" hint="Suggested cleanups — every one routes through the review workbench; nothing executes from this page" />
       {unavailable ? (
         <div className="mt-5 rounded-token-lg border border-warning/30 bg-warning-subtle p-4">
           <Badge variant="warning" dot>
@@ -512,10 +524,14 @@ function BarRow({ bar, max }: { bar: BarDatum; max: number }) {
   );
 }
 
-function SectionHead({ title, badge }: { title: string; badge: string }) {
+function SectionHead({ title, badge, hint }: { title: string; badge: string; hint?: string }) {
   return (
     <div className="flex items-center justify-between gap-3">
-      <h2 className="text-sm font-semibold text-primary">{title}</h2>
+      <Tooltip content={hint} disabled={!hint} bubbleClassName="max-w-[300px]">
+        <h2 className="text-sm font-semibold text-primary" tabIndex={hint ? 0 : undefined}>
+          {title}
+        </h2>
+      </Tooltip>
       <Badge variant="neutral" className="font-mono">
         {badge}
       </Badge>

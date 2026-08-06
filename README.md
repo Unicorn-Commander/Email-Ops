@@ -2,16 +2,30 @@
 
 The **mailbox / thread surface + agent-inbox** of the Unicorn Commander suite.
 
-Email-Ops is the app that **fronts the Stalwart mail server** (IMAP/JMAP) for mailbox state + threads, and owns the **agent inbox** — the human-in-the-loop approval queue for agent-drafted mail. It is the system-of-record for every mailbox, thread, and outbound message it initiated. Transactional outbound routes via **Postmark** (the high-rep deliverability lane); the mailbox read path is Stalwart. (`SUITE-ARCHITECTURE-MAP.md` §2/§3.)
+**v0.6.0 — LIVE (Wave 1 shipped):** Real triage moves mail in James, JMAP send lane saves copies, security headers, and Forgejo CI.
+
+Email-Ops is the app that **fronts the Apache James mail server** (JMAP) for mailbox state + threads, and owns the **agent inbox** — the human-in-the-loop approval queue for agent-drafted mail. It is the system-of-record for every mailbox, thread, and outbound message it initiated. Transactional outbound routes via **Postmark** (the high-rep deliverability lane); the mailbox read/move path is **Apache James 3.9** (the live MX — James replaced Stalwart in the P-00106 migration; the internal `stalwart/` module name is legacy). (`SUITE-ARCHITECTURE-MAP.md` §2/§3.)
 
 **Golden rule:** *federate the engine, don't reinvent a mail server.* A cockpit (e.g. Customer-Ops) federates Email-Ops over MCP **by `workspace_id`** — it never runs a mail server, never stores a message body, never copies a thread.
+
+## Agent Email Command Center
+
+The `/mail` surface is a full webmail client run **with a human in the loop over an agent fleet**:
+
+- **Webmail** — a 4-pane command center over every workspace mailbox (sovereign James + connected Gmail / Microsoft 365): search, HTML mail (rendered in a sandboxed, theme-correct iframe), attachments, reply/reply-all/forward, bulk actions, keyboard shortcuts, message **pop-out** (overlay + eject-to-window), and **All inboxes** (a bounded, timed fan-out that merges every mailbox newest-first). A **command-center chrome** wraps every page: an expandable section rail, and a folders pane that collapses to a slim avatar rail rather than vanishing.
+- **Chat that acts** — a streaming assistant in the rail that not only summarizes/triages but **stages work into the approval queue**: threaded **draft replies** and **cleanup batches** (Archive / Trash). Cleanup against your own James inbox runs a real JMAP move — only after you click **Approve & run**.
+- **Agent activity rail** — a live timeline with real, server-computed metrics (`GET /workspaces/:id/agent-metrics?window=7d`): **Triaged** (threads an agent filed), **Sent** (agent autonomous + approved sends), **Awaiting** (pending approvals). Honest counts — not a client-side proxy.
+- **Autonomy dial + kill switch** — per-agent **L0** draft-only / **L1** approve-to-send / **L2** autonomous-with-audit, plus a global **Pause all agents** switch.
+- **Agent Inbox** — the approval queue: agents stage drafts (and cleanup batches); a human **Approve & sends** or **Rejects**, every decision attributed.
+- **In-app Help** — a discoverable guide behind the **`?`** button in the mail top bar (and the `?` key) covers all of the above plus the keyboard shortcuts.
+- **MCP** — connect Claude Code / suite agents to drive all of it with an `eo_pat_` token. See **[docs/MCP.md](docs/MCP.md)**.
 
 ## What it owns vs federates
 
 | | |
 |---|---|
-| **Owns** | mailboxes/threads/messages (over Stalwart), the agent inbox (approval queue), the outbound message SoR (idempotent on the compose tuple) |
-| **Federates the engine** | Stalwart (IMAP/JMAP mailboxes) for reads; Postmark for the transactional outbound lane |
+| **Owns** | mailboxes/threads/messages (over Apache James), the agent inbox (approval queue), the outbound message SoR (idempotent on the compose tuple) |
+| **Federates the engine** | Apache James 3.9 (JMAP mailboxes) for reads/moves; Postmark for the transactional outbound lane |
 | **Federated BY** | Customer-Ops (the relationship cockpit) + agents, via the EmailOpsPort MCP contract |
 
 ## The EmailOpsPort contract (what the MCP server implements)

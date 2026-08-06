@@ -6,13 +6,15 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { ConnectedAccountsEnginePort } from './connected-accounts.port';
 import { CleanerEngineClient } from './connected-accounts.client';
 import { ConnectedAccountsController } from './connected-accounts.controller';
+import { AssistantController } from './assistant.controller';
 import { ConnectedAccountsService } from './connected-accounts.service';
 import { ArchiveStorageService } from './archive-storage.service';
 import { ArchiveRetentionService } from './archive-retention.service';
+import { NotifyModule } from '../notify/notify.module';
 
 @Module({
-  imports: [AuthModule, WorkspaceModule, PrismaModule, ScheduleModule.forRoot()],
-  controllers: [ConnectedAccountsController],
+  imports: [AuthModule, WorkspaceModule, PrismaModule, ScheduleModule.forRoot(), NotifyModule],
+  controllers: [ConnectedAccountsController, AssistantController],
   providers: [
     ConnectedAccountsService,
     ArchiveStorageService,

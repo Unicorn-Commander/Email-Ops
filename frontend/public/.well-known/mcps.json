@@ -1,0 +1,1924 @@
+{
+  "$schema": "https://brigade.unicorncommander.ai/.well-known/mcps-schema-v1.json",
+  "name": "Email-Ops",
+  "version": "0.1.0",
+  "description": "Privacy-first email cockpit: connected mailboxes, threads, the agent-inbox approval surface, mail triage, conversational provisioning, the Cleaner engine, and an agent-controls-the-UI (AG-UI) surface — over the Apache James mail engine.",
+  "mcp_endpoint": "https://email-ops.magicunicorn.dev/api/v1/mcp",
+  "tool_namespace": "emailops",
+  "auth": {
+    "type": "keycloak_jwt",
+    "federated_auth": {
+      "type": "brigade_jwt",
+      "trusted_issuer": "https://brigade.unicorncommander.ai",
+      "jwks_url": "https://brigade.unicorncommander.ai/.well-known/jwks.json",
+      "expected_audience": "email-ops",
+      "signing_algorithm": "RS256"
+    }
+  },
+  "tools": [
+    {
+      "name": "health",
+      "description": "Liveness + configuration check. Returns service status, whether suite tenancy is enabled, and the server time.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "list_my_workspaces",
+      "description": "Return the workspaces the calling user is an active member of, with their canonical suite role and which one is the default. Empty when the user has no membership.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "_ack": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:workspaces"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "email_ops_health",
+      "description": "The email operations health + setup report for a workspace: is the mail engine configured, the default mailbox + mailbox count, the approval-queue backlog (pending count + oldest age), failed sends in the last 7 days, and the registered agent fleet (count + how many can send autonomously). Read-only — a Mail-Ops steward calls this to know the setup and run health checks.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "list_agents",
+      "description": "List the workspace’s registered agents (the registry): each agent’s stable key, display name, sending mailbox, autonomy level (L0/L1/L2), and how many of its drafts await approval. Read-only — the fleet roster a Mail-Ops steward reads.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:agents"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "provision_mailbox",
+      "description": "Create a mailbox (human / agent / shared) by talking to an agent. Runs AS the calling user: the workspace provisioning policy is enforced with the user’s own role — so this only does what that user is allowed to. Returns {status:\"created\", mailbox} when applied, or {status:\"pending_approval\", request} when the policy requires an approver (a human approves it in the Mailboxes view). owner_kind AGENT is the higher-trust send-identity path (admin by default).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "email_address": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "owner_kind": {
+            "type": "string",
+            "enum": [
+              "HUMAN",
+              "AGENT",
+              "SHARED"
+            ]
+          },
+          "owner_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email_address"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mailboxes"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "provision_agent",
+      "description": "Register a new agent (key + display name + autonomy + tier + manager) by talking to an agent. Runs AS the calling user with their role enforced against the provisioning policy. Returns {status:\"created\", agent} or {status:\"pending_approval\", request}. autonomy_level ∈ L0_DRAFT_ONLY|L1_APPROVE_TO_SEND|L2_AUTONOMOUS_AUDIT; tier ∈ EXECUTIVE|DOMAIN_LEAD|MANAGER|SPECIALIST|UNSPECIFIED.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "autonomy_level": {
+            "type": "string",
+            "enum": [
+              "L0_DRAFT_ONLY",
+              "L1_APPROVE_TO_SEND",
+              "L2_AUTONOMOUS_AUDIT"
+            ]
+          },
+          "tier": {
+            "type": "string",
+            "enum": [
+              "EXECUTIVE",
+              "DOMAIN_LEAD",
+              "MANAGER",
+              "SPECIALIST",
+              "UNSPECIFIED"
+            ]
+          },
+          "manager_agent_key": {
+            "type": "string"
+          },
+          "mailbox_account_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "display_name"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:agents"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "set_disposition",
+      "description": "Triage a thread into a folder by talking to an agent: INBOX (un-triage), ARCHIVE, TRASH, or SPAM (junk). Runs AS the calling user; only works in a workspace they are a member of. This is the agent analogue of the human triage UI — an agent on a loop can archive handled threads or route junk to Spam. Returns the updated disposition overlay row.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string"
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "INBOX",
+              "ARCHIVE",
+              "TRASH",
+              "SPAM"
+            ]
+          }
+        },
+        "required": [
+          "thread_id",
+          "disposition"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:triage"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "set_sender_policy",
+      "description": "Add/update a sender block (BLOCK) or trust (ALLOW) rule — an exact ADDRESS or a whole DOMAIN. The app enforces it on triage today and feeds it to the mail engine’s inbound spam filter once live (BLOCK → Spam; ALLOW → never-spam). Runs AS the calling user, member-level. Upserts on (scope, pattern).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "ADDRESS",
+              "DOMAIN"
+            ]
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "BLOCK",
+              "ALLOW"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern",
+          "kind"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:triage"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "list_threads_with_contact",
+      "description": "List the mailbox THREADS with a customer’s contact (the customer-360 email history). Federated from the Apache James mailbox + the workspace’s own outbound SoR rows, deduped by thread. Read-only / viewer-level — does NOT require the dual SKU. Returns { threads: [...] }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "contact_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "contact_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "list_thread_messages",
+      "description": "List the MESSAGES in one thread, bodies as PREVIEWS only (the full message lives in Apache James). Read-only / viewer-level. Returns { messages: [...] }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "compose_email",
+      "description": "Compose an outbound email to a customer’s contact. mode=send queues delivery now (Apache James, or Postmark for the transactional high-rep lane); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires BOTH customer-ops and email-ops entitlements. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "contact_id": {
+            "type": "string"
+          },
+          "to_address": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 320
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100000
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "send",
+              "draft"
+            ]
+          },
+          "in_reply_to_thread_id": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "external_source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "external_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "to_address",
+          "subject",
+          "body",
+          "external_source",
+          "external_ref"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:email"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "list_threads",
+      "description": "List the THREADS in a mailbox folder (inbox/archive/spam/trash/sent/drafts). Pass mailbox_id for one mailbox; omit it for the unified inbox across every mailbox the caller can read (each thread then carries mailbox_id + mailbox_address). Optional q (full-text), limit (max 200, default 50), offset (paging). Read-only / member-level. Returns { threads, count, folder } - an empty list when the mail engine is dormant (never a 500).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string"
+          },
+          "folder": {
+            "type": "string",
+            "enum": [
+              "inbox",
+              "archive",
+              "spam",
+              "trash",
+              "sent",
+              "drafts"
+            ]
+          },
+          "q": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "get_thread",
+      "description": "Return the full MESSAGES in one thread WITH bodies (text + HTML), cc/bcc, threading headers, read/flag state, and attachments when the engine serves them. Pass mailbox_id to read an external (Gmail/Microsoft) thread through its provider or to force the live engine detail; omit it to read the workspace default mailbox. Read-only / member-level. Returns { messages, count }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mailbox_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "search_mail",
+      "description": "Full-text SEARCH a mailbox folder by query string q (subject/body/participants, via the engine's own search). Pass mailbox_id for one mailbox; omit it to search across every readable mailbox (unified). Optional folder (default inbox), limit (max 200, default 50), offset. Read-only / member-level. Returns { threads, count, q } - an empty list when the engine is dormant.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string"
+          },
+          "q": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "folder": {
+            "type": "string",
+            "enum": [
+              "inbox",
+              "archive",
+              "spam",
+              "trash",
+              "sent",
+              "drafts"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "set_read",
+      "description": "Set or clear the read ($seen) state on every message in a thread. Pass mailbox_id to target one mailbox; omit it to apply across the workspace's sovereign mailboxes (the bulk path). Member-level write; runs AS the calling user. Returns { thread_id, read, updated } - updated:false when the engine could not apply it (e.g. dormant, or an external provider mailbox).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "read": {
+            "type": "boolean"
+          },
+          "mailbox_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "thread_id",
+          "read"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "bulk_disposition",
+      "description": "Move a SET of threads into a folder in one call: ARCHIVE, TRASH, SPAM, or INBOX (un-triage) - the same disposition overlay the single-thread set_disposition writes. Per-thread isolation: one failing thread never fails the batch. Member-level write; runs AS the calling user. Returns { succeeded, failed } (thread ids). Up to 200 thread_ids per call.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "thread_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 200
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "INBOX",
+              "ARCHIVE",
+              "TRASH",
+              "SPAM"
+            ]
+          }
+        },
+        "required": [
+          "thread_ids",
+          "disposition"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:triage"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "list_folders",
+      "description": "List every folder in a mailbox - the system role folders (Inbox/Sent/Archive/Trash/Junk/Drafts, role non-null) AND user-created custom folders (role null). Read-only / member-level. Returns { folders: [{ id, name, role, parentId, unread? }], count } - an empty list when the engine is dormant or the mailbox is external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "create_folder",
+      "description": "Create a custom folder in a mailbox, optionally nested under parent_id. Member-level write; runs AS the calling user. Returns { id, created } - created:false when the engine is dormant or the mailbox is external (never a 500).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "parent_id": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "name"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:triage"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "rename_folder",
+      "description": "Rename a custom folder by id. Member-level write; runs AS the calling user. Returns { updated } - updated:false when the id is unknown, the engine is dormant, or the mailbox is external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "folder_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "folder_id",
+          "name"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:triage"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "delete_folder",
+      "description": "Delete a CUSTOM folder by id. A system/role folder (Inbox/Sent/Archive/Trash/Junk/Drafts) is NEVER deletable - the engine refuses it. Member-level write; runs AS the calling user. Returns { deleted } - deleted:false when refused, unknown, dormant, or external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "folder_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "folder_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:triage"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "move_to_folder",
+      "description": "Move a thread INTO a custom folder by folder_id (from list_folders). The custom-folder counterpart to bulk_disposition (which reaches only the system folders). Member-level write; runs AS the calling user. Returns { moved } - moved:false when the target/thread is unknown, the mailbox is external, or the engine is dormant.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "folder_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "thread_id",
+          "folder_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:triage"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "list_connected_accounts",
+      "description": "List whether the caller has linked Gmail or Microsoft in Keycloak. Viewer-level; no SKU gate. Returns { accounts: [{ provider, linked }] }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:accounts"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "get_inbox_stats",
+      "description": "Return Cleaner Engine inbox stats using the caller’s brokered provider token. Requires the email-ops SKU.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "gmail",
+              "microsoft"
+            ]
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:cleaner"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "analyze_inbox",
+      "description": "Run the stateless Cleaner Engine analysis using the caller’s brokered provider token. Requires the email-ops SKU.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "gmail",
+              "microsoft"
+            ]
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:cleaner"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "plan_cleanup",
+      "description": "Build a dry-run cleanup plan with protected and safe rows separated. Read-only preview; does not mutate the mailbox.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "gmail",
+              "microsoft"
+            ]
+          },
+          "criteria": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:cleaner"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "clean_trash",
+      "description": "Stage a trash cleanup batch into the agent inbox. The caller is an agent, so this does not execute immediately.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "gmail",
+              "microsoft"
+            ]
+          },
+          "criteria": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:cleaner"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "clean_delete",
+      "description": "Stage a permanent-delete cleanup batch into the agent inbox. Human approval later enforces the verified-backup gate.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "gmail",
+              "microsoft"
+            ]
+          },
+          "criteria": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:cleaner"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "organize_messages",
+      "description": "Stage an organize/archive batch into the agent inbox. This is a pending approval request for an agent caller.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "gmail",
+              "microsoft"
+            ]
+          },
+          "criteria": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:cleaner"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "unsubscribe_sender",
+      "description": "Stage an unsubscribe batch into the agent inbox for a sender group. Approval later decides whether it executes.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "gmail",
+              "microsoft"
+            ]
+          },
+          "sender_group": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "provider",
+          "sender_group"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:cleaner"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "undo_batch",
+      "description": "Undo a cleanup batch record. This is a best-effort audit reversal and does not invent a restore path the engine does not expose.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "gmail",
+              "microsoft"
+            ]
+          },
+          "batch_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "batch_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:cleaner"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "list_agent_inbox",
+      "description": "List the agent-inbox queue: agent-drafted messages awaiting human approval before send (mode=draft composes land here). Defaults to PENDING; pass state to filter. Returns { items: [...], count }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "rejected"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:agent_inbox"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "approve_agent_inbox_item",
+      "description": "Approve a PENDING agent-inbox draft: hand it to the send lane and advance the message to queued/sent. This is the human-in-the-loop SEND, so it requires BOTH customer-ops and email-ops entitlements. By default the approval also TRUSTS the external recipients (Wave 7 learning) so future in-thread agent replies to them can send autonomously; pass trust_recipients:false to approve without learning. Returns the updated inbox item + message.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "trust_recipients": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "item_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:agent_inbox"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "reject_agent_inbox_item",
+      "description": "Reject a PENDING agent-inbox draft: mark it REJECTED; the message is never sent. Returns the updated inbox item + message.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "item_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:agent_inbox"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "list_trusted_correspondents",
+      "description": "List the workspace’s trusted correspondents — the OUTBOUND addresses an L2 agent may auto-send to (learned when a human approves a staged draft, or added manually). Read-only / member-level. Returns { items, count }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "trust_correspondent",
+      "description": "Manually add an address (jane@acme.com) OR a whole domain (acme.com) to the trusted-correspondent allowlist (source MANUAL; idempotent — re-trusting refreshes the note). scope is inferred from the value when omitted (an \"@\"-address → address; a bare domain → domain). After this, an L2 agent’s in-thread replies to the address (or any address at the trusted domain) can send autonomously. Returns the trusted-correspondent row.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 320
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "address",
+              "domain"
+            ]
+          }
+        },
+        "required": [
+          "address"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "untrust_correspondent",
+      "description": "Remove an address from the trusted-correspondent allowlist — the next agent reply to it stages for human approval again. Returns { ok } (ok:false when the address was not trusted).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 320
+          }
+        },
+        "required": [
+          "address"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "ui_navigate",
+      "description": "Push a NAVIGATE command to the calling user’s open Email-Ops cockpit: route it to an app path (e.g. /mail, /agents, /agent-inbox, /cleanup, /dashboard, /insights, /mailboxes, /accounts). Applied on the user’s next focus-gated poll. No side effect. Returns { enqueued, command_id, kind }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "control:ui"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "ui_open_thread",
+      "description": "Push an OPEN_THREAD command: navigate the user’s cockpit to /mail and select a specific thread (optionally selecting its mailbox first). Read-only UI action. Returns { enqueued, command_id, kind }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string"
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "thread_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "control:ui"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "ui_compose",
+      "description": "Push a COMPOSE command that opens the cockpit composer PRE-FILLED with an optional to / subject / body (and optional thread to reply in). It does NOT send — the human reviews and sends. Use compose_email instead to actually queue/stage an outbound message. Returns { enqueued, command_id, kind }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string",
+            "maxLength": 320
+          },
+          "subject": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 100000
+          },
+          "thread_id": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "control:ui"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "ui_switch_space",
+      "description": "Push a SWITCH_SPACE command: set the cockpit’s active Space (a Space id, or \"all\" for no filter), which re-scopes /mail + the agents view. Returns { enqueued, command_id, kind }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "space_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "control:ui"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "ui_notify",
+      "description": "Push a NOTIFY command: show a non-blocking toast in the user’s cockpit — an agent → human status message (e.g. \"Archived 12 newsletters\"). tone ∈ info|success|warning. Returns { enqueued, command_id, kind }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "tone": {
+            "type": "string",
+            "enum": [
+              "info",
+              "success",
+              "warning"
+            ]
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "control:ui"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
+      "name": "list_mail_domains",
+      "description": "List the domains the sovereign mail engine (Apache James) currently serves. Read-only / member-level. Returns { domains: [{ domain }] } or { status:\"engine_not_configured\" } when no WebAdmin endpoint is wired.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:mail_engine"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "list_mail_accounts",
+      "description": "List the accounts (mailbox logins) the mail engine hosts. Read-only / member-level. Returns { accounts: [{ address }] } or { status:\"engine_not_configured\" } when no WebAdmin endpoint is wired.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:mail_engine"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "ensure_mail_domain",
+      "description": "Add a domain to the mail engine if not already served (idempotent). OWNER-only. Returns { status:\"ok\"|\"failed\"|\"engine_not_configured\", result }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "domain": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          }
+        },
+        "required": [
+          "domain"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "admin:mail_engine"
+      ],
+      "tier_required": "enterprise",
+      "read_only": false
+    },
+    {
+      "name": "remove_mail_domain",
+      "description": "Remove a domain from the mail engine (idempotent). OWNER-only. Returns { status:\"ok\"|\"failed\"|\"engine_not_configured\", result }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "domain": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          }
+        },
+        "required": [
+          "domain"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "admin:mail_engine"
+      ],
+      "tier_required": "enterprise",
+      "read_only": false
+    },
+    {
+      "name": "set_mailbox_quota",
+      "description": "Set (or clear) the storage quota for an engine mailbox account. OWNER-only. quota_bytes: integer bytes; null clears. Returns { status:\"ok\"|\"failed\"|\"engine_not_configured\", result }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string",
+            "format": "email"
+          },
+          "quota_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "nullable": true
+          }
+        },
+        "required": [
+          "address",
+          "quota_bytes"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "admin:mail_engine"
+      ],
+      "tier_required": "enterprise",
+      "read_only": false
+    },
+    {
+      "name": "remove_mailbox_engine",
+      "description": "Remove the mail-server account for an address (idempotent). OWNER-only. Tears down engine login and storage ONLY — does NOT delete the SoR MailboxAccount row. Returns { status:\"ok\"|\"failed\"|\"engine_not_configured\", result }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string",
+            "format": "email"
+          }
+        },
+        "required": [
+          "address"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "admin:mail_engine"
+      ],
+      "tier_required": "enterprise",
+      "read_only": false
+    },
+    {
+      "name": "snooze_thread",
+      "description": "Snooze a thread in a sovereign mailbox until a chosen time (ISO 8601 until): it leaves the Inbox now and the scheduler wakes it back to Inbox at that time. Member-level write; runs AS the calling user. Returns { snoozed, item } - snoozed:false when the mailbox is dormant or external, or the move was refused.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "until": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "thread_id",
+          "until"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "unsnooze_thread",
+      "description": "Cancel an active snooze and restore the thread to Inbox immediately. Member-level write; runs AS the calling user. Returns { unsnoozed } - unsnoozed:false when no active snooze matches the thread or the mailbox is dormant or external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "thread_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "list_snoozed",
+      "description": "List the active snoozed threads for one sovereign mailbox, each with its wake time. Read-only / member-level. Returns { snoozed, count } - an empty list when the mailbox is dormant or external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "schedule_send",
+      "description": "Schedule an outbound email to send later (ISO 8601 send_at) from one sovereign mailbox. The scheduler fires it at send_at through the same send lane compose_email uses, idempotent on the scheduled-send id so a retry never doubles. Member-level write; runs AS the calling user. Returns { scheduled, item } - scheduled:false when the mailbox is dormant or external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "to_address": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 320
+          },
+          "subject": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 100000
+          },
+          "body_html": {
+            "type": "string",
+            "maxLength": 100000
+          },
+          "to_addresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50
+          },
+          "bcc": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50
+          },
+          "in_reply_to_thread_id": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "send_at": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "to_address",
+          "send_at"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:email"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "cancel_scheduled_send",
+      "description": "Cancel a pending scheduled send by id before it fires. Member-level write; runs AS the calling user. Returns { cancelled } - cancelled:false when the id is unknown, already sent or cancelled, or the owning mailbox is not actionable.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "list_scheduled_sends",
+      "description": "List the pending (and in-flight) scheduled sends for one sovereign mailbox, each with its send time and payload. Read-only / member-level. Returns { scheduled_sends, count } - an empty list when the mailbox is dormant or external.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "list_agent_mailboxes",
+      "description": "List the workspace's agents with their mailbox address, unread count, and pending-approval count - the lightweight roster behind the agent-world switcher. Read-only / member-level. Returns { items, count }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:agents"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "get_agent_mailbox",
+      "description": "Return one agent's mailbox world: its mailbox, recent inbox threads (up to thread_limit, default 25, max 100), its pending agent-inbox drafts plus state counts, and mailbox stats. Read-only / member-level. Returns the composed view, or { status: not_found } when no such agent exists in this workspace.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "thread_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:agents"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "list_mail_rules",
+      "description": "List one mailbox's inbound mail rules, priority ascending: each rule's name, enabled state, priority, match tree, ordered actions, and hit stats. Read-only / member-level. Returns { rules, count }.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "create_mail_rule",
+      "description": "Create an inbound rule on one mailbox: a name, a match tree ({ all / any } groups of { field, op, value } conditions over from/to/subject/fromDomain), and an ordered actions list (MOVE_TO_FOLDER/ARCHIVE/TRASH/MARK_READ/STOP). priority auto-assigns past the current max when omitted. The service validates match + actions exactly as on REST - a bad payload is refused, never stored raw. Member-level write; runs AS the calling user. Returns the created rule.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "match": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "actions": {
+            "type": "array",
+            "items": {}
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "priority": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "name",
+          "match",
+          "actions"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "update_mail_rule",
+      "description": "Update any subset of an inbound rule's fields (name, enabled, priority, match, actions); provided fields are re-validated exactly as on create. Member-level write; runs AS the calling user. Returns the updated rule, or { status: not_found } when the rule is not in this workspace + mailbox.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rule_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "match": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "actions": {
+            "type": "array",
+            "items": {}
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "priority": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "rule_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "delete_mail_rule",
+      "description": "Delete an inbound rule from one mailbox. Member-level write; runs AS the calling user. Returns { ok:true }, or { ok:false, reason } when the rule is not in this workspace + mailbox.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rule_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mailbox_id",
+          "rule_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    }
+  ],
+  "resources": [],
+  "prompts": []
+}

@@ -6,8 +6,14 @@ import {
   EngineArchiveRef,
   EngineArchiveRestoreResult,
   EngineArchiveVerifyResult,
+  EngineAccountProfile,
   EngineInboxStats,
   EngineListMessagesResult,
+  EngineMailFolder,
+  EngineMailSendResult,
+  EngineMailThreadActionResult,
+  EngineMailThreadResult,
+  EngineMailThreadsResult,
   EngineMessageSummary,
 } from './connected-accounts.types';
 
@@ -132,6 +138,47 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
     credentials: Record<string, unknown>,
   ): Promise<EngineInboxStats | null> {
     return this.postJson<EngineInboxStats>('/accounts/stats', { provider, credentials });
+  }
+
+  /**
+   * Conversational assistant turn — forwards a user message plus a context blob
+   * (current mailbox/folder/thread digest) to the engine's LLM chat endpoint.
+   * Returns the assistant text, or null when the engine/gateway is dormant.
+   */
+  async chat(message: string, context: Record<string, unknown> = {}): Promise<string | null> {
+    const res = await this.postJson<{ response?: string }>('/ai/chat', { message, context });
+    return res?.response ?? null;
+  }
+
+  /**
+   * Streaming chat — POSTs to the engine's SSE endpoint and returns the raw Response
+   * so the controller can proxy the `token`/`actions`/`done` frames to the browser.
+   * Deliberately bypasses `fetchWithTimeout` (a long stream must not be aborted at
+   * the 10s buffered-request timeout); returns null when the engine is dormant.
+   */
+  async chatStream(
+    message: string,
+    context: Record<string, unknown> = {},
+  ): Promise<Response | null> {
+    const url = this.endpoint('/ai/chat/stream');
+    if (!url || !this.token) return null;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { ...this.headers(), Accept: 'text/event-stream' },
+        body: JSON.stringify({ message, context }),
+      });
+      if (!res.ok) {
+        this.logger.warn(`Cleaner Engine HTTP ${res.status} on /ai/chat/stream`);
+        return null;
+      }
+      return res;
+    } catch (err) {
+      this.logger.warn(
+        `Cleaner Engine transport error on /ai/chat/stream: ${(err as Error).message}`,
+      );
+      return null;
+    }
   }
 
   async analyzeInbox(
@@ -299,5 +346,122 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
 
   async backupVerify(path: string): Promise<Record<string, unknown> | null> {
     return this.postJson<Record<string, unknown>>('/backup/verify', { path });
+  }
+
+  // ── Unified-inbox verbs (degrade-clean: null on dormant/transport/HTTP error) ──
+
+  async getAccountProfile(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+  ): Promise<EngineAccountProfile | null> {
+    return this.postJson<EngineAccountProfile>('/accounts/profile', { provider, credentials });
+  }
+
+  async listMailThreads(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    folder: EngineMailFolder,
+    limit = 50,
+  ): Promise<EngineMailThreadsResult | null> {
+    return this.postJson<EngineMailThreadsResult>('/mail/threads', {
+      provider,
+      credentials,
+      folder,
+      limit,
+    });
+  }
+
+  async getMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadResult | null> {
+    return this.postJson<EngineMailThreadResult>('/mail/thread', {
+      provider,
+      credentials,
+      thread_id: threadId,
+    });
+  }
+
+  // Thread-level triage verbs. The thread id rides in the PATH (the engine's
+  // /mail/threads/{id}/... routes), so encode it — Microsoft conversation ids
+  // are base64 and may contain '/' or '='.
+
+  async archiveMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>(
+      `/mail/threads/${encodeURIComponent(threadId)}/archive`,
+      { provider, credentials },
+    );
+  }
+
+  async trashMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>(
+      `/mail/threads/${encodeURIComponent(threadId)}/trash`,
+      { provider, credentials },
+    );
+  }
+
+  async spamMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>(
+      `/mail/threads/${encodeURIComponent(threadId)}/spam`,
+      { provider, credentials },
+    );
+  }
+
+  async restoreMailThreadToInbox(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>(
+      `/mail/threads/${encodeURIComponent(threadId)}/inbox`,
+      { provider, credentials },
+    );
+  }
+
+  async setMailThreadRead(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+    read: boolean,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>(
+      `/mail/threads/${encodeURIComponent(threadId)}/read`,
+      { provider, credentials, read },
+    );
+  }
+
+  async sendMail(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    message: {
+      from: string;
+      to: string;
+      subject: string;
+      body: string;
+      inReplyToThreadId?: string | null;
+    },
+  ): Promise<EngineMailSendResult | null> {
+    return this.postJson<EngineMailSendResult>('/mail/send', {
+      provider,
+      credentials,
+      from: message.from,
+      to: message.to,
+      subject: message.subject,
+      body: message.body,
+      in_reply_to_thread_id: message.inReplyToThreadId ?? null,
+    });
   }
 }

@@ -18,6 +18,11 @@ module.exports = {
         secondary: 'rgb(var(--text-secondary) / <alpha-value>)',
         tertiary: 'rgb(var(--text-tertiary) / <alpha-value>)',
         muted: 'rgb(var(--text-muted) / <alpha-value>)',
+        /* Border tones exposed as colors too, so hairline dividers can use
+           `bg-border-subtle` / `bg-border-strong` (borderColor only feeds
+           `border-*`, which left these dividers rendering transparent). */
+        'border-subtle': 'rgb(var(--border-subtle) / <alpha-value>)',
+        'border-strong': 'rgb(var(--border) / <alpha-value>)',
         accent: {
           DEFAULT: 'rgb(var(--accent) / <alpha-value>)',
           hover: 'rgb(var(--accent-hover) / <alpha-value>)',
@@ -67,12 +72,18 @@ module.exports = {
       boxShadow: {
         token: 'var(--shadow)',
         'token-lg': 'var(--shadow-lg)',
+        pop: 'var(--shadow-pop)',
       },
       transitionDuration: {
+        /* Bare `transition` / `transition-colors` (which otherwise fall back to
+           150ms linear) now inherit the token timing, unifying hover feedback
+           across the chrome and message area without touching each component. */
+        DEFAULT: 'var(--dur-fast)',
         fast: 'var(--dur-fast)',
         token: 'var(--dur)',
       },
       transitionTimingFunction: {
+        DEFAULT: 'var(--ease)',
         token: 'var(--ease)',
       },
       opacity: Object.fromEntries(

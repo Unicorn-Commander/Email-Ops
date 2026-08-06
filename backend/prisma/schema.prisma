@@ -62,6 +62,25 @@ enum MembershipStatus {
   REVOKED
 }
 
+// The lifecycle of a workspace invitation (the create-org → invite layer).
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+// The kinds of UI command an agent (MCP client) can push to a user's cockpit —
+// the AG-UI / frontend-tools surface. None has an external side effect; COMPOSE
+// only PREFILLS the composer (the human still sends).
+enum UiCommandKind {
+  NAVIGATE
+  OPEN_THREAD
+  COMPOSE
+  SWITCH_SPACE
+  NOTIFY
+}
+
 // ── Outbound message lane (Email-Ops OWNS this) ──
 //
 // The compose lane selected by the cockpit / an agent:
@@ -105,6 +124,58 @@ enum EmailDirection {
   DRAFT
 }
 
+// ── Mailbox disposition / folder (Email-Ops OWNS this — the app-layer overlay) ──
+//
+// A thread's folder placement as an OVERLAY over the federated mailbox, NOT a
+// fork of the engine's state. INBOX is the implicit default (no row). ARCHIVE /
+// TRASH / SPAM are explicit user/agent triage. When the mail engine is live this
+// overlay is the source the JMAP-keyword / Junk-mailbox sync reconciles toward;
+// until then it is the whole truth for the SoR rows we hold. SPAM is the app-side
+// Junk verdict — distinct from the engine's inbound spam SCORE (see EmailMessage
+// .spamScore/.spamVerdict, stamped by the SpamPort when the engine produces one).
+enum MessageDisposition {
+  INBOX
+  ARCHIVE
+  TRASH
+  SPAM
+}
+
+// ── Sender allow/block policy (Email-Ops OWNS this) ──
+//
+// A per-workspace block/allow list the app enforces on display + triage and
+// FEEDS the mail engine's inbound filter once live (the engine is the real gate;
+// this is the policy the app teaches it). BLOCK → route to Spam; ALLOW → trusted
+// / never-spam. Scope is an exact ADDRESS or a whole DOMAIN.
+enum SenderPolicyKind {
+  BLOCK
+  ALLOW
+}
+
+enum SenderPolicyScope {
+  ADDRESS
+  DOMAIN
+}
+
+// ── SMS channel (the enterprise/shared-line scope; Email-Ops OWNS this) ──
+//
+// The SMS send/draft analogue of EmailMode/EmailMessageStatus. Dedicated (not the
+// Email* enums) so the SMS channel is self-contained. The agent-inbox approval
+// queue, the autonomy dial, the kill switch, and the audit log are SHARED — an SMS
+// send flows through the exact same governance as email.
+enum SmsMode {
+  SEND
+  DRAFT
+}
+
+enum SmsDeliveryStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  PENDING_APPROVAL
+  REJECTED
+  FAILED
+}
+
 // ── Agent-inbox approval state (Email-Ops OWNS this) ──
 //
 // The lifecycle of an agent-drafted message awaiting human approval before
@@ -120,6 +191,112 @@ enum AgentInboxState {
 enum AgentInboxKind {
   EMAIL
   CLEANUP
+}
+
+// ── Agent autonomy dial (Email-Ops OWNS this) ──
+//
+// The per-agent send-autonomy level the registry carries (the "autonomy dial"):
+//   L0_DRAFT_ONLY       — stage drafts only; never sends, even autonomously.
+//   L1_APPROVE_TO_SEND  — drafts; a human approves each send (today's default flow).
+//   L2_AUTONOMOUS_AUDIT — may send without per-message approval; every send audited.
+// This layer RECORDS + manages the dial; enforcement in the compose/approve path
+// is a follow-up that reads this value (so L2 is not auto-sending yet).
+enum AgentAutonomyLevel {
+  L0_DRAFT_ONLY
+  L1_APPROVE_TO_SEND
+  L2_AUTONOMOUS_AUDIT
+}
+
+// ── Agent-mail action/audit event (Email-Ops OWNS this) ──
+//
+// The audit substrate behind the activity feed + the "autonomous-with-audit"
+// guarantee. One row per governance-relevant agent-mail action:
+//   AUTONOMOUS_SEND     — an L2 agent sent without human approval.
+//   STAGED_FOR_APPROVAL — an agent draft staged (incl. a send coerced by the dial).
+//   APPROVED / REJECTED — a human decided a staged draft.
+//   PAUSED / RESUMED    — the workspace kill switch was toggled.
+enum AgentActionKind {
+  AUTONOMOUS_SEND
+  STAGED_FOR_APPROVAL
+  APPROVED
+  REJECTED
+  PAUSED
+  RESUMED
+  // Provisioning + fleet-management actions (the command-center plane).
+  MAILBOX_CREATED
+  MAILBOX_UPDATED
+  MAILBOX_ACCESS_GRANTED
+  MAILBOX_ACCESS_REVOKED
+  AGENT_CREATED
+  AGENT_UPDATED
+  AUTONOMY_CHANGED
+  PROVISION_REQUESTED
+  PROVISION_APPROVED
+  PROVISION_REJECTED
+  PROVISION_APPLIED
+  PROVISION_FAILED
+}
+
+// ── Mailbox ownership + agent access (the command-center plane) ──
+//
+// A mailbox's PRINCIPAL (who it belongs to) is distinct from which agents may
+// ACT THROUGH it (AgentMailbox). ownerKind=SHARED is the back-compat default for
+// every pre-existing workspace mailbox.
+enum MailboxOwnerKind {
+  HUMAN
+  AGENT
+  SHARED
+}
+
+// What an agent may DO through a mailbox it's bound to.
+enum MailboxAccessLevel {
+  SEND
+  READ
+  BOTH
+}
+
+// SoR-row vs a real engine-minted account. PROVISIONED only once the mail engine
+// mints the actual IMAP/JMAP account; until then the row is REGISTERED (honest —
+// no fiction while the engine is dormant).
+enum MailboxProvisionState {
+  REGISTERED
+  PROVISIONING
+  PROVISIONED
+  PROVISION_FAILED
+}
+
+// The agent's org-chart rank (a thin denormalized copy of the Brigade hierarchy;
+// UNSPECIFIED = lowest privilege to any tier-aware policy).
+enum AgentTier {
+  EXECUTIVE
+  DOMAIN_LEAD
+  MANAGER
+  SPECIALIST
+  UNSPECIFIED
+}
+
+// The provisioning policy dial per action: OPEN (any member) / MANAGER / ADMIN_ONLY
+// / APPROVAL (anyone may request, an approver applies).
+enum ProvisioningMode {
+  OPEN
+  MANAGER
+  ADMIN_ONLY
+  APPROVAL
+}
+
+enum ProvisionableKind {
+  HUMAN_MAILBOX
+  AGENT_MAILBOX
+  AGENT
+}
+
+enum ProvisioningRequestState {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELED
+  APPLIED
+  FAILED
 }
 
 enum CleanupActionKind {
@@ -139,6 +316,20 @@ enum CleanupBatchState {
   CANCELED
 }
 
+enum SnoozedThreadState {
+  ACTIVE
+  SURFACED
+  CANCELLED
+}
+
+enum ScheduledSendState {
+  PENDING
+  CLAIMED
+  SENT
+  CANCELLED
+  FAILED
+}
+
 // ── Normalized engagement vocabulary (Email-Ops OWNS the capture) ──
 //
 // The suite's normalized engagement vocabulary (SUITE contract / Customer-Ops'
@@ -154,6 +345,20 @@ enum EmailEngagementKind {
   OPENED
   BOUNCED
   UNSUBSCRIBED
+}
+
+// ── Space visibility (Email-Ops OWNS this — the soft grouping layer) ──
+//
+// A Space is a soft, overlapping grouping of mailboxes + agents INSIDE the
+// existing RLS workspace (NOT a new hard tenant). Two flavors:
+//   PERSONAL — only its owner (ownerKey) sees it.
+//   TEAM     — shared across the whole workspace (ownerKey is null).
+// A mailbox/agent can belong to MANY spaces; switching the active Space filters
+// the /mail picker + the agents view. The implicit "All" view (no row) = show
+// everything.
+enum SpaceVisibility {
+  PERSONAL
+  TEAM
 }
 
 // ============================================================
@@ -179,16 +384,39 @@ model Workspace {
   gdprMode          Boolean                @default(false)
   dataResidency     String?                @default("us-east")
   status            String                 @default("active") // active|suspended|archived|deleting
+  // Kill switch: when true, agents cannot compose/send mail in this workspace
+  // (a human approving an already-staged draft still works).
+  agentsPaused      Boolean                @default(false)
   entitlementCache  Json? // offline/dedicated only; null on shared SaaS
   syncedAt          DateTime               @default(now())
   createdAt         DateTime               @default(now())
   updatedAt         DateTime               @updatedAt
   memberships       Membership[]
   mailboxAccounts   MailboxAccount[]
+  mailSignatures    MailSignature[]
+  mailVacationSettings MailVacationSetting[]
+  mailContacts      MailContact[]
+  mailDomains       MailDomain[]
   emailMessages     EmailMessage[]
+  smsAccounts       SmsAccount[]
+  smsMessages       SmsMessage[]
   agentInboxItems   AgentInboxItem[]
+  agents            Agent[]
+  agentMailboxes    AgentMailbox[]
+  agentActionEvents AgentActionEvent[]
+  provisioningPolicy   ProvisioningPolicy?
+  provisioningRequests MailboxProvisioningRequest[]
   cleanupBatches    CleanupBatch[]
   engagementEvents  EmailEngagementEvent[]
+  threadDispositions ThreadDisposition[]
+  senderPolicies     SenderPolicy[]
+  snoozedThreads     SnoozedThread[]
+  scheduledSends     ScheduledSend[]
+  mailRules          MailRule[]
+  trustedCorrespondents TrustedCorrespondent[]
+  spaces             Space[]
+  invitations        Invitation[]
+  uiCommands         UiCommand[]
 
   @@index([slug])
   @@index([status])
@@ -210,6 +438,53 @@ model Membership {
   @@map("memberships")
 }
 
+/// A pending invitation into a workspace (the create-org → invite layer). Like
+/// Membership, this is a control/identity table (NO RLS): the accept-by-token
+/// and list-mine paths span workspace boundaries, so they cannot be fenced by
+/// the current_workspace GUC. The app layer fences the admin surface by the
+/// caller's actual membership role; accept-by-token is self-authorizing (the
+/// random token is the secret). `email` is stored lowercased for the match.
+model Invitation {
+  id            String           @id @default(uuid())
+  workspaceId   String
+  email         String // lowercased for case-insensitive match
+  role          WorkspaceRole    @default(MEMBER)
+  token         String           @unique
+  status        InvitationStatus @default(PENDING)
+  invitedByKey  String // the inviter's membership key (keycloakId ?? User.id)
+  createdAt     DateTime         @default(now())
+  expiresAt     DateTime?
+  acceptedAt    DateTime?
+  acceptedByKey String?
+  workspace     Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([email])
+  @@index([token])
+  @@map("invitations")
+}
+
+/// A UI command an agent (MCP client) pushes to a user's open cockpit — the
+/// "agent controls the UI" surface. It is addressed to a (workspaceId, ucUid)
+/// pair: the agent acts AS the user, and that user's browser drains pending
+/// commands on a focus-gated poll and applies them (navigate / open a thread /
+/// PREFILL a compose / switch Space / toast). Workspace-scoped + RLS-fenced like
+/// the other tenant tables; the per-USER fence (ucUid) is applied in app code.
+/// Drain-on-read (consumedAt) gives at-most-once delivery; rows are ephemeral.
+model UiCommand {
+  id          String        @id @default(uuid())
+  workspaceId String
+  ucUid       String // the target user (== the acting agent's ucUid)
+  kind        UiCommandKind
+  payload     Json
+  createdAt   DateTime      @default(now())
+  consumedAt  DateTime?
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, ucUid, consumedAt])
+  @@map("ui_commands")
+}
+
 // ============================================================
 // IDENTITY
 // ============================================================
@@ -224,6 +499,7 @@ model User {
   username    String    @unique
   firstName   String    @default("")
   lastName    String    @default("")
+  picture     String?   // avatar URL from the Keycloak `picture` claim (suite avatar spine)
   keycloakId  String?   @unique // == uchub sub once SSO-linked; the Membership.userKey
   kcRefreshTokenEnc String?
   kcRefreshUpdatedAt DateTime?
@@ -232,9 +508,39 @@ model User {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
+  personalAccessTokens PersonalAccessToken[]
+
   @@index([email])
   @@index([keycloakId])
   @@map("users")
+}
+
+// ============================================================
+// PERSONAL ACCESS TOKEN (agent auth — SUITE-IDENTITY §D9, `eo_pat_` prefix)
+// ============================================================
+//
+// A durable, user-mintable credential for the MCP surface (and any other
+// JwtAuthGuard-protected route) so an agent can authenticate without a
+// short-lived uchub JWT. Mirrors the suite-wide PAT pattern (Meeting-Ops
+// `mops_pat_`, Accounting-Ops `aops_pat_`). We never store the plaintext
+// token — only its sha256 hash (`tokenHash`, unique + indexed) plus a
+// display-only prefix (`tokenPrefix`). Revocation is a soft `revokedAt`
+// stamp, never a delete, so audit history survives.
+model PersonalAccessToken {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  tokenHash   String    @unique
+  tokenPrefix String
+  scopes      String[]  @default([])
+  expiresAt   DateTime?
+  lastUsedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  revokedAt   DateTime?
+
+  @@index([userId])
+  @@map("personal_access_tokens")
 }
 
 // ============================================================
@@ -277,16 +583,116 @@ model MailboxAccount {
   // (the high-rep lane) rather than Stalwart SMTP (per the suite comms lanes).
   postmarkLane Boolean  @default(true)
   active       Boolean  @default(true)
+  // Which mail backend fronts this mailbox: 'stalwart' (the sovereign engine —
+  // the back-compat default for every pre-existing row) or an EXTERNAL connected
+  // account read/sent through its provider API + the Keycloak broker token:
+  // 'gmail' | 'microsoft'. The unified-inbox dispatch reads this to pick the
+  // MailProviderPort impl. For external rows: ownerKind=HUMAN, ownerKey=the
+  // linking user's keycloakId, emailAddress=the external address; NO secret on
+  // the row (the broker is the vault).
+  provider     String   @default("stalwart")
+  // The Principal behind this mailbox (command-center plane). Pre-existing rows
+  // default SHARED (the workspace's deliverable identity, no single owner) =
+  // back-compat, no data fixup. ownerKey: HUMAN→User.keycloakId / AGENT→Agent.key
+  // / SHARED→null (soft reference). `kind` is a cheap denorm of ownerKind for the
+  // grouped mailbox view. provisionState is honest: REGISTERED until the engine
+  // mints the real account.
+  ownerKind      MailboxOwnerKind      @default(SHARED)
+  ownerKey       String?
+  kind           String                @default("shared")
+  provisionState MailboxProvisionState @default(REGISTERED)
+  // The inbound watcher's high-water mark for this (sovereign) mailbox: the ISO
+  // receivedAt of the newest inbox message already seen. NULL until the watcher
+  // first baselines it; only advances. Sovereign mailboxes only (external boxes
+  // are polled via their provider). See backend/src/inbound/.
+  inboundCursor  String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agentMailboxes AgentMailbox[]
+  spaceLinks     SpaceMailbox[]
+  signatures     MailSignature[]
+  mailVacationSettings MailVacationSetting[]
+  contacts       MailContact[]
+  snoozedThreads SnoozedThread[]
+  scheduledSends ScheduledSend[]
+  mailRules      MailRule[]
 
   // One mailbox identity per address per workspace.
   @@unique([workspaceId, emailAddress])
   @@index([workspaceId])
   @@index([workspaceId, isDefault])
+  // "my inboxes" / "agent X's inboxes" / "shared boxes".
+  @@index([workspaceId, ownerKind, ownerKey])
   @@map("mailbox_accounts")
+}
+
+// ============================================================
+// MAIL SIGNATURES (Email-Ops OWNS this — tenant-scoped)
+// ============================================================
+//
+// Per-mailbox reusable HTML signatures for the human mail client. RLS-fenced on
+// workspaceId and always resolved through MailboxAccount inside withWorkspace.
+model MailSignature {
+  id               String   @id @default(uuid())
+  workspaceId      String
+  mailboxAccountId String
+  name             String
+  html             String
+  isDefault        Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxAccountId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, mailboxAccountId])
+  @@index([workspaceId, mailboxAccountId, isDefault])
+  @@map("mail_signatures")
+}
+
+// Workspace-scoped mailbox vacation/autoresponder settings.
+model MailVacationSetting {
+  id               String   @id @default(uuid())
+  workspaceId      String
+  mailboxAccountId String
+  enabled          Boolean  @default(false)
+  subject          String   @default("")
+  bodyHtml         String   @default("")
+  bodyText         String   @default("")
+  startsAt         DateTime?
+  endsAt           DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, mailboxAccountId])
+  @@index([workspaceId, mailboxAccountId])
+  @@map("mail_vacation_settings")
+}
+
+// Workspace-scoped recipient autocomplete source, derived from mailbox history
+// and successful compose activity. One normalized email per mailbox.
+model MailContact {
+  id               String   @id @default(uuid())
+  workspaceId      String
+  mailboxAccountId String
+  email            String
+  displayName      String?
+  lastSeenAt       DateTime @default(now())
+  frequency        Int      @default(1)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, mailboxAccountId, email])
+  @@index([workspaceId, mailboxAccountId, frequency, lastSeenAt])
+  @@map("mail_contacts")
 }
 
 // ============================================================
@@ -340,6 +746,21 @@ model EmailMessage {
   // received mail is in `preview`; full received bodies stay in Stalwart.
   body              String?
   preview           String?
+  // The FULL composed payload, persisted so an APPROVED staged draft sends EXACTLY
+  // what the approver reviewed. Before this, cc/bcc/html/attachments were dropped
+  // on approve (the approval-fidelity fix). Empty arrays / null when not applicable.
+  toAddresses       String[]
+  ccAddresses       String[]
+  bccAddresses      String[]
+  bodyHtml          String?
+  attachments       Json?
+  // Inbound spam classification stamped by the SpamPort once the mail engine
+  // produces a verdict (e.g. an rspamd/SpamAssassin score + a normalized verdict
+  // 'clean'|'spam'|'unsure'). NULL until the engine is live (honest — no fiction
+  // while dormant). The app-side Junk FOLDER is MessageDisposition.SPAM on the
+  // thread; this is the raw engine signal that may drive that triage.
+  spamScore         Float?
+  spamVerdict       String?
   // If this message is a reply, the thread it replied within (for threading).
   inReplyToThreadId String?
   // The provider message id once delivery is handed off (Stalwart/Postmark id).
@@ -373,6 +794,224 @@ model EmailMessage {
 }
 
 // ============================================================
+// THREAD DISPOSITION (Email-Ops OWNS this — tenant-scoped; the folder overlay)
+// ============================================================
+//
+// The app-layer folder placement of a thread, kept as a thin OVERLAY (one row
+// per moved thread) merged over the federated mailbox at read time — never a
+// fork of the engine's mailbox state. Absence of a row == INBOX. This is the
+// model behind Inbox / Archive / Spam / Trash navigation + the "mark as spam /
+// not spam / archive / trash" triage actions. RLS-fenced on workspaceId (ENABLE
+// + FORCE, identical workspace_isolation policy). A no-GUC read returns zero
+// rows (fail-closed).
+model ThreadDisposition {
+  id            String             @id @default(uuid())
+  workspaceId   String
+  // The JMAP/Stalwart (or synthesized) thread id this disposition overlays. A
+  // string, NOT a FK to email_messages: received mail has no SoR row, so the
+  // overlay is intentionally decoupled from the message rows it folders.
+  threadId      String
+  disposition   MessageDisposition @default(INBOX)
+  // Light provenance: who/what last filed it (a human ucUid or an agent key).
+  setByUcUid    String?
+  setByAgentKey String?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  // One disposition per thread per workspace (the latest triage wins).
+  @@unique([workspaceId, threadId])
+  @@index([workspaceId, disposition])
+  @@map("thread_dispositions")
+}
+
+// ============================================================
+// SENDER POLICY (Email-Ops OWNS this — tenant-scoped; block/allow list)
+// ============================================================
+//
+// The per-workspace sender block/allow list. The app enforces it on display +
+// triage today and FEEDS it to the mail engine's inbound filter once live (the
+// engine is the real gate; this is the policy the app teaches it). RLS-fenced on
+// workspaceId exactly like the rest.
+model SenderPolicy {
+  id            String            @id @default(uuid())
+  workspaceId   String
+  scope         SenderPolicyScope
+  // The normalized (lowercased) match value: a full address for ADDRESS scope,
+  // a bare domain (no leading '@') for DOMAIN scope.
+  pattern       String
+  kind          SenderPolicyKind
+  reason        String?
+  setByUcUid    String?
+  setByAgentKey String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  // One verdict per (scope,pattern) per workspace; flipping BLOCK↔ALLOW updates it.
+  @@unique([workspaceId, scope, pattern])
+  @@index([workspaceId, kind])
+  @@map("sender_policies")
+}
+
+// ============================================================
+// SNOOZE + SEND-LATER (Email-Ops OWNS this — tenant-scoped scheduler state)
+// ============================================================
+//
+// SnoozedThread hides one live mailbox thread until a chosen time. The worker
+// wakes ACTIVE rows by moving the live thread back to Inbox, then marks SURFACED.
+// RLS-fenced on workspaceId exactly like the other scoped mail tables.
+model SnoozedThread {
+  id          String             @id @default(uuid())
+  workspaceId String
+  mailboxId   String
+  threadId    String
+  snoozeUntil DateTime
+  // Thread subject captured at snooze time (from the caller, else best-effort
+  // from the engine) so the Snoozed view renders a human row. Display-only,
+  // nullable — agent snoozes without a subject and dormant-engine lookups store null.
+  subject     String?
+  createdBy   String?
+  state       SnoozedThreadState @default(ACTIVE)
+  createdAt   DateTime           @default(now())
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, mailboxId, state, snoozeUntil])
+  @@index([state, snoozeUntil])
+  @@map("snoozed_threads")
+}
+
+// A scheduled outbound email. The payload is the compose payload the existing
+// EmailService.composeEmail send lane consumes later; the worker claims before
+// sending so retries cannot double-send a SENT row.
+model ScheduledSend {
+  id          String             @id @default(uuid())
+  workspaceId String
+  mailboxId   String
+  payload     Json
+  sendAt      DateTime
+  state       ScheduledSendState @default(PENDING)
+  createdBy   String?
+  createdAt   DateTime           @default(now())
+  claimedAt   DateTime?
+  sentAt      DateTime?
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, mailboxId, state, sendAt])
+  @@index([state, sendAt])
+  @@map("scheduled_sends")
+}
+
+// A per-mailbox inbound mail rule. `match` / `actions` hold the rule-engine
+// JSON (MatchNode / RuleAction[], see src/mail-rules/rule-engine.ts) validated
+// via parseMatch/parseActions at write time; the inbound watcher compiles the
+// enabled rows and applies them to each newly arrived message. hitCount /
+// lastHitAt are observability counters only (never load-bearing).
+model MailRule {
+  id          String    @id @default(uuid())
+  workspaceId String
+  mailboxId   String
+  name        String
+  enabled     Boolean   @default(true)
+  priority    Int
+  match       Json
+  actions     Json
+  hitCount    Int       @default(0)
+  lastHitAt   DateTime?
+  createdBy   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@index([mailboxId, enabled])
+  @@map("mail_rules")
+}
+
+// ============================================================
+// MAIL DOMAIN (Email-Ops OWNS this — tenant-scoped engine binding)
+// ============================================================
+//
+// The control-plane ownership boundary for the shared mail engine. A domain is
+// globally unique, so it can be bound to exactly one workspace. Every access is
+// also RLS-fenced on workspaceId; the global unique constraint is used only to
+// reject a competing claim, never to read the other workspace's row.
+model MailDomain {
+  id          String   @id @default(uuid())
+  workspaceId String
+  domain      String
+  verified    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([domain])
+  @@index([workspaceId])
+  @@map("mail_domains")
+}
+
+// ============================================================
+// TRUSTED CORRESPONDENT (Email-Ops OWNS this — tenant-scoped; Wave 7)
+// ============================================================
+//
+// The learned "ongoing conversation" allowlist behind the agent-send autonomy
+// matrix: an L2 agent may auto-send EXTERNAL mail only to addresses a human has
+// already vouched for — by approving a staged draft to them (source APPROVAL,
+// the learning loop) or by adding them explicitly (source MANUAL). First contact
+// always needs a human; once approved, the ongoing conversation flows.
+//
+// `address` is the full recipient address, LOWERCASED at write time (the gate
+// compares lowercased). Deliberately NOT SenderPolicy (that is the INBOUND
+// allow/block surface) — this table answers the OUTBOUND question only.
+//
+// RLS-fenced on workspaceId exactly like the other scoped tables. ENABLE +
+// FORCE, identical workspace_isolation policy. A no-GUC read returns zero rows.
+model TrustedCorrespondent {
+  id              String                     @id @default(uuid())
+  workspaceId     String
+  // ADDRESS scope: a full lowercased address (jane@acme.com). DOMAIN scope: a
+  // bare lowercased domain (acme.com, no leading '@') that trusts EVERY address
+  // at it. Mirrors SenderPolicy's ADDRESS|DOMAIN pattern so the two allowlists
+  // read the same way.
+  address         String
+  scope           TrustedCorrespondentScope  @default(ADDRESS)
+  source          TrustedCorrespondentSource @default(APPROVAL)
+  approvalCount   Int                        @default(0)
+  lastApprovedAt  DateTime?
+  addedByUcUid    String?
+  addedByAgentKey String?
+  note            String?
+  createdAt       DateTime                   @default(now())
+  updatedAt       DateTime                   @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  // One verdict per (scope,value): an ADDRESS row and a DOMAIN row can coexist
+  // (jane@acme.com explicitly trusted AND acme.com domain-trusted).
+  @@unique([workspaceId, scope, address])
+  @@index([workspaceId])
+  @@map("trusted_correspondents")
+}
+
+enum TrustedCorrespondentSource {
+  MANUAL
+  APPROVAL
+}
+
+enum TrustedCorrespondentScope {
+  ADDRESS
+  DOMAIN
+}
+
+// ============================================================
 // AGENT INBOX (Email-Ops OWNS this — tenant-scoped; the approval queue)
 // ============================================================
 //
@@ -391,8 +1030,12 @@ model EmailMessage {
 model AgentInboxItem {
   id              String          @id @default(uuid())
   workspaceId     String
-  // The staged outbound message awaiting approval (1:1).
+  // The staged outbound EMAIL message awaiting approval (1:1; null for SMS items).
   messageId       String?         @unique
+  // The staged outbound SMS message awaiting approval (1:1; null for email items).
+  // Additive: an SMS draft sets this and leaves messageId null. The existing email
+  // path is untouched.
+  smsMessageId    String?         @unique
   kind            AgentInboxKind  @default(EMAIL)
   payload         Json?
   state           AgentInboxState @default(PENDING)
@@ -410,12 +1053,300 @@ model AgentInboxItem {
 
   workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   message   EmailMessage? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  smsMessage SmsMessage?  @relation(fields: [smsMessageId], references: [id], onDelete: Cascade)
   cleanupBatch CleanupBatch?
 
   @@index([workspaceId])
   // The queue reads pending items newest-first.
   @@index([workspaceId, state, createdAt])
   @@map("agent_inbox_items")
+}
+
+// ============================================================
+// SMS ACCOUNT (Email-Ops OWNS this — tenant-scoped; the shared-line identity)
+// ============================================================
+//
+// The SMS analogue of MailboxAccount: a workspace's outbound SMS identity (a
+// Twilio number for the enterprise/shared-line scope). RLS-fenced on workspaceId
+// exactly like mailbox_accounts. `secretRef` points at the provider credential in
+// the secret store (never the secret itself). ownerKind/ownerKey mirror the
+// mailbox ownership model so an agent or a human can "own" a line.
+model SmsAccount {
+  id             String                @id @default(uuid())
+  workspaceId    String
+  phoneNumber    String // E.164, e.g. +15551234567
+  displayName    String?
+  secretRef      String?
+  isDefault      Boolean               @default(false)
+  active         Boolean               @default(true)
+  ownerKind      MailboxOwnerKind      @default(SHARED)
+  ownerKey       String?
+  provisionState MailboxProvisionState @default(REGISTERED)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messages  SmsMessage[]
+
+  @@unique([workspaceId, phoneNumber])
+  @@index([workspaceId])
+  @@index([workspaceId, isDefault])
+  @@index([workspaceId, ownerKind, ownerKey])
+  @@map("sms_accounts")
+}
+
+// ============================================================
+// SMS MESSAGE (Email-Ops OWNS this — tenant-scoped; the SoR)
+// ============================================================
+//
+// The system-of-record row for every SMS Email-Ops created (a send or an
+// approved agent-inbox draft) AND for inbound SMS recorded by the Twilio webhook.
+// The SMS analogue of EmailMessage — same idempotency tuple, same provider-id
+// resolve key, same RLS fence. SMS has no server-side thread store, so the body
+// is the SoR (there is no federate-from-engine read like Stalwart for email).
+model SmsMessage {
+  id                String            @id @default(uuid())
+  workspaceId       String
+  smsAccountId      String?
+  // The federated Contact-Ops contact id this message is to/from (thin reference).
+  contactId         String?
+  threadId          String?
+  // Idempotency tuple (workspaceId, externalSource, externalRef) — the compose
+  // path is idempotent on it, and the inbound webhook is idempotent on the
+  // provider id (providerMessageId).
+  externalSource    String?
+  externalRef       String?
+  mode              SmsMode           @default(SEND)
+  status            SmsDeliveryStatus @default(QUEUED)
+  // 'SENT' | 'RECEIVED' | 'DRAFT' (TEXT, like the rest of the channel-direction).
+  direction         String            @default("SENT")
+  fromPhoneNumber   String?
+  toPhoneNumber     String?
+  body              String?
+  preview           String?
+  // The provider message id (Twilio MessageSid) — the inbound/status webhook
+  // resolves provider→row by this, exactly like email's providerMessageId.
+  providerMessageId String?
+  actorUcUid        String?
+  sentAt            DateTime?
+  receivedAt        DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  workspace  Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  smsAccount SmsAccount?     @relation(fields: [smsAccountId], references: [id], onDelete: SetNull)
+  agentInbox AgentInboxItem?
+
+  @@unique([workspaceId, externalSource, externalRef])
+  @@index([providerMessageId])
+  @@index([workspaceId])
+  @@index([workspaceId, contactId, createdAt])
+  @@index([workspaceId, threadId])
+  @@index([workspaceId, status])
+  @@map("sms_messages")
+}
+
+// ============================================================
+// AGENT (Email-Ops OWNS this — tenant-scoped; the agent registry)
+// ============================================================
+//
+// A first-class, workspace-scoped identity for each agent that drafts/sends mail
+// (Customer-Ops, Email-Ops Agent, a per-platform persona, ...). This is the
+// registry behind the "Agents" view + the autonomy dial — the second pillar of
+// the Agent Email Command Center, alongside the agent-inbox approval queue.
+//
+// `key` is the STABLE provenance slug that supersedes the free-text
+// AgentInboxItem.draftedBy ('customer-ops', 'email-ops-agent', ...): unique per
+// workspace, it's how a queue item is attributed back to a registered agent.
+// `mailboxAccountId` is a SOFT reference to the MailboxAccount the agent sends
+// from (no DB FK, matching EmailMessage.mailboxAccountId — the RLS-fenced mailbox
+// table is resolved in app code, not cross-referenced). `autonomyLevel` is the
+// dial; `recipientPolicy` is an optional per-recipient-class scoping (JSON-on-row,
+// matching the payload/criteria convention).
+//
+// RLS-fenced on workspaceId exactly like the other scoped tables. ENABLE + FORCE,
+// identical workspace_isolation policy. A no-GUC read returns zero rows.
+model Agent {
+  id               String             @id @default(uuid())
+  workspaceId      String
+  key              String
+  displayName      String
+  description      String?
+  // Presentation identity: an explicit avatar image URL (absolute, or app-relative
+  // like /agent-avatars/perry.svg). NULL → the app resolves the shipped per-key
+  // placeholder, then /agent-avatars/default.svg (see src/agents/agent-avatar.ts).
+  avatarUrl        String?
+  mailboxAccountId String?
+  autonomyLevel    AgentAutonomyLevel @default(L1_APPROVE_TO_SEND)
+  recipientPolicy  Json?
+  active           Boolean            @default(true)
+  // Org-chart hierarchy (a thin denorm of the Brigade fleet — Email-Ops federates
+  // the identity + governance; Brigade owns the runtime/loop/inter-agent tasking).
+  // managerAgentKey is a SOFT ref by Agent.key (the parent may be created later /
+  // reorg churn → a dangling ref renders "unmanaged", can't break a migration).
+  tier             AgentTier          @default(UNSPECIFIED)
+  managerAgentKey  String?
+  brigadeAgentId   String?
+  // Per-agent pause: stops THIS agent's compose/send (distinct from the
+  // workspace-wide kill switch, which stops the whole fleet).
+  paused           Boolean            @default(false)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // The mailboxes this agent may act through (multi-mailbox). mailboxAccountId
+  // above is the denormalized cache of the isPrimary binding's mailbox.
+  mailboxes AgentMailbox[]
+  spaceLinks SpaceAgent[]
+
+  // One agent identity per key per workspace (the stable provenance slug).
+  @@unique([workspaceId, key])
+  @@index([workspaceId])
+  @@index([workspaceId, active])
+  // "list an agent's reports" / org-chart render; tier-scoped policy + pause sweep.
+  @@index([workspaceId, managerAgentKey])
+  @@index([workspaceId, tier])
+  @@map("agents")
+}
+
+// ============================================================
+// AGENT MAILBOX (Email-Ops OWNS this — tenant-scoped; the multi-mailbox join)
+// ============================================================
+//
+// Which mailboxes an agent may ACT THROUGH, with what access, and which is its
+// default From (isPrimary). Distinct from ownership (MailboxAccount.ownerKind):
+// a shared sales@ is owned by no one yet several agents send from it; a delegate
+// agent reads a human's inbox it doesn't own. REAL FKs (not soft) — a junction
+// whose whole purpose is referential integrity + cascade between two same-fence
+// tables. RLS-fenced on workspaceId like every scoped table.
+model AgentMailbox {
+  id               String             @id @default(uuid())
+  workspaceId      String
+  agentId          String
+  mailboxAccountId String
+  access           MailboxAccessLevel @default(SEND)
+  // The agent's default From (exactly one TRUE per agent, app-enforced like
+  // MailboxAccount.isDefault).
+  isPrimary        Boolean            @default(false)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agent     Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, mailboxAccountId])
+  @@index([workspaceId])
+  @@index([workspaceId, agentId])
+  @@index([workspaceId, mailboxAccountId])
+  @@map("agent_mailboxes")
+}
+
+// ============================================================
+// AGENT ACTION EVENT (Email-Ops OWNS this — tenant-scoped; the activity/audit log)
+// ============================================================
+//
+// The append-only audit substrate behind the agent-mail ACTIVITY FEED and the
+// "autonomous-with-audit" guarantee: one row per governance-relevant action (an
+// L2 autonomous send, a staged draft, a human approve/reject, a kill-switch
+// toggle). `agentKey` is the acting agent's provenance slug (the autonomous
+// actor); `actorUcUid` is the acting human (approve/reject/pause). `messageId`
+// links the email when applicable. Read newest-first for the feed.
+//
+// RLS-fenced on workspaceId exactly like the other scoped tables. ENABLE + FORCE,
+// identical workspace_isolation policy. A no-GUC read returns zero rows.
+model AgentActionEvent {
+  id          String          @id @default(uuid())
+  workspaceId String
+  kind        AgentActionKind
+  agentKey    String?
+  // Delegation provenance: when agent A acts because manager/peer B tasked it,
+  // this is B's key. agentKey stays the ACTING identity; null = self-initiated.
+  onBehalfOfAgentKey String?
+  messageId   String?
+  actorUcUid  String?
+  detail      String?
+  createdAt   DateTime        @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  // The feed reads events newest-first.
+  @@index([workspaceId, createdAt])
+  @@map("agent_action_events")
+}
+
+// ============================================================
+// PROVISIONING POLICY (Email-Ops OWNS this — per-workspace RBAC control surface)
+// ============================================================
+//
+// Who may create/edit human mailboxes, agent mailboxes (send identities), and
+// agents — the founder's flexible dials. One row per workspace (1:1); when absent
+// the code DEFAULT_PROVISIONING_POLICY applies (inert until a row is written).
+// Typed (not JSON) — a fixed control surface on the hot path + edited by an admin
+// UI. RLS-fenced on workspaceId like the scoped tables (defense-in-depth, even
+// though the @id IS the workspaceId); reads/writes go through withWorkspace.
+model ProvisioningPolicy {
+  workspaceId                String           @id
+  humanMailboxCreateMode     ProvisioningMode @default(MANAGER)
+  humanMailboxEditMode       ProvisioningMode @default(MANAGER)
+  // An agent's send identity is higher-trust — default ADMIN_ONLY.
+  agentMailboxCreateMode     ProvisioningMode @default(ADMIN_ONLY)
+  agentMailboxEditMode       ProvisioningMode @default(ADMIN_ONLY)
+  agentCreateMode            ProvisioningMode @default(MANAGER)
+  agentEditMode              ProvisioningMode @default(MANAGER)
+  // The rung that approves an APPROVAL-mode request.
+  approverMinRole            WorkspaceRole    @default(ADMIN)
+  // May a MEMBER create their OWN human mailbox regardless of the mode above.
+  allowSelfServiceOwnMailbox Boolean          @default(false)
+  maxMailboxesPerWorkspace   Int?
+  maxAgentsPerWorkspace      Int?
+  updatedByUcUid             String?
+  createdAt                  DateTime         @default(now())
+  updatedAt                  DateTime         @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("provisioning_policies")
+}
+
+// ============================================================
+// MAILBOX PROVISIONING REQUEST (Email-Ops OWNS this — tenant-scoped; approval queue)
+// ============================================================
+//
+// An APPROVAL-mode (or above-the-caller's-rung) create/edit lands here PENDING. On
+// approve, the validated `payload` is REPLAYED through the SAME service method the
+// direct path uses (one write path). Separate from AgentInboxItem: a different
+// gate (a role rung, not a comms SKU), no message body, APPLIED/FAILED terminal
+// (the engine apply can defer while dormant). RLS-fenced on workspaceId.
+model MailboxProvisioningRequest {
+  id          String                   @id @default(uuid())
+  workspaceId String
+  kind        ProvisionableKind
+  action      String                   @default("CREATE")
+  state       ProvisioningRequestState @default(PENDING)
+  // The validated create/edit payload, replayed through the canonical service.
+  payload     Json
+  // The MailboxAccount/Agent id for an UPDATE (null for CREATE).
+  targetId            String?
+  summary             String?
+  requestedByUcUid    String?
+  requestedByAgentKey String?
+  reviewedByUcUid     String?
+  reviewedAt          DateTime?
+  reviewNote          String?
+  // Engine-gated: the created/updated id once applied, + why an apply deferred.
+  appliedRefId  String?
+  appliedAt     DateTime?
+  failureReason String?
+  createdAt   DateTime                 @default(now())
+  updatedAt   DateTime                 @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([workspaceId, state, createdAt])
+  @@map("mailbox_provisioning_requests")
 }
 
 // ============================================================
@@ -534,6 +1465,84 @@ model EmailEngagementEvent {
   // The per-message engagement timeline (newest-first reads).
   @@index([workspaceId, emailMessageId, occurredAt])
   @@map("email_engagement_events")
+}
+
+// ============================================================
+// SPACE (Email-Ops OWNS this — tenant-scoped; the soft grouping layer)
+// ============================================================
+//
+// A Space is a soft, OVERLAPPING grouping of mailboxes + agents INSIDE the
+// existing RLS workspace — a "view", NOT a new hard tenant. It lets a user slice
+// the unified inbox + the agent fleet by context (Personal=Gmail, Magic Unicorn
+// =M365, a per-platform Space = that mailbox(es) + its agents). A mailbox/agent
+// can be in MANY spaces (the join tables below). The active Space filters /mail +
+// the agents view; the implicit "All" (no Space) shows everything.
+//
+//   PERSONAL — visible only to its owner. `ownerKey` is the owner's keycloakId
+//              (canonically; the read fence also accepts the local User.id, since
+//              that id can arrive in either flavor depending on the auth path —
+//              mirrors EmailService.mayActThroughMailbox / EngineMailProvider).
+//   TEAM     — shared across the workspace; `ownerKey` is null.
+//
+// RLS-fenced on workspaceId exactly like the other scoped tables (ENABLE + FORCE,
+// identical workspace_isolation policy). A no-GUC read returns zero rows. The
+// per-USER PERSONAL fence is enforced in app code (the ownerKey predicate),
+// layered on top of the per-WORKSPACE RLS fence.
+model Space {
+  id          String          @id @default(uuid())
+  workspaceId String
+  // Owner's keycloakId for PERSONAL; null for TEAM. The per-user visibility fence.
+  ownerKey    String?
+  visibility  SpaceVisibility @default(PERSONAL)
+  name        String
+  // Optional presentation (a swatch + an icon/emoji the switcher renders).
+  color       String?
+  icon        String?
+  sortOrder   Int             @default(0)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailboxes SpaceMailbox[]
+  agents    SpaceAgent[]
+
+  // "my personal spaces in this workspace" + "all team spaces in this workspace".
+  @@index([workspaceId, ownerKey])
+  @@index([workspaceId, visibility])
+  @@map("spaces")
+}
+
+// ── SPACE ↔ MAILBOX (the many-to-many membership; cascade both ways) ──
+//
+// Which mailboxes belong to a Space. Pure join (no workspaceId column — it is
+// reached only THROUGH a Space already fenced to the workspace; the migration
+// fences this table via an EXISTS-on-parent-space RLS policy). REPLACE semantics
+// on the PUT endpoint: the service deletes + recreates the set.
+model SpaceMailbox {
+  spaceId          String
+  mailboxAccountId String
+
+  space   Space          @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  mailbox MailboxAccount @relation(fields: [mailboxAccountId], references: [id], onDelete: Cascade)
+
+  @@id([spaceId, mailboxAccountId])
+  @@index([mailboxAccountId])
+  @@map("space_mailboxes")
+}
+
+// ── SPACE ↔ AGENT (the many-to-many membership; cascade both ways) ──
+//
+// Which agents belong to a Space. Same shape + RLS posture as SpaceMailbox.
+model SpaceAgent {
+  spaceId String
+  agentId String
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([spaceId, agentId])
+  @@index([agentId])
+  @@map("space_agents")
 }
 
 // NOTE: The Workspace↔MailboxAccount / Workspace↔EmailMessage /

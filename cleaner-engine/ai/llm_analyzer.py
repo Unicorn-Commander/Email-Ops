@@ -54,9 +54,10 @@ class LLMAnalyzer:
     def _should_disable_thinking(self, model_name: str) -> bool:
         return bool(model_name) and model_name != self.frontier_model
 
-    def _chat_completion(self, prompt: str, system_prompt: str, model_name: str) -> str:
-        client = self._get_client()
-
+    def _build_messages(
+        self, prompt: str, system_prompt: str, model_name: str
+    ) -> tuple[list[dict[str, str]], dict[str, Any] | None]:
+        """Assemble the chat messages + extra_body (shared by buffered + streaming paths)."""
         messages: list[dict[str, str]] = []
         effective_system_prompt = system_prompt
         extra_body: dict[str, Any] | None = None
@@ -71,6 +72,11 @@ class LLMAnalyzer:
             extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
 
         messages.append({"role": "user", "content": prompt})
+        return messages, extra_body
+
+    def _chat_completion(self, prompt: str, system_prompt: str, model_name: str) -> str:
+        client = self._get_client()
+        messages, extra_body = self._build_messages(prompt, system_prompt, model_name)
 
         kwargs: dict[str, Any] = {
             "model": model_name,
@@ -84,6 +90,30 @@ class LLMAnalyzer:
         response = client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
         return content.strip()
+
+    def _chat_completion_stream(self, prompt: str, system_prompt: str, model_name: str):
+        """Yield content deltas from the gateway as they arrive (stream=True)."""
+        client = self._get_client()
+        messages, extra_body = self._build_messages(prompt, system_prompt, model_name)
+
+        kwargs: dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": True,
+        }
+        if extra_body is not None:
+            kwargs["extra_body"] = extra_body
+
+        stream = client.chat.completions.create(**kwargs)
+        for chunk in stream:
+            try:
+                delta = chunk.choices[0].delta.content
+            except (IndexError, AttributeError):
+                delta = None
+            if delta:
+                yield delta
 
     def _generate(self, prompt: str, system_prompt: str = "") -> str:
         """Generate a response from the configured LiteLLM gateway."""
@@ -109,56 +139,86 @@ class LLMAnalyzer:
             raise
 
     def _parse_json_response(self, response: str) -> Any:
-        """Parse a JSON response from the model, handling markdown code blocks."""
+        """Parse a JSON response from the model, tolerating markdown fences, prose
+        around the JSON, and trailing commas. Raises json.JSONDecodeError if no
+        valid JSON can be recovered."""
         text = response.strip()
 
+        # Strip a leading ```json / ``` fence and its closing ```.
         if text.startswith("```"):
-            lines = text.split("\n")
-            lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines)
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.rstrip().endswith("```"):
+                text = text.rstrip()[:-3]
+            text = text.strip()
 
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Recover the outermost JSON array/object emitted amid prose, dropping any
+        # trailing comma a local model may slip in before a closing bracket.
+        match = re.search(r"(\[.*\]|\{.*\})", text, re.S)
+        if not match:
+            raise json.JSONDecodeError("No JSON found in model response", text, 0)
+        candidate = re.sub(r",(\s*[\]}])", r"\1", match.group(1))
+        return json.loads(candidate)
+
+    # Categorize at most this many emails per model call. Small batches keep each
+    # response well under max_tokens (a local model silently truncates a long JSON
+    # array, which then fails to parse) and bound a single parse failure to one chunk.
+    _CATEGORIZE_BATCH = 15
 
     def categorize_emails(self, emails: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Categorize a batch of emails using the LLM.
+        """Categorize emails using the LLM, in small batches.
+
+        Only metadata (id, sender, subject) is ever sent to the model — never the
+        message body or snippet, honoring the "metadata only" promise. Emails whose
+        batch fails to categorize are omitted from the result (a partial list), never
+        back-filled with a fabricated "unknown" verdict: an empty result is what lets
+        the caller honestly report that AI categorization did not run.
 
         Args:
-            emails: List of email dicts with at least 'id', 'subject', 'sender', 'snippet'.
+            emails: List of email dicts with at least 'id', 'subject', 'sender'.
 
         Returns:
-            List of dicts with 'id', 'category', 'confidence', 'reason'.
+            List of dicts with 'id', 'category', 'confidence', 'reason' — one per
+            successfully categorized email. May be shorter than the input (or empty).
         """
         from ai.prompts import CATEGORIZER_PROMPT
 
-        summaries = []
-        for email in emails:
-            summaries.append({
-                "id": email.get("id", ""),
-                "from": email.get("sender", ""),
-                "subject": email.get("subject", ""),
-                "snippet": email.get("snippet", "")[:200],
-            })
-
-        prompt = (
-            "Categorize these emails:\n\n"
-            + json.dumps(summaries, indent=2, ensure_ascii=False)
-        )
-
-        try:
-            response = self._generate(prompt, system_prompt=CATEGORIZER_PROMPT)
-            results = self._parse_json_response(response)
-            if isinstance(results, list):
-                return results
-            logger.warning("Unexpected categorization response format: %s", type(results))
-            return []
-        except (json.JSONDecodeError, Exception) as e:
-            logger.error("Failed to categorize emails: %s", e)
-            return [
-                {"id": email.get("id", ""), "category": "unknown", "confidence": 0.0, "reason": "categorization failed"}
-                for email in emails
+        results: list[dict[str, Any]] = []
+        for start in range(0, len(emails), self._CATEGORIZE_BATCH):
+            batch = emails[start:start + self._CATEGORIZE_BATCH]
+            summaries = [
+                {
+                    "id": email.get("id", ""),
+                    "from": email.get("sender", ""),
+                    "subject": email.get("subject", ""),
+                }
+                for email in batch
             ]
+            prompt = (
+                "Categorize these emails:\n\n"
+                + json.dumps(summaries, indent=2, ensure_ascii=False)
+            )
+
+            try:
+                response = self._generate(prompt, system_prompt=CATEGORIZER_PROMPT)
+                parsed = self._parse_json_response(response)
+            except Exception as e:  # noqa: BLE001 — degrade clean: keep the other batches
+                logger.warning(
+                    "Categorization batch [%d:%d] failed (skipping, not back-filling): %s",
+                    start, start + len(batch), e,
+                )
+                continue
+
+            if isinstance(parsed, list):
+                results.extend(item for item in parsed if isinstance(item, dict))
+            else:
+                logger.warning("Unexpected categorization response format: %s", type(parsed))
+
+        return results
 
     def generate_recommendations(
         self, stats: dict[str, Any], emails: list[dict[str, Any]]
@@ -225,6 +285,83 @@ class LLMAnalyzer:
         except Exception as e:
             logger.error("Chat generation failed: %s", e)
             return f"I'm sorry, I encountered an error processing your question: {e}"
+
+    # The marker the model emits between its prose reply and the JSON action list.
+    _ACTION_MARKER = "<<<ACTIONS>>>"
+
+    def chat_stream(self, message: str, context: dict[str, Any] | None = None):
+        """Stream a chat turn, then propose confirm-before-anything actions.
+
+        Yields ``("token", str)`` for each prose delta as it arrives, then exactly one
+        ``("actions", list[dict])`` at the end (possibly empty). The model is asked to
+        append its structured actions after a ``<<<ACTIONS>>>`` marker; everything from
+        the marker onward is withheld from the prose stream and parsed into JSON here,
+        so the raw marker/JSON is never shown to the user.
+        """
+        from ai.prompts import CHAT_PROMPT, CHAT_ACTIONS_ADDENDUM
+
+        prompt = message
+        if context:
+            context_text = json.dumps(context, indent=2, default=str)
+            prompt = f"Inbox context:\n{context_text}\n\nUser question: {message}"
+
+        system_prompt = CHAT_PROMPT + CHAT_ACTIONS_ADDENDUM
+        marker = self._ACTION_MARKER
+        keep = len(marker) - 1  # hold back enough to catch a marker split across deltas
+
+        buf = ""            # unflushed prose (with lookback tail)
+        action_raw = ""     # accumulated text after the marker
+        in_actions = False
+
+        try:
+            for delta in self._chat_completion_stream(prompt, system_prompt, self.model_name):
+                if in_actions:
+                    action_raw += delta
+                    continue
+                buf += delta
+                idx = buf.find(marker)
+                if idx != -1:
+                    pre = buf[:idx]
+                    if pre:
+                        yield ("token", pre)
+                    action_raw = buf[idx + len(marker):]
+                    in_actions = True
+                    buf = ""
+                    continue
+                if len(buf) > keep:
+                    flush, buf = buf[:-keep], buf[-keep:]
+                    if flush:
+                        yield ("token", flush)
+            if not in_actions and buf:
+                yield ("token", buf)
+        except Exception as e:
+            logger.error("Chat stream failed: %s", e)
+            yield ("token", f"\n\n_(The assistant hit an error: {e})_")
+            yield ("actions", [])
+            return
+
+        yield ("actions", self._parse_actions(action_raw) if in_actions else [])
+
+    def _parse_actions(self, raw: str) -> list[dict[str, Any]]:
+        """Best-effort parse of the model's post-marker JSON action list. Never raises."""
+        text = (raw or "").strip()
+        if not text:
+            return []
+        data: Any = None
+        try:
+            data = self._parse_json_response(text)
+        except Exception:
+            match = re.search(r"\[.*\]", text, re.S)
+            if match:
+                try:
+                    data = json.loads(match.group(0))
+                except Exception:
+                    return []
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            return []
+        return [a for a in data if isinstance(a, dict) and a.get("type")]
 
     def summarize_inbox(self, analysis: dict[str, Any]) -> str:
         """Generate a natural language summary of inbox analysis.

@@ -1,7 +1,10 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useConnectedAccounts } from '@/components/ConnectedAccountsProvider';
+import { Tooltip } from '@/components/Tooltip';
 import {
   Badge,
   Button,
@@ -32,6 +35,7 @@ const DEFAULT_CRITERIA = {
 
 export default function CleanupPage() {
   const { activeAccount, activeProvider } = useConnectedAccounts();
+  const router = useRouter();
   const meta = providerMeta(activeProvider);
   const [criteriaQuery, setCriteriaQuery] = useState('');
   const [plan, setPlan] = useState<CleanupPlanResponse | null>(null);
@@ -82,9 +86,12 @@ export default function CleanupPage() {
     }
   }, [activeAccount.linked, activeProvider, criteriaQuery, meta.label, refreshActivity]);
 
+  // The audit (past runs) loads on mount — it's cheap. The PLAN scans the live
+  // mailbox, so it runs ONLY when the user asks (the Build button) or on a
+  // schedule — never automatically on navigation.
   useEffect(() => {
-    void refreshPlan();
-  }, [refreshPlan]);
+    void refreshActivity();
+  }, [refreshActivity]);
 
   const selectedSafe = useMemo(
     () => plan?.safe.filter((row) => selectedSafeIds.includes(row.id)) ?? [],
@@ -239,7 +246,10 @@ export default function CleanupPage() {
           <p className="mt-2 max-w-2xl text-sm leading-6 text-tertiary">
             The safety workbench splits protected mail from safe mail before anything executes.
             <span className="text-primary"> Trash is reversible.</span> Archive &amp; purge exports
-            a restorable archive first, verifies it, then permanently frees quota.
+            a restorable archive first, verifies it, then permanently frees quota.{' '}
+            <Link href="/help#cleanup" className="font-medium text-accent hover:underline">
+              How cleanup works →
+            </Link>
           </p>
           {message && <p className="mt-3 text-sm text-warning">{message}</p>}
         </div>
@@ -257,6 +267,21 @@ export default function CleanupPage() {
         </div>
       </header>
 
+      {!activeAccount.linked && (
+        <Card padded className="border-warning/30 bg-warning-subtle">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="font-medium text-primary">Connect {meta.label} to start cleaning.</p>
+              <p className="mt-1 text-sm text-tertiary">
+                The cleaner runs on a linked Gmail or Microsoft&nbsp;365 mailbox. Nothing is scanned
+                until you connect that account and grant consent — your own inbox stays private.
+              </p>
+            </div>
+            <Button onClick={() => router.push('/accounts')}>Connect {meta.shortLabel}</Button>
+          </div>
+        </Card>
+      )}
+
       <Card padded>
         <div className="grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
           <div>
@@ -271,11 +296,31 @@ export default function CleanupPage() {
             />
           </div>
           <Button onClick={() => void refreshPlan()} disabled={loading || busy !== null}>
-            Rebuild plan
+            {loading ? 'Scanning…' : plan ? 'Rebuild plan' : 'Build plan'}
           </Button>
         </div>
       </Card>
 
+      {activeAccount.linked && !plan && !loading && (
+        <Card padded className="border-accent/25 bg-accent/[0.04]">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div className="min-w-0">
+              <p className="font-medium text-primary">Ready when you are</p>
+              <p className="mt-1 max-w-2xl text-sm text-tertiary">
+                Building a plan scans your linked {meta.label} inbox and previews what&apos;s safe
+                to delete. It doesn&apos;t run automatically — press the button so a scan happens
+                only when you want one. Scheduled sweeps are coming next.
+              </p>
+            </div>
+            <Button onClick={() => void refreshPlan()} disabled={busy !== null}>
+              Build cleanup plan
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {(loading || plan) && (
+        <>
       <Card padded className="border-protected/25 bg-surface-raised">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
@@ -283,10 +328,18 @@ export default function CleanupPage() {
             <p className="mt-1 text-sm text-tertiary">{banner}</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="keep">keep</Badge>
-            <Badge variant="review">review</Badge>
-            <Badge variant="delete">delete</Badge>
-            <Badge variant="protected">protected</Badge>
+            <Tooltip content="Keep — mail the plan leaves untouched">
+              <span><Badge variant="keep">keep</Badge></span>
+            </Tooltip>
+            <Tooltip content="Review — flagged for your judgment before anything runs">
+              <span><Badge variant="review">review</Badge></span>
+            </Tooltip>
+            <Tooltip content="Delete — safe candidates you can trash or purge after review">
+              <span><Badge variant="delete">delete</Badge></span>
+            </Tooltip>
+            <Tooltip content="Protected — locked out of every cleanup action (starred, recent, important)">
+              <span><Badge variant="protected">protected</Badge></span>
+            </Tooltip>
           </div>
         </div>
       </Card>
@@ -355,35 +408,39 @@ export default function CleanupPage() {
           </div>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-          <Button
-            onClick={() => void runTrash()}
-            disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
-          >
-            Trash {selectedSafe.length || ''} (reversible)
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={() => void runOrganize()}
-            disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
-          >
-            Organize
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={() => void runUnsubscribe()}
-            disabled
-            title="Coming with the archive release"
-          >
-            Unsubscribe · soon
-          </Button>
-          <Button
-            variant="secondary"
-            disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
-            title="Exports a verified restorable archive, then permanently purges to free mailbox quota."
-            onClick={() => setDeleteDialogOpen(true)}
-          >
-            Archive &amp; purge
-          </Button>
+          <Tooltip content="Move the selected messages to the provider's Trash — recoverable there">
+            <Button
+              onClick={() => void runTrash()}
+              disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
+            >
+              Trash {selectedSafe.length || ''} (reversible)
+            </Button>
+          </Tooltip>
+          <Tooltip content="Label and archive matching messages instead of deleting them">
+            <Button
+              variant="secondary"
+              onClick={() => void runOrganize()}
+              disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
+            >
+              Organize
+            </Button>
+          </Tooltip>
+          <Tooltip content="Coming with the archive release">
+            <span className="inline-flex">
+              <Button variant="secondary" onClick={() => void runUnsubscribe()} disabled>
+                Unsubscribe · soon
+              </Button>
+            </span>
+          </Tooltip>
+          <Tooltip content="Permanent lane: exports and verifies a restorable archive first, then purges to free quota. Typed confirmation required.">
+            <Button
+              variant="secondary"
+              disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
+              onClick={() => setDeleteDialogOpen(true)}
+            >
+              Archive &amp; purge
+            </Button>
+          </Tooltip>
         </div>
         {archiveUrl && (
           <div className="rounded-token border border-subtle bg-surface-base p-3 text-sm">
@@ -398,6 +455,8 @@ export default function CleanupPage() {
           </div>
         )}
       </section>
+      </>
+      )}
 
       <section className="space-y-3">
         <div className="flex items-center justify-between gap-3">
@@ -432,15 +491,24 @@ export default function CleanupPage() {
                     </p>
                   )}
                 </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={!row.undoable || busy === `undo:${row.id}`}
-                  title={row.undoable ? 'Restore from the verified archive.' : 'No live cloud archive is available.'}
-                  onClick={() => void runUndo(row.id)}
+                <Tooltip
+                  content={
+                    row.undoable
+                      ? 'Restore this batch from its verified archive'
+                      : 'No live cloud archive is available — use your downloaded file to re-import'
+                  }
                 >
-                  Restore
-                </Button>
+                  <span className="inline-flex shrink-0">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={!row.undoable || busy === `undo:${row.id}`}
+                      onClick={() => void runUndo(row.id)}
+                    >
+                      Restore
+                    </Button>
+                  </span>
+                </Tooltip>
               </Card>
             ))
           )}
@@ -518,7 +586,11 @@ function CleanupRow({
       )}
     >
       {disabled ? (
-        <span className="mt-1 text-[11px] text-info">Locked</span>
+        <Tooltip content="Protected — cleanup never touches this message, whatever you select">
+          <span className="mt-1 text-[11px] text-info" tabIndex={0}>
+            Locked
+          </span>
+        </Tooltip>
       ) : (
         <input
           type="checkbox"

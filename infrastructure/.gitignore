@@ -2,3 +2,4 @@
 .env.your-host
 .env.your-host.*
 !.env.your-host.example
+!.env.your-host.prod.example

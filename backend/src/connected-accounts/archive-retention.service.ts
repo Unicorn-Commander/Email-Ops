@@ -16,7 +16,10 @@ export class ArchiveRetentionService {
   @Cron(CronExpression.EVERY_DAY_AT_3AM)
   async sweepExpiredArchives(): Promise<void> {
     const now = new Date();
-    const rows = await this.prisma.cleanupBatch.findMany({
+    // Cross-workspace maintenance scan: intentionally uses the documented
+    // ADMIN_DATABASE_URL / BYPASSRLS system connection. Every per-row mutation
+    // remains fenced through withWorkspace(row.workspaceId, ...).
+    const rows = await this.prisma.systemClient.cleanupBatch.findMany({
       where: {
         archiveKey: { not: null },
         archiveRetained: false,

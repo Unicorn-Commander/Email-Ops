@@ -52,6 +52,25 @@ describe('StalwartClient', () => {
     });
   });
 
+  describe('webmail-wave additions: NOT SUPPORTED on the legacy engine (degrade-clean, never throw)', () => {
+    const client = new StalwartClient(makeConfig({}));
+
+    it('listFolderThreads / getThreadDetail / setThreadRead / getMailboxCounts / downloadBlob / uploadBlob all degrade clean WITHOUT any fetch', async () => {
+      const fetchSpy = jest.fn();
+      global.fetch = fetchSpy as any;
+      await expect(client.listFolderThreads('desk@x.test', { folder: 'inbox', limit: 10, offset: 0 })).resolves.toEqual({
+        threads: [],
+      });
+      await expect(client.getThreadDetail('desk@x.test', 'thread-1')).resolves.toEqual([]);
+      await expect(client.setThreadRead('desk@x.test', 'thread-1', true)).resolves.toBe(false);
+      await expect(client.getMailboxCounts('desk@x.test')).resolves.toBeNull();
+      await expect(client.downloadBlob('desk@x.test', 'blob-1')).resolves.toBeNull();
+      await expect(client.uploadBlob('desk@x.test', Buffer.from('x'), 'text/plain', 'f.txt')).resolves.toBeNull();
+      await expect(client.getMessageHeaders('desk@x.test', 'msg-1')).resolves.toBeNull();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('configured: JMAP read + Postmark transactional send', () => {
     const CONFIGURED = {
       STALWART_JMAP_URL: 'https://mail.example.test/jmap/',

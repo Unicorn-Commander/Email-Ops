@@ -41,21 +41,62 @@ export class AuthService {
    * Resolve (or JIT-provision) the Email-Ops User for a verified Keycloak
    * identity. Resolution order (SUITE-IDENTITY §D1):
    *   1. by keycloakId (== uchub sub) — the canonical key.
-   *   2. by email — links an existing local row to this sub (sets keycloakId).
+   *   2. by email — LINKS an existing *unlinked* local row to this sub. It does
+   *      NOT silently rebind a row that already carries a different sub (that is
+   *      an account-identity conflict, not a link — see below).
    *   3. neither — JIT-create, GATED by the access list.
    */
   async validateKeycloakUser(keycloakId: string, profile: any): Promise<User> {
     const email: string | undefined = profile?.email;
+    // The Keycloak `picture` claim (suite avatar spine) — only trust an absolute
+    // URL, and never null out a stored photo on a login whose userinfo omits it.
+    const picture: string | null =
+      typeof profile?.picture === 'string' && /^https?:\/\//.test(profile.picture)
+        ? profile.picture
+        : null;
 
-    // 1. keycloakId / sub first.
+    // 1. keycloakId / sub first (the canonical, unique key).
     let user = await this.prisma.user.findUnique({ where: { keycloakId } });
 
-    // 2. email linking fallback.
+    // 2. email linking fallback — link an UNLINKED local row (keycloakId == null)
+    //    to its first verified sub. We do NOT silently REBIND a row that already
+    //    carries a DIFFERENT sub: an email resolving to a different Keycloak
+    //    identity is a conflict (email reuse / offboarding / a forged email
+    //    claim), and rebinding would hand the existing account — its id, stored
+    //    Keycloak refresh token, and any id-keyed data — to the new sub. (Note it
+    //    would NOT even transfer workspace access: memberships key off keycloakId,
+    //    so a rebind orphans them — auto-rebind was never a complete migration
+    //    path.) The historical auto-rebind is preserved behind
+    //    EMAIL_OPS_ALLOW_KEYCLOAK_REBIND (default OFF = fail closed), for a
+    //    Keycloak realm migration where users keep their email but get a new sub
+    //    — and even then the operator must also re-key memberships.
     if (!user && email) {
-      user = await this.prisma.user.findUnique({ where: { email } });
-      if (user) {
-        user = await this.prisma.user.update({ where: { id: user.id }, data: { keycloakId } });
-        this.logger.log(`Linked existing user ${email} to Keycloak sub ${keycloakId}`);
+      const byEmail = await this.prisma.user.findUnique({ where: { email } });
+      if (byEmail) {
+        if (!byEmail.keycloakId) {
+          user = await this.prisma.user.update({
+            where: { id: byEmail.id },
+            data: { keycloakId },
+          });
+          this.logger.log(`Linked existing local user ${email} to Keycloak sub ${keycloakId}`);
+        } else if (AuthService.allowKeycloakRebind()) {
+          user = await this.prisma.user.update({
+            where: { id: byEmail.id },
+            data: { keycloakId },
+          });
+          this.logger.warn(
+            `Rebound ${email} from Keycloak sub ${byEmail.keycloakId} to ${keycloakId} ` +
+              `(EMAIL_OPS_ALLOW_KEYCLOAK_REBIND enabled — migration window; re-key memberships too)`,
+          );
+        } else {
+          this.logger.warn(
+            `Refusing to rebind ${email}: existing Keycloak sub ${byEmail.keycloakId} != token ` +
+              `sub ${keycloakId}. Enable EMAIL_OPS_ALLOW_KEYCLOAK_REBIND only during a Keycloak migration.`,
+          );
+          throw new UnauthorizedException(
+            'This email is already linked to a different identity. Contact your administrator.',
+          );
+        }
       }
     }
 
@@ -77,6 +118,7 @@ export class AuthService {
           username,
           firstName: profile?.given_name || profile?.firstName || '',
           lastName: profile?.family_name || profile?.lastName || '',
+          picture,
           keycloakId,
         },
       });
@@ -89,7 +131,10 @@ export class AuthService {
       throw new UnauthorizedException('User account is inactive');
     }
 
-    await this.prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+    user = await this.prisma.user.update({
+      where: { id: user.id },
+      data: { lastLoginAt: new Date(), ...(picture ? { picture } : {}) },
+    });
     return user;
   }
 
@@ -149,10 +194,14 @@ export class AuthService {
    *   - Locally-signed session token (no/foreign `iss`) → resolve by local id.
    */
   async validateJwtPayload(payload: any): Promise<User> {
-    const issuer: string | undefined = payload?.iss;
-    const isKeycloakRealmToken = typeof issuer === 'string' && issuer.includes('/realms/');
+    // Normalize the issuer (trim + strip trailing slash) BEFORE matching, using
+    // the same helper the JWT strategy uses to build its JWKS/issuer sets — so a
+    // trailing-slash config can't make a verified Brigade token fall through to
+    // the local-session branch (issuer-normalization divergence, defense in depth).
+    const issuer = AuthService.normalizeIssuer(payload?.iss);
+    const isKeycloakRealmToken = !!issuer && issuer.includes('/realms/');
     const isBrigadeFederationToken =
-      typeof issuer === 'string' && AuthService.brigadeTrustedIssuers().includes(issuer);
+      !!issuer && AuthService.brigadeTrustedIssuers().includes(issuer);
 
     if (isKeycloakRealmToken || isBrigadeFederationToken) {
       // Brigade's transitional sub may be an email; surface it as the profile
@@ -160,6 +209,26 @@ export class AuthService {
       // Keycloak realm tokens (which DO emit email) and for the long-term
       // opaque-sub Brigade model (Brigade emits email separately then).
       const subLooksLikeEmail = typeof payload.sub === 'string' && payload.sub.includes('@');
+
+      // Federation-actor branch: a cross-app SERVICE caller carries an RFC-8693
+      // `act.client_id` and no human identity → resolve to a synthetic, allow-listed
+      // federation principal instead of running it through the human access-list gate
+      // (which would reject it). Mirrors the Project-Ops federation pattern.
+      const actorClientId =
+        payload?.act && typeof payload.act.client_id === 'string'
+          ? payload.act.client_id.trim()
+          : null;
+      const hasHumanIdentity = !!payload?.email || subLooksLikeEmail;
+      if (actorClientId && !hasHumanIdentity) {
+        if (AuthService.federationActors().includes(actorClientId)) {
+          this.logger.log(`Federation actor authorized: ${actorClientId}`);
+          return AuthService.buildFederationPrincipal(actorClientId);
+        }
+        this.logger.warn(
+          `Rejected federation actor '${actorClientId}' — not in EMAIL_OPS_FEDERATION_ACTORS`,
+        );
+      }
+
       const profile = {
         email: payload.email ?? (subLooksLikeEmail ? payload.sub : undefined),
         preferred_username: payload.preferred_username,
@@ -187,6 +256,73 @@ export class AuthService {
     if (raw === undefined || raw === null) {
       return ['https://brigade.unicorncommander.ai'];
     }
+    return raw
+      .split(',')
+      .map((s) => AuthService.normalizeIssuer(s))
+      .filter((s): s is string => !!s);
+  }
+
+  /**
+   * Canonicalize an issuer string: trim, strip trailing slash(es), return null
+   * for a non-string/empty value. Shared by AuthService (the federation-token
+   * branch) AND JwtStrategy (the JWKS-client map + the per-request audience
+   * gate) so issuer matching is identical on the signature side and the
+   * resolution side — a trailing slash on either the config or the token can't
+   * route a verified federation token to the wrong branch.
+   */
+  static normalizeIssuer(raw: unknown): string | null {
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.trim().replace(/\/+$/, '');
+    return trimmed || null;
+  }
+
+  /**
+   * Whether to REBIND an existing user row's keycloakId when a verified token
+   * presents the same email but a different sub. Default OFF (secure: an
+   * email→different-sub collision is an identity conflict, not a silent
+   * takeover). Enable ONLY during a Keycloak realm migration where users keep
+   * their email but receive a new sub — and re-key memberships in the same
+   * migration, since they bind to keycloakId. Read per-call so an operator can
+   * flip it without a code change.
+   */
+  private static allowKeycloakRebind(): boolean {
+    const raw = process.env.EMAIL_OPS_ALLOW_KEYCLOAK_REBIND;
+    return raw === 'true' || raw === '1';
+  }
+
+  /**
+   * A synthetic, non-DB principal for a cross-app federation actor. Mirrors the
+   * suite pattern (Project-Ops): a service caller authenticates as
+   * `federation:<actor>` and is authorized downstream by the Brigade-vouched
+   * workspace claim, never the human access-list. `email`/`role` are absent — the
+   * cast satisfies the read type (Email-Ops `User` has no role column).
+   */
+  static buildFederationPrincipal(actorClientId: string): User {
+    const now = new Date();
+    return {
+      id: `federation:${actorClientId}`,
+      email: null,
+      username: `federation:${actorClientId}`,
+      firstName: '',
+      lastName: '',
+      keycloakId: null,
+      isActive: true,
+      lastLoginAt: null,
+      createdAt: now,
+      updatedAt: now,
+      __isFederationActor: true,
+      __federationActor: actorClientId,
+    } as unknown as User;
+  }
+
+  /**
+   * Parse EMAIL_OPS_FEDERATION_ACTORS (comma-separated allow-list of actor
+   * client-ids permitted to federate, e.g. `customer-ops`). Unset/empty ⇒ no
+   * federation actors (safe default). Read each call (like brigadeTrustedIssuers).
+   */
+  private static federationActors(): readonly string[] {
+    const raw = process.env.EMAIL_OPS_FEDERATION_ACTORS;
+    if (!raw) return [];
     return raw
       .split(',')
       .map((s) => s.trim())

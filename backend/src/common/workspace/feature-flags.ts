@@ -49,3 +49,17 @@ export function tenancyEnabled(getEnv: EnvGetter = defaultGetter): boolean {
 export function webhooksEnabled(getEnv: EnvGetter = defaultGetter): boolean {
   return truthy(getEnv('EMAIL_WEBHOOKS_ENABLED'), false);
 }
+
+/**
+ * Inbound watcher master switch (Wave 2 — the agent-email fabric's inbound half).
+ *
+ * Default OFF == today's behavior: no polling of the sovereign James mailboxes,
+ * MailTriageService.classifyInbound has no caller, and agent mailboxes receiving
+ * mail do nothing. Flip to true to start the per-mailbox JMAP delta poll that
+ * classifies newly-arrived mail (sender-policy + SpamPort → disposition) and
+ * routes agent-mailbox arrivals to the reply seam. Off by default so the watcher
+ * deploys DORMANT (the dormant-seam posture) and is enabled + verified deliberately.
+ */
+export function inboundWatcherEnabled(getEnv: EnvGetter = defaultGetter): boolean {
+  return truthy(getEnv('INBOUND_WATCHER_ENABLED'), false);
+}

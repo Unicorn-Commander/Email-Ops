@@ -30,11 +30,20 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { StalwartPort } from './stalwart.port';
 import {
+  StalwartBlobDownload,
+  StalwartDraftRequest,
+  StalwartFolderQuery,
+  StalwartFolderThreadsResult,
+  StalwartMailboxCounts,
   StalwartMessage,
   StalwartParticipant,
+  StalwartMessageDetail,
+  StalwartMessageHeaders,
   StalwartSendRequest,
   StalwartSendResult,
+  StalwartVacationState,
   StalwartThread,
+  StalwartUploadResult,
 } from './stalwart.types';
 
 @Injectable()
@@ -252,11 +261,113 @@ export class StalwartClient extends StalwartPort {
     return out;
   }
 
+  /**
+   * NOT SUPPORTED on the legacy Stalwart engine (the webmail-wave search+paging
+   * surface is James-first) — degrade-clean: always returns an empty
+   * threads array, never throws. Swap MAIL_ENGINE=james to light this up for real.
+   */
+  async listFolderThreads(_mailbox: string, _query: StalwartFolderQuery): Promise<StalwartFolderThreadsResult> {
+    return { threads: [] };
+  }
+
+  /** NOT SUPPORTED on Stalwart (webmail-wave thread-detail enrichment) — degrade-clean []. */
+  async getThreadDetail(_mailbox: string, _threadId: string): Promise<StalwartMessageDetail[]> {
+    return [];
+  }
+
+  /** NOT SUPPORTED on Stalwart (webmail-wave read-state toggle) — degrade-clean false. */
+  async setThreadRead(_mailbox: string, _threadId: string, _read: boolean): Promise<boolean> {
+    return false;
+  }
+
+  async setThreadFlags(
+    _mailbox: string,
+    _threadId: string,
+    _flags: { seen?: boolean; flagged?: boolean },
+  ): Promise<boolean> {
+    return false;
+  }
+
+  /** NOT SUPPORTED on Stalwart (JMAP folder move is a James-only surface) — degrade-clean false. */
+  async moveThreadToFolder(
+    _mailbox: string,
+    _threadId: string,
+    _folder: StalwartFolderQuery['folder'],
+  ): Promise<boolean> {
+    return false;
+  }
+
+  async emptyFolder(_mailbox: string, _folder: 'trash' | 'spam'): Promise<number | null> {
+    return null;
+  }
+
+  async saveDraft(_mailbox: string, _draft: StalwartDraftRequest): Promise<{ id: string } | null> {
+    return null;
+  }
+
+  async updateDraft(
+    _mailbox: string,
+    _draftId: string,
+    _draft: StalwartDraftRequest,
+  ): Promise<{ id: string } | null> {
+    return null;
+  }
+
+  async deleteDraft(_mailbox: string, _draftId: string): Promise<boolean> {
+    return false;
+  }
+
+  async getVacation(_mailbox: string): Promise<StalwartVacationState | null> {
+    return null;
+  }
+
+  async setVacation(_mailbox: string, _state: StalwartVacationState): Promise<boolean> {
+    return false;
+  }
+
+  /** NOT SUPPORTED on Stalwart (webmail-wave counts surface) — degrade-clean null. */
+  async getMailboxCounts(_mailbox: string): Promise<StalwartMailboxCounts | null> {
+    return null;
+  }
+
+  /** NOT SUPPORTED on Stalwart (webmail-wave attachment download) — degrade-clean null. */
+  async downloadBlob(_mailbox: string, _blobId: string): Promise<StalwartBlobDownload | null> {
+    return null;
+  }
+
+  /** NOT SUPPORTED on Stalwart (webmail-wave attachment upload) — degrade-clean null. */
+  async uploadBlob(
+    _mailbox: string,
+    _file: Buffer,
+    _type: string,
+    _filename: string,
+  ): Promise<StalwartUploadResult | null> {
+    return null;
+  }
+
+  /** NOT SUPPORTED on Stalwart (webmail-wave reply-threading resolution) — degrade-clean null. */
+  async getMessageHeaders(_mailbox: string, _messageId: string): Promise<StalwartMessageHeaders | null> {
+    return null;
+  }
+
   async send(
     mailbox: string,
     request: StalwartSendRequest,
     transactional: boolean,
   ): Promise<StalwartSendResult> {
+    // Neither Stalwart lane carries attachments. Fail loud rather than silently drop
+    // the file (accepted:true with a missing attachment). uploadBlob returns null for
+    // Stalwart mailboxes so no blob_id is normally minted — this guards a stale/forged
+    // ref or a draft staged under James then approved after an engine switch.
+    if ((request.attachments?.length ?? 0) > 0) {
+      return {
+        accepted: false,
+        providerMessageId: null,
+        threadId: request.inReplyToThreadId ?? null,
+        lane: null,
+        reason: 'the Stalwart engine cannot carry attachments — nothing was sent',
+      };
+    }
     // Transactional → Postmark (high-rep) when configured.
     if (transactional && this.postmarkConfigured) {
       return this.sendViaPostmark(request);
@@ -275,6 +386,30 @@ export class StalwartClient extends StalwartPort {
     };
   }
 
+  // Folder CRUD + custom-folder move are James/JMAP-only capabilities; the
+  // legacy Stalwart adapter never participates (degrade-clean → []/null/false).
+  async moveThreadToMailbox(): Promise<boolean> {
+    return false;
+  }
+  async listFolders(): Promise<never[]> {
+    return [];
+  }
+  async createFolder(): Promise<null> {
+    return null;
+  }
+  async renameFolder(): Promise<boolean> {
+    return false;
+  }
+  async deleteFolder(): Promise<boolean> {
+    return false;
+  }
+
+  // Inbound polling is a James/JMAP-only capability; the legacy Stalwart adapter
+  // never participates (degrade-clean → null).
+  async pollInbound(): Promise<null> {
+    return null;
+  }
+
   private async sendViaPostmark(request: StalwartSendRequest): Promise<StalwartSendResult> {
     const token = this.postmarkToken!;
     const fromHeader = request.fromName
@@ -291,10 +426,15 @@ export class StalwartClient extends StalwartPort {
         },
         body: JSON.stringify({
           From: fromHeader,
-          To: request.toAddress,
+          To: request.toAddresses?.length ? request.toAddresses.join(', ') : request.toAddress,
           Subject: request.subject,
           TextBody: request.body,
+          ...(request.bodyHtml ? { HtmlBody: request.bodyHtml } : {}),
           MessageStream: 'outbound',
+          // Wave 7: custom headers (e.g. the X-UC-Agent-Autoreply loop marker).
+          ...(request.headers?.length
+            ? { Headers: request.headers.map((h) => ({ Name: h.name, Value: h.value })) }
+            : {}),
         }),
       });
     } catch (err) {
@@ -344,10 +484,17 @@ export class StalwartClient extends StalwartPort {
           create: {
             outbound: {
               from: [{ email: request.fromAddress, name: request.fromName ?? null }],
-              to: [{ email: request.toAddress }],
+              to: (request.toAddresses?.length ? request.toAddresses : [request.toAddress]).map((email) => ({ email })),
               subject: request.subject,
-              bodyValues: { body: { value: request.body } },
+              bodyValues: request.bodyHtml
+                ? { body: { value: request.body }, html: { value: request.bodyHtml } }
+                : { body: { value: request.body } },
               textBody: [{ partId: 'body', type: 'text/plain' }],
+              ...(request.bodyHtml ? { htmlBody: [{ partId: 'html', type: 'text/html' }] } : {}),
+              // Wave 7: custom headers via the RFC 8621 header:{name} form.
+              ...Object.fromEntries(
+                (request.headers ?? []).map((h) => [`header:${h.name}:asText`, h.value]),
+              ),
             },
           },
         },

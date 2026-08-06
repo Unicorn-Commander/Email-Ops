@@ -8,6 +8,32 @@ import { AuthService, JwtPayload } from '../auth.service';
 import { User } from '@prisma/client';
 
 /**
+ * Extract the local session JWT from the HttpOnly `access_token` cookie — the
+ * web session's transport. An HttpOnly cookie is not readable by JS, so an XSS
+ * can't exfiltrate it the way it could the old localStorage token. Dependency-
+ * free (parses the raw Cookie header) so no cookie-parser middleware is needed.
+ * Returns null when absent; the Bearer header extractor still serves MCP / PAT /
+ * federation callers, so this is purely ADDITIVE.
+ */
+function cookieTokenExtractor(req: any): string | null {
+  const header: string | undefined = req?.headers?.cookie;
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === 'access_token') {
+      const value = part.slice(idx + 1).trim();
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        return value;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Multi-token JWT strategy (SUITE-IDENTITY §D6).
  *
  * Accepts:
@@ -57,7 +83,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     }
 
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      // Cookie first (the web session's HttpOnly transport), then the Bearer
+      // header (MCP / PAT / Brigade federation). Same secretOrKeyProvider
+      // validates whichever token is found, so all three token types still work.
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        cookieTokenExtractor,
+        ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ]),
       ignoreExpiration: false,
       // secretOrKeyProvider runs per-request; inspect the JWT header + payload
       // and resolve the right key on the fly. Provider must call done(err, key).
@@ -72,7 +104,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
           const decoded: any = jsonwebtoken.decode(token, { complete: true });
           const alg = decoded?.header?.alg;
           const kid = decoded?.header?.kid;
-          const iss: string | undefined = decoded?.payload?.iss;
+          const iss = AuthService.normalizeIssuer(decoded?.payload?.iss);
 
           // RS256 + Brigade-trusted-issuer -> per-issuer Brigade JWKS
           if (alg === 'RS256' && kid && iss && brigadeJwksByIss.has(iss)) {
@@ -144,8 +176,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     const source = raw === undefined || raw === null ? 'https://brigade.unicorncommander.ai' : raw;
     const issuers = source
       .split(',')
-      .map((s) => s.trim().replace(/\/$/, ''))
-      .filter(Boolean);
+      .map((s) => AuthService.normalizeIssuer(s))
+      .filter((s): s is string => !!s);
 
     const map = new Map<string, JwksClient>();
     for (const iss of issuers) {
@@ -225,8 +257,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       // enforce that its audience is THIS app before resolving the user. (Local
       // HS256 + Keycloak-realm tokens have a non-Brigade `iss` and carry no
       // app-scoped `aud`, so they are unaffected.)
-      const issuer: string | undefined = payload?.iss;
-      if (typeof issuer === 'string' && this.brigadeTrustedIssuers.has(issuer)) {
+      const issuer = AuthService.normalizeIssuer(payload?.iss);
+      if (issuer && this.brigadeTrustedIssuers.has(issuer)) {
         if (!JwtStrategy.audienceMatches(payload?.aud, this.brigadeExpectedAudience)) {
           this.logger.warn(
             `Rejected Brigade token: aud=${JSON.stringify(payload?.aud)} != ${this.brigadeExpectedAudience}`,
