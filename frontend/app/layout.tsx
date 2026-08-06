@@ -30,9 +30,6 @@ export const metadata: Metadata = {
   },
   description: 'The privacy-first agent email command center for connected mailboxes.',
   applicationName: 'Email-Ops',
-  alternates: {
-    canonical: '/',
-  },
   openGraph: {
     url: '/',
     siteName: 'Email-Ops',
@@ -46,6 +43,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
+        <link rel="canonical" href="https://email-ops.unicorncommander.ai/" />
         <script
           dangerouslySetInnerHTML={{
             __html: `(function(){try{var pref=localStorage.getItem("theme")}catch(e){var pref=null}if(pref!=="light"&&pref!=="dark"&&pref!=="system")pref="dark";var resolved=pref;if(pref==="system"){resolved=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}document.documentElement.setAttribute("data-theme",resolved)})();`,
