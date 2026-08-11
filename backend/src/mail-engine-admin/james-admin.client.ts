@@ -4,10 +4,14 @@
  *
  * This is the control-plane counterpart to the data-plane mail client: it mints
  * and removes the real engine objects (domains, accounts, mailboxes, quotas,
- * aliases) behind Email-Ops' MailboxAccount SoR. James exposes all of it over a
- * clean REST surface (PUT/GET/DELETE on /domains, /users, /quota, /address/...),
- * which is exactly why James was chosen for the agent-manageable migration —
- * `provisionMailbox` becomes a real mailbox, not just a registry row.
+ * aliases, JMAP delegation) behind Email-Ops' MailboxAccount SoR. James exposes
+ * all of it over a clean REST surface (PUT/GET/DELETE on /domains, /users,
+ * /quota, /address/...), which is exactly why James was chosen for the
+ * agent-manageable migration — `provisionMailbox` becomes a real mailbox, not
+ * just a registry row. "Real mailbox" includes READABLE: ensureAccount also
+ * delegates the new account to the suite's JMAP primary principal
+ * (/users/{addr}/authorizedUsers/{principal}), without which the data plane
+ * silently reads the primary's inbox instead of the new one.
  *
  * DEGRADE-CLEAN (binding): when JAMES_WEBADMIN_URL is unset, `isConfigured()` is
  * false and every method returns `provisioned:false` (or []) WITHOUT a network
@@ -63,6 +67,27 @@ export class JamesAdminClient extends MailEngineAdminPort {
   private get jwt(): string | null {
     const raw = this.config.get<string>('JAMES_WEBADMIN_JWT');
     return raw && raw.trim() ? raw.trim() : null;
+  }
+
+  /**
+   * The JMAP PRIMARY PRINCIPAL — the single account the Email-Ops data plane
+   * authenticates as (the user half of `JAMES_JMAP_BASIC`, i.e. the same env the
+   * data-plane client reads; e.g. the suite's hq@ address). Every sovereign
+   * mailbox must be DELEGATED to this principal at mint time, or the data plane
+   * cannot see it at all: the address never appears in the JMAP /session
+   * accounts map and james.client silently falls back to reading the PRIMARY's
+   * mailbox instead (the recurring "half-bound mailbox" incident). Null when
+   * JAMES_JMAP_BASIC is unset (data plane dormant, or bearer-auth'd where the
+   * principal address is unknowable) — then there is no principal to delegate
+   * to and ensureAccount skips the grant, loudly.
+   */
+  private get jmapPrimaryPrincipal(): string | null {
+    const raw = this.config.get<string>('JAMES_JMAP_BASIC');
+    if (!raw || !raw.trim()) return null;
+    const trimmed = raw.trim();
+    const colon = trimmed.indexOf(':');
+    const user = (colon === -1 ? trimmed : trimmed.slice(0, colon)).trim();
+    return user.includes('@') ? user : null;
   }
 
   private get timeoutMs(): number {
@@ -190,6 +215,37 @@ export class JamesAdminClient extends MailEngineAdminPort {
     const userRes = await this.req('PUT', `/users/${this.seg(address)}`, { password });
     const userResult = this.result(userRes, `ensureAccount(${address})`, true);
     if (!userResult.provisioned) return userResult;
+
+    // Grant JMAP delegation to the suite's primary principal — NOT best-effort.
+    // Without this grant the account is HALF-BOUND: SMTP delivers into it (250s
+    // all round, MX/SPF/DKIM all green) but the address never appears in the
+    // JMAP /session accounts map, so the data plane silently reads the PRIMARY's
+    // inbox instead of this one. A mailbox without the grant is broken, so a
+    // failed grant fails the provisioning: the SoR row honestly stays REGISTERED
+    // and a re-provision retries everything (all steps are idempotent).
+    const delegate = this.jmapPrimaryPrincipal;
+    if (delegate && delegate.toLowerCase() !== address.toLowerCase()) {
+      const grantRes = await this.req(
+        'PUT',
+        `/users/${this.seg(address)}/authorizedUsers/${this.seg(delegate)}`,
+      );
+      if (!this.ok(grantRes, true)) {
+        const reason = grantRes
+          ? `grantJmapDelegation(${address} -> ${delegate}) → HTTP ${grantRes.status}`
+          : `grantJmapDelegation(${address} -> ${delegate}) → transport error`;
+        this.logger.error(
+          `James admin: ${reason} — the engine account exists but is UNREADABLE by the ` +
+            'JMAP principal (half-bound); reporting provisioned:false so the mailbox stays REGISTERED',
+        );
+        return { provisioned: false, reason };
+      }
+    } else if (!delegate) {
+      this.logger.warn(
+        `James admin: no JMAP primary principal derivable (JAMES_JMAP_BASIC unset) — ` +
+          `skipped the delegation grant for ${address}; the suite data plane will NOT ` +
+          'see this mailbox until a grant is issued',
+      );
+    }
 
     // Pre-create the standard mailboxes (best-effort; INBOX is auto-made on first
     // login, but we want the full folder set visible immediately). Failures here

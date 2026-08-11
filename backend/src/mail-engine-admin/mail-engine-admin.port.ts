@@ -57,10 +57,13 @@ export abstract class MailEngineAdminPort {
   /**
    * Mint (or confirm) a real engine account for `address`: ensures the domain
    * exists, creates the login (with `password`, or a generated one when null and
-   * auth is delegated to OIDC), ensures the standard mailboxes, and applies the
-   * size quota (5 GiB by default; explicit null opts out of quota application).
-   * Idempotent — re-running a provisioned address is a no-op that still reports
-   * `provisioned:true`.
+   * auth is delegated to OIDC), grants the suite's JMAP primary principal
+   * delegated access to the new account (the grant that makes the mailbox
+   * READABLE by the data plane — a failed grant fails the provisioning, because
+   * an ungranted mailbox is silently mis-bound), ensures the standard mailboxes,
+   * and applies the size quota (5 GiB by default; explicit null opts out of
+   * quota application). Idempotent — re-running a provisioned address is a
+   * no-op that still reports `provisioned:true`.
    */
   abstract ensureAccount(
     address: string,

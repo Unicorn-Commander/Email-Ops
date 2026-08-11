@@ -13,7 +13,13 @@ export const MCP_TOOL_SCOPES = {
   set_sender_policy: 'mail:write',
   list_threads_with_contact: 'mail:read',
   list_thread_messages: 'mail:read',
-  compose_email: 'agent-inbox:approve',
+  // compose_email spans TWO privilege levels. The static scope here is the
+  // FLOOR (staging a draft = writing mail); sending additionally requires
+  // 'agent-inbox:approve', enforced per-call in EmailOpsTools.composeEmail via
+  // enforceExtraScope. Requiring approve for BOTH modes forced every
+  // draft-only agent to hold send authority just to use the approval queue —
+  // which inverted the agent inbox from a choke point into a formality.
+  compose_email: 'mail:write',
   list_threads: 'mail:read',
   get_thread: 'mail:read',
   search_mail: 'mail:read',
@@ -93,6 +99,48 @@ export function enforceMcpToolScope(
       error: 'Forbidden',
       reason: decision.reason,
       message: `Personal access token requires scope ${required}`,
+    });
+  }
+
+  throw new UnauthorizedException({
+    statusCode: 401,
+    error: 'Unauthorized',
+    reason: decision.reason,
+    message: `Personal access token ${decision.reason}`,
+  });
+}
+
+/**
+ * Enforce an ADDITIONAL scope for one call shape, on top of the tool's static
+ * scope from MCP_TOOL_SCOPES.
+ *
+ * Exists for tools that legitimately span two privilege levels — today only
+ * compose_email, where mode='draft' merely stages into the approval queue
+ * (mail:write) but mode='send' puts mail on the wire (agent-inbox:approve).
+ * JWT callers bypass PAT scoping here exactly as they do in enforceMcpToolScope.
+ */
+export function enforceExtraScope(
+  identity: PatTaggedIdentity,
+  required: PatScope,
+  context: string,
+  nowIso = new Date().toISOString(),
+): void {
+  const pat = identity.__patAuth;
+  if (!pat) {
+    return;
+  }
+
+  const decision = checkPat(pat, required, nowIso);
+  if (decision.ok) {
+    return;
+  }
+
+  if (decision.reason === 'missing-scope') {
+    throw new ForbiddenException({
+      statusCode: 403,
+      error: 'Forbidden',
+      reason: decision.reason,
+      message: `Personal access token requires scope ${required} for ${context}`,
     });
   }
 
