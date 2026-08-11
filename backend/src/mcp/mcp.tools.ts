@@ -66,6 +66,7 @@ import { MailRulesService } from '../mail-rules/mail-rules.service';
 import { MailRuleView } from '../mail-rules/mail-rules.types';
 import { TrustedCorrespondentsService } from '../trusted-correspondents/trusted-correspondents.service';
 import { TrustedCorrespondentView } from '../email/email.types';
+import { enforceExtraScope, PatTaggedIdentity } from './mcp-scopes';
 
 export class EmailOpsTools {
   constructor(
@@ -290,6 +291,22 @@ export class EmailOpsTools {
   ): Promise<unknown> {
     const workspaceId = await this.resolve(user, args.workspace_id);
 
+    // NOTE: mode defaults to 'send' when omitted — an omitted mode is a SEND,
+    // so the send-scope gate below must key off this same resolved value.
+    const mode: 'send' | 'draft' = args.mode === 'draft' ? 'draft' : 'send';
+
+    // Staging a draft costs mail:write (the tool's static scope). Putting mail
+    // on the wire costs agent-inbox:approve — the same authority a human spends
+    // approving a queued draft. This keeps the agent inbox a real choke point:
+    // a draft-only agent can fill the queue but can never drain it.
+    if (mode === 'send') {
+      enforceExtraScope(
+        user as PatTaggedIdentity,
+        'agent-inbox:approve',
+        "compose_email(mode='send')",
+      );
+    }
+
     // Defense-in-depth: re-derive the dual-SKU gate server-side off the verified
     // token. A federated call can never bypass the entitlement boundary.
     const gate = checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
@@ -302,7 +319,7 @@ export class EmailOpsTools {
       toAddress: args.to_address,
       subject: args.subject,
       body: args.body,
-      mode: args.mode === 'draft' ? 'draft' : 'send',
+      mode,
       inReplyToThreadId: args.in_reply_to_thread_id ?? null,
       externalSource: args.external_source,
       externalRef: args.external_ref,
