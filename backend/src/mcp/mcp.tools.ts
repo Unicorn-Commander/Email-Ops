@@ -50,7 +50,7 @@ import { MailboxAccountsService } from '../mailbox-accounts/mailbox-accounts.ser
 import { DispositionService } from '../mail-triage/disposition.service';
 import { SenderPolicyService } from '../mail-triage/sender-policy.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
-import { checkCleanerEntitlement } from '../connected-accounts/entitlement';
+import { checkCleanerEntitlement, checkMailboxHostingEntitlement } from '../connected-accounts/entitlement';
 import {
   CleanupExecutionResult,
   CleanupPlanResult,
@@ -135,6 +135,20 @@ export class EmailOpsTools {
       ownerKind,
       ownerKey: args.owner_key ?? null,
     };
+    // Commercial gate: hosting a mailbox on our own mail server is the metered
+    // add-on (`email-ops:mailbox`). Checked BEFORE the provisioning-policy
+    // decision so an unentitled caller is refused outright rather than filing an
+    // approval request an admin could never legitimately grant. Connecting an
+    // existing Gmail/Outlook account goes through a different path and stays
+    // bundled — no hosting cost, no gate.
+    const hosting = checkMailboxHostingEntitlement(
+      entitlementsOf(user as WithWorkspaceClaim),
+      workspaceId,
+    );
+    if (!hosting.allowed) {
+      throw new ForbiddenException(hosting.reason);
+    }
+
     const decision = await this.policy.authorize(workspaceId, ucUid, role, action, { isSelfOwnMailbox });
     if (decision === 'requires_approval') {
       const request = await this.policy.fileRequest(workspaceId, ucUid, {
@@ -307,9 +321,16 @@ export class EmailOpsTools {
       );
     }
 
-    // Defense-in-depth: re-derive the dual-SKU gate server-side off the verified
-    // token. A federated call can never bypass the entitlement boundary.
-    const gate = checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    // Defense-in-depth: re-derive the entitlement gate server-side off the
+    // verified token. A federated call can never bypass the boundary. The
+    // external_source decides whether the CROSS-APP dual-SKU rule applies — a
+    // person sending their own mail needs only email-ops.
+    const gate = checkComposeEntitlement(
+      entitlementsOf(user as WithWorkspaceClaim),
+      workspaceId,
+      undefined,
+      args.external_source,
+    );
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }

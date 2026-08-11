@@ -142,6 +142,7 @@ describe('EmailService — intra-tenant per-user mailbox fence (integration)', (
   const OWNER = 'owner-uid';
   const INTRUDER = 'intruder-uid';
   let mbId: string;
+  let sovereignMbId: string;
 
   beforeAll(async () => {
     process.env.DATABASE_URL = DB_URL;
@@ -163,6 +164,20 @@ describe('EmailService — intra-tenant per-user mailbox fence (integration)', (
       },
     });
     mbId = mb.id;
+    // A SOVEREIGN (James/stalwart) mailbox, also owned by OWNER. The per-user
+    // fence used to live inside the external-provider branch only, so this lane
+    // was readable by any co-member — the regression these two cases lock out.
+    const sovereign = await prisma.mailboxAccount.create({
+      data: {
+        workspaceId: WS,
+        emailAddress: 'owner@sovereign.test',
+        provider: 'stalwart',
+        ownerKind: 'HUMAN',
+        ownerKey: OWNER,
+        kind: 'human',
+      },
+    });
+    sovereignMbId = sovereign.id;
     const connectedAccounts = {
       approveCleanupBatch: jest.fn(),
       undoBatch: jest.fn(),
@@ -194,6 +209,17 @@ describe('EmailService — intra-tenant per-user mailbox fence (integration)', (
     expect(ownerMsgs.map((m) => m.id)).toContain('g-m1');
 
     const intruderMsgs = await service.listThreadMessages(WS, INTRUDER, 'g-t1', mbId);
+    expect(intruderMsgs).toEqual([]);
+  });
+
+  it('SOVEREIGN inbox read: a co-member gets nothing (the fence is not provider-specific)', async () => {
+    const intruderView = await service.listMailboxInbox(WS, INTRUDER, sovereignMbId);
+    expect(intruderView).toEqual([]);
+  });
+
+  it('SOVEREIGN thread read: a co-member gets no message BODIES', async () => {
+    // listThreadMessages returns full bodies — the most sensitive read here.
+    const intruderMsgs = await service.listThreadMessages(WS, INTRUDER, 's-t1', sovereignMbId);
     expect(intruderMsgs).toEqual([]);
   });
 

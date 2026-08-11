@@ -19,17 +19,28 @@ function truthy(value: string | undefined | null, fallback: boolean): boolean {
 /**
  * Suite tenancy master switch (SUITE-IDENTITY).
  *
- * Default OFF == today's behavior: workspace routes do NOT require a
- * Membership row, the membership gate is a no-op, and rows resolve to
- * DEFAULT_WORKSPACE_ID. RLS exists in the DB but is inert because the runtime
- * still connects as the table owner.
+ * ⚠️ **DEFAULTS ON (changed 2026-08-11). Absent means SAFE.**
  *
- * When ON (a later rollout phase, alongside flipping the runtime DATABASE_URL
- * to the NOBYPASSRLS email_ops_app role): workspace routes 403 without an
- * active Membership, and the membership-derived workspace drives the RLS GUC.
+ * When ON: workspace routes 403 without an active Membership, and the
+ * membership-derived workspace drives the RLS GUC.
+ *
+ * When explicitly OFF: the membership gate is a NO-OP — `resolveAndAuthorize`
+ * skips the membership check entirely and `resolveWithRole` returns **OWNER for
+ * every user**, so any caller is an owner of any workspace id they name. That is
+ * a fine dev default and a catastrophic production one. It used to default OFF,
+ * which meant a per-org customer install that merely FORGOT
+ * `EMAIL_OPS_TENANCY_ENABLED` silently handed every user owner rights — a
+ * missing variable should never be the unsafe choice.
+ *
+ * `main.ts` additionally refuses to boot when NODE_ENV=production and this is
+ * off; that guard only fires when NODE_ENV is actually set, which is exactly the
+ * other thing a hand-rolled install forgets. Hence: fail safe here too.
+ *
+ * The rollout this flag protected is COMPLETE — both rings set it true
+ * explicitly — so flipping the default changes no deployed behavior.
  */
 export function tenancyEnabled(getEnv: EnvGetter = defaultGetter): boolean {
-  return truthy(getEnv('EMAIL_OPS_TENANCY_ENABLED'), false);
+  return truthy(getEnv('EMAIL_OPS_TENANCY_ENABLED'), true);
 }
 
 /**

@@ -119,12 +119,30 @@ describe('AgentInboxController (delegation)', () => {
     );
   });
 
-  it('POST approve of an EMAIL item is BLOCKED (403) for a cleaner-only caller (a send needs the dual SKU)', async () => {
+  it('POST approve of an EMAIL item is ALLOWED for an email-ops-only caller (own-mailbox send)', async () => {
+    // A human approving a queued draft in Email-Ops is sending THEIR OWN mail
+    // from THEIR OWN mailbox. The dual-SKU rule exists for the CROSS-APP trigger
+    // (Customer-Ops reaching through the federation seam) and is applied where
+    // that call declares its external_source. Demanding customer-ops here made a
+    // standalone Email-Ops customer unable to send at all.
+    const peekAgentInboxKind = jest.fn().mockResolvedValue(AgentInboxKind.EMAIL);
+    const approveAgentInboxItem = jest
+      .fn()
+      .mockResolvedValue({ inbox: { state: 'approved' }, message: null });
+    const ctrl = make({ peekAgentInboxKind, approveAgentInboxItem });
+
+    const out = await ctrl.approve(WS, userWith(['email-ops']), 'item-9', {});
+
+    expect(approveAgentInboxItem).toHaveBeenCalled();
+    expect(out).toMatchObject({ inbox: { state: 'approved' } });
+  });
+
+  it('POST approve of an EMAIL item is BLOCKED (403) for a caller with NO email-ops SKU', async () => {
     const peekAgentInboxKind = jest.fn().mockResolvedValue(AgentInboxKind.EMAIL);
     const approveAgentInboxItem = jest.fn();
     const ctrl = make({ peekAgentInboxKind, approveAgentInboxItem });
     await expect(
-      ctrl.approve(WS, userWith(['email-ops']), 'item-9', {}),
+      ctrl.approve(WS, userWith(['customer-ops']), 'item-9', {}),
     ).rejects.toBeInstanceOf(ForbiddenException);
     // The send delegate is never reached when the gate denies.
     expect(approveAgentInboxItem).not.toHaveBeenCalled();

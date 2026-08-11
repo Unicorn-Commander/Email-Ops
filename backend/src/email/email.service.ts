@@ -358,11 +358,15 @@ export class EmailService {
         ? await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } })
         : await this.defaultMailbox(tx, workspaceId);
 
+      // ⚠️ PER-USER FENCE — before ANY branch, for EVERY mailbox kind. This
+      // method returns FULL MESSAGE BODIES, so an unfenced sovereign path is
+      // the most sensitive read in the service. The check previously sat inside
+      // the external-provider branch only, leaving James-hosted mail readable
+      // by any co-member of the workspace.
+      if (mailbox && !(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
+
       let live: MessageView[] = [];
       if (mailbox && this.mailProvider.handles(mailbox)) {
-        // Per-user fence (see mayActThroughMailbox): never reveal a co-member's
-        // external thread — the read runs on the mailbox OWNER's broker token.
-        if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
         live = await this.mailProvider.listThreadMessages(mailbox, threadId);
       } else if (mailbox) {
         // webmail wave: the FULL detail (bodies/cc/threading headers/read
@@ -452,6 +456,22 @@ export class EmailService {
           reason: null,
         };
       }
+      // ⚠️ PER-USER FENCE — applies to EVERY mailbox kind, before any branch.
+      // A HUMAN mailbox is one person's private account; the workspaceId
+      // predicate above only proves same-tenant, not same-person. This check
+      // previously lived INSIDE the external-provider branch, leaving the
+      // sovereign (James) lane unfenced — a co-member could pass another
+      // member's hosted mailboxId and read their mail.
+      if (!(await this.mayActThroughMailbox(mailbox, ucUid))) {
+        return {
+          threads: [],
+          nextPageToken: null,
+          hasMore: false,
+          pagingMode: 'offset',
+          searchSupported: true,
+          reason: null,
+        };
+      }
 
       if (this.mailProvider.handles(mailbox)) {
         if (!(await this.mayActThroughMailbox(mailbox, ucUid))) {
@@ -516,6 +536,13 @@ export class EmailService {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
       if (!mailbox) return [];
+      // ⚠️ PER-USER FENCE — applies to EVERY mailbox kind, before any branch.
+      // A HUMAN mailbox is one person's private account; the workspaceId
+      // predicate above only proves same-tenant, not same-person. This check
+      // previously lived INSIDE the external-provider branch, leaving the
+      // sovereign (James) lane unfenced — a co-member could pass another
+      // member's hosted mailboxId and read their mail.
+      if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
 
       // External account (gmail / microsoft): the provider folders are
       // authoritative — fetch the live folder threads through the provider (the
@@ -526,9 +553,6 @@ export class EmailService {
       // (Gmail `q`); paging uses an opaque pageToken. A numeric offset without a
       // pageToken yields an empty page — never a silent re-serve of page 1.
       if (this.mailProvider.handles(mailbox)) {
-        // Per-user fence: a HUMAN external mailbox is private to its owner — never
-        // surface a co-member's connected inbox just because it shares the workspace.
-        if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
         const page = await this.mailProvider.listInbox(mailbox, {
           folder,
           limit,

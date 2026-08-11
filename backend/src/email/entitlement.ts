@@ -64,16 +64,30 @@ export function checkComposeEntitlement(
   entitlements: string[],
   workspaceId: string,
   getEnv: (k: string) => string | undefined = (k) => process.env[k],
+  externalSource?: string | null,
 ): EntitlementDecision {
   const have = new Set((entitlements ?? []).map(normalizeSku));
-  const hasBoth = have.has(SKU_CUSTOMER_OPS) && have.has(SKU_EMAIL_OPS);
   const mode = entitlementMode(getEnv);
 
-  if (hasBoth) {
+  // `email-ops` is ALWAYS required — it is the SKU for this product.
+  const hasEmailOps = have.has(SKU_EMAIL_OPS);
+  // `customer-ops` is required ONLY for the CROSS-APP trigger, which is what the
+  // dual-SKU rule was always about: a Customer-Ops cockpit reaching through the
+  // federation seam to send mail must hold BOTH products. It must NOT be
+  // demanded of a person sending their own mail from their own mailbox —
+  // requiring it there made a standalone Email-Ops customer, who never bought
+  // Customer-Ops, unable to send at all. (Invisible until now only because
+  // dogfood runs UC_ENTITLEMENT_MODE=open.)
+  const crossApp = isCrossAppComposeSource(externalSource);
+  const hasCustomerOps = have.has(SKU_CUSTOMER_OPS);
+
+  if (hasEmailOps && (!crossApp || hasCustomerOps)) {
     return {
       allowed: true,
       mode,
-      reason: 'entitled: caller carries both customer-ops and email-ops',
+      reason: crossApp
+        ? 'entitled: cross-app compose, caller carries both customer-ops and email-ops'
+        : 'entitled: caller carries email-ops (own-mailbox compose)',
     };
   }
 
@@ -94,8 +108,23 @@ export function checkComposeEntitlement(
   return {
     allowed: false,
     mode,
-    reason:
-      'not entitled: sending/drafting mail via Email-Ops requires BOTH customer-ops ' +
-      'and email-ops; the caller does not carry both.',
+    reason: !hasEmailOps
+      ? 'not entitled: sending/drafting mail via Email-Ops requires the email-ops SKU.'
+      : 'not entitled: a cross-app compose (via the Customer-Ops federation) requires ' +
+        'BOTH customer-ops and email-ops; the caller does not carry customer-ops.',
   };
+}
+
+/**
+ * Is this compose arriving through a CROSS-APP federation seam (rather than a
+ * human using Email-Ops directly)? Only those pay the dual-SKU rule.
+ *
+ * Unknown/absent source is treated as FIRST-PARTY — the conservative choice for
+ * BILLING (this gate meters entitlement, it is not the security boundary; the
+ * anti-impersonation and mailbox-ownership fences are separate and unchanged).
+ */
+export function isCrossAppComposeSource(source?: string | null): boolean {
+  const s = (source ?? '').trim().toLowerCase();
+  if (!s) return false;
+  return s.startsWith('customer-ops') || s.startsWith('customer_ops') || s === 'co';
 }

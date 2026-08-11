@@ -1,3 +1,4 @@
+import { tenancyEnabled } from './feature-flags';
 import { ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MembershipStatus, User, WorkspaceRole } from '@prisma/client';
@@ -41,22 +42,32 @@ describe('MembershipService', () => {
     delete process.env.EMAIL_OPS_ACCESS_LIST; // legacy fallback (Aaron+Shafen OWNER)
   });
 
-  describe('flag OFF (default)', () => {
+  // ⚠️ Tenancy now DEFAULTS ON (absent env == safe). These cases must therefore
+  // set EMAIL_OPS_TENANCY_ENABLED='false' EXPLICITLY — an omitted variable no
+  // longer means "off", precisely so a customer install that forgets it does not
+  // silently make every user an OWNER of any workspace they name.
+  describe('flag explicitly OFF (dev escape hatch)', () => {
     const prisma = { membership: {}, workspace: {} };
+    const OFF = { DEFAULT_WORKSPACE_ID: BOOTSTRAP, EMAIL_OPS_TENANCY_ENABLED: 'false' };
 
     it('resolveAndAuthorize returns the requested workspace without a membership check', async () => {
-      const svc = make({ DEFAULT_WORKSPACE_ID: BOOTSTRAP }, prisma);
+      const svc = make(OFF, prisma);
       await expect(svc.resolveAndAuthorize(aaron, 'W-requested')).resolves.toBe('W-requested');
     });
 
     it('falls back to the default workspace when none requested', async () => {
-      const svc = make({ DEFAULT_WORKSPACE_ID: BOOTSTRAP }, prisma);
+      const svc = make(OFF, prisma);
       await expect(svc.resolveAndAuthorize(aaron, null)).resolves.toBe(BOOTSTRAP);
     });
 
     it('never throws for a non-allow-listed user when the flag is off', async () => {
-      const svc = make({ DEFAULT_WORKSPACE_ID: BOOTSTRAP }, prisma);
+      const svc = make(OFF, prisma);
       await expect(svc.resolveAndAuthorize(stranger, null)).resolves.toBe(BOOTSTRAP);
+    });
+
+    it('DEFAULT (env unset) is now ON — an omitted flag must NOT disable the membership gate', () => {
+      expect(tenancyEnabled(() => undefined)).toBe(true);
+      expect(tenancyEnabled(() => 'false')).toBe(false);
     });
   });
 
