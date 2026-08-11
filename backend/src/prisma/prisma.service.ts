@@ -122,6 +122,6 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       await tx.$executeRaw`SELECT set_config('app.current_workspace', ${workspaceId}, true)`;
       await tx.$executeRaw`SELECT set_config('app.uc_uid', ${ucUid ?? ''}, true)`;
       return fn(tx);
-    }, options);
+    }, { maxWait: 10_000, timeout: 30_000, ...options });
   }
 }
