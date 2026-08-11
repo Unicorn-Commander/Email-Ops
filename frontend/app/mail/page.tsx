@@ -782,7 +782,13 @@ export default function MailPage() {
     !mail.unified &&
     !!mail.selectedMailbox &&
     (mail.selectedMailbox.provider === 'gmail' || mail.selectedMailbox.provider === 'microsoft');
-  const searchAvailable = !externalMailbox;
+  // Sovereign mailboxes always search (JMAP full-text). An external mailbox
+  // searches only when the BACKEND confirms the provider honoured `q` — the
+  // provider lane can now really search Gmail, but we trust the server's
+  // capability flag rather than assuming, so a provider that can't (or an older
+  // backend that reports nothing) keeps the box disabled instead of returning
+  // an unfiltered inbox dressed up as search results.
+  const searchAvailable = !externalMailbox || mail.searchSupported;
   // Compose/reply honesty follows the *sending* mailbox, not only the list selection
   // (matters in unified mode when the open thread is on a connected account).
   const composeIsExternal =
@@ -2633,9 +2639,11 @@ function ConversationList({
             )}
             {externalListCapped && !hasMore && threads.length > 0 && (
               <p className="px-4 py-3 text-center text-[12px] leading-relaxed text-tertiary">
-                {threads.length >= 50
-                  ? `Showing the 50 most recent — open ${providerLabel ?? 'Gmail or Outlook'} for older mail.`
-                  : `Showing recent mail only — open ${providerLabel ?? 'Gmail or Outlook'} for the full mailbox.`}
+                {threads.length > 50
+                  ? `That's every message in this folder.`
+                  : threads.length === 50
+                    ? `Showing the 50 most recent — open ${providerLabel ?? 'Gmail or Outlook'} for older mail.`
+                    : `Showing recent mail only — open ${providerLabel ?? 'Gmail or Outlook'} for the full mailbox.`}
               </p>
             )}
           </>

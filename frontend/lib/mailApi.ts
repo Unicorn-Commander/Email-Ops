@@ -278,6 +278,19 @@ export interface MailThreadsResponse {
   count: number;
   /** Echoes the folder the list was scoped to (defaults to inbox server-side). */
   folder?: string;
+  /**
+   * Honest paging metadata. Sovereign (JMAP) mailboxes page by numeric offset;
+   * external providers page by an OPAQUE cursor — Gmail/Graph ignore `offset`
+   * entirely, so a numeric page 2 silently re-serves page 1. All four fields are
+   * optional so an older backend degrades to the previous client behaviour.
+   */
+  next_page_token?: string | null;
+  /** Server-truth "is there another page" — never inferred from result length. */
+  has_more?: boolean;
+  paging_mode?: 'offset' | 'page_token' | string;
+  /** False when the provider cannot honour `q` — the list is UNFILTERED, say so. */
+  search_supported?: boolean;
+  reason?: string | null;
 }
 
 export interface MailThreadResponse {
@@ -400,8 +413,14 @@ export interface ListThreadsOpts {
   limit?: number;
   /** Full-text search (Wave 2). Omitted when empty. */
   q?: string;
-  /** Load-more paging offset (Wave 2). */
+  /** Load-more paging offset (Wave 2) — SOVEREIGN mailboxes only. */
   offset?: number;
+  /**
+   * Opaque provider cursor for EXTERNAL (Gmail/Graph) mailboxes. Mutually
+   * exclusive with `offset`: those providers ignore a numeric offset, so
+   * sending both would ask for page 1 while pretending to ask for page 2.
+   */
+  pageToken?: string | null;
 }
 
 function threadsQs(opts: ListThreadsOpts): string {
@@ -409,7 +428,9 @@ function threadsQs(opts: ListThreadsOpts): string {
   params.set('folder', opts.folder ?? 'inbox');
   params.set('limit', String(opts.limit ?? 50));
   if (opts.q?.trim()) params.set('q', opts.q.trim());
-  if (opts.offset) params.set('offset', String(opts.offset));
+  const token = opts.pageToken?.trim();
+  if (token) params.set('page_token', token);
+  else if (opts.offset) params.set('offset', String(opts.offset));
   return `?${params.toString()}`;
 }
 

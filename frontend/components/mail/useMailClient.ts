@@ -165,10 +165,17 @@ export interface UseMailClient {
    */
   refresh: () => void;
   refreshing: boolean;
-  /** Offset paging: whether another page may exist, and the loader. */
+  /** Paging: whether another page may exist, and the loader. */
   hasMore: boolean;
   loadingMore: boolean;
   loadMore: () => void;
+  /**
+   * Server-reported: can this mailbox's provider actually honour a search query?
+   * Starts FALSE for an external mailbox and only turns true when the backend
+   * says so — a lying search box is worse than a disabled one, so the fail-safe
+   * direction is "off until proven".
+   */
+  searchSupported: boolean;
 
   /** The selected thread id (null = none open). */
   selectedThreadId: string | null;
@@ -319,6 +326,9 @@ export function useMailClient(): UseMailClient {
   const [threadsLoad, setThreadsLoad] = useState<Load>('loading');
   const [threadsError, setThreadsError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
+  // Opaque provider cursor for external mailboxes (Gmail/Graph ignore `offset`).
+  const nextPageTokenRef = useRef<string | null>(null);
+  const [searchSupported, setSearchSupported] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -473,7 +483,16 @@ export function useMailClient(): UseMailClient {
         setLoadingMore(false); // a fresh list supersedes any in-flight load-more
       }
       try {
-        const opts = { folder: f, limit: PAGE_SIZE, q: q || undefined, offset: offset || undefined };
+        // Page by opaque cursor when the server gave us one (external providers);
+        // otherwise by numeric offset (sovereign JMAP). threadsQs sends only one.
+        const pageToken = append && mailboxId !== ALL_INBOXES ? nextPageTokenRef.current : null;
+        const opts = {
+          folder: f,
+          limit: PAGE_SIZE,
+          q: q || undefined,
+          offset: offset || undefined,
+          pageToken,
+        };
         // A live custom folder overrides the system folder as the list source.
         const customId = activeCustomFolderIdRef.current;
         const res =
@@ -492,13 +511,24 @@ export function useMailClient(): UseMailClient {
           const seen = new Set(prev.map((t) => t.id));
           return [...prev, ...res.threads.filter((t) => !seen.has(t.id))];
         });
-        // External (Gmail/Outlook) list endpoints ignore `offset` — another page
-        // would re-fetch the same first 50, dedupe to nothing, and leave a dead
-        // "Load more" button. Cap honestly after the first page.
         const mbxMeta = mailboxesRef.current.find((m) => m.id === mailboxId);
         const externalList =
           mailboxId !== ALL_INBOXES && isExternalProvider(mbxMeta?.provider);
-        setHasMore(!externalList && res.threads.length >= PAGE_SIZE);
+
+        // Paging truth, in order of trustworthiness:
+        //  1. the server's explicit `has_more` (it knows whether a real cursor
+        //     exists — never inferred from result length),
+        //  2. else the legacy length heuristic, still capped for external lists
+        //     whose endpoints ignore `offset` (a second page would re-serve the
+        //     first 50, dedupe to nothing, and leave a dead "Load more").
+        nextPageTokenRef.current = res.next_page_token ?? null;
+        if (typeof res.has_more === 'boolean') {
+          setHasMore(res.has_more);
+        } else {
+          setHasMore(!externalList && res.threads.length >= PAGE_SIZE);
+        }
+        // Only an explicit `true` enables search on an external mailbox.
+        setSearchSupported(!externalList || res.search_supported === true);
         setThreadsError(null);
         setThreadsLoad('ready');
       } catch (err) {
@@ -1253,6 +1283,7 @@ export function useMailClient(): UseMailClient {
     refresh,
     refreshing,
     hasMore,
+    searchSupported,
     loadingMore,
     loadMore,
     selectedThreadId: openThread?.id ?? null,
