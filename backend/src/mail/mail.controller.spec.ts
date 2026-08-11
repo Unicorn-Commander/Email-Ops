@@ -41,9 +41,33 @@ describe('MailController (webmail wave)', () => {
   }
 
   it('GET :mailboxId/threads passes q + offset (and clamps limit) through to the service', async () => {
-    const listMailboxInbox = jest.fn().mockResolvedValue([]);
-    await make({ listMailboxInbox }).threads(WS, user(), 'mb-1', '500', 'archive', 'invoice', '25');
-    expect(listMailboxInbox).toHaveBeenCalledWith(WS, 'kc-aaron', 'mb-1', 200, 'archive', 'invoice', 25);
+    const listMailboxInboxPage = jest.fn().mockResolvedValue({
+      threads: [],
+      nextPageToken: null,
+      hasMore: false,
+      pagingMode: 'offset',
+      searchSupported: true,
+      reason: null,
+    });
+    await make({ listMailboxInboxPage }).threads(
+      WS,
+      user(),
+      'mb-1',
+      '500',
+      'archive',
+      'invoice',
+      '25',
+    );
+    expect(listMailboxInboxPage).toHaveBeenCalledWith(
+      WS,
+      'kc-aaron',
+      'mb-1',
+      200,
+      'archive',
+      'invoice',
+      25,
+      null,
+    );
   });
 
   it('GET threads/aggregate delegates with folder/limit/q/offset and echoes count', async () => {

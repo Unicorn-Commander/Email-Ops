@@ -121,6 +121,8 @@ export interface CleanupExecutionResult {
   staged?: boolean;
   staged_item_id?: string | null;
   reason?: string | null;
+  /** Per-sender unsubscribe outcomes (never a blanket success). */
+  unsubscribe_results?: EngineUnsubscribeSenderResult[];
 }
 
 export interface CleanupBatchView {
@@ -208,6 +210,33 @@ export interface EngineMailThread {
 
 export interface EngineMailThreadsResult {
   threads: EngineMailThread[];
+  /** Opaque provider cursor for the next page (Gmail pageToken / Graph nextLink). */
+  next_page_token?: string | null;
+  /** True only when next_page_token is present — never inferred from result length. */
+  has_more?: boolean;
+  /** False when the provider refused the search rather than returning unfiltered mail. */
+  search_supported?: boolean;
+  reason?: string | null;
+}
+
+/** Per-sender result of an RFC 2369 / RFC 8058 unsubscribe attempt. */
+export type UnsubscribeSenderStatus =
+  | 'unsubscribed'
+  | 'link_returned'
+  | 'unavailable'
+  | 'failed';
+
+export interface EngineUnsubscribeSenderResult {
+  sender: string;
+  status: UnsubscribeSenderStatus;
+  method?: string | null;
+  url?: string | null;
+  detail?: string | null;
+  message_id?: string | null;
+}
+
+export interface EngineUnsubscribeResult {
+  results: EngineUnsubscribeSenderResult[];
 }
 
 export interface EngineMailMessage {

@@ -1,4 +1,4 @@
-import { parseSearchQuery, buildJmapFilter } from './search-query';
+import { parseSearchQuery, buildJmapFilter, buildGmailQuery } from './search-query';
 
 describe('parseSearchQuery', () => {
   it('returns empty text for null / undefined / empty string', () => {
@@ -308,5 +308,32 @@ describe('buildJmapFilter', () => {
     const parsed = parseSearchQuery('foo:bar hello');
     expect(parsed.text).toBe('foo:bar hello');
     expect(buildJmapFilter(parsed)).toEqual({ text: 'foo:bar hello' });
+  });
+});
+
+describe('buildGmailQuery', () => {
+  it('maps the app operators onto Gmail q syntax', () => {
+    const q = buildGmailQuery(
+      parseSearchQuery('from:promo@shop.com to:me@x.com subject:"big sale" has:attachment before:2024-06-01 after:2024-01-01 is:unread'),
+    );
+    expect(q).toContain('from:promo@shop.com');
+    expect(q).toContain('to:me@x.com');
+    expect(q).toContain('subject:"big sale"');
+    expect(q).toContain('has:attachment');
+    expect(q).toContain('before:2024-06-01');
+    expect(q).toContain('after:2024-01-01');
+    expect(q).toContain('is:unread');
+  });
+
+  it('passes free-text through and is empty for an empty parse', () => {
+    expect(buildGmailQuery(parseSearchQuery('invoice receipt'))).toBe('invoice receipt');
+    expect(buildGmailQuery({ text: '' })).toBe('');
+  });
+
+  it('round-trips parse → gmail for a realistic mixed query', () => {
+    const raw = 'from:alice@example.com has:attachment quarterly';
+    expect(buildGmailQuery(parseSearchQuery(raw))).toBe(
+      'from:alice@example.com has:attachment quarterly',
+    );
   });
 });

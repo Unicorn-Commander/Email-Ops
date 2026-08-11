@@ -91,8 +91,15 @@ describe('EngineMailProvider', () => {
       expect.objectContaining({ keycloakId: 'kc-sub-1' }),
       'google',
     );
-    expect(engine.listMailThreads).toHaveBeenCalledWith('gmail', { token: 'gtok' }, 'inbox', 50);
-    expect(out).toEqual([
+    expect(engine.listMailThreads).toHaveBeenCalledWith(
+      'gmail',
+      { token: 'gtok' },
+      'inbox',
+      50,
+      null,
+      null,
+    );
+    expect(out.threads).toEqual([
       {
         id: 't1',
         subject: 'Hi',
@@ -103,6 +110,8 @@ describe('EngineMailProvider', () => {
         participants: [{ address: 'a@x.test', name: 'A' }],
       },
     ]);
+    expect(out.hasMore).toBe(false);
+    expect(out.nextPageToken).toBeNull();
   });
 
   it('microsoft uses the microsoft alias + access_token credentials', async () => {
@@ -112,24 +121,81 @@ describe('EngineMailProvider', () => {
       limit: 25,
     });
     expect(broker.getProviderAccessToken).toHaveBeenCalledWith(expect.anything(), 'microsoft');
-    expect(engine.listMailThreads).toHaveBeenCalledWith('microsoft', { access_token: 'mtok' }, 'spam', 25);
+    expect(engine.listMailThreads).toHaveBeenCalledWith(
+      'microsoft',
+      { access_token: 'mtok' },
+      'spam',
+      25,
+      null,
+      null,
+    );
   });
 
-  it('listInbox degrades clean: no owner / no user / no token / null engine → []', async () => {
-    expect(await make({}).provider.listInbox(gmailbox({ ownerKey: null }), { folder: 'inbox', limit: 50 })).toEqual([]);
-    expect(await make({ user: null }).provider.listInbox(gmailbox(), { folder: 'inbox', limit: 50 })).toEqual([]);
+  it('listInbox maps search operators to Gmail q and threads pageToken honestly', async () => {
+    const { provider, engine } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      threads: {
+        threads: [{ id: 't2', subject: 'Promo', participants: [], last_message_at: null, last_snippet: null, message_count: 1, unread: false }],
+        next_page_token: 'PAGE_2',
+        has_more: true,
+      },
+    });
+    const out = await provider.listInbox(gmailbox(), {
+      folder: 'inbox',
+      limit: 10,
+      query: 'from:promo@shop.com has:attachment after:2024-01-01',
+      pageToken: 'PAGE_1',
+    });
+    expect(engine.listMailThreads).toHaveBeenCalledWith(
+      'gmail',
+      { token: 'gtok' },
+      'inbox',
+      10,
+      'from:promo@shop.com has:attachment after:2024-01-01',
+      'PAGE_1',
+    );
+    expect(out.nextPageToken).toBe('PAGE_2');
+    expect(out.hasMore).toBe(true);
+    expect(out.threads).toHaveLength(1);
+  });
+
+  it('listInbox refuses numeric offset without pageToken (honest no-more-pages)', async () => {
+    const { provider, engine } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      threads: { threads: [{ id: 'should-not-return' }] },
+    });
+    const out = await provider.listInbox(gmailbox(), { folder: 'inbox', limit: 50, offset: 50 });
+    expect(engine.listMailThreads).not.toHaveBeenCalled();
+    expect(out.threads).toEqual([]);
+    expect(out.hasMore).toBe(false);
+    expect(out.nextPageToken).toBeNull();
+    expect(out.reason).toMatch(/page_token/i);
+  });
+
+  it('listInbox degrades clean: no owner / no user / no token / null engine → empty page', async () => {
+    const empty = {
+      threads: [],
+      nextPageToken: null,
+      hasMore: false,
+      searchSupported: true,
+      reason: null,
+    };
+    expect(await make({}).provider.listInbox(gmailbox({ ownerKey: null }), { folder: 'inbox', limit: 50 })).toEqual(empty);
+    expect(await make({ user: null }).provider.listInbox(gmailbox(), { folder: 'inbox', limit: 50 })).toEqual(empty);
     expect(
       await make({ user: { keycloakId: 'kc-sub-1' }, token: null }).provider.listInbox(gmailbox(), {
         folder: 'inbox',
         limit: 50,
       }),
-    ).toEqual([]);
+    ).toEqual(empty);
     expect(
       await make({ user: { keycloakId: 'kc-sub-1' }, token: 'gtok', threads: null }).provider.listInbox(
         gmailbox(),
         { folder: 'inbox', limit: 50 },
       ),
-    ).toEqual([]);
+    ).toEqual(empty);
   });
 
   it('send: maps an accepted engine result; not-connected → accepted:false (engine never called)', async () => {

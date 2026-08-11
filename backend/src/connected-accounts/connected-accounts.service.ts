@@ -51,6 +51,9 @@ interface CleanupCriteria {
   archive?: boolean;
   max_results?: number;
   maxResults?: number;
+  /** Explicit message ids selected in the UI (organize / execute). */
+  messageIds?: string[];
+  message_ids?: string[];
   [key: string]: unknown;
 }
 
@@ -59,6 +62,13 @@ interface CleanupExecutionOptions {
   agentInboxItemId?: string | null;
   requestedByUcUid?: string | null;
   archiveRetained?: boolean;
+  /**
+   * When true, run the destructive batch immediately (used by the approval path
+   * and by an explicit REST confirm). Default / REST is to STAGE for human approval.
+   */
+  confirm?: boolean;
+  /** Typed confirmation for permanent delete (`ARCHIVE`). */
+  confirmToken?: string | null;
 }
 
 /**
@@ -263,6 +273,47 @@ export class ConnectedAccountsService {
       throw new ForbiddenException(`no linked ${provider} account — sign in via ${provider} first`);
     }
 
+    // REST parity with MCP/chat: destructive batches STAGE for human approval by
+    // default. Immediate execution requires an explicit confirm flag (and for
+    // permanent delete, a typed ARCHIVE token). The approval path passes
+    // confirm:true via executeCleanupInternal, not this public entrypoint.
+    if (!options.confirm) {
+      const action =
+        mode === 'trash'
+          ? CleanupActionKind.TRASH
+          : mode === 'delete' || mode === 'archive_purge'
+            ? CleanupActionKind.DELETE
+            : CleanupActionKind.TRASH;
+      // Re-plan from criteria for a fresh protection gate, then INTERSECT with
+      // the client's explicit selection so the staged batch (and later approve)
+      // only touch what the human picked — never re-expand to the full plan.
+      const serverPlan = await this.planCleanup(user, provider, plan.criteria as CleanupCriteria);
+      const safeIds = new Set(serverPlan.safe.map((row) => row.id));
+      const selected = (Array.isArray(plan.safe) ? plan.safe : [])
+        .map((row) => row.id)
+        .filter((id) => safeIds.has(id));
+      const selectedSafe = serverPlan.safe.filter((row) => selected.includes(row.id));
+      const stagedPlan: CleanupPlanResult = {
+        ...serverPlan,
+        safe: selectedSafe,
+        counts: {
+          ...serverPlan.counts,
+          safe: selectedSafe.length,
+        },
+        freesBytes: selectedSafe.reduce((sum, row) => sum + row.size_bytes, 0),
+      };
+      return this.stageCleanupRequestWithPlan(user, provider, mode, action, stagedPlan);
+    }
+
+    if (
+      (mode === 'delete' || mode === 'archive_purge') &&
+      (options.confirmToken ?? '').trim() !== 'ARCHIVE'
+    ) {
+      throw new BadRequestException(
+        'Permanent delete requires typed confirmation: set confirm_token to "ARCHIVE".',
+      );
+    }
+
     const serverPlan = await this.planCleanup(user, provider, plan.criteria as CleanupCriteria);
     const safeIds = new Set(serverPlan.safe.map((row) => row.id));
     // Only the ids the client EXPLICITLY selected, intersected with what the fresh
@@ -377,7 +428,11 @@ export class ConnectedAccountsService {
     this.requireCleanerEntitlement(user, workspaceId);
     const accessToken = await this.requireAccessToken(user, provider);
     const plan = await this.planCleanup(user, provider, criteria);
-    const requested = plan.safe.map((row) => row.id);
+    // Honour explicit message selection from the UI. An empty selection is a
+    // no-op (never fall back to archiving the entire plan). When no selection
+    // key is present at all, keep the legacy "all safe rows" behaviour so MCP
+    // criteria-only organize still works.
+    const requested = this.selectedSafeIds(plan, criteria);
     const count = this.assertEngineApplied(
       await this.engine.batchArchive(
         provider,
@@ -432,14 +487,81 @@ export class ConnectedAccountsService {
     provider: ConnectedProvider,
     senderGroup: string[],
   ): Promise<CleanupExecutionResult> {
-    const criteria: CleanupCriteria = { senderGroup, query: '' };
+    const workspaceId = await this.resolveWorkspace(user);
+    this.requireCleanerEntitlement(user, workspaceId);
+    const accessToken = await this.requireAccessToken(user, provider);
+    const senders = (Array.isArray(senderGroup) ? senderGroup : [])
+      .map((s) => String(s).trim())
+      .filter(Boolean);
+    if (!senders.length) {
+      throw new BadRequestException('senderGroup must include at least one sender.');
+    }
+
+    // Prefer a plan scoped to the senders so the audit batch has a truthful preview.
+    const fromQuery = senders.map((s) => `from:${s}`).join(' OR ');
+    const criteria: CleanupCriteria = { senderGroup: senders, query: fromQuery };
     const plan = await this.planCleanup(user, provider, criteria);
-    return this.unsupportedResult(
+
+    const engineResult = await this.engine.unsubscribeSenders(
       provider,
-      'unsubscribe',
-      plan,
-      'Unsubscribe is coming with the archive release — no messages were changed.',
+      this.credentialsFor(provider, accessToken),
+      senders,
     );
+    if (!engineResult) {
+      throw new BadGatewayException(
+        'The mail provider did not confirm the unsubscribe — it may be rate-limited or the sign-in may have expired. Nothing was recorded as done; try again.',
+      );
+    }
+
+    const results = Array.isArray(engineResult.results) ? engineResult.results : [];
+    const completed = results.filter((r) => r.status === 'unsubscribed').length;
+    const failed = results.filter((r) => r.status === 'failed').length;
+    const linkReturned = results.filter((r) => r.status === 'link_returned').length;
+    const unavailable = results.filter((r) => r.status === 'unavailable').length;
+    const result = this.cleanupResult({
+      completed,
+      failed: failed + unavailable,
+      bytesFreed: 0,
+      totalAttempted: results.length,
+    });
+
+    return this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
+      const batch = await tx.cleanupBatch.create({
+        data: {
+          workspaceId,
+          provider,
+          action: CleanupActionKind.UNSUBSCRIBE,
+          mode: 'unsubscribe',
+          state: CleanupBatchState.COMPLETED,
+          criteria: plan.criteria as any,
+          plan: plan as any,
+          result: { ...result, unsubscribe_results: results } as any,
+          requestedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+          approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+          summary: this.batchSummary('unsubscribe', provider, senders.length, null),
+          params: this.batchParams(criteria),
+          completedAt: new Date(),
+        },
+      });
+      const reasonParts = [
+        `${completed} unsubscribed`,
+        linkReturned ? `${linkReturned} link(s) returned for human click` : null,
+        unavailable ? `${unavailable} unavailable (filter/block instead)` : null,
+        failed ? `${failed} failed` : null,
+      ].filter(Boolean);
+      return {
+        ok: failed === 0 && completed + linkReturned + unavailable > 0,
+        provider,
+        mode: 'unsubscribe' as const,
+        batch_id: batch.id,
+        action: 'unsubscribe',
+        plan,
+        result,
+        status: 'completed' as const,
+        reason: reasonParts.join('; '),
+        unsubscribe_results: results,
+      };
+    });
   }
 
   async undoBatch(user: User, provider: ConnectedProvider, batchId: string): Promise<CleanupExecutionResult> {
@@ -564,18 +686,33 @@ export class ConnectedAccountsService {
     }
 
     const plan = await this.planCleanup(user, provider, criteria);
+    // When the caller passed an explicit selection, narrow the staged plan so
+    // approval cannot re-expand to the full safe set.
+    const narrowed = this.narrowPlanToSelection(plan, criteria);
+    return this.stageCleanupRequestWithPlan(user, provider, mode, action, narrowed);
+  }
 
-    if (action === CleanupActionKind.UNSUBSCRIBE) {
-      return this.unsupportedResult(
-        provider,
-        mode,
-        plan,
-        'Unsubscribe is not implemented yet — no messages were changed.',
-      );
-    }
+  /**
+   * Stage a pre-built plan (already selection-narrowed when needed). Shared by
+   * MCP criteria staging and REST execute-without-confirm.
+   */
+  private async stageCleanupRequestWithPlan(
+    user: User,
+    provider: ConnectedProvider,
+    mode: CleanupWriteMode,
+    action: CleanupActionKind,
+    plan: CleanupPlanResult,
+  ): Promise<CleanupExecutionResult> {
+    const workspaceId = await this.resolveWorkspace(user);
+    this.requireCleanerEntitlement(user, workspaceId);
+
+    // UNSUBSCRIBE is staged like every other agent destructive verb. On approve,
+    // executeCleanupInternal runs the real engine unsubscribe against the
+    // sender group in the staged criteria.
 
     const requestedByUcUid = ucUidOf(user as WithWorkspaceClaim);
     const summary = this.batchSummary(mode, provider, plan.safe.length, null);
+    const criteria = plan.criteria as CleanupCriteria;
     const staged = await this.prisma.withWorkspace(workspaceId, requestedByUcUid, async (tx) => {
       const batch = await tx.cleanupBatch.create({
         data: {
@@ -659,6 +796,24 @@ export class ConnectedAccountsService {
       staged: true,
       staged_item_id: staged.itemId,
       reason: 'staged into agent inbox for human approval',
+    };
+  }
+
+  private narrowPlanToSelection(plan: CleanupPlanResult, criteria: CleanupCriteria): CleanupPlanResult {
+    const raw =
+      Array.isArray(criteria.messageIds)
+        ? criteria.messageIds
+        : Array.isArray(criteria.message_ids)
+          ? criteria.message_ids
+          : null;
+    if (raw === null) return plan;
+    const wanted = new Set(raw.map(String));
+    const safe = plan.safe.filter((row) => wanted.has(row.id));
+    return {
+      ...plan,
+      safe,
+      counts: { ...plan.counts, safe: safe.length },
+      freesBytes: safe.reduce((sum, row) => sum + row.size_bytes, 0),
     };
   }
 
@@ -872,6 +1027,37 @@ export class ConnectedAccountsService {
         result,
         backup_ref: archiveRef,
         status: 'completed',
+      };
+    } else if (mode === 'unsubscribe') {
+      const senders = this.senderGroupFromCriteria(serverPlan.criteria as CleanupCriteria);
+      const engineResult = await this.engine.unsubscribeSenders(
+        provider,
+        this.credentialsFor(provider, accessToken),
+        senders,
+      );
+      if (!engineResult) {
+        throw new BadGatewayException(
+          'The mail provider did not confirm the unsubscribe — nothing was recorded as done.',
+        );
+      }
+      const results = Array.isArray(engineResult.results) ? engineResult.results : [];
+      const completed = results.filter((r) => r.status === 'unsubscribed').length;
+      const failed = results.filter((r) => r.status === 'failed' || r.status === 'unavailable').length;
+      return {
+        ok: true,
+        provider,
+        mode,
+        batch_id: options.batchId ?? randomUUID(),
+        action: 'unsubscribe',
+        plan: serverPlan,
+        result: this.cleanupResult({
+          completed,
+          failed,
+          bytesFreed: 0,
+          totalAttempted: results.length,
+        }),
+        status: 'completed',
+        unsubscribe_results: results,
       };
     } else {
       throw new BadRequestException(`"${mode}" cleanup is not implemented — no messages were changed.`);
@@ -1230,6 +1416,10 @@ export class ConnectedAccountsService {
   private backupQueryFor(criteria: CleanupCriteria): string {
     const q = typeof criteria.query === 'string' ? criteria.query.trim() : '';
     if (q) return q;
+    const senders = this.senderGroupFromCriteria(criteria);
+    if (senders.length) {
+      return senders.map((s) => `from:${s}`).join(' OR ');
+    }
     // No free-text query: SCOPE the fetch to the selected categories so a plan
     // never pulls (and later classifies as "safe") the whole mailbox — including
     // personal and Sent mail. If no categories are given either, fall back to
@@ -1242,6 +1432,31 @@ export class ConnectedAccountsService {
     ];
     if (!terms.length) return 'category:promotions';
     return terms.length === 1 ? terms[0] : `(${terms.join(' OR ')})`;
+  }
+
+  /**
+   * Intersect the UI's explicit selection with the server-safe set.
+   * - messageIds / message_ids present (including empty) → honour selection.
+   * - absent → all safe rows (legacy / MCP criteria-only organize).
+   */
+  private selectedSafeIds(plan: CleanupPlanResult, criteria: CleanupCriteria): string[] {
+    const safeIds = plan.safe.map((row) => row.id);
+    const safeSet = new Set(safeIds);
+    const raw =
+      Array.isArray(criteria.messageIds)
+        ? criteria.messageIds
+        : Array.isArray(criteria.message_ids)
+          ? criteria.message_ids
+          : null;
+    if (raw === null) return safeIds;
+    return raw.map((id) => String(id)).filter((id) => safeSet.has(id));
+  }
+
+  private senderGroupFromCriteria(criteria: CleanupCriteria | Record<string, unknown>): string[] {
+    const c = criteria as CleanupCriteria;
+    if (Array.isArray(c.senderGroup)) return c.senderGroup.map(String).filter(Boolean);
+    if (Array.isArray(c.sender_groups)) return c.sender_groups.map(String).filter(Boolean);
+    return [];
   }
 
   /**

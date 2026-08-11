@@ -117,6 +117,14 @@ class OrganizeRequest(MessageIdsRequest):
 class MailThreadsRequest(ProfileRequest):
     folder: str = "inbox"
     limit: int = 50
+    # Gmail-style search string (operators mapped by the provider). Empty = unfiltered folder.
+    query: str = ""
+    # Opaque provider page token (Gmail pageToken / Graph @odata.nextLink). NEVER a numeric offset.
+    page_token: Optional[str] = None
+
+
+class UnsubscribeRequest(ProfileRequest):
+    sender_group: list[str] = Field(default_factory=list)
 
 
 class MailThreadRequest(ProfileRequest):
@@ -481,17 +489,83 @@ def cleanup_organize(request: OrganizeRequest) -> CountResponse:
     return CountResponse(count=count)
 
 
+@app.post("/cleanup/unsubscribe", dependencies=[Depends(_require_engine_token)])
+def cleanup_unsubscribe(request: UnsubscribeRequest) -> dict[str, Any]:
+    """RFC 2369 / RFC 8058 unsubscribe for a sender group.
+
+    Always returns a per-sender result list (unsubscribed / link_returned /
+    unavailable / failed). Never a blanket success. Mutating (mailto send /
+    one-click POST) — surface provider failures as 502 like the other cleanup verbs.
+    """
+    from cleanup.unsubscribe import unsubscribe_senders
+
+    try:
+        provider = _create_authenticated_provider(request.provider, request.credentials.model_dump())
+        batch = unsubscribe_senders(provider, request.sender_group or [])
+    except Exception as exc:  # noqa: BLE001 - surface as a clean 502
+        raise _cleanup_failed("unsubscribe", request.provider, exc) from exc
+    return batch.to_dict()
+
+
 @app.post("/mail/threads", dependencies=[Depends(_require_engine_token)])
 def mail_threads(request: MailThreadsRequest) -> dict[str, Any]:
+    """List threads for a folder with optional search + opaque page token.
+
+    Honest contract:
+      - ``next_page_token`` is the provider's opaque cursor (or null).
+      - ``has_more`` is true ONLY when next_page_token is present — never inferred
+        from result length.
+      - When a provider cannot honour the requested search, return empty threads
+        with ``search_supported: false`` and a reason — NEVER the unfiltered inbox.
+    """
     provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
     if provider is None:
-        return {"threads": []}
+        return {
+            "threads": [],
+            "next_page_token": None,
+            "has_more": False,
+            "search_supported": True,
+            "reason": None,
+        }
     try:
-        threads = provider.list_threads(folder=request.folder, limit=request.limit)
-        return {"threads": [_dataclass_to_dict(t) for t in threads]}
+        listed = provider.list_threads(
+            folder=request.folder,
+            limit=request.limit,
+            query=request.query or "",
+            page_token=request.page_token,
+        )
+        # Providers return (threads, next_page_token). Tolerate a bare list from
+        # older test fakes for a soft migration window.
+        if isinstance(listed, tuple):
+            threads, next_token = listed
+        else:
+            threads, next_token = listed, None
+        return {
+            "threads": [_dataclass_to_dict(t) for t in threads],
+            "next_page_token": next_token,
+            "has_more": bool(next_token),
+            "search_supported": True,
+            "reason": None,
+        }
+    except ValueError as exc:
+        # Explicit unsupported search (e.g. Microsoft free-text) — honest empty.
+        logger.info("mail/threads unsupported for %s: %s", request.provider, exc)
+        return {
+            "threads": [],
+            "next_page_token": None,
+            "has_more": False,
+            "search_supported": False,
+            "reason": str(exc),
+        }
     except Exception as exc:  # noqa: BLE001 - degrade clean
         logger.warning("mail/threads failed for %s: %s", request.provider, exc)
-        return {"threads": []}
+        return {
+            "threads": [],
+            "next_page_token": None,
+            "has_more": False,
+            "search_supported": True,
+            "reason": None,
+        }
 
 
 @app.post("/mail/thread", dependencies=[Depends(_require_engine_token)])

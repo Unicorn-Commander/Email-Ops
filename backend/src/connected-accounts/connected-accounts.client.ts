@@ -15,6 +15,7 @@ import {
   EngineMailThreadResult,
   EngineMailThreadsResult,
   EngineMessageSummary,
+  EngineUnsubscribeResult,
 } from './connected-accounts.types';
 
 @Injectable()
@@ -362,12 +363,28 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
     credentials: Record<string, unknown>,
     folder: EngineMailFolder,
     limit = 50,
+    query: string | null = null,
+    pageToken: string | null = null,
   ): Promise<EngineMailThreadsResult | null> {
     return this.postJson<EngineMailThreadsResult>('/mail/threads', {
       provider,
       credentials,
       folder,
       limit,
+      query: query ?? '',
+      page_token: pageToken,
+    });
+  }
+
+  async unsubscribeSenders(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    senderGroup: string[],
+  ): Promise<EngineUnsubscribeResult | null> {
+    return this.postJson<EngineUnsubscribeResult>('/cleanup/unsubscribe', {
+      provider,
+      credentials,
+      sender_group: senderGroup,
     });
   }
 

@@ -145,3 +145,34 @@ export function buildJmapFilter(
   if (conditions.length === 1) return conditions[0];
   return { operator: 'AND', conditions };
 }
+
+/**
+ * Map a ParsedSearch onto Gmail `users.messages.list` / `users.threads.list` `q`
+ * syntax. Gmail is the canonical operator source for most of these (`from:`,
+ * `to:`, `subject:`, `has:attachment`, `before:`, `after:`, `is:unread`, …), so
+ * this is largely a faithful re-serialisation — the point is to never pass
+ * raw free-text through unparsed when operators were present, and to quote
+ * values that contain spaces.
+ */
+export function buildGmailQuery(parsed: ParsedSearch): string {
+  const parts: string[] = [];
+  const quoteIfNeeded = (value: string): string => {
+    if (!value) return value;
+    if (/[\s"]/.test(value)) {
+      return `"${value.replace(/"/g, '')}"`;
+    }
+    return value;
+  };
+  if (parsed.from) parts.push(`from:${quoteIfNeeded(parsed.from)}`);
+  if (parsed.to) parts.push(`to:${quoteIfNeeded(parsed.to)}`);
+  if (parsed.cc) parts.push(`cc:${quoteIfNeeded(parsed.cc)}`);
+  if (parsed.subject) parts.push(`subject:${quoteIfNeeded(parsed.subject)}`);
+  if (parsed.hasAttachment) parts.push('has:attachment');
+  if (parsed.isUnread) parts.push('is:unread');
+  if (parsed.isRead) parts.push('is:read');
+  if (parsed.isStarred) parts.push('is:starred');
+  if (parsed.before) parts.push(`before:${parsed.before}`);
+  if (parsed.after) parts.push(`after:${parsed.after}`);
+  if (parsed.text) parts.push(parsed.text);
+  return parts.join(' ').trim();
+}

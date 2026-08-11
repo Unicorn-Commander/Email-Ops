@@ -66,6 +66,7 @@ describe('ConnectedAccountsService', () => {
     archiveRestore: jest.fn(),
     backupCreate: jest.fn(),
     backupVerify: jest.fn(),
+    unsubscribeSenders: jest.fn(),
   } as unknown as ConnectedAccountsEnginePort;
 
   const archiveStorage = {
@@ -134,10 +135,28 @@ describe('ConnectedAccountsService', () => {
     (engine.batchTrash as jest.Mock).mockResolvedValue({ count: 1 });
 
     const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
-    const result = await service().executeCleanup(user, 'gmail', plan, 'trash');
+    const result = await service().executeCleanup(user, 'gmail', plan, 'trash', { confirm: true });
 
     expect(engine.batchTrash).toHaveBeenCalledWith('gmail', { token: 'broker-token' }, ['m-1']);
     expect(result.status).toBe('completed');
+  });
+
+  it('REST executeCleanup STAGES by default (no confirm) instead of mutating the mailbox', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false },
+      ],
+      next_token: null,
+    });
+
+    const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
+    const result = await service().executeCleanup(user, 'gmail', plan, 'trash');
+
+    expect(result.status).toBe('pending');
+    expect(result.staged).toBe(true);
+    expect(tx.agentInboxItem.create).toHaveBeenCalled();
+    expect(engine.batchTrash).not.toHaveBeenCalled();
+    expect(engine.batchDelete).not.toHaveBeenCalled();
   });
 
   it('records FAILED (not a silent COMPLETED) when the engine rejects the trash', async () => {
@@ -152,9 +171,9 @@ describe('ConnectedAccountsService', () => {
     (engine.batchTrash as jest.Mock).mockResolvedValue(null);
 
     const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
-    await expect(service().executeCleanup(user, 'gmail', plan, 'trash')).rejects.toBeInstanceOf(
-      BadGatewayException,
-    );
+    await expect(
+      service().executeCleanup(user, 'gmail', plan, 'trash', { confirm: true }),
+    ).rejects.toBeInstanceOf(BadGatewayException);
     expect(engine.batchTrash).toHaveBeenCalled();
     // No COMPLETED batch row is written for a cleanup that never happened.
     expect(tx.cleanupBatch.create).not.toHaveBeenCalled();
@@ -177,7 +196,9 @@ describe('ConnectedAccountsService', () => {
     expect(plan.safe.map((r) => r.id)).toEqual(['m-1']);
 
     // An empty explicit selection must be a no-op — never fall back to "everything".
-    await service().executeCleanup(user, 'gmail', { ...plan, safe: [] } as never, 'trash');
+    await service().executeCleanup(user, 'gmail', { ...plan, safe: [] } as never, 'trash', {
+      confirm: true,
+    });
     expect(engine.batchTrash).toHaveBeenCalledWith('gmail', { token: 'broker-token' }, []);
   });
 
@@ -205,11 +226,26 @@ describe('ConnectedAccountsService', () => {
     (engine.batchDelete as jest.Mock).mockResolvedValue({ count: 1 });
 
     const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
-    const result = await service().executeCleanup(user, 'gmail', plan, 'delete');
+    const result = await service().executeCleanup(user, 'gmail', plan, 'delete', {
+      confirm: true,
+      confirmToken: 'ARCHIVE',
+    });
     expect(engine.archiveCreate).toHaveBeenCalled();
     expect(engine.archiveVerify).toHaveBeenCalledWith('archives', 'workspaces/ws-1/archives/gmail/batch.eml.zip');
     expect(engine.batchDelete).toHaveBeenCalledWith('gmail', { token: 'broker-token' }, ['m-1']);
     expect(result.backup_ref?.verified).toBe(true);
+  });
+
+  it('permanent delete with confirm but without ARCHIVE token is rejected', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      next_token: null,
+    });
+    const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
+    await expect(
+      service().executeCleanup(user, 'gmail', plan, 'delete', { confirm: true }),
+    ).rejects.toThrow(/ARCHIVE/);
+    expect(engine.batchDelete).not.toHaveBeenCalled();
   });
 
   it('reports partial engine counts correctly (completed vs failed)', async () => {
@@ -224,7 +260,7 @@ describe('ConnectedAccountsService', () => {
     (engine.batchTrash as jest.Mock).mockResolvedValue({ count: 1 });
 
     const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
-    const result = await service().executeCleanup(user, 'gmail', plan, 'trash');
+    const result = await service().executeCleanup(user, 'gmail', plan, 'trash', { confirm: true });
 
     expect(result.result.completed).toBe(1);
     expect(result.result.failed).toBe(1);
@@ -248,9 +284,12 @@ describe('ConnectedAccountsService', () => {
     (engine.archiveVerify as jest.Mock).mockResolvedValue({ success: false, message: 'bad sha' });
 
     const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
-    await expect(service().executeCleanup(user, 'gmail', plan, 'delete')).rejects.toBeInstanceOf(
-      ForbiddenException,
-    );
+    await expect(
+      service().executeCleanup(user, 'gmail', plan, 'delete', {
+        confirm: true,
+        confirmToken: 'ARCHIVE',
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
     expect(engine.batchDelete).not.toHaveBeenCalled();
   });
 
@@ -330,26 +369,85 @@ describe('ConnectedAccountsService', () => {
     expect(tx.cleanupBatch.update).not.toHaveBeenCalled();
   });
 
-  it('organize performs real non-destructive archive; unsubscribe remains unsupported', async () => {
+  it('organize performs real non-destructive archive; honours explicit messageIds', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
-      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false },
+        { id: 'm-2', sender: 'Promo <promo2@example.com>', size_bytes: 100, is_starred: false },
+      ],
       next_token: null,
     });
     (engine.batchArchive as jest.Mock).mockResolvedValue({ count: 1 });
 
-    const organized = await service().organize(user, 'gmail', { query: 'category:promotions' });
+    const organized = await service().organize(user, 'gmail', {
+      query: 'category:promotions',
+      messageIds: ['m-1'],
+    });
     expect(organized.ok).toBe(true);
     expect(organized.status).toBe('completed');
     expect(engine.batchArchive).toHaveBeenCalledWith('gmail', { token: 'broker-token' }, ['m-1'], null);
-
-    const unsub = await service().unsubscribe(user, 'gmail', ['promo@example.com']);
-    expect(unsub.ok).toBe(false);
-    expect(unsub.status).toBe('rejected');
 
     // the original bug: these must never trash and never fake a completed batch
     expect(engine.batchTrash).not.toHaveBeenCalled();
     expect(engine.batchDelete).not.toHaveBeenCalled();
     expect(tx.cleanupBatch.create).toHaveBeenCalled();
+  });
+
+  it('unsubscribe returns per-sender results (never a blanket success stub)', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      next_token: null,
+    });
+    (engine.unsubscribeSenders as jest.Mock).mockResolvedValue({
+      results: [
+        {
+          sender: 'promo@example.com',
+          status: 'unsubscribed',
+          method: 'one_click',
+          url: 'https://shop.example/unsub',
+          detail: 'one-click POST accepted (HTTP 200)',
+        },
+        {
+          sender: 'news@example.com',
+          status: 'link_returned',
+          method: 'link',
+          url: 'https://news.example/unsub',
+          detail: 'open it yourself',
+        },
+      ],
+    });
+
+    const unsub = await service().unsubscribe(user, 'gmail', ['promo@example.com', 'news@example.com']);
+    expect(unsub.status).toBe('completed');
+    expect(unsub.unsubscribe_results).toHaveLength(2);
+    expect(unsub.unsubscribe_results?.[0]?.status).toBe('unsubscribed');
+    expect(unsub.unsubscribe_results?.[1]?.status).toBe('link_returned');
+    expect(engine.unsubscribeSenders).toHaveBeenCalledWith(
+      'gmail',
+      { token: 'broker-token' },
+      ['promo@example.com', 'news@example.com'],
+    );
+    expect(engine.batchTrash).not.toHaveBeenCalled();
+    expect(engine.batchDelete).not.toHaveBeenCalled();
+  });
+
+  it('stages unsubscribe via stageCleanupRequest without calling the engine yet', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      next_token: null,
+    });
+
+    const staged = await service().stageCleanupRequest(
+      user,
+      'gmail',
+      'unsubscribe',
+      CleanupActionKind.UNSUBSCRIBE,
+      { senderGroup: ['promo@example.com'] },
+    );
+    expect(staged.status).toBe('pending');
+    expect(staged.staged).toBe(true);
+    expect(engine.unsubscribeSenders).not.toHaveBeenCalled();
+    expect(tx.agentInboxItem.create).toHaveBeenCalled();
   });
 
   it('stages delete and organize for approval without executing provider writes', async () => {
