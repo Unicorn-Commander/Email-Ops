@@ -130,6 +130,16 @@ export default function CleanupPage() {
         { ...plan, safe: selectedSafe, counts: { ...plan.counts, safe: selectedSafe.length } },
         'trash',
       );
+      // The backend STAGES destructive batches for human approval by default.
+      // A staged batch has touched nothing, so an "undo" toast would assert an
+      // outcome that did not happen — say what actually occurred instead.
+      if (result.staged || result.status === 'pending') {
+        setMessage(
+          `Staged for your approval — nothing has been moved yet. ${selectedSafe.length} message${selectedSafe.length === 1 ? '' : 's'} are waiting in your Agent Inbox; approve there to move them to Trash.`,
+        );
+        await refreshActivity();
+        return;
+      }
       setUndoToast({
         id: result.batch_id,
         provider: activeProvider,
@@ -161,6 +171,16 @@ export default function CleanupPage() {
         { ...plan, safe: selectedSafe, counts: { ...plan.counts, safe: selectedSafe.length } },
         'delete',
       );
+      // Staged: no archive exists yet and nothing was purged. Do not fetch an
+      // archive URL or claim completion — the typed ARCHIVE confirmation is
+      // collected again at approval time, where the purge actually runs.
+      if (result.staged || result.status === 'pending') {
+        setMessage(
+          `Staged for your approval — nothing has been deleted. ${selectedSafe.length} message${selectedSafe.length === 1 ? '' : 's'} are waiting in your Agent Inbox; the verified archive is built and the purge runs only after you approve there.`,
+        );
+        await refreshActivity();
+        return;
+      }
       const download = await archiveDownloadUrl(activeProvider, result.batch_id).catch(() => null);
       setArchiveUrl(download?.url ?? null);
       setUndoToast({
@@ -190,20 +210,41 @@ export default function CleanupPage() {
   const runOrganize = useCallback(async () => {
     setBusy('organize');
     try {
-      await organizeMessages(activeProvider, { label: 'archive', archive: true, query: criteriaQuery });
+      // Send the rows the user actually ticked. The button requires a selection,
+      // so omitting the ids meant organize silently archived everything matching
+      // the query instead of the selection — the backend honors messageIds now.
+      const result = await organizeMessages(activeProvider, {
+        label: 'archive',
+        archive: true,
+        query: criteriaQuery,
+        messageIds: selectedSafe.map((row) => row.id),
+      });
+      if (result.staged || result.status === 'pending') {
+        setMessage(
+          `Staged for your approval — nothing has been moved yet. Approve it in your Agent Inbox to archive the ${selectedSafe.length} selected message${selectedSafe.length === 1 ? '' : 's'}.`,
+        );
+      }
       await refreshActivity();
     } catch (err) {
       setMessage(err instanceof Error ? err.message : 'Organize failed.');
     } finally {
       setBusy(null);
     }
-  }, [activeProvider, criteriaQuery, refreshActivity]);
+  }, [activeProvider, criteriaQuery, refreshActivity, selectedSafe]);
 
   const runUnsubscribe = useCallback(async () => {
     setBusy('unsubscribe');
     try {
       const senderGroup = [...new Set(selectedSafe.map((row) => row.sender).filter(Boolean))] as string[];
-      await unsubscribeSender(activeProvider, senderGroup, undefined);
+      const result = await unsubscribeSender(activeProvider, senderGroup, undefined);
+      // Unsubscribing is irreversible and leaves your account: it POSTs to the
+      // sender, or emails them AS YOU. The backend stages it for approval —
+      // tell the user that plainly rather than implying it already happened.
+      setMessage(
+        result.staged || result.status === 'pending'
+          ? `Staged for your approval — no unsubscribe has been sent yet. ${senderGroup.length} sender${senderGroup.length === 1 ? '' : 's'} are waiting in your Agent Inbox. Approving will contact them on your behalf.`
+          : `Unsubscribe finished for ${senderGroup.length} sender${senderGroup.length === 1 ? '' : 's'}.`,
+      );
       await refreshActivity();
     } catch (err) {
       setMessage(err instanceof Error ? err.message : 'Unsubscribe failed.');

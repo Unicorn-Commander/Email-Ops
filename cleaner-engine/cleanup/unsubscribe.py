@@ -158,7 +158,15 @@ def _find_message_for_sender(provider: Any, sender: str) -> Optional[Any]:
 
 
 def _one_click_post(url: str, timeout: float = 15.0) -> tuple[bool, str]:
-    """RFC 8058 one-click: POST body List-Unsubscribe=One-Click. Never a GET."""
+    """RFC 8058 one-click: POST body List-Unsubscribe=One-Click. Never a GET.
+
+    ``allow_redirects`` MUST stay False. requests downgrades POST -> GET on a
+    301/302/303, which would silently perform the arbitrary GET fetch this
+    module exists to refuse (tracker confirmation / SSRF via an attacker-chosen
+    Location). A 3xx is still counted as accepted below — RFC 8058 endpoints
+    commonly answer a successful one-click with a redirect to a confirmation
+    page — we simply decline to follow it.
+    """
     try:
         resp = requests.post(
             url,
@@ -168,7 +176,7 @@ def _one_click_post(url: str, timeout: float = 15.0) -> tuple[bool, str]:
                 "User-Agent": "Email-Ops-Cleaner/0.2 (RFC8058 one-click)",
             },
             timeout=timeout,
-            allow_redirects=True,
+            allow_redirects=False,
         )
         if 200 <= resp.status_code < 400:
             return True, f"one-click POST accepted (HTTP {resp.status_code})"

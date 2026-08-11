@@ -489,7 +489,9 @@ export class ConnectedAccountsService {
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
-    const accessToken = await this.requireAccessToken(user, provider);
+    // Still require a linked account up front, so an unlinked caller fails fast
+    // instead of staging a batch that could never run on approve.
+    await this.requireAccessToken(user, provider);
     const senders = (Array.isArray(senderGroup) ? senderGroup : [])
       .map((s) => String(s).trim())
       .filter(Boolean);
@@ -502,66 +504,21 @@ export class ConnectedAccountsService {
     const criteria: CleanupCriteria = { senderGroup: senders, query: fromQuery };
     const plan = await this.planCleanup(user, provider, criteria);
 
-    const engineResult = await this.engine.unsubscribeSenders(
+    // STAGE, never fire. Unsubscribing is irreversible and OUTWARD-FACING: the
+    // one-click branch POSTs to a third-party endpoint, and the mailto branch
+    // SENDS MAIL FROM THE USER'S OWN ACCOUNT to a third party. It therefore
+    // takes the same human-approval gate as every other destructive verb --
+    // matching the MCP path (mcp.tools.ts unsubscribeSender) and this file's
+    // own contract note on stageCleanupRequestWithPlan. On approve,
+    // executeCleanupInternal's `mode === 'unsubscribe'` branch runs the engine
+    // and records the real per-sender outcome.
+    return this.stageCleanupRequestWithPlan(
+      user,
       provider,
-      this.credentialsFor(provider, accessToken),
-      senders,
+      'unsubscribe',
+      CleanupActionKind.UNSUBSCRIBE,
+      plan,
     );
-    if (!engineResult) {
-      throw new BadGatewayException(
-        'The mail provider did not confirm the unsubscribe — it may be rate-limited or the sign-in may have expired. Nothing was recorded as done; try again.',
-      );
-    }
-
-    const results = Array.isArray(engineResult.results) ? engineResult.results : [];
-    const completed = results.filter((r) => r.status === 'unsubscribed').length;
-    const failed = results.filter((r) => r.status === 'failed').length;
-    const linkReturned = results.filter((r) => r.status === 'link_returned').length;
-    const unavailable = results.filter((r) => r.status === 'unavailable').length;
-    const result = this.cleanupResult({
-      completed,
-      failed: failed + unavailable,
-      bytesFreed: 0,
-      totalAttempted: results.length,
-    });
-
-    return this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
-      const batch = await tx.cleanupBatch.create({
-        data: {
-          workspaceId,
-          provider,
-          action: CleanupActionKind.UNSUBSCRIBE,
-          mode: 'unsubscribe',
-          state: CleanupBatchState.COMPLETED,
-          criteria: plan.criteria as any,
-          plan: plan as any,
-          result: { ...result, unsubscribe_results: results } as any,
-          requestedByUcUid: ucUidOf(user as WithWorkspaceClaim),
-          approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
-          summary: this.batchSummary('unsubscribe', provider, senders.length, null),
-          params: this.batchParams(criteria),
-          completedAt: new Date(),
-        },
-      });
-      const reasonParts = [
-        `${completed} unsubscribed`,
-        linkReturned ? `${linkReturned} link(s) returned for human click` : null,
-        unavailable ? `${unavailable} unavailable (filter/block instead)` : null,
-        failed ? `${failed} failed` : null,
-      ].filter(Boolean);
-      return {
-        ok: failed === 0 && completed + linkReturned + unavailable > 0,
-        provider,
-        mode: 'unsubscribe' as const,
-        batch_id: batch.id,
-        action: 'unsubscribe',
-        plan,
-        result,
-        status: 'completed' as const,
-        reason: reasonParts.join('; '),
-        unsubscribe_results: results,
-      };
-    });
   }
 
   async undoBatch(user: User, provider: ConnectedProvider, batchId: string): Promise<CleanupExecutionResult> {

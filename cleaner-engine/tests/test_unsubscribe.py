@@ -86,6 +86,31 @@ def test_one_click_unsubscribed():
     assert post.call_args.kwargs.get("data") == {"List-Unsubscribe": "One-Click"}
 
 
+def test_one_click_never_follows_redirects():
+    """SECURITY INVARIANT: allow_redirects must be False.
+
+    requests downgrades POST -> GET on a 301/302/303, so following a redirect
+    would silently perform the arbitrary GET fetch this module promises never
+    to do (tracker confirmation, and SSRF to an attacker-chosen Location).
+    A 3xx still counts as accepted — we just decline to follow it.
+    """
+    msg = _Msg(
+        "m1",
+        "Promo <promo@shop.com>",
+        {
+            "List-Unsubscribe": "<https://shop.example/unsub>",
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        },
+    )
+    provider = _StubProvider(msg)
+    with patch("cleanup.unsubscribe.requests.post") as post:
+        post.return_value = SimpleNamespace(status_code=302)
+        result = unsubscribe_sender(provider, "promo@shop.com")
+    assert post.call_args.kwargs.get("allow_redirects") is False
+    # A redirect response is still a successful one-click, un-followed.
+    assert result.status == STATUS_UNSUBSCRIBED
+
+
 def test_one_click_failed_http():
     msg = _Msg(
         "m1",

@@ -393,40 +393,22 @@ describe('ConnectedAccountsService', () => {
     expect(tx.cleanupBatch.create).toHaveBeenCalled();
   });
 
-  it('unsubscribe returns per-sender results (never a blanket success stub)', async () => {
+  it('REST unsubscribe STAGES for approval and never fires the engine itself', async () => {
+    // Unsubscribing is irreversible and outward-facing: one-click POSTs to a
+    // third party, and mailto SENDS MAIL FROM THE USER'S OWN ACCOUNT. The REST
+    // path must take the same human-approval gate as every other destructive
+    // verb — it must NOT execute on the caller's behalf.
     (engine.listMessages as jest.Mock).mockResolvedValue({
       messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
       next_token: null,
     });
-    (engine.unsubscribeSenders as jest.Mock).mockResolvedValue({
-      results: [
-        {
-          sender: 'promo@example.com',
-          status: 'unsubscribed',
-          method: 'one_click',
-          url: 'https://shop.example/unsub',
-          detail: 'one-click POST accepted (HTTP 200)',
-        },
-        {
-          sender: 'news@example.com',
-          status: 'link_returned',
-          method: 'link',
-          url: 'https://news.example/unsub',
-          detail: 'open it yourself',
-        },
-      ],
-    });
 
     const unsub = await service().unsubscribe(user, 'gmail', ['promo@example.com', 'news@example.com']);
-    expect(unsub.status).toBe('completed');
-    expect(unsub.unsubscribe_results).toHaveLength(2);
-    expect(unsub.unsubscribe_results?.[0]?.status).toBe('unsubscribed');
-    expect(unsub.unsubscribe_results?.[1]?.status).toBe('link_returned');
-    expect(engine.unsubscribeSenders).toHaveBeenCalledWith(
-      'gmail',
-      { token: 'broker-token' },
-      ['promo@example.com', 'news@example.com'],
-    );
+
+    expect(unsub.status).toBe('pending');
+    expect(unsub.staged).toBe(true);
+    expect(engine.unsubscribeSenders).not.toHaveBeenCalled();
+    expect(tx.agentInboxItem.create).toHaveBeenCalled();
     expect(engine.batchTrash).not.toHaveBeenCalled();
     expect(engine.batchDelete).not.toHaveBeenCalled();
   });
