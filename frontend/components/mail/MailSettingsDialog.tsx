@@ -17,6 +17,12 @@ export function MailSettingsDialog({
   open,
   onClose,
   notifications,
+  /**
+   * Undo-send only works on engine-hosted (Fabrikam) mailboxes that support
+   * scheduled send. On connected Gmail/Outlook the send is immediate — hide
+   * the control rather than let it look effective.
+   */
+  undoSendAvailable = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -26,6 +32,7 @@ export function MailSettingsDialog({
     permission: NotificationPermission | 'unsupported';
     setEnabled: (on: boolean) => Promise<void>;
   };
+  undoSendAvailable?: boolean;
 }) {
   const [undoSeconds, setUndoSeconds] = useState(10);
 
@@ -51,32 +58,42 @@ export function MailSettingsDialog({
           onChange={notifications.setEnabled}
         />
 
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <label htmlFor="undo-send-window" className="text-[13px] font-medium text-primary">
-              Undo send
-            </label>
-            <p className="text-[11px] text-tertiary">
-              How long a sent message can be recalled before it leaves.
+        {undoSendAvailable ? (
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <label htmlFor="undo-send-window" className="text-[13px] font-medium text-primary">
+                Undo send
+              </label>
+              <p className="text-[11px] text-tertiary">
+                How long a sent message can be recalled before it leaves.
+              </p>
+            </div>
+            <Select
+              id="undo-send-window"
+              className="w-28 shrink-0"
+              value={String(undoSeconds)}
+              onChange={(e) => {
+                const n = Number.parseInt(e.target.value, 10);
+                setUndoSeconds(n);
+                writeUndoSeconds(n);
+              }}
+            >
+              {UNDO_CHOICES.map((n) => (
+                <option key={n} value={n}>
+                  {n === 0 ? 'Off' : `${n} seconds`}
+                </option>
+              ))}
+            </Select>
+          </div>
+        ) : (
+          <div className="rounded-token border border-subtle bg-surface-overlay/40 px-3 py-2.5">
+            <p className="text-[13px] font-medium text-primary">Undo send</p>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-tertiary">
+              Not available on connected Gmail/Outlook accounts — messages send right away. Switch
+              to your Fabrikam mailbox to use a recall window.
             </p>
           </div>
-          <Select
-            id="undo-send-window"
-            className="w-28 shrink-0"
-            value={String(undoSeconds)}
-            onChange={(e) => {
-              const n = Number.parseInt(e.target.value, 10);
-              setUndoSeconds(n);
-              writeUndoSeconds(n);
-            }}
-          >
-            {UNDO_CHOICES.map((n) => (
-              <option key={n} value={n}>
-                {n === 0 ? 'Off' : `${n} seconds`}
-              </option>
-            ))}
-          </Select>
-        </div>
+        )}
       </div>
     </Dialog>
   );

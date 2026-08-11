@@ -26,10 +26,16 @@ import {
   ChevronRightIcon,
 } from './icons';
 
+/** Why in-app search is unavailable (connected Gmail/Outlook). Empty → search works. */
+const DEFAULT_SEARCH_UNAVAILABLE =
+  "Search isn't available on connected Gmail/Outlook accounts yet — search in Gmail or Outlook directly";
+
 export function MailTopBar({
   query,
   onQuery,
   searchRef,
+  searchAvailable = true,
+  searchUnavailableReason = DEFAULT_SEARCH_UNAVAILABLE,
   foldersCollapsed,
   onToggleFolders,
   railCollapsed,
@@ -47,6 +53,14 @@ export function MailTopBar({
   query: string;
   onQuery: (q: string) => void;
   searchRef: RefObject<HTMLInputElement | null>;
+  /**
+   * False on connected Gmail/Outlook mailboxes: the backend ignores `q`, so a
+   * working-looking search would silently return the unfiltered inbox. Prefer
+   * a disabled control with an honest tooltip over a lying one.
+   */
+  searchAvailable?: boolean;
+  /** Plain-language tooltip / aria description when search is unavailable. */
+  searchUnavailableReason?: string;
   foldersCollapsed: boolean;
   onToggleFolders: () => void;
   railCollapsed: boolean;
@@ -69,7 +83,7 @@ export function MailTopBar({
   const { resolved, setPref } = useTheme();
 
   // ⌘K / Ctrl-K opens the command palette from anywhere on the surface. (The `/`
-  // shortcut still focuses the search box for a plain text search.)
+  // shortcut still focuses the search box for a plain text search when available.)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
@@ -86,6 +100,48 @@ export function MailTopBar({
     : activeAgentCount == null
       ? 'Agents active'
       : `${activeAgentCount} agent${activeAgentCount === 1 ? '' : 's'} active`;
+
+  const searchBox = (
+    <label
+      className={cn(
+        'flex h-8 max-w-[560px] flex-1 items-center gap-2.5 rounded-lg border border-subtle bg-surface-overlay px-3 text-tertiary transition-colors',
+        searchAvailable ? 'hover:border-border' : 'cursor-not-allowed opacity-70',
+      )}
+    >
+      <SearchIcon className="h-[15px] w-[15px] shrink-0" />
+      <input
+        ref={searchRef}
+        value={searchAvailable ? query : ''}
+        onChange={(e) => {
+          if (searchAvailable) onQuery(e.target.value);
+        }}
+        placeholder={
+          searchAvailable
+            ? 'Search all mail, senders, agents…'
+            : 'Search not available on this account'
+        }
+        aria-label="Search"
+        aria-disabled={!searchAvailable}
+        disabled={!searchAvailable}
+        title={searchAvailable ? undefined : searchUnavailableReason}
+        className="min-w-0 flex-1 bg-transparent text-[13px] text-primary outline-none placeholder:text-tertiary disabled:cursor-not-allowed"
+      />
+      <Tooltip content="Command menu — every folder, account, and action in one fuzzy search">
+        <button
+          type="button"
+          aria-label="Open command menu"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onCommandPalette?.();
+          }}
+          className="hidden cursor-pointer rounded-[5px] border border-border bg-surface-base px-1.5 py-px text-[11px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary sm:block mono"
+        >
+          ⌘K
+        </button>
+      </Tooltip>
+    </label>
+  );
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-3.5 border-b border-subtle bg-surface-raised pl-3 pr-3.5">
@@ -119,31 +175,13 @@ export function MailTopBar({
         <WorkspaceSwitcher />
       </div>
 
-      <label className="flex h-8 max-w-[560px] flex-1 items-center gap-2.5 rounded-lg border border-subtle bg-surface-overlay px-3 text-tertiary transition-colors hover:border-border">
-        <SearchIcon className="h-[15px] w-[15px] shrink-0" />
-        <input
-          ref={searchRef}
-          value={query}
-          onChange={(e) => onQuery(e.target.value)}
-          placeholder="Search all mail, senders, agents…"
-          aria-label="Search"
-          className="min-w-0 flex-1 bg-transparent text-[13px] text-primary outline-none placeholder:text-tertiary"
-        />
-        <Tooltip content="Command menu — every folder, account, and action in one fuzzy search">
-          <button
-            type="button"
-            aria-label="Open command menu"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              onCommandPalette?.();
-            }}
-            className="hidden cursor-pointer rounded-[5px] border border-border bg-surface-base px-1.5 py-px text-[11px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary sm:block mono"
-          >
-            ⌘K
-          </button>
+      {searchAvailable ? (
+        searchBox
+      ) : (
+        <Tooltip content={searchUnavailableReason} bubbleClassName="max-w-[320px]">
+          <div className="flex max-w-[560px] flex-1">{searchBox}</div>
         </Tooltip>
-      </label>
+      )}
 
       <span className="hidden h-5 w-px shrink-0 bg-border-subtle lg:block" aria-hidden />
 

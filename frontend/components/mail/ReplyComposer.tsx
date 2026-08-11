@@ -46,6 +46,13 @@ export interface ReplyComposerHandle {
   focus: () => void;
 }
 
+/** Plain-language banner when replying via a connected Gmail/Outlook account. */
+const EXTERNAL_REPLY_LIMITS =
+  'Sending from a connected Gmail/Outlook account through Email-Ops sends plain text only — CC, formatting, and attachments won\u2019t be included.';
+
+const ATTACH_UNAVAILABLE_EXTERNAL =
+  'Attachments aren\u2019t supported when sending from connected Gmail/Outlook yet — attach in Gmail or Outlook instead.';
+
 export const ReplyComposer = forwardRef<
   ReplyComposerHandle,
   {
@@ -70,14 +77,37 @@ export const ReplyComposer = forwardRef<
      *  Pass false for external providers (Gmail/M365) whose sends are immediate
      *  and irreversible, to show a brief inline confirm before sending. */
     hasUndoWindow?: boolean;
+    /**
+     * Connected Gmail/Outlook reply port: plain text only. Prefer this over
+     * inferring from hasUndoWindow so engine-hosted mailboxes stay full-featured.
+     */
+    limitedExternalSend?: boolean;
   }
 >(function ReplyComposer(
-  { defaultTo, defaultCc, defaultSubject, workspaceId, mailboxId, inReplyTo, onSend, onCollapse, hasUndoWindow = true },
+  {
+    defaultTo,
+    defaultCc,
+    defaultSubject,
+    workspaceId,
+    mailboxId,
+    inReplyTo,
+    onSend,
+    onCollapse,
+    hasUndoWindow = true,
+    limitedExternalSend = false,
+  },
   ref,
 ) {
-  const [to, setTo] = useState<string[]>(defaultTo.filter(Boolean));
-  const [cc, setCc] = useState<string[]>(defaultCc ?? []);
-  const [showCc, setShowCc] = useState((defaultCc?.length ?? 0) > 0);
+  // Fold reply-all CC into To on external so those people still appear as recipients.
+  const [to, setTo] = useState<string[]>(() => {
+    const base = defaultTo.filter(Boolean);
+    if (limitedExternalSend) {
+      return Array.from(new Set([...base, ...(defaultCc ?? []).filter(Boolean)]));
+    }
+    return base;
+  });
+  const [cc, setCc] = useState<string[]>(() => (limitedExternalSend ? [] : (defaultCc ?? [])));
+  const [showCc, setShowCc] = useState(() => !limitedExternalSend && (defaultCc?.length ?? 0) > 0);
   const [subject, setSubject] = useState(defaultSubject);
   const [body, setBody] = useState('');
   const [sending, setSending] = useState(false);
@@ -94,32 +124,44 @@ export const ReplyComposer = forwardRef<
   const [confirmExternal, setConfirmExternal] = useState(false);
 
   const bodyRef = useRef<HTMLLabelElement>(null);
+  const plainBodyRef = useRef<HTMLTextAreaElement>(null);
   const appliedSignature = useRef<string>('');
   const saveTimer = useRef<number | null>(null);
   const lastSavedSnapshot = useRef<string>('');
   const uploads = useAttachmentUploads(workspaceId, mailboxId);
   useEffect(() => {
+    const baseTo = defaultTo.filter(Boolean);
+    const seedTo = limitedExternalSend
+      ? Array.from(new Set([...baseTo, ...(defaultCc ?? []).filter(Boolean)]))
+      : baseTo;
     lastSavedSnapshot.current = JSON.stringify({
-      to: defaultTo.filter(Boolean),
-      cc: defaultCc ?? [],
+      to: seedTo,
+      cc: limitedExternalSend ? [] : (defaultCc ?? []),
       subject: defaultSubject,
       body: '',
       attachments: [],
       draftId: null,
       inReplyTo: inReplyTo ?? null,
     });
-  }, [defaultTo, defaultCc, defaultSubject, inReplyTo]);
+  }, [defaultTo, defaultCc, defaultSubject, inReplyTo, limitedExternalSend]);
 
   useImperativeHandle(
     ref,
     () => ({
-      focus: () => bodyRef.current?.querySelector<HTMLElement>('[contenteditable="true"]')?.focus(),
+      focus: () => {
+        if (limitedExternalSend) {
+          plainBodyRef.current?.focus();
+          return;
+        }
+        bodyRef.current?.querySelector<HTMLElement>('[contenteditable="true"]')?.focus();
+      },
     }),
-    [],
+    [limitedExternalSend],
   );
 
   useEffect(() => {
-    if (!workspaceId || !mailboxId) return;
+    // Signatures are HTML blocks — skip on plain-text external sends.
+    if (limitedExternalSend || !workspaceId || !mailboxId) return;
     let alive = true;
     void (async () => {
       try {
@@ -140,7 +182,7 @@ export const ReplyComposer = forwardRef<
     return () => {
       alive = false;
     };
-  }, [workspaceId, mailboxId]);
+  }, [workspaceId, mailboxId, limitedExternalSend]);
 
   function applySignature(nextId: string) {
     setSelectedSignatureId(nextId);
@@ -172,14 +214,15 @@ export const ReplyComposer = forwardRef<
 
   async function persistDraft(): Promise<{ draft_id: string | null; updated: boolean } | null> {
     if (!workspaceId || !mailboxId || sending || draftSaving || !hasDraftContent()) return null;
-    const attachments = uploads.refs();
+    const attachments = limitedExternalSend ? [] : uploads.refs();
+    const plain = (limitedExternalSend ? body : htmlToText(body)).trim();
     const payload = {
       to_address: to.join(', '),
       subject: subject.trim() || undefined,
-      body: htmlToText(body) || undefined,
-      body_html: body.trim() || undefined,
-      ...(cc.length > 0 ? { cc } : {}),
-      ...(attachments.length > 0 ? { attachments } : {}),
+      body: plain || undefined,
+      ...(limitedExternalSend ? {} : { body_html: body.trim() || undefined }),
+      ...(!limitedExternalSend && cc.length > 0 ? { cc } : {}),
+      ...(!limitedExternalSend && attachments.length > 0 ? { attachments } : {}),
       // inReplyTo is the MESSAGE id being replied to — send it as in_reply_to (the
       // header hint the backend resolves), NOT in_reply_to_thread_id. The backend
       // resolves it to In-Reply-To/References so a saved reply-draft threads.
@@ -234,9 +277,15 @@ export const ReplyComposer = forwardRef<
     setConfirmExternal(false);
   }, [subject, body, hasUndoWindow]);
 
-  const invalidCount = [...to, ...cc].filter((a) => !isValidEmail(a)).length;
+  const recipientPool = limitedExternalSend ? to : [...to, ...cc];
+  const invalidCount = recipientPool.filter((a) => !isValidEmail(a)).length;
+  const bodyPlain = (limitedExternalSend ? body : htmlToText(body)).trim();
   const canSend =
-    to.length > 0 && invalidCount === 0 && htmlToText(body).length > 0 && !sending && !uploads.uploading;
+    to.length > 0 &&
+    invalidCount === 0 &&
+    bodyPlain.length > 0 &&
+    !sending &&
+    (limitedExternalSend || !uploads.uploading);
 
   async function saveAndCollapse() {
     await persistDraft();
@@ -258,17 +307,26 @@ export const ReplyComposer = forwardRef<
     setSending(true);
     setError(null);
     setStatus(null);
-    const attachments = uploads.refs();
-    const res = await onSend({
-      to_address: to.join(', '),
-      subject: subject.trim() || undefined,
-      body: htmlToText(body) || undefined,
-      body_html: body.trim() || undefined,
-      ...(cc.length > 0 ? { cc } : {}),
-      ...(attachments.length > 0 ? { attachments } : {}),
-      ...(inReplyTo ? { in_reply_to: inReplyTo } : {}),
-      ...(draftId ? { draft_id: draftId } : {}),
-    });
+    const res = await onSend(
+      limitedExternalSend
+        ? {
+            to_address: to.join(', '),
+            subject: subject.trim() || undefined,
+            body: body.trim() || undefined,
+            ...(inReplyTo ? { in_reply_to: inReplyTo } : {}),
+            ...(draftId ? { draft_id: draftId } : {}),
+          }
+        : {
+            to_address: to.join(', '),
+            subject: subject.trim() || undefined,
+            body: htmlToText(body) || undefined,
+            body_html: body.trim() || undefined,
+            ...(cc.length > 0 ? { cc } : {}),
+            ...(uploads.refs().length > 0 ? { attachments: uploads.refs() } : {}),
+            ...(inReplyTo ? { in_reply_to: inReplyTo } : {}),
+            ...(draftId ? { draft_id: draftId } : {}),
+          },
+    );
     setSending(false);
     if (!res.ok) {
       setError(res.error ?? 'Could not record your reply.');
@@ -289,6 +347,7 @@ export const ReplyComposer = forwardRef<
   function handleDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
     setDragging(false);
+    if (limitedExternalSend) return;
     if (uploads.supported && e.dataTransfer.files.length > 0) {
       uploads.addFiles(e.dataTransfer.files);
     }
@@ -301,7 +360,7 @@ export const ReplyComposer = forwardRef<
         dragging && 'bg-accent/5 ring-2 ring-inset ring-accent/40',
       )}
       onDragOver={(e) => {
-        if (uploads.supported) {
+        if (!limitedExternalSend && uploads.supported) {
           e.preventDefault();
           setDragging(true);
         }
@@ -327,11 +386,20 @@ export const ReplyComposer = forwardRef<
         )}
       </div>
       <div className="flex flex-col gap-2.5">
+        {limitedExternalSend && (
+          <div
+            role="status"
+            className="rounded-token border border-warning/40 bg-warning/[0.08] px-3 py-2 text-[12px] leading-relaxed text-primary"
+          >
+            {EXTERNAL_REPLY_LIMITS}
+          </div>
+        )}
+
         <div className="flex flex-col gap-2 sm:flex-row">
           <div className="block min-w-0 flex-1">
             <div className="mb-1 flex items-center justify-between">
               <span className="block text-[11px] font-medium text-tertiary">To</span>
-              {!showCc && (
+              {!limitedExternalSend && !showCc && (
                 <button
                   type="button"
                   onClick={() => setShowCc(true)}
@@ -352,7 +420,7 @@ export const ReplyComposer = forwardRef<
           </div>
         </div>
 
-        {showCc && (
+        {!limitedExternalSend && showCc && (
           <label className="block">
             <span className="mb-1 block text-[11px] font-medium text-tertiary">Cc</span>
             <RecipientChips
@@ -378,15 +446,27 @@ export const ReplyComposer = forwardRef<
 
         <label className="block" ref={bodyRef}>
           <span className="mb-1 block text-[11px] font-medium text-tertiary">Message</span>
-          <RichTextEditor
-            value={body}
-            onChange={setBody}
-            disabled={sending}
-            placeholder="Write your reply…  (drop files here to attach)"
-          />
+          {limitedExternalSend ? (
+            <textarea
+              ref={plainBodyRef}
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              disabled={sending}
+              placeholder="Write your reply… (plain text only)"
+              rows={6}
+              className="block min-h-[120px] w-full resize-y rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-60"
+            />
+          ) : (
+            <RichTextEditor
+              value={body}
+              onChange={setBody}
+              disabled={sending}
+              placeholder="Write your reply…  (drop files here to attach)"
+            />
+          )}
         </label>
 
-        {(signatures.length > 0 || signatureError) && (
+        {!limitedExternalSend && (signatures.length > 0 || signatureError) && (
           <label className="block">
             <span className="mb-1 block text-[11px] font-medium text-tertiary">Signature</span>
             <select
@@ -406,7 +486,9 @@ export const ReplyComposer = forwardRef<
           </label>
         )}
 
-        <ComposerAttachments items={uploads.items} onRemove={uploads.remove} disabled={sending} />
+        {!limitedExternalSend && (
+          <ComposerAttachments items={uploads.items} onRemove={uploads.remove} disabled={sending} />
+        )}
 
         <div className="flex flex-wrap items-center gap-2">
           <span
@@ -436,10 +518,11 @@ export const ReplyComposer = forwardRef<
         </div>
 
         <div className="flex items-center justify-end gap-2">
-          {uploads.supported && (
+          {(uploads.supported || limitedExternalSend) && (
             <AttachButton
               onFiles={uploads.addFiles}
-              disabled={sending || !mailboxId}
+              disabled={sending || !mailboxId || limitedExternalSend}
+              unavailableReason={limitedExternalSend ? ATTACH_UNAVAILABLE_EXTERNAL : undefined}
               className="mr-auto"
             />
           )}
@@ -454,7 +537,7 @@ export const ReplyComposer = forwardRef<
           <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
             {sending
               ? 'Sending…'
-              : uploads.uploading
+              : !limitedExternalSend && uploads.uploading
                 ? 'Uploading…'
                 : confirmExternal
                   ? 'Send anyway'

@@ -63,8 +63,13 @@ import {
 /** Sentinel mailbox id for the unified "All inboxes" list (Wave 2). */
 export const ALL_INBOXES = '__all_inboxes__';
 
-/** Page size for thread lists (also the load-more step). */
-const PAGE_SIZE = 50;
+/** Page size for thread lists (also the load-more step). Exported for honest UI copy. */
+export const PAGE_SIZE = 50;
+
+/** Connected external providers whose list/search/paging ports are still degraded. */
+function isExternalProvider(provider: string | null | undefined): boolean {
+  return provider === 'gmail' || provider === 'microsoft';
+}
 
 /**
  * New-mail arrival poll cadence (ms). The poll is visibility-gated: the interval
@@ -487,7 +492,13 @@ export function useMailClient(): UseMailClient {
           const seen = new Set(prev.map((t) => t.id));
           return [...prev, ...res.threads.filter((t) => !seen.has(t.id))];
         });
-        setHasMore(res.threads.length >= PAGE_SIZE);
+        // External (Gmail/Outlook) list endpoints ignore `offset` — another page
+        // would re-fetch the same first 50, dedupe to nothing, and leave a dead
+        // "Load more" button. Cap honestly after the first page.
+        const mbxMeta = mailboxesRef.current.find((m) => m.id === mailboxId);
+        const externalList =
+          mailboxId !== ALL_INBOXES && isExternalProvider(mbxMeta?.provider);
+        setHasMore(!externalList && res.threads.length >= PAGE_SIZE);
         setThreadsError(null);
         setThreadsLoad('ready');
       } catch (err) {
@@ -550,8 +561,8 @@ export function useMailClient(): UseMailClient {
       return;
     }
     const mbx = mailboxesRef.current.find((m) => m.id === mbxId);
-    // Only sovereign mailboxes have custom folders; skip gmail/microsoft.
-    if (mbx && (mbx.provider === 'gmail' || mbx.provider === 'microsoft')) {
+    // Only Fabrikam / engine-hosted mailboxes have custom folders; skip connected Gmail/Outlook.
+    if (mbx && isExternalProvider(mbx.provider)) {
       setCustomFolders([]);
       return;
     }

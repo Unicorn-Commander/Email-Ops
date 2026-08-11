@@ -71,6 +71,13 @@ function plainToHtml(text: string): string {
     .join('');
 }
 
+/** Copy for the external-provider composer honesty banner (plain language). */
+const EXTERNAL_SEND_LIMITS =
+  'Sending from a connected Gmail/Outlook account through Email-Ops sends plain text only — CC, BCC, formatting, and attachments won\u2019t be included.';
+
+const ATTACH_UNAVAILABLE_EXTERNAL =
+  'Attachments aren\u2019t supported when sending from connected Gmail/Outlook yet — attach in Gmail or Outlook instead.';
+
 export function ComposeDialog({
   open,
   onClose,
@@ -80,6 +87,7 @@ export function ComposeDialog({
   onCompose,
   onScheduleSend,
   canSchedule,
+  limitedExternalSend = false,
   initial,
 }: {
   open: boolean;
@@ -97,7 +105,7 @@ export function ComposeDialog({
   ) => Promise<ComposeOutcome>;
   /**
    * Optional "Send later": schedule the composed message to leave at `sendAt`.
-   * Only offered when `canSchedule` is true (a sovereign mailbox with the
+   * Only offered when `canSchedule` is true (an engine-hosted mailbox with the
    * scheduling endpoint live); absent → the composer sends immediately only.
    */
   onScheduleSend?: (
@@ -108,6 +116,11 @@ export function ComposeDialog({
     sendAt: Date,
   ) => Promise<{ ok: boolean; error?: string }>;
   canSchedule?: boolean;
+  /**
+   * Connected Gmail/Outlook send port: plain text only — hide CC/BCC, rich text,
+   * and attachments rather than silently dropping them.
+   */
+  limitedExternalSend?: boolean;
   /**
    * Optional prefill (e.g. an agent's `ui_compose`, or Forward). Seeds the
    * fields each time the dialog opens; null/undefined opens it blank.
@@ -140,14 +153,34 @@ export function ComposeDialog({
   const lastSavedSnapshot = useRef<string>('');
 
   // Seed the fields when the dialog re-opens. An explicit prefill (Forward /
-  // agent `ui_compose`) wins.
+  // agent `ui_compose`) wins. On limited external sends, fold CC/BCC into To
+  // so recipients never silently disappear, and strip rich/attachments.
   useEffect(() => {
     if (!open) return;
-    const seededBody = initial?.bodyHtml ?? (initial?.body ? plainToHtml(initial.body) : '');
-    setTo(toList(initial?.to));
-    setCc(initial?.cc ?? []);
-    setBcc(initial?.bcc ?? []);
-    setShowCcBcc((initial?.cc?.length ?? 0) > 0 || (initial?.bcc?.length ?? 0) > 0);
+    const limited = limitedExternalSend;
+    const seededHtml = initial?.bodyHtml ?? (initial?.body ? plainToHtml(initial.body) : '');
+    // External port is plain text only — store plain in the body field.
+    const seededBody = limited
+      ? initial?.body ?? (initial?.bodyHtml ? htmlToText(initial.bodyHtml) : '')
+      : seededHtml;
+    const initialTo = toList(initial?.to);
+    const initialCc = limited ? [] : (initial?.cc ?? []);
+    const initialBcc = limited ? [] : (initial?.bcc ?? []);
+    // Preserve every named recipient: if the prefill had CC/BCC and this mailbox
+    // can't send them as CC/BCC, put them on To so the user still sees them.
+    const foldedTo = limited
+      ? Array.from(
+          new Set([
+            ...initialTo,
+            ...(initial?.cc ?? []).filter(Boolean),
+            ...(initial?.bcc ?? []).filter(Boolean),
+          ]),
+        )
+      : initialTo;
+    setTo(foldedTo);
+    setCc(initialCc);
+    setBcc(initialBcc);
+    setShowCcBcc(!limited && ((initial?.cc?.length ?? 0) > 0 || (initial?.bcc?.length ?? 0) > 0));
     setSubject(initial?.subject ?? '');
     setBody(seededBody);
     setDraftId(initial?.draftId ?? null);
@@ -163,21 +196,23 @@ export function ComposeDialog({
     setConfirmEmpty(false);
     setConfirmExternal(false);
     appliedSignature.current = '';
+    const seedAttachments = limited ? [] : (initial?.attachments ?? []);
     lastSavedSnapshot.current = JSON.stringify({
-      to: toList(initial?.to),
-      cc: initial?.cc ?? [],
-      bcc: initial?.bcc ?? [],
+      to: foldedTo,
+      cc: initialCc,
+      bcc: initialBcc,
       subject: initial?.subject ?? '',
       body: seededBody,
-      attachments: initial?.attachments ?? [],
+      attachments: seedAttachments,
       draftId: initial?.draftId ?? null,
     });
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    resetUploads(initial?.attachments);
-  }, [open, initial, resetUploads]);
+    resetUploads(seedAttachments);
+  }, [open, initial, resetUploads, limitedExternalSend]);
 
   useEffect(() => {
-    if (!open || !workspaceId || !mailboxId) return;
+    // HTML signatures are not meaningful on the plain-text external send path.
+    if (!open || limitedExternalSend || !workspaceId || !mailboxId) return;
     let alive = true;
     void (async () => {
       try {
@@ -198,7 +233,7 @@ export function ComposeDialog({
     return () => {
       alive = false;
     };
-  }, [open, workspaceId, mailboxId]);
+  }, [open, workspaceId, mailboxId, limitedExternalSend]);
 
   function applySignature(nextId: string) {
     setSelectedSignatureId(nextId);
@@ -230,15 +265,16 @@ export function ComposeDialog({
 
   async function persistDraft(): Promise<{ draft_id: string | null; updated: boolean } | null> {
     if (!open || !workspaceId || !mailboxId || sending || draftSaving || !hasDraftContent()) return null;
-    const attachments = uploads.refs();
+    const attachments = limitedExternalSend ? [] : uploads.refs();
+    const plain = (limitedExternalSend ? body : htmlToText(body)).trim();
     const payload = {
       to_address: to.join(', '),
       subject: subject.trim() || undefined,
-      body: htmlToText(body) || undefined,
-      body_html: body.trim() || undefined,
-      ...(cc.length > 0 ? { cc } : {}),
-      ...(bcc.length > 0 ? { bcc } : {}),
-      ...(attachments.length > 0 ? { attachments } : {}),
+      body: plain || undefined,
+      ...(limitedExternalSend ? {} : { body_html: body.trim() || undefined }),
+      ...(!limitedExternalSend && cc.length > 0 ? { cc } : {}),
+      ...(!limitedExternalSend && bcc.length > 0 ? { bcc } : {}),
+      ...(!limitedExternalSend && attachments.length > 0 ? { attachments } : {}),
       ...(draftId ? { draft_id: draftId } : {}),
     };
     setDraftSaving(true);
@@ -293,11 +329,15 @@ export function ComposeDialog({
     setConfirmExternal(false);
   }, [subject, body, canSchedule]);
 
-  const allRecipients = [...to, ...cc, ...bcc];
+  const allRecipients = limitedExternalSend ? to : [...to, ...cc, ...bcc];
   const invalidCount = allRecipients.filter((a) => !isValidEmail(a)).length;
-  const canSend = to.length > 0 && invalidCount === 0 && !sending && !uploads.uploading;
+  const canSend =
+    to.length > 0 &&
+    invalidCount === 0 &&
+    !sending &&
+    (limitedExternalSend || !uploads.uploading);
   const noSubject = subject.trim() === '';
-  const noBody = htmlToText(body).trim() === '';
+  const noBody = (limitedExternalSend ? body : htmlToText(body)).trim() === '';
 
   async function saveAndClose() {
     await persistDraft();
@@ -310,6 +350,15 @@ export function ComposeDialog({
   }
 
   function buildComposeBody() {
+    // External port: plain text only — never claim CC/BCC/HTML/attachments went out.
+    if (limitedExternalSend) {
+      return {
+        to_address: to.join(', '),
+        subject: subject.trim() || undefined,
+        body: body.trim() || undefined,
+        ...(draftId ? { draft_id: draftId } : {}),
+      };
+    }
     const attachments = uploads.refs();
     return {
       to_address: to.join(', '),
@@ -389,6 +438,7 @@ export function ComposeDialog({
   function handleDrop(e: DragEvent<HTMLFormElement>) {
     e.preventDefault();
     setDragging(false);
+    if (limitedExternalSend) return;
     if (uploads.supported && e.dataTransfer.files.length > 0) {
       uploads.addFiles(e.dataTransfer.files);
     }
@@ -411,10 +461,11 @@ export function ComposeDialog({
       }
       footer={
         <>
-          {uploads.supported && (
+          {(uploads.supported || limitedExternalSend) && (
             <AttachButton
               onFiles={uploads.addFiles}
-              disabled={sending || !mailboxId}
+              disabled={sending || !mailboxId || limitedExternalSend}
+              unavailableReason={limitedExternalSend ? ATTACH_UNAVAILABLE_EXTERNAL : undefined}
               className="mr-auto"
             />
           )}
@@ -460,7 +511,7 @@ export function ComposeDialog({
           <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
             {sending
               ? 'Sending…'
-              : uploads.uploading
+              : !limitedExternalSend && uploads.uploading
                 ? 'Uploading…'
                 : confirmExternal
                   ? 'Send anyway'
@@ -486,7 +537,7 @@ export function ComposeDialog({
           void handleSend();
         }}
         onDragOver={(e) => {
-          if (uploads.supported) {
+          if (!limitedExternalSend && uploads.supported) {
             e.preventDefault();
             setDragging(true);
           }
@@ -494,10 +545,19 @@ export function ComposeDialog({
         onDragLeave={() => setDragging(false)}
         onDrop={handleDrop}
       >
+        {limitedExternalSend && (
+          <div
+            role="status"
+            className="rounded-token border border-warning/40 bg-warning/[0.08] px-3 py-2 text-[12px] leading-relaxed text-primary"
+          >
+            {EXTERNAL_SEND_LIMITS}
+          </div>
+        )}
+
         <div className="block">
           <div className="mb-1 flex items-center justify-between">
             <span className="block text-[11px] font-medium text-tertiary">To</span>
-            {!showCcBcc && (
+            {!limitedExternalSend && !showCcBcc && (
               <Tooltip content="Add Cc (visible copy) and Bcc (hidden copy) recipient fields">
                 <button
                   type="button"
@@ -519,7 +579,7 @@ export function ComposeDialog({
           />
         </div>
 
-        {showCcBcc && (
+        {!limitedExternalSend && showCcBcc && (
           <>
             <label className="block">
               <span className="mb-1 block text-[11px] font-medium text-tertiary">Cc</span>
@@ -557,15 +617,26 @@ export function ComposeDialog({
         </label>
         <label className="block">
           <span className="mb-1 block text-[11px] font-medium text-tertiary">Message</span>
-          <RichTextEditor
-            value={body}
-            onChange={setBody}
-            disabled={sending}
-            placeholder="Write your message…  (drop files here to attach)"
-          />
+          {limitedExternalSend ? (
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              disabled={sending}
+              placeholder="Write your message… (plain text only)"
+              rows={8}
+              className="block min-h-[150px] w-full resize-y rounded-token border border-border bg-surface-base px-3 py-2 text-sm text-primary placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-60"
+            />
+          ) : (
+            <RichTextEditor
+              value={body}
+              onChange={setBody}
+              disabled={sending}
+              placeholder="Write your message…  (drop files here to attach)"
+            />
+          )}
         </label>
 
-        {(signatures.length > 0 || signatureError) && (
+        {!limitedExternalSend && (signatures.length > 0 || signatureError) && (
           <label className="block">
             <span className="mb-1 block text-[11px] font-medium text-tertiary">Signature</span>
             <select
@@ -585,7 +656,9 @@ export function ComposeDialog({
           </label>
         )}
 
-        <ComposerAttachments items={uploads.items} onRemove={uploads.remove} disabled={sending} />
+        {!limitedExternalSend && (
+          <ComposerAttachments items={uploads.items} onRemove={uploads.remove} disabled={sending} />
+        )}
 
         {invalidCount > 0 ? (
           <p className="text-xs text-danger">
