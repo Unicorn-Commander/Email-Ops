@@ -12,6 +12,7 @@ import { Injectable } from '@nestjs/common';
 import { AgentAutonomyLevel, AgentInboxState, EmailMessageStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
+import { FederationPrincipalCheck } from '../common/workspace/federation-principal.check';
 import { EmailHealthCheck, EmailHealthReport } from './email-health.types';
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -22,7 +23,75 @@ export class EmailHealthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stalwart: StalwartPort,
+    private readonly federationPrincipals: FederationPrincipalCheck,
   ) {}
+
+  /**
+   * Federation-principal signal. A missing principal makes a whole federated
+   * seam return 403s that the CALLING app degrades into an empty panel — i.e. it
+   * looks like "no data" rather than a fault. This is the check that refuses to
+   * let that be quiet.
+   */
+  private federationCheck(): EmailHealthCheck {
+    const s = this.federationPrincipals.getStatus();
+    if (!s.checked) {
+      return {
+        key: 'federation_principals',
+        label: 'Federation principals',
+        status: 'warn',
+        detail: 'The startup check has not run yet — federation health is UNKNOWN.',
+      };
+    }
+    if (s.error) {
+      return {
+        key: 'federation_principals',
+        label: 'Federation principals',
+        status: 'warn',
+        detail: `The startup check could not run (${s.error}) — treat federation health as UNKNOWN, not healthy.`,
+      };
+    }
+    if (s.missingRequired.length > 0) {
+      const who = s.missingRequired
+        .map((f) => `${f.actor} -> ${f.workspaceSlug}`)
+        .join('; ');
+      return {
+        key: 'federation_principals',
+        label: 'Federation principals',
+        status: 'fail',
+        detail:
+          `${s.missingRequired.length} required principal(s) MISSING: ${who}. ` +
+          `Federated calls from those actors 403 and the caller will show an empty panel, not an error.`,
+      };
+    }
+    if (s.actors.length > 0 && s.requiredPairs.length === 0) {
+      return {
+        key: 'federation_principals',
+        label: 'Federation principals',
+        status: 'warn',
+        detail:
+          `Actors are allow-listed (${s.actors.join(', ')}) but no required (actor, workspace) pairs are ` +
+          `declared, so a missing principal would still fail silently. Set EMAIL_OPS_FEDERATION_REQUIRED_WORKSPACES.`,
+      };
+    }
+    if (s.unlistedActorRows.length > 0) {
+      const who = s.unlistedActorRows.map((f) => `${f.actor}@${f.workspaceSlug}`).join('; ');
+      return {
+        key: 'federation_principals',
+        label: 'Federation principals',
+        status: 'warn',
+        detail: `All ${s.requiredPairs.length} required principal(s) present, but rows exist for non-allow-listed actors: ${who}.`,
+      };
+    }
+    return {
+      key: 'federation_principals',
+      label: 'Federation principals',
+      status: 'ok',
+      detail:
+        s.requiredPairs.length > 0
+          ? `All ${s.requiredPairs.length} required (actor, workspace) principal(s) present and ACTIVE.`
+          : 'No federation actors are accepted — nothing to assert.',
+    };
+  }
 
   async getReport(workspaceId: string, ucUid: string | null): Promise<EmailHealthReport> {
     const engineConfigured = this.stalwart.isConfigured();
@@ -139,6 +208,10 @@ export class EmailHealthService {
         detail: 'Every active agent has a sending mailbox.',
       });
     }
+
+    // Federation principals: process-wide (not workspace-scoped), but reported
+    // here because this is the surface a steward actually reads.
+    checks.push(this.federationCheck());
 
     const status: EmailHealthReport['status'] = checks.some((c) => c.status === 'fail')
       ? 'degraded'

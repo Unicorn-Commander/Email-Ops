@@ -30,7 +30,22 @@ describe('EmailHealthService', () => {
       withWorkspace: jest.fn((_ws: string, _uid: string | null, fn: (t: unknown) => unknown) => fn(tx)),
     } as unknown as PrismaService;
     const stalwart = { isConfigured: () => opts.engineConfigured } as unknown as StalwartPort;
-    return new EmailHealthService(prisma, stalwart);
+    // FederationPrincipalCheck is process-level; these specs assert the
+    // workspace-scoped signals, so a stub that reports "not yet checked" keeps
+    // them focused. Its own behaviour is covered in federation-principal.check.spec.ts.
+    const federationPrincipals = {
+      getStatus: () => ({
+        checked: true,
+        checkedAt: '2026-08-11T00:00:00.000Z',
+        actors: [],
+        requiredPairs: [],
+        missingRequired: [],
+        unlistedActorRows: [],
+        absentOptional: [],
+        error: null,
+      }),
+    } as any;
+    return new EmailHealthService(prisma, stalwart, federationPrincipals);
   }
 
   const check = (r: { checks: Array<{ key: string; status: string }> }, key: string) =>

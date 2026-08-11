@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { FederationPrincipalCheck } from './federation-principal.check';
 import { MembershipService } from './membership.service';
 import { WorkspaceContextService } from './workspace-context.service';
 import { WorkspaceMembershipGuard } from './workspace-membership.guard';
@@ -10,7 +11,17 @@ import { WorkspaceMembershipGuard } from './workspace-membership.guard';
  * is injectable here without an explicit import.
  */
 @Module({
-  providers: [MembershipService, WorkspaceContextService, WorkspaceMembershipGuard],
-  exports: [MembershipService, WorkspaceContextService, WorkspaceMembershipGuard],
+  providers: [
+    MembershipService,
+    WorkspaceContextService,
+    WorkspaceMembershipGuard,
+    FederationPrincipalCheck,
+  ],
+  exports: [
+    MembershipService,
+    WorkspaceContextService,
+    WorkspaceMembershipGuard,
+    FederationPrincipalCheck,
+  ],
 })
 export class WorkspaceModule {}
