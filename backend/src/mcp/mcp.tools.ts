@@ -16,7 +16,8 @@
  *       in_reply_to_thread_id?, external_source, external_ref)
  *       -> MessageComposeView. mode='send' queues delivery; mode='draft' stages
  *       the agent-inbox approval surface. IDEMPOTENT on (workspace_id,
- *       external_source, external_ref). Requires BOTH customer-ops + email-ops.
+ *       external_source, external_ref). Requires email-ops; customer-ops too
+ *       ONLY when external_source marks it a cross-app (Customer-Ops) compose.
  *
  * Plus the foundation tools (health, list_my_workspaces) and the agent-inbox
  * approval tools (list_agent_inbox, approve_agent_inbox_item,

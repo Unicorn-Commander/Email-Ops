@@ -310,7 +310,7 @@
     },
     {
       "name": "compose_email",
-      "description": "Compose an outbound email to a customer’s contact. mode=send queues delivery now (Apache James, or Postmark for the transactional high-rep lane); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires BOTH customer-ops and email-ops entitlements. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created.",
+      "description": "Compose an outbound email to a customer’s contact. mode=send queues delivery now (Apache James, or Postmark for the transactional high-rep lane); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires the email-ops entitlement; a CROSS-APP compose (external_source=customer-ops) additionally requires customer-ops. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1045,7 +1045,7 @@
     },
     {
       "name": "approve_agent_inbox_item",
-      "description": "Approve a PENDING agent-inbox draft: hand it to the send lane and advance the message to queued/sent. This is the human-in-the-loop SEND, so it requires BOTH customer-ops and email-ops entitlements. By default the approval also TRUSTS the external recipients (Wave 7 learning) so future in-thread agent replies to them can send autonomously; pass trust_recipients:false to approve without learning. Returns the updated inbox item + message.",
+      "description": "Approve a PENDING agent-inbox draft: hand it to the send lane and advance the message to queued/sent. This is the human-in-the-loop SEND, so it requires the email-ops entitlement. By default the approval also TRUSTS the external recipients (Wave 7 learning) so future in-thread agent replies to them can send autonomously; pass trust_recipients:false to approve without learning. Returns the updated inbox item + message.",
       "input_schema": {
         "type": "object",
         "properties": {

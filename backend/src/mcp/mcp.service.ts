@@ -100,8 +100,9 @@ export class McpService {
           'messages (previews only), and compose an outbound email — mode=send queues ' +
           'delivery now (Apache James/Postmark), mode=draft stages it into the AGENT ' +
           'INBOX for a human to approve before it leaves. compose_email is idempotent ' +
-          'on (workspace_id, external_source, external_ref) and requires BOTH ' +
-          'customer-ops and email-ops entitlements; reading threads is viewer-level. ' +
+          'on (workspace_id, external_source, external_ref) and requires the email-ops ' +
+          'entitlement — plus customer-ops ONLY for a cross-app compose (one arriving ' +
+          'with external_source=customer-ops); reading threads is viewer-level. ' +
           'The agent-inbox tools list the pending queue and approve/reject a draft ' +
           '(approve sends it). The connected-accounts tools reflect the caller’s ' +
           'brokered Gmail/Microsoft account links in Keycloak and use the linked ' +
@@ -347,7 +348,8 @@ export class McpService {
           'stages it into the AGENT INBOX approval surface (a human approves before it ' +
           'leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, ' +
           'external_source, external_ref): a repeat returns the EXISTING message and ' +
-          'queues NO second send. Requires BOTH customer-ops and email-ops entitlements. ' +
+          'queues NO second send. Requires the email-ops entitlement; a CROSS-APP compose ' +
+          '(external_source=customer-ops) additionally requires customer-ops. ' +
           'Email-Ops stores no contact record (contact_id is a thin reference) and is ' +
           'the system-of-record for the message it created.',
         inputSchema: {
@@ -728,8 +730,8 @@ export class McpService {
         title: 'Approve an agent-inbox draft (sends it)',
         description:
           'Approve a PENDING agent-inbox draft: hand it to the send lane and advance the ' +
-          'message to queued/sent. This is the human-in-the-loop SEND, so it requires ' +
-          'BOTH customer-ops and email-ops entitlements. By default the approval also ' +
+          'message to queued/sent. This is the human-in-the-loop SEND, so it requires the ' +
+          'email-ops entitlement. By default the approval also ' +
           'TRUSTS the external recipients (Wave 7 learning) so future in-thread agent ' +
           'replies to them can send autonomously; pass trust_recipients:false to approve ' +
           'without learning. Returns the updated inbox item + message.',

@@ -1,11 +1,13 @@
 /**
  * The compose entitlement gate (server-side, defense-in-depth).
  *
- * BINDING (mirrors the cockpit's EmailOpsPort gate): SENDING/DRAFTING outbound
- * mail via Email-Ops requires BOTH `customer-ops` AND `email-ops` in the
- * caller's entitlements — the dual-SKU rule the suite uses for a cross-app
- * trigger. READS (list threads/messages) are viewer-level and do NOT require the
- * dual SKU. The bootstrap `UC_ENTITLEMENT_MODE=open` lets a compose run with a
+ * BINDING: SENDING/DRAFTING outbound mail requires `email-ops`. It ADDITIONALLY
+ * requires `customer-ops` only when the compose arrives through the CROSS-APP
+ * seam (external_source = customer-ops) — which is all the "dual-SKU rule" ever
+ * meant: one app reaching into another must hold both products. Demanding it of
+ * a person sending their OWN mail made a standalone Email-Ops customer unable to
+ * send at all. READS (list threads/messages) are viewer-level and require
+ * neither. The bootstrap `UC_ENTITLEMENT_MODE=open` lets a compose run with a
  * loud WARN before Lago emits the claim; anything else (incl. the default
  * `enforce`) is strict.
  *
@@ -57,8 +59,9 @@ export function entitlementMode(
 const logger = new Logger('EmailOpsEntitlement');
 
 /**
- * Decide whether a caller may SEND/DRAFT: requires BOTH customer-ops AND
- * email-ops, honoring the open bootstrap. Pure (no I/O). Never throws.
+ * Decide whether a caller may SEND/DRAFT: always requires email-ops, and
+ * customer-ops as well for a cross-app compose. Honors the open bootstrap.
+ * Pure (no I/O). Never throws.
  */
 export function checkComposeEntitlement(
   entitlements: string[],
