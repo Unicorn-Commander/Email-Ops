@@ -437,12 +437,46 @@ export function AttachButton({
   onFiles,
   disabled,
   className,
+  /**
+   * When set, the control stays visible but is inert (and the file input is
+   * not opened). Use for honest "attachments aren't supported here" states
+   * instead of letting the upload fail with a 501.
+   */
+  unavailableReason,
 }: {
   onFiles: (files: FileList) => void;
   disabled?: boolean;
   className?: string;
+  unavailableReason?: string;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const inert = disabled || !!unavailableReason;
+  const tip = unavailableReason
+    ? unavailableReason
+    : 'Attach files — or drop them anywhere on the message';
+  // Disabled native buttons don't fire pointer events — wrap so the tooltip
+  // still explains why Attach is unavailable.
+  const button = (
+    <button
+      type="button"
+      disabled={inert}
+      aria-label={unavailableReason ? 'Attach (not available)' : 'Attach'}
+      aria-disabled={inert || undefined}
+      onClick={() => {
+        if (inert) return;
+        inputRef.current?.click();
+      }}
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-token px-2 py-1 text-xs font-medium text-tertiary',
+        'transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary',
+        inert && 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-tertiary',
+        className,
+      )}
+    >
+      <PaperclipIcon className="h-3.5 w-3.5" />
+      Attach
+    </button>
+  );
   return (
     <>
       <input
@@ -450,26 +484,14 @@ export function AttachButton({
         type="file"
         multiple
         className="hidden"
+        disabled={inert}
         onChange={(e) => {
           if (e.target.files?.length) onFiles(e.target.files);
           e.target.value = ''; // allow re-picking the same file
         }}
       />
-      <Tooltip content="Attach files — or drop them anywhere on the message">
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() => inputRef.current?.click()}
-          className={cn(
-            'inline-flex items-center gap-1.5 rounded-token px-2 py-1 text-xs font-medium text-tertiary',
-            'transition-colors duration-fast ease-token hover:bg-surface-overlay/60 hover:text-primary',
-            'disabled:pointer-events-none disabled:opacity-50',
-            className,
-          )}
-        >
-          <PaperclipIcon className="h-3.5 w-3.5" />
-          Attach
-        </button>
+      <Tooltip content={tip} bubbleClassName={unavailableReason ? 'max-w-[300px]' : undefined}>
+        {inert ? <span className="inline-flex">{button}</span> : button}
       </Tooltip>
     </>
   );

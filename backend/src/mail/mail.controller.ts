@@ -257,8 +257,12 @@ export class MailController {
   }
 
   @Get(':mailboxId/threads')
-  @ApiOperation({ summary: "A mailbox's recent threads for a folder (the client inbox list); q = full-text search, offset = paging." })
-  @ApiResponse({ status: 200, description: 'The threads + count + folder.' })
+  @ApiOperation({
+    summary:
+      "A mailbox's recent threads for a folder (the client inbox list); q = full-text search. " +
+      'Sovereign mailboxes page by offset; external (Gmail/Graph) page by opaque page_token.',
+  })
+  @ApiResponse({ status: 200, description: 'The threads + count + folder + honest paging metadata.' })
   async threads(
     @ResolvedWorkspace() workspaceId: string,
     @CurrentUser() user: User,
@@ -267,10 +271,11 @@ export class MailController {
     @Query('folder') folderRaw?: string,
     @Query('q') q?: string,
     @Query('offset') offsetRaw?: string,
+    @Query('page_token') pageToken?: string,
   ) {
     const limit = parseLimit(limitRaw);
     const folder = normalizeFolder(folderRaw);
-    const threads = await this.email.listMailboxInbox(
+    const page = await this.email.listMailboxInboxPage(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
       mailboxId,
@@ -278,8 +283,18 @@ export class MailController {
       folder,
       q ?? null,
       parseOffset(offsetRaw),
+      pageToken ?? null,
     );
-    return { threads, count: threads.length, folder };
+    return {
+      threads: page.threads,
+      count: page.threads.length,
+      folder,
+      next_page_token: page.nextPageToken,
+      has_more: page.hasMore,
+      paging_mode: page.pagingMode,
+      search_supported: page.searchSupported,
+      reason: page.reason,
+    };
   }
 
   @Get(':mailboxId/threads/:threadId')

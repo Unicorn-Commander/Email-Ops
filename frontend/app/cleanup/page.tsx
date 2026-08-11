@@ -425,12 +425,14 @@ export default function CleanupPage() {
               Organize
             </Button>
           </Tooltip>
-          <Tooltip content="Coming with the archive release">
-            <span className="inline-flex">
-              <Button variant="secondary" onClick={() => void runUnsubscribe()} disabled>
-                Unsubscribe · soon
-              </Button>
-            </span>
+          <Tooltip content="Unsubscribe from selected senders via List-Unsubscribe (one-click POST or mailto). GET-only links are returned for you to open — never auto-fetched.">
+            <Button
+              variant="secondary"
+              onClick={() => void runUnsubscribe()}
+              disabled={!activeAccount.linked || selectedSafe.length === 0 || busy !== null}
+            >
+              Unsubscribe
+            </Button>
           </Tooltip>
           <Tooltip content="Permanent lane: exports and verifies a restorable archive first, then purges to free quota. Typed confirmation required.">
             <Button

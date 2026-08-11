@@ -24,6 +24,7 @@ import {
   EngineMailThreadResult,
   EngineMailThreadsResult,
   EngineMessageSummary,
+  EngineUnsubscribeResult,
 } from './connected-accounts.types';
 
 export abstract class ConnectedAccountsEnginePort {
@@ -125,7 +126,19 @@ export abstract class ConnectedAccountsEnginePort {
     credentials: Record<string, unknown>,
     folder: EngineMailFolder,
     limit?: number,
+    query?: string | null,
+    pageToken?: string | null,
   ): Promise<EngineMailThreadsResult | null>;
+
+  /**
+   * RFC 2369 / RFC 8058 unsubscribe for a sender group. Always returns a
+   * per-sender result list — never a blanket success.
+   */
+  abstract unsubscribeSenders(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    senderGroup: string[],
+  ): Promise<EngineUnsubscribeResult | null>;
 
   abstract getMailThread(
     provider: 'gmail' | 'microsoft',

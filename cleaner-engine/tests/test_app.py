@@ -127,10 +127,12 @@ class FakeProvider:
         self.calls.append(("translate_query", (canonical_query,), {}))
         return canonical_query
 
-    def list_threads(self, folder: str = "inbox", limit: int = 50):
+    def list_threads(self, folder: str = "inbox", limit: int = 50, query: str = "", page_token=None):
         from providers.mail_client import Address, ThreadSummary
 
-        self.calls.append(("list_threads", (), {"folder": folder, "limit": limit}))
+        self.calls.append(
+            ("list_threads", (), {"folder": folder, "limit": limit, "query": query, "page_token": page_token})
+        )
         return [
             ThreadSummary(
                 id="thread-1",
@@ -141,7 +143,7 @@ class FakeProvider:
                 message_count=2,
                 unread=True,
             )
-        ]
+        ], ("NEXT" if page_token is None else None)
 
     def get_thread(self, thread_id: str):
         from providers.mail_client import Address, ThreadMessage
@@ -184,7 +186,7 @@ class FakeProvider:
 class FailingProvider(FakeProvider):
     """A provider that authenticates but whose mail methods raise (degrade-clean)."""
 
-    def list_threads(self, folder: str = "inbox", limit: int = 50):
+    def list_threads(self, folder: str = "inbox", limit: int = 50, query: str = "", page_token=None):
         raise RuntimeError("401 auth error")
 
     def get_thread(self, thread_id: str):
@@ -617,8 +619,11 @@ def test_mail_threads_happy_path(client, fake_provider_factory, provider):
     assert fake_provider_factory.instances[-1].calls[-1] == (
         "list_threads",
         (),
-        {"folder": "inbox", "limit": 25},
+        {"folder": "inbox", "limit": 25, "query": "", "page_token": None},
     )
+    assert body["has_more"] is True
+    assert body["next_page_token"] == "NEXT"
+    assert body["search_supported"] is True
 
 
 @pytest.mark.parametrize("provider", ["gmail", "microsoft"])
@@ -696,7 +701,10 @@ def test_mail_threads_degrades_clean_on_provider_error(monkeypatch):
         json={"provider": "gmail", "credentials": {"token": "abc"}, "folder": "inbox"},
     )
     assert response.status_code == 200
-    assert response.json() == {"threads": []}
+    body = response.json()
+    assert body["threads"] == []
+    assert body["has_more"] is False
+    assert body["next_page_token"] is None
 
 
 def test_mail_thread_degrades_clean_on_provider_error(monkeypatch):
@@ -885,7 +893,10 @@ def test_mail_threads_degrades_clean_on_auth_failure(monkeypatch):
         json={"provider": "microsoft", "credentials": {"access_token": "expired"}},
     )
     assert response.status_code == 200
-    assert response.json() == {"threads": []}
+    body = response.json()
+    assert body["threads"] == []
+    assert body["has_more"] is False
+    assert body["next_page_token"] is None
 
 
 def test_mail_send_degrades_clean_on_auth_failure(monkeypatch):

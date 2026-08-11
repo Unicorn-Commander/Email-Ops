@@ -240,7 +240,10 @@ class MicrosoftGraphProvider(EmailProvider):
         return messages, next_link
 
     def get_message(self, message_id: str, format: str = 'metadata') -> EmailMessage:
-        select = 'id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,importance,hasAttachments,bodyPreview'
+        select = (
+            'id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,'
+            'importance,hasAttachments,bodyPreview,internetMessageHeaders'
+        )
         if format == 'full':
             select += ',body'
 
@@ -255,6 +258,13 @@ class MicrosoftGraphProvider(EmailProvider):
             if r.get('emailAddress'):
                 to_addrs.append(r['emailAddress'].get('address', ''))
 
+        headers: Dict[str, str] = {}
+        for h in msg.get('internetMessageHeaders') or []:
+            name = h.get('name')
+            value = h.get('value')
+            if name and value is not None:
+                headers[str(name)] = str(value)
+
         email = EmailMessage(
             id=msg['id'],
             thread_id=msg.get('conversationId', ''),
@@ -266,6 +276,7 @@ class MicrosoftGraphProvider(EmailProvider):
             is_read=msg.get('isRead', False),
             is_starred=msg.get('importance', '') == 'high',
             has_attachments=msg.get('hasAttachments', False),
+            headers=headers,
             raw_data=msg,
         )
 
@@ -300,17 +311,50 @@ class MicrosoftGraphProvider(EmailProvider):
         except Exception:
             return ''
 
-    def list_threads(self, folder: str = 'inbox', limit: int = 50) -> List[ThreadSummary]:
-        """List threads (conversations) for a folder, newest first."""
+    def list_threads(
+        self,
+        folder: str = 'inbox',
+        limit: int = 50,
+        query: str = '',
+        page_token: Optional[str] = None,
+    ) -> Tuple[List[ThreadSummary], Optional[str]]:
+        """List threads (conversations) for a folder, newest first.
+
+        Returns ``(summaries, next_page_token)``. Graph paginates with an opaque
+        ``@odata.nextLink`` URL (used as page_token) — never a numeric offset.
+
+        Search: when ``query`` is set, only a small set of mappable operators is
+        applied (``from:``, ``is:unread``, ``has:attachment``). Unsupported query
+        shapes raise ``ValueError`` with a clear message so the route can surface
+        an honest "unsupported" signal rather than silently returning unfiltered
+        results.
+        """
         limit = clamp_limit(limit)
         folder_id = _FOLDER_ID.get(folder, 'inbox')
-        # Over-fetch a little so grouping by conversation still yields ~limit threads.
-        params = {
-            '$top': min(limit * 2, 200),
-            '$select': 'id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview',
-            '$orderby': 'receivedDateTime desc',
-        }
-        data = self._graph_get(f'/me/mailFolders/{folder_id}/messages', params=params)
+        user_q = (query or '').strip()
+
+        # Graph page_token is a full nextLink URL.
+        if page_token:
+            resp = requests.get(page_token, headers=self._headers(), timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        else:
+            # Over-fetch a little so grouping by conversation still yields ~limit threads.
+            params: Dict[str, Any] = {
+                '$top': min(limit * 2, 200),
+                '$select': 'id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview',
+                '$orderby': 'receivedDateTime desc',
+            }
+            if user_q:
+                odata = self._thread_search_filter(user_q)
+                if odata is None:
+                    raise ValueError(
+                        f"microsoft search not supported for query {user_q!r} — "
+                        "refusing unfiltered results"
+                    )
+                if odata:
+                    params['$filter'] = odata
+            data = self._graph_get(f'/me/mailFolders/{folder_id}/messages', params=params)
 
         threads: Dict[str, ThreadSummary] = {}
         order: List[str] = []
@@ -345,7 +389,24 @@ class MicrosoftGraphProvider(EmailProvider):
                     seen_participants[conv].add(addr.address.lower())
                     summary.participants.append(addr)
 
-        return [threads[c] for c in order]
+        next_link = data.get('@odata.nextLink')
+        return [threads[c] for c in order], next_link
+
+    def _thread_search_filter(self, query: str) -> Optional[str]:
+        """Map a small Gmail-ish query subset to Graph $filter, or None if unsupported.
+
+        Returns '' when the query is empty (no extra filter). Returns None when the
+        query cannot be mapped honestly — callers must NOT fall through to unfiltered.
+        """
+        q = (query or '').strip()
+        if not q:
+            return ''
+        # Reuse translate_query for the exact operators it already handles.
+        translated = self.translate_query(q)
+        if translated:
+            return translated
+        # Free-text and anything else: refuse rather than lie.
+        return None
 
     def get_thread(self, thread_id: str) -> List[ThreadMessage]:
         """Return the messages of one conversation in chronological order."""

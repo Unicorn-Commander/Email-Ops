@@ -715,7 +715,10 @@ export default function MailPage() {
       onForward: () => {
         if (threadOpen && lastMessage) forwardMessage(lastMessage, openThreadRow);
       },
-      onFocusSearch: () => searchRef.current?.focus(),
+      onFocusSearch: () => {
+        if (!searchAvailable) return;
+        searchRef.current?.focus();
+      },
       onToggleSelect: () => {
         if (cursorThread && mail.features.bulk) toggleSelect(cursorThread.id);
       },
@@ -773,6 +776,27 @@ export default function MailPage() {
       ? mail.selectedMailbox
       : null;
   const canSchedule = !!sovereignMailbox;
+  // Connected Gmail/Outlook (not unified): several list/compose ports are degraded —
+  // gate search, load-more, empty-folder, and settings so the UI never silently lies.
+  const externalMailbox =
+    !mail.unified &&
+    !!mail.selectedMailbox &&
+    (mail.selectedMailbox.provider === 'gmail' || mail.selectedMailbox.provider === 'microsoft');
+  const searchAvailable = !externalMailbox;
+  // Compose/reply honesty follows the *sending* mailbox, not only the list selection
+  // (matters in unified mode when the open thread is on a connected account).
+  const composeIsExternal =
+    mail.composeMailbox?.provider === 'gmail' || mail.composeMailbox?.provider === 'microsoft';
+  const threadMailboxIsExternal =
+    threadMailbox?.provider === 'gmail' || threadMailbox?.provider === 'microsoft';
+
+  // Drop any leftover search draft when landing on an external mailbox so we never
+  // show "searching" chrome over an unfiltered list.
+  useEffect(() => {
+    if (!externalMailbox) return;
+    if (searchDraft) setSearchDraft('');
+    if (mail.query) setQuery('');
+  }, [externalMailbox]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Undo-send: on sovereign mailboxes a "send" becomes a scheduled send due in
   // a few seconds, recallable from the UndoSendBar. Everywhere the schedule lane
@@ -1291,6 +1315,7 @@ export default function MailPage() {
         query={searchDraft}
         onQuery={onSearchInput}
         searchRef={searchRef}
+        searchAvailable={searchAvailable}
         foldersCollapsed={foldersCollapsed}
         onToggleFolders={toggleFolders}
         railCollapsed={railCollapsed}
@@ -1407,6 +1432,14 @@ export default function MailPage() {
               hasMore={mail.hasMore}
               loadingMore={mail.loadingMore}
               onLoadMore={mail.loadMore}
+              externalListCapped={externalMailbox}
+              providerLabel={
+                mail.selectedMailbox?.provider === 'microsoft'
+                  ? 'Outlook'
+                  : mail.selectedMailbox?.provider === 'gmail'
+                    ? 'Gmail'
+                    : null
+              }
               rowRefs={rowRefs}
               draftForThread={draftForThread}
               selfAddresses={selfAddresses}
@@ -1414,7 +1447,9 @@ export default function MailPage() {
               onQuickMark={(id, read) => mail.markRead([id], read)}
               onToggleFlag={(id, flagged) => mail.toggleFlag(id, flagged)}
               onEmptyFolder={
-                !mail.unified && (mail.folder === 'trash' || mail.folder === 'spam')
+                // Empty Trash/Spam only works on engine-hosted mailboxes; never
+                // offer a destructive confirm for a no-op on connected Gmail/Outlook.
+                sovereignMailbox && (mail.folder === 'trash' || mail.folder === 'spam')
                   ? () => {
                       const target = mail.folder === 'trash' ? 'trash' : 'spam';
                       const label = target === 'trash' ? 'Trash' : 'Spam';
@@ -1452,6 +1487,7 @@ export default function MailPage() {
                 mail.selectedMailbox.provider !== 'microsoft'
               }
               replyHasUndoWindow={canSchedule}
+              replyLimitedExternalSend={threadMailboxIsExternal}
               onReload={reloadOpenThread}
               replySeed={activeSeed}
               replyRef={replyRef}
@@ -1528,6 +1564,7 @@ export default function MailPage() {
           )
         }
         canSchedule={canSchedule}
+        limitedExternalSend={composeIsExternal}
         onScheduleSend={(b, at) =>
           mail.scheduleSend(
             // Keep the reply context on the explicit send-later lane too — a
@@ -1577,6 +1614,7 @@ export default function MailPage() {
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         notifications={desktopNotifications}
+        undoSendAvailable={canSchedule}
       />
 
       <RulesDialog
@@ -2412,6 +2450,8 @@ function ConversationList({
   hasMore,
   loadingMore,
   onLoadMore,
+  externalListCapped,
+  providerLabel,
   rowRefs,
   draftForThread,
   selfAddresses,
@@ -2443,6 +2483,10 @@ function ConversationList({
   hasMore: boolean;
   loadingMore: boolean;
   onLoadMore: () => void;
+  /** Connected Gmail/Outlook: first page only — show an honest end-of-list note. */
+  externalListCapped?: boolean;
+  /** "Gmail" | "Outlook" for the end-of-list note. */
+  providerLabel?: string | null;
   rowRefs: RefObject<Map<string, HTMLButtonElement>>;
   draftForThread: (thread: ThreadView | null) => AgentInboxItemView | null;
   selfAddresses: ReadonlySet<string>;
@@ -2586,6 +2630,13 @@ function ConversationList({
                   {loadingMore ? 'Loading…' : 'Load more'}
                 </Button>
               </div>
+            )}
+            {externalListCapped && !hasMore && threads.length > 0 && (
+              <p className="px-4 py-3 text-center text-[12px] leading-relaxed text-tertiary">
+                {threads.length >= 50
+                  ? `Showing the 50 most recent — open ${providerLabel ?? 'Gmail or Outlook'} for older mail.`
+                  : `Showing recent mail only — open ${providerLabel ?? 'Gmail or Outlook'} for the full mailbox.`}
+              </p>
             )}
           </>
         )}
@@ -3190,6 +3241,7 @@ function Reader({
   onSnooze,
   snoozeEnabled,
   replyHasUndoWindow,
+  replyLimitedExternalSend,
   onReload,
   replySeed,
   replyRef,
@@ -3234,6 +3286,8 @@ function Reader({
    *  When false (external Gmail/M365 — immediate, irreversible), the composer asks
    *  a one-tap confirm before sending. Mirrors ComposeDialog's canSchedule. */
   replyHasUndoWindow: boolean;
+  /** Connected Gmail/Outlook reply port — plain text only (see ReplyComposer). */
+  replyLimitedExternalSend: boolean;
   /** Re-run the open thread's messages fetch (reader error-retry). */
   onReload: () => void;
   replySeed: ReplySeed;
@@ -3506,6 +3560,7 @@ function Reader({
                 mailboxId={mailbox?.id ?? null}
                 inReplyTo={replySeed.inReplyTo}
                 hasUndoWindow={replyHasUndoWindow}
+                limitedExternalSend={replyLimitedExternalSend}
                 onSend={onReply}
                 onCollapse={onCollapseComposer}
               />

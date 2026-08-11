@@ -3,3 +3,4 @@
 **/.DS_Store
 scripts/.backup.env
 __pycache__/
+cleaner-engine/*.egg-info/

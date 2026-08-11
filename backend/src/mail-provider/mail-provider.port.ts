@@ -35,15 +35,49 @@ export interface MailProviderSendResult {
   reason: string | null;
 }
 
+/**
+ * Honest list result for an external mailbox.
+ *
+ * Gmail/Graph paginate with an opaque `pageToken` — never a numeric offset.
+ * `hasMore` is true ONLY when `nextPageToken` is present. A search the provider
+ * cannot honour returns empty threads with `searchSupported: false` (never the
+ * unfiltered inbox).
+ */
+export interface MailProviderListResult {
+  threads: ThreadView[];
+  nextPageToken: string | null;
+  hasMore: boolean;
+  searchSupported: boolean;
+  reason: string | null;
+}
+
+export interface MailProviderListOpts {
+  folder: MailFolder;
+  limit: number;
+  /** Gmail-style search string (operators mapped by the provider). */
+  query?: string | null;
+  /**
+   * Opaque provider page cursor (Gmail pageToken / Graph @odata.nextLink).
+   * Preferred over numeric offset for external accounts.
+   */
+  pageToken?: string | null;
+  /**
+   * Numeric offset — NOT supported by Gmail/Graph. When offset > 0 and no
+   * pageToken is supplied, the provider returns an empty page with hasMore:false
+   * rather than silently re-serving page 1.
+   */
+  offset?: number;
+}
+
 export abstract class MailProviderPort {
   /** True for mailboxes this port serves (external providers: gmail / microsoft). */
   abstract handles(mailbox: Pick<MailboxAccount, 'provider'>): boolean;
 
-  /** Live inbox threads for a folder (newest-first). [] when not connected. */
+  /** Live inbox threads for a folder (newest-first), with honest search + paging. */
   abstract listInbox(
     mailbox: MailboxAccount,
-    opts: { folder: MailFolder; limit: number },
-  ): Promise<ThreadView[]>;
+    opts: MailProviderListOpts,
+  ): Promise<MailProviderListResult>;
 
   /** The messages in one thread. [] when not connected. */
   abstract listThreadMessages(mailbox: MailboxAccount, threadId: string): Promise<MessageView[]>;

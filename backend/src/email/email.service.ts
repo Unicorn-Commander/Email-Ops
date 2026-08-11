@@ -416,6 +416,93 @@ export class EmailService {
    * page beyond the first is answered purely from the live, paged JMAP result
    * (mixing in an un-paged, unfiltered local supplement there would be wrong).
    */
+
+  /**
+   * Page result for a mailbox inbox list with honest paging metadata.
+   * External accounts (Gmail/Graph) page by opaque pageToken; sovereign JMAP
+   * pages by numeric offset. Prefer this over {@link listMailboxInbox} when the
+   * caller needs next_page_token / has_more.
+   */
+  async listMailboxInboxPage(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+    limit = 50,
+    folder: MailFolder = 'inbox',
+    query?: string | null,
+    offset = 0,
+    pageToken?: string | null,
+  ): Promise<{
+    threads: ThreadView[];
+    nextPageToken: string | null;
+    hasMore: boolean;
+    pagingMode: 'offset' | 'page_token';
+    searchSupported: boolean;
+    reason: string | null;
+  }> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
+      if (!mailbox) {
+        return {
+          threads: [],
+          nextPageToken: null,
+          hasMore: false,
+          pagingMode: 'offset',
+          searchSupported: true,
+          reason: null,
+        };
+      }
+
+      if (this.mailProvider.handles(mailbox)) {
+        if (!(await this.mayActThroughMailbox(mailbox, ucUid))) {
+          return {
+            threads: [],
+            nextPageToken: null,
+            hasMore: false,
+            pagingMode: 'page_token',
+            searchSupported: true,
+            reason: null,
+          };
+        }
+        const page = await this.mailProvider.listInbox(mailbox, {
+          folder,
+          limit,
+          query,
+          pageToken,
+          offset,
+        });
+        return {
+          threads: page.threads,
+          nextPageToken: page.nextPageToken,
+          hasMore: page.hasMore,
+          pagingMode: 'page_token' as const,
+          searchSupported: page.searchSupported,
+          reason: page.reason,
+        };
+      }
+
+      // Sovereign (JMAP) path: reuse listMailboxInbox rows; offset paging.
+      const threads = await this.listMailboxInbox(
+        workspaceId,
+        ucUid,
+        mailboxId,
+        limit,
+        folder,
+        query,
+        offset,
+        pageToken,
+      );
+      return {
+        threads,
+        nextPageToken: null,
+        hasMore: threads.length >= limit,
+        pagingMode: 'offset' as const,
+        searchSupported: true,
+        reason: null,
+      };
+    });
+  }
+
   async listMailboxInbox(
     workspaceId: string,
     ucUid: string | null,
@@ -424,6 +511,7 @@ export class EmailService {
     folder: MailFolder = 'inbox',
     query?: string | null,
     offset = 0,
+    pageToken?: string | null,
   ): Promise<ThreadView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
@@ -432,17 +520,23 @@ export class EmailService {
       // External account (gmail / microsoft): the provider folders are
       // authoritative — fetch the live folder threads through the provider (the
       // KC-broker token + the cleaner-engine). Degrade-clean: [] when the account
-      // isn't connected or the engine is dormant. The local disposition overlay
-      // stays a sovereign-mailbox concern (sync-back to the provider is a follow-up).
-      // NOTE (webmail wave): the external-provider port doesn't yet carry a
-      // `query`/`offset` param — a search/page-2+ request against an external
-      // mailbox still returns its first `limit` unfiltered results (documented
-      // limitation; see the wave report).
+      // isn't connected or the engine is dormant.
+      //
+      // HONEST search + paging: query is mapped onto the provider's native search
+      // (Gmail `q`); paging uses an opaque pageToken. A numeric offset without a
+      // pageToken yields an empty page — never a silent re-serve of page 1.
       if (this.mailProvider.handles(mailbox)) {
         // Per-user fence: a HUMAN external mailbox is private to its owner — never
         // surface a co-member's connected inbox just because it shares the workspace.
         if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
-        return this.mailProvider.listInbox(mailbox, { folder, limit });
+        const page = await this.mailProvider.listInbox(mailbox, {
+          folder,
+          limit,
+          query,
+          pageToken,
+          offset,
+        });
+        return page.threads;
       }
 
       const addr = mailbox.emailAddress;

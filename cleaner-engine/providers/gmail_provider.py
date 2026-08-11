@@ -228,7 +228,14 @@ class GmailProvider(EmailProvider):
                 userId='me',
                 id=message_id,
                 format='metadata',
-                metadataHeaders=['From', 'To', 'Subject', 'Date', 'List-Unsubscribe'],
+                metadataHeaders=[
+                    'From',
+                    'To',
+                    'Subject',
+                    'Date',
+                    'List-Unsubscribe',
+                    'List-Unsubscribe-Post',
+                ],
             ).execute(num_retries=3)
         else:
             msg = self.service.users().messages().get(
@@ -294,15 +301,31 @@ class GmailProvider(EmailProvider):
     # Unified mail client (threads / thread / send)
     # ------------------------------------------------------------------
 
-    def list_threads(self, folder: str = 'inbox', limit: int = 50) -> List[ThreadSummary]:
-        """List inbox threads for a folder, newest first."""
+    def list_threads(
+        self,
+        folder: str = 'inbox',
+        limit: int = 50,
+        query: str = '',
+        page_token: Optional[str] = None,
+    ) -> Tuple[List[ThreadSummary], Optional[str]]:
+        """List threads for a folder (optionally filtered), newest first.
+
+        Gmail paginates with an opaque ``pageToken`` — never a numeric offset.
+        Returns ``(summaries, next_page_token)``; ``next_page_token`` is None when
+        there is no further page (honest has-more signal).
+        """
         limit = clamp_limit(limit)
-        query = _FOLDER_QUERY.get(folder, _FOLDER_QUERY['inbox'])
-        result = self.service.users().threads().list(
-            userId='me',
-            q=query,
-            maxResults=limit,
-        ).execute()
+        folder_q = _FOLDER_QUERY.get(folder, _FOLDER_QUERY['inbox'])
+        user_q = (query or '').strip()
+        effective = f'{folder_q} {user_q}'.strip() if user_q else folder_q
+        list_kwargs: dict = {
+            'userId': 'me',
+            'q': effective,
+            'maxResults': limit,
+        }
+        if page_token:
+            list_kwargs['pageToken'] = page_token
+        result = self.service.users().threads().list(**list_kwargs).execute()
 
         summaries: List[ThreadSummary] = []
         for stub in result.get('threads', [])[:limit]:
@@ -313,7 +336,7 @@ class GmailProvider(EmailProvider):
                 metadataHeaders=['From', 'To', 'Subject', 'Date'],
             ).execute()
             summaries.append(self._thread_summary(thread))
-        return summaries
+        return summaries, result.get('nextPageToken')
 
     def _thread_summary(self, thread: dict) -> ThreadSummary:
         messages = thread.get('messages', [])

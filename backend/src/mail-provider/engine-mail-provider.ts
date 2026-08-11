@@ -15,12 +15,15 @@ import { MailboxAccount } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { KeycloakBrokerService } from '../auth/keycloak-broker.service';
 import { ConnectedAccountsEnginePort } from '../connected-accounts/connected-accounts.port';
-import { MailFolder, MessageView, ThreadView } from '../email/email.types';
+import { MessageView } from '../email/email.types';
 import {
+  MailProviderListOpts,
+  MailProviderListResult,
   MailProviderPort,
   MailProviderSendRequest,
   MailProviderSendResult,
 } from './mail-provider.port';
+import { parseSearchQuery, buildGmailQuery } from '../stalwart/search-query';
 
 type ExternalProvider = 'gmail' | 'microsoft';
 
@@ -42,26 +45,64 @@ export class EngineMailProvider extends MailProviderPort {
 
   async listInbox(
     mailbox: MailboxAccount,
-    opts: { folder: MailFolder; limit: number },
-  ): Promise<ThreadView[]> {
+    opts: MailProviderListOpts,
+  ): Promise<MailProviderListResult> {
+    const empty: MailProviderListResult = {
+      threads: [],
+      nextPageToken: null,
+      hasMore: false,
+      searchSupported: true,
+      reason: null,
+    };
+
+    // Gmail/Graph paginate by opaque pageToken, NOT numeric offset. A page-2+
+    // request that only carries offset would previously re-serve page 1 of the
+    // unfiltered folder — the exact dishonest bug this method exists to fix.
+    // Without a pageToken, any offset > 0 is an explicit "no more pages".
+    const offset = opts.offset ?? 0;
+    const pageToken = opts.pageToken?.trim() || null;
+    if (offset > 0 && !pageToken) {
+      return {
+        ...empty,
+        reason:
+          'external mailboxes page by opaque page_token, not numeric offset — no more pages',
+      };
+    }
+
     const auth = await this.authFor(mailbox);
-    if (!auth) return [];
+    if (!auth) return empty;
+
+    // Map app search operators onto Gmail `q` syntax (Microsoft maps a subset
+    // itself and returns search_supported:false for free-text it cannot honour).
+    const rawQuery = opts.query?.trim() || '';
+    const gmailQ = rawQuery ? buildGmailQuery(parseSearchQuery(rawQuery)) : '';
+
     const res = await this.engine.listMailThreads(
       auth.provider,
       auth.credentials,
       opts.folder,
       opts.limit,
+      gmailQ || null,
+      pageToken,
     );
-    if (!res) return [];
-    return res.threads.map((t) => ({
-      id: t.id,
-      subject: t.subject,
-      message_count: t.message_count,
-      unread: t.unread,
-      last_message_at: t.last_message_at,
-      last_snippet: t.last_snippet,
-      participants: t.participants.map((p) => ({ address: p.address, name: p.name })),
-    }));
+    if (!res) return empty;
+
+    const next = res.next_page_token ?? null;
+    return {
+      threads: (res.threads ?? []).map((t) => ({
+        id: t.id,
+        subject: t.subject,
+        message_count: t.message_count,
+        unread: t.unread,
+        last_message_at: t.last_message_at,
+        last_snippet: t.last_snippet,
+        participants: t.participants.map((p) => ({ address: p.address, name: p.name })),
+      })),
+      nextPageToken: next,
+      hasMore: Boolean(next ?? res.has_more),
+      searchSupported: res.search_supported !== false,
+      reason: res.reason ?? null,
+    };
   }
 
   async listThreadMessages(mailbox: MailboxAccount, threadId: string): Promise<MessageView[]> {

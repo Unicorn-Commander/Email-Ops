@@ -44,6 +44,19 @@ class CleanupExecuteBodyDto {
 
   @IsObject()
   plan!: CleanupPlanResult;
+
+  /**
+   * When true, execute immediately instead of staging for approval. Permanent
+   * delete also requires confirm_token === 'ARCHIVE'. Default is stage (MCP/chat parity).
+   */
+  @IsOptional()
+  @IsBoolean()
+  confirm?: boolean;
+
+  /** Typed confirmation for permanent delete — must be exactly "ARCHIVE". */
+  @IsOptional()
+  @IsString()
+  confirm_token?: string;
 }
 
 class CleanupOrganizeBodyDto {
@@ -58,6 +71,12 @@ class CleanupOrganizeBodyDto {
   @IsOptional()
   @IsObject()
   criteria?: Record<string, unknown>;
+
+  /** Explicit message ids selected in the UI. Empty = no-op. */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  messageIds?: string[];
 }
 
 class CleanupUnsubscribeBodyDto {
@@ -146,9 +165,10 @@ export class ConnectedAccountsController {
 
   @Post(':provider/cleanup/execute')
   @ApiOperation({
-    summary: 'Execute a cleanup plan as trash or delete, with backup verification for delete.',
+    summary:
+      'Stage (default) or execute a cleanup plan as trash or delete. Immediate execution requires confirm=true; permanent delete also requires confirm_token=ARCHIVE. Verified archive-before-purge is preserved on the execute path.',
   })
-  @ApiResponse({ status: 200, description: 'The cleanup execution result.' })
+  @ApiResponse({ status: 200, description: 'The cleanup execution (or staged) result.' })
   @ApiResponse({ status: 403, description: 'Caller lacks the email-ops cleaner SKU.' })
   async execute(
     @CurrentUser() user: User,
@@ -158,7 +178,10 @@ export class ConnectedAccountsController {
     const provider = this.provider(providerParam);
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
-    return this.connectedAccounts.executeCleanup(user, provider, body.plan, body.mode);
+    return this.connectedAccounts.executeCleanup(user, provider, body.plan, body.mode, {
+      confirm: body.confirm === true,
+      confirmToken: body.confirm_token ?? null,
+    });
   }
 
   @Post(':provider/organize')
@@ -173,10 +196,15 @@ export class ConnectedAccountsController {
     const provider = this.provider(providerParam);
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
-    return this.connectedAccounts.organize(user, provider, body.criteria ?? {
-      label: body.label ?? '',
-      archive: body.archive ?? true,
-    });
+    const criteria = {
+      ...(body.criteria ?? {
+        label: body.label ?? '',
+        archive: body.archive ?? true,
+      }),
+      // Surface-level messageIds wins when present so the UI selection is honoured.
+      ...(Array.isArray(body.messageIds) ? { messageIds: body.messageIds } : {}),
+    };
+    return this.connectedAccounts.organize(user, provider, criteria);
   }
 
   @Post(':provider/unsubscribe')

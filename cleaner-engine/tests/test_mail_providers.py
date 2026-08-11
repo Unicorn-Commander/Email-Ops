@@ -96,7 +96,7 @@ def _make_gmail(list_result=None, get_results=None, send_result=None):
 
 
 def test_gmail_list_threads_maps_folder_and_shapes():
-    list_result = {"threads": [{"id": "t1"}]}
+    list_result = {"threads": [{"id": "t1"}], "nextPageToken": "NEXT_1"}
     get_results = {
         "t1": {
             "id": "t1",
@@ -122,11 +122,12 @@ def test_gmail_list_threads_maps_folder_and_shapes():
     }
     provider, sink = _make_gmail(list_result=list_result, get_results=get_results)
 
-    threads = provider.list_threads(folder="archive", limit=10)
+    threads, next_token = provider.list_threads(folder="archive", limit=10)
 
     # Folder mapping was applied as the Gmail query.
     list_call = next(c for c in sink if c[0] == "threads.list")
     assert list_call[1]["q"] == _FOLDER_QUERY["archive"]
+    assert next_token == "NEXT_1"
 
     assert len(threads) == 1
     t = threads[0]
@@ -138,6 +139,38 @@ def test_gmail_list_threads_maps_folder_and_shapes():
     assert t.last_message_at.startswith("2024-01-02")
     addrs = {p.address for p in t.participants}
     assert addrs == {"a@example.com", "b@example.com", "me@example.com"}
+
+
+def test_gmail_list_threads_applies_search_q_and_page_token():
+    list_result = {"threads": [{"id": "t9"}]}
+    get_results = {
+        "t9": {
+            "id": "t9",
+            "messages": [
+                {
+                    "id": "m9",
+                    "threadId": "t9",
+                    "labelIds": ["INBOX"],
+                    "internalDate": "1704067200000",
+                    "snippet": "promo",
+                    "payload": {"headers": _headers(Subject="Sale", **{"From": "p@x.com", "To": "me@example.com"})},
+                }
+            ],
+        }
+    }
+    provider, sink = _make_gmail(list_result=list_result, get_results=get_results)
+    threads, next_token = provider.list_threads(
+        folder="inbox",
+        limit=5,
+        query="from:p@x.com has:attachment",
+        page_token="TOK_ABC",
+    )
+    list_call = next(c for c in sink if c[0] == "threads.list")
+    assert list_call[1]["q"] == f"{_FOLDER_QUERY['inbox']} from:p@x.com has:attachment"
+    assert list_call[1]["pageToken"] == "TOK_ABC"
+    assert list_call[1]["maxResults"] == 5
+    assert len(threads) == 1
+    assert next_token is None
 
 
 def test_gmail_get_thread_infers_direction():
@@ -359,7 +392,8 @@ def test_ms_list_threads_groups_by_conversation(monkeypatch):
         return _FakeResp(json_data=messages_page)
 
     provider, _ = _make_ms(monkeypatch, get_router=get_router)
-    threads = provider.list_threads(folder="spam", limit=10)
+    threads, next_token = provider.list_threads(folder="spam", limit=10)
+    assert next_token is None
 
     assert len(threads) == 2
     by_id = {t.id: t for t in threads}
