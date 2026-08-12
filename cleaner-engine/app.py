@@ -5,7 +5,7 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
@@ -139,6 +139,18 @@ class MailSendRequest(ProfileRequest):
     in_reply_to_thread_id: Optional[str] = None
 
     model_config = {"populate_by_name": True}
+
+
+class MailDraftRequest(MailSendRequest):
+    """Create a REAL draft in the provider's Drafts folder. Sends NOTHING."""
+
+    cc: Optional[List[str]] = None
+    bcc: Optional[List[str]] = None
+    body_html: Optional[str] = None
+
+
+class MailDraftDeleteRequest(ProfileRequest):
+    draft_id: str
 
 
 class MailReadRequest(ProfileRequest):
@@ -598,6 +610,52 @@ def mail_send(request: MailSendRequest) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - degrade clean
         logger.warning("mail/send failed for %s: %s", request.provider, exc)
         return {"accepted": False, "provider_message_id": None, "thread_id": None, "reason": "send_failed"}
+
+
+# DRAFT verbs — create/delete a REAL draft in the provider's Drafts folder.
+# A draft SENDS NOTHING: Email-Ops mirrors an agent-inbox draft here so the human
+# reviews it in their own Outlook/Gmail before approving, and deletes the mirror
+# once the approval has actually sent. Degrade-clean like the rest of /mail/*, but
+# NEVER optimistic: a provider that cannot draft returns created:false + a reason
+# so the backend does not claim a mirror that does not exist.
+
+
+@app.post("/mail/draft", dependencies=[Depends(_require_engine_token)])
+def mail_draft(request: MailDraftRequest) -> dict[str, Any]:
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return {"created": False, "draft_id": None, "thread_id": None, "web_link": None, "reason": "provider_unavailable"}
+    if not hasattr(provider, "create_draft"):
+        # Honest, not silent: this provider has no draft lane yet.
+        return {"created": False, "draft_id": None, "thread_id": None, "web_link": None, "reason": "drafts_unsupported_for_provider"}
+    try:
+        result = provider.create_draft(
+            from_addr=request.from_,
+            to_addr=request.to,
+            subject=request.subject,
+            body=request.body,
+            in_reply_to_thread_id=request.in_reply_to_thread_id,
+            cc=request.cc,
+            bcc=request.bcc,
+            body_html=request.body_html,
+        )
+        return _dataclass_to_dict(result)
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/draft failed for %s: %s", request.provider, exc)
+        return {"created": False, "draft_id": None, "thread_id": None, "web_link": None, "reason": "draft_failed"}
+
+
+@app.post("/mail/draft/delete", dependencies=[Depends(_require_engine_token)])
+def mail_draft_delete(request: MailDraftDeleteRequest) -> ThreadActionResponse:
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None or not hasattr(provider, "delete_draft"):
+        return ThreadActionResponse(ok=False, moved=0)
+    try:
+        ok = provider.delete_draft(request.draft_id)
+        return ThreadActionResponse(ok=bool(ok), moved=1 if ok else 0)
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/draft/delete failed for %s: %s", request.provider, exc)
+        return ThreadActionResponse(ok=False, moved=0)
 
 
 # Thread-level TRIAGE verbs (webmail parity for external accounts): resolve the

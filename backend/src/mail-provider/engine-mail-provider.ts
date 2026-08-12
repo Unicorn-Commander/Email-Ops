@@ -19,6 +19,8 @@ import { MessageView } from '../email/email.types';
 import {
   MailProviderListOpts,
   MailProviderListResult,
+  MailProviderDraftRequest,
+  MailProviderDraftResult,
   MailProviderPort,
   MailProviderSendRequest,
   MailProviderSendResult,
@@ -146,6 +148,62 @@ export class EngineMailProvider extends MailProviderPort {
       threadId: res.thread_id,
       reason: res.reason,
     };
+  }
+
+  /**
+   * Mirror a staged draft into the provider's REAL Drafts folder (Graph
+   * `POST /me/messages` for Microsoft). Sends NOTHING — the agent-inbox item
+   * remains the approval choke point; this copy exists so the human can read
+   * the exact text in their own Outlook before approving.
+   */
+  async createDraft(
+    mailbox: MailboxAccount,
+    req: MailProviderDraftRequest,
+  ): Promise<MailProviderDraftResult> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) {
+      return {
+        created: false,
+        draftId: null,
+        threadId: null,
+        webLink: null,
+        reason: 'account_not_connected',
+      };
+    }
+    const res = await this.engine.createMailDraft(auth.provider, auth.credentials, {
+      from: req.from,
+      to: req.to,
+      subject: req.subject,
+      body: req.body,
+      bodyHtml: req.bodyHtml ?? null,
+      cc: req.cc,
+      bcc: req.bcc,
+      inReplyToThreadId: req.inReplyToThreadId ?? null,
+    });
+    if (!res) {
+      return {
+        created: false,
+        draftId: null,
+        threadId: null,
+        webLink: null,
+        reason: 'engine_unavailable',
+      };
+    }
+    return {
+      created: res.created,
+      draftId: res.draft_id,
+      threadId: res.thread_id,
+      webLink: res.web_link,
+      reason: res.reason,
+    };
+  }
+
+  async deleteDraft(mailbox: MailboxAccount, draftId: string): Promise<boolean> {
+    if (!draftId) return false;
+    const auth = await this.authFor(mailbox);
+    if (!auth) return false;
+    const res = await this.engine.deleteMailDraft(auth.provider, auth.credentials, draftId);
+    return res?.ok === true;
   }
 
   // Thread-level triage verbs: same auth chain as the reads, engine answers

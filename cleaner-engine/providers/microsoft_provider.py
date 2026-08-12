@@ -23,6 +23,7 @@ from providers.base import (
 )
 from providers.mail_client import (
     Address,
+    DraftResult,
     SendResult,
     ThreadMessage,
     ThreadSummary,
@@ -477,6 +478,71 @@ class MicrosoftGraphProvider(EmailProvider):
                 thread_id=in_reply_to_thread_id,
             )
         return SendResult(accepted=False, reason=f'graph_status_{resp.status_code}')
+
+    def create_draft(
+        self,
+        from_addr: str,
+        to_addr: str,
+        subject: str,
+        body: str,
+        in_reply_to_thread_id: Optional[str] = None,
+        cc: Optional[List[str]] = None,
+        bcc: Optional[List[str]] = None,
+        body_html: Optional[str] = None,
+    ) -> DraftResult:
+        """Create a REAL draft in the mailbox's Drafts folder (POST /me/messages).
+
+        Nothing is sent. Graph files a message created this way under
+        ``isDraft: true`` in Drafts, so it shows up in the user's own Outlook
+        exactly like a draft they typed — which is the point: the human reviews
+        and approves in their own client.
+
+        NOTE on ``from``: Graph ignores/rejects a ``from`` that is not the
+        authenticated mailbox (or a mailbox it has SendAs rights on). We only
+        set it when it differs from the account address, and a Graph refusal is
+        surfaced as created:False rather than silently dropping the identity.
+        """
+        message: Dict[str, Any] = {
+            'subject': subject or '',
+            'body': {
+                'contentType': 'HTML' if body_html else 'Text',
+                'content': body_html if body_html else (body or ''),
+            },
+            'toRecipients': [{'emailAddress': {'address': to_addr}}],
+        }
+        if cc:
+            message['ccRecipients'] = [{'emailAddress': {'address': a}} for a in cc if a]
+        if bcc:
+            message['bccRecipients'] = [{'emailAddress': {'address': a}} for a in bcc if a]
+
+        account = self._account_address()
+        if from_addr and account and from_addr.strip().lower() != account:
+            # Sending/drafting AS another mailbox needs an explicit SendAs grant;
+            # set it so Graph can accept or refuse EXPLICITLY.
+            message['from'] = {'emailAddress': {'address': from_addr}}
+
+        resp = self._graph_post('/me/messages', json_body=message)
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            return DraftResult(
+                created=True,
+                draft_id=data.get('id'),
+                thread_id=data.get('conversationId') or in_reply_to_thread_id,
+                web_link=data.get('webLink'),
+            )
+        return DraftResult(created=False, reason=f'graph_status_{resp.status_code}')
+
+    def delete_draft(self, draft_id: str) -> bool:
+        """Delete a draft we previously mirrored (DELETE /me/messages/{id}).
+
+        Used to reconcile the mirror after the approval sends (or rejects) the
+        staged message, so a stale duplicate never lingers in Drafts. 404 counts
+        as success — the draft is already gone, which is the desired end state.
+        """
+        if not draft_id:
+            return False
+        resp = self._graph_delete(f'/me/messages/{draft_id}')
+        return resp.status_code in (200, 204, 404)
 
     # ------------------------------------------------------------------
     # Batch operations

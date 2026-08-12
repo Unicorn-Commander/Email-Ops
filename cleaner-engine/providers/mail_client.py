@@ -59,6 +59,26 @@ class SendResult:
     reason: Optional[str] = None
 
 
+@dataclass
+class DraftResult:
+    """Result of creating a REAL draft in the provider's Drafts folder.
+
+    A draft is not a send: nothing leaves the mailbox. Email-Ops mirrors an
+    agent-inbox draft here so the human reviews it in their own client
+    (Outlook / Gmail) before approving. ``web_link`` is the provider's
+    deep-link to the draft when it exposes one.
+
+    ``created: False`` + ``reason`` is the honest degrade — the caller must
+    NOT report a mirrored draft that does not exist.
+    """
+
+    created: bool
+    draft_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    web_link: Optional[str] = None
+    reason: Optional[str] = None
+
+
 def clamp_limit(limit: Optional[int]) -> int:
     """Clamp the caller-supplied limit to [1, MAX_THREAD_LIMIT]."""
     if not limit or limit <= 0:

@@ -142,6 +142,19 @@ export interface ComposeInput {
    * resolution; otherwise the usual resolveSendMailbox path applies.
    */
   fromMailboxAccountId?: string | null;
+  /**
+   * Explicit send-from ADDRESS — the same choice as `fromMailboxAccountId` but
+   * expressed the way a caller actually thinks about it ("send as
+   * aaron@magicunicorn.tech"). Resolved against the workspace's registered
+   * mailboxes by `mail-routing.routeFromAddress`, which also decides the lane
+   * (Graph for M365, James for the sovereign domains).
+   *
+   * An address with no registered mailbox is REFUSED, never silently downgraded
+   * to the workspace default — a cold-outreach mail must not leave from a
+   * different identity than the caller asked for. Ignored when
+   * `fromMailboxAccountId` is set (the id is more specific).
+   */
+  fromAddress?: string | null;
   // webmail wave — compose extension (all optional, back-compat). Carried
   // through to the mail engine's send lane (StalwartPort); see
   // JamesClient.send for the attachment-routing deviation (JMAP, not Postmark).
