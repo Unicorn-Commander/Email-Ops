@@ -3114,6 +3114,12 @@ export class EmailService {
         to: req.toAddress,
         subject: req.subject,
         body: req.body,
+        // cc/bcc/html ride the external lane too. They used to be dropped here
+        // silently, which is data loss on its own and would additionally make an
+        // approved draft send to fewer people than the approver was shown.
+        bodyHtml: req.bodyHtml ?? null,
+        cc: req.cc,
+        bcc: req.bcc,
         inReplyToThreadId: req.inReplyToThreadId,
       });
       return {

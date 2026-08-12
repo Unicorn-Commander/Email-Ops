@@ -469,6 +469,9 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       to: string;
       subject: string;
       body: string;
+      bodyHtml?: string | null;
+      cc?: string[];
+      bcc?: string[];
       inReplyToThreadId?: string | null;
     },
   ): Promise<EngineMailSendResult | null> {
@@ -479,6 +482,9 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       to: message.to,
       subject: message.subject,
       body: message.body,
+      body_html: message.bodyHtml ?? null,
+      cc: message.cc?.length ? message.cc : null,
+      bcc: message.bcc?.length ? message.bcc : null,
       in_reply_to_thread_id: message.inReplyToThreadId ?? null,
     });
   }

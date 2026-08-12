@@ -459,13 +459,23 @@ class MicrosoftGraphProvider(EmailProvider):
         subject: str,
         body: str,
         in_reply_to_thread_id: Optional[str] = None,
+        cc: Optional[List[str]] = None,
+        bcc: Optional[List[str]] = None,
+        body_html: Optional[str] = None,
     ) -> SendResult:
         """Send a new message or reply (via /me/sendMail)."""
-        message = {
+        message: Dict[str, Any] = {
             'subject': subject or '',
-            'body': {'contentType': 'Text', 'content': body or ''},
+            'body': {
+                'contentType': 'HTML' if body_html else 'Text',
+                'content': body_html if body_html else (body or ''),
+            },
             'toRecipients': [{'emailAddress': {'address': to_addr}}],
         }
+        if cc:
+            message['ccRecipients'] = [{'emailAddress': {'address': a}} for a in cc if a]
+        if bcc:
+            message['bccRecipients'] = [{'emailAddress': {'address': a}} for a in bcc if a]
         if from_addr:
             message['from'] = {'emailAddress': {'address': from_addr}}
 

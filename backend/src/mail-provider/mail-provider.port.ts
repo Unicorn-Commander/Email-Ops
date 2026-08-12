@@ -25,6 +25,11 @@ export interface MailProviderSendRequest {
   to: string;
   subject: string;
   body: string;
+  /** HTML alternative. Sent as the Graph/MIME HTML body when present. */
+  bodyHtml?: string | null;
+  /** Carried on the external lane too — a silently dropped cc/bcc is data loss. */
+  cc?: string[];
+  bcc?: string[];
   inReplyToThreadId?: string | null;
 }
 
@@ -69,12 +74,12 @@ export interface MailProviderListOpts {
   offset?: number;
 }
 
-/** What to put in a provider-side draft (superset of the send request). */
-export interface MailProviderDraftRequest extends MailProviderSendRequest {
-  bodyHtml?: string | null;
-  cc?: string[];
-  bcc?: string[];
-}
+/**
+ * What to put in a provider-side draft. Identical to the send request — the
+ * draft and the send it becomes MUST carry the same fields, or the human would
+ * approve a draft showing recipients the send then quietly omits.
+ */
+export type MailProviderDraftRequest = MailProviderSendRequest;
 
 /**
  * Result of mirroring a staged draft into the provider's own Drafts folder.

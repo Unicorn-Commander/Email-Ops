@@ -137,16 +137,18 @@ class MailSendRequest(ProfileRequest):
     subject: str = ""
     body: str = ""
     in_reply_to_thread_id: Optional[str] = None
+    # Carried on the EXTERNAL send lane too: dropping a cc/bcc silently is a
+    # data-loss bug, and it is worse now that the draft mirror shows the user a
+    # cc/bcc list that the send would otherwise not honour.
+    cc: Optional[List[str]] = None
+    bcc: Optional[List[str]] = None
+    body_html: Optional[str] = None
 
     model_config = {"populate_by_name": True}
 
 
 class MailDraftRequest(MailSendRequest):
     """Create a REAL draft in the provider's Drafts folder. Sends NOTHING."""
-
-    cc: Optional[List[str]] = None
-    bcc: Optional[List[str]] = None
-    body_html: Optional[str] = None
 
 
 class MailDraftDeleteRequest(ProfileRequest):
@@ -605,6 +607,9 @@ def mail_send(request: MailSendRequest) -> dict[str, Any]:
             subject=request.subject,
             body=request.body,
             in_reply_to_thread_id=request.in_reply_to_thread_id,
+            cc=request.cc,
+            bcc=request.bcc,
+            body_html=request.body_html,
         )
         return _dataclass_to_dict(result)
     except Exception as exc:  # noqa: BLE001 - degrade clean

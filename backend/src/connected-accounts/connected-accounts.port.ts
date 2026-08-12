@@ -190,6 +190,9 @@ export abstract class ConnectedAccountsEnginePort {
       to: string;
       subject: string;
       body: string;
+      bodyHtml?: string | null;
+      cc?: string[];
+      bcc?: string[];
       inReplyToThreadId?: string | null;
     },
   ): Promise<EngineMailSendResult | null>;

@@ -137,6 +137,9 @@ export class EngineMailProvider extends MailProviderPort {
       to: req.to,
       subject: req.subject,
       body: req.body,
+      bodyHtml: req.bodyHtml ?? null,
+      cc: req.cc,
+      bcc: req.bcc,
       inReplyToThreadId: req.inReplyToThreadId ?? null,
     });
     if (!res) {
