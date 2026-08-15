@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Magic Unicorn Unconventional Technology & Stuff Inc.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 (() => {
-  // 30 rotating headlines — the payoff of each is wrapped in <em> so it renders
-  // in the signature purple→pink→gold gradient. One is chosen at random on every
-  // page load; the "Another headline" control shuffles to a different one.
+  // 30 headlines — the payoff of each is wrapped in <em> so it renders in the
+  // signature purple→pink→gold gradient. One is chosen at random on every page
+  // load, and it stays put for the whole visit.
   const headlines = [
     'Email with a <em>chain of command.</em>',
     'Your inbox called. It wants <em>adult supervision.</em>',
@@ -36,20 +36,10 @@
     'The operational layer between intelligence and <em>Send.</em>',
     'A better email platform was apparently <em>not mythical after all.</em>'
   ];
+  // One headline is chosen at random per page load. There is no in-page control and no
+  // timer: the variation is between visits, not while someone is reading.
   const headline = document.getElementById('rotating-headline');
-  const shuffle = document.querySelector('.headline-shuffle');
-  let current = Math.floor(Math.random() * headlines.length);
-  const setHeadline = (index, animate = false) => {
-    if (!headline) return;
-    if (animate) {
-      headline.animate([{opacity:1,transform:'translateY(0)'},{opacity:0,transform:'translateY(-12px)'}],{duration:180,fill:'forwards'}).onfinish=()=>{
-        headline.innerHTML=headlines[index];
-        headline.animate([{opacity:0,transform:'translateY(16px)'},{opacity:1,transform:'translateY(0)'}],{duration:350,fill:'forwards',easing:'cubic-bezier(.2,.8,.2,1)'});
-      };
-    } else headline.innerHTML = headlines[index];
-  };
-  setHeadline(current);
-  shuffle?.addEventListener('click',()=>{let next=current;while(next===current)next=Math.floor(Math.random()*headlines.length);current=next;setHeadline(current,true)});
+  if (headline) headline.innerHTML = headlines[Math.floor(Math.random() * headlines.length)];
 
   const observer = new IntersectionObserver(entries => entries.forEach(e => { if(e.isIntersecting){e.target.classList.add('visible');observer.unobserve(e.target)}}), {threshold:.13});
   document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
