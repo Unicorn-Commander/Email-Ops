@@ -354,6 +354,12 @@ class MicrosoftGraphProvider(EmailProvider):
                     )
                 if odata:
                     params['$filter'] = odata
+                elif odata == '' and user_q:
+                    # Pure free text: use $search instead of $filter.
+                    # Graph rejects $search combined with $orderby.
+                    params.pop('$orderby', None)
+                    # VERIFY-AT-GATE: Graph $search expects quoted search terms.
+                    params['$search'] = f'"{user_q}"'
             data = self._graph_get(f'/me/mailFolders/{folder_id}/messages', params=params)
 
         threads: Dict[str, ThreadSummary] = {}
@@ -395,18 +401,29 @@ class MicrosoftGraphProvider(EmailProvider):
     def _thread_search_filter(self, query: str) -> Optional[str]:
         """Map a small Gmail-ish query subset to Graph $filter, or None if unsupported.
 
-        Returns '' when the query is empty (no extra filter). Returns None when the
-        query cannot be mapped honestly — callers must NOT fall through to unfiltered.
+        Returns '' when the query is empty or pure free text (no operators).
+        Returns None when the query contains unsupported or mixed operators.
         """
         q = (query or '').strip()
         if not q:
             return ''
-        # Reuse translate_query for the exact operators it already handles.
-        translated = self.translate_query(q)
-        if translated:
-            return translated
-        # Free-text and anything else: refuse rather than lie.
-        return None
+        
+        # Check if query contains any operator-like tokens
+        # Supported operators: from:, is:, has:, older_than:, category:
+        import re
+        # Look for word-boundary followed by operator:
+        has_operators = bool(re.search(r'\b(?:from|is|has|older_than|category):', q))
+        
+        if has_operators:
+            # Try to translate
+            translated = self.translate_query(q)
+            if translated:
+                return translated
+            # If translate_query returned '' but we had operators, it's unsupported
+            return None
+        else:
+            # Pure free text
+            return ''
 
     def get_thread(self, thread_id: str) -> List[ThreadMessage]:
         """Return the messages of one conversation in chronological order."""
