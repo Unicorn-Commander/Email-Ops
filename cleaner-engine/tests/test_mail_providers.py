@@ -624,3 +624,53 @@ def test_ms_get_thread_degrades_when_account_lookup_fails(monkeypatch):
     messages = provider.get_thread("c1")
     # account == '' so even a self-sent message is reported as received (safe default)
     assert messages[0].direction == "received"
+
+
+def test_ms_list_threads_pure_free_text_uses_search(monkeypatch):
+    """Pure free text query should use $search and drop $orderby."""
+    messages_page = {
+        "value": [
+            {
+                "id": "m1",
+                "conversationId": "c1",
+                "subject": "Hello",
+                "from": {"emailAddress": {"address": "a@example.com"}},
+                "toRecipients": [],
+                "receivedDateTime": "2024-01-01T10:00:00Z",
+                "isRead": True,
+                "bodyPreview": "test",
+            }
+        ]
+    }
+
+    def get_router(url, params):
+        # Verify $search is present and $orderby is absent
+        assert "$search" in params
+        assert params["$search"] == '"hello world"'
+        assert "$orderby" not in params
+        assert "$filter" not in params
+        return _FakeResp(json_data=messages_page)
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    threads, _ = provider.list_threads(folder="inbox", limit=10, query="hello world")
+    assert len(threads) == 1
+
+
+def test_ms_list_threads_mixed_query_raises(monkeypatch):
+    """Mixed free text and operators should raise ValueError."""
+    def get_router(url, params):
+        return _FakeResp()
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    with pytest.raises(ValueError, match="microsoft search not supported"):
+        provider.list_threads(folder="inbox", limit=10, query="hello from:a@example.com")
+
+
+def test_ms_list_threads_unsupported_operator_raises(monkeypatch):
+    """Unsupported operator should raise ValueError."""
+    def get_router(url, params):
+        return _FakeResp()
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    with pytest.raises(ValueError, match="microsoft search not supported"):
+        provider.list_threads(folder="inbox", limit=10, query="is:flagged")
