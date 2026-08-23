@@ -129,7 +129,7 @@ export class MailSignaturesService {
       select: { id: true, ownerKind: true, ownerKey: true },
     });
     if (!mailbox) throw new NotFoundException('Mailbox not found in this workspace.');
-    assertMayActThroughMailbox(mailbox, ucUid);
+    await assertMayActThroughMailbox(this.prisma, mailbox, ucUid);
   }
 
   private async assertSignature(

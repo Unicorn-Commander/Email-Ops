@@ -409,6 +409,7 @@ describe('MailRulesService', () => {
           findFirst: jest.fn().mockResolvedValue({ id: 'mb-1', ownerKind: 'HUMAN', ownerKey: 'someone-else' }),
         },
         mailRule: { findMany: jest.fn() },
+        user: { findFirst: jest.fn().mockResolvedValue(null) },
       },
     });
     await expect(service.list(WS, UC, 'mb-1')).rejects.toBeInstanceOf(ForbiddenException);
