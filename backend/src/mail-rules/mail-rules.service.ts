@@ -309,7 +309,7 @@ export class MailRulesService {
       select: { id: true, ownerKind: true, ownerKey: true, provider: true, active: true },
     });
     if (!mailbox) throw new NotFoundException('Mailbox not found in this workspace.');
-    assertMayActThroughMailbox(mailbox, ucUid);
+    await assertMayActThroughMailbox(tx, mailbox, ucUid);
     // CREATE-only fence: the inbound watcher only ever applies rules to active
     // sovereign (James) mailboxes, so accepting a rule on a connected Gmail/
     // Microsoft or inactive mailbox would be a silent no-op — refuse loudly

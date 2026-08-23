@@ -116,7 +116,7 @@ export class MailVacationService {
       where: { id: mailboxId, workspaceId },
       select: { emailAddress: true, ownerKind: true, ownerKey: true },
     });
-    if (mailbox) assertMayActThroughMailbox(mailbox, ucUid);
+    if (mailbox) await assertMayActThroughMailbox(this.prisma, mailbox, ucUid);
     return mailbox;
   }
 }

@@ -379,13 +379,7 @@ export class SchedulingService {
     mailbox: { ownerKind: string; ownerKey: string | null },
     ucUid: string | null,
   ): Promise<boolean> {
-    if (mailbox.ownerKind !== 'HUMAN') return true;
-    if (!mailbox.ownerKey || !ucUid) return false;
-    if (mailbox.ownerKey === ucUid) return true;
-    const u = await tx.user.findFirst({
-      where: { OR: [{ keycloakId: ucUid }, { id: ucUid }] },
-    });
-    return !!u && (mailbox.ownerKey === u.keycloakId || mailbox.ownerKey === u.id);
+    return mayActThroughMailbox(tx, mailbox, ucUid);
   }
 
   private normalizePayload(raw: unknown): ScheduledSendPayload | null {

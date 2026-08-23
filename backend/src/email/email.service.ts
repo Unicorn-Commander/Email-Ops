@@ -260,16 +260,7 @@ export class EmailService {
     mailbox: { ownerKind: string; ownerKey: string | null },
     ucUid: string | null,
   ): Promise<boolean> {
-    if ((mailbox.ownerKind as string) !== 'HUMAN') return true; // SHARED/AGENT = workspace resource
-    if (!mailbox.ownerKey || !ucUid) return false;
-    if (mailbox.ownerKey === ucUid) return true;
-    // ownerKey is canonically the keycloakId, but ucUid can arrive as the local
-    // User.id (auth-path dependent) — resolve the caller by EITHER identity and
-    // accept a match on either, so a legitimate owner is never falsely fenced out.
-    const u = await this.prisma.user.findFirst({
-      where: { OR: [{ keycloakId: ucUid }, { id: ucUid }] },
-    });
-    return !!u && (mailbox.ownerKey === u.keycloakId || mailbox.ownerKey === u.id);
+    return mayActThroughMailbox(this.prisma, mailbox, ucUid);
   }
 
   // ── 1. list_threads_with_contact ───────────────────────────────────────
