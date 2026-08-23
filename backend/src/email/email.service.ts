@@ -83,6 +83,7 @@ import {
   splitRecipients,
 } from './autonomy';
 import { mapWithConcurrency, withTimeout } from '../common/async/concurrency';
+import { mayActThroughMailbox } from '../common/mailbox/mailbox-fence';
 import { ApprovalPendingNotice, StableNotifierService } from '../notify/stable-notifier.service';
 
 /**

@@ -13,6 +13,7 @@ import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { ucUidOf } from '../common/workspace/workspace.util';
+import { mayActThroughMailbox } from '../common/mailbox/mailbox-fence';
 import {
   ScheduledSendPayload,
   ScheduledSendView,
