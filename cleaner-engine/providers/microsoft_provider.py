@@ -101,6 +101,12 @@ class MicrosoftGraphProvider(EmailProvider):
         self._handle_throttle(resp)
         return resp
 
+    def _graph_patch(self, path: str, json_body: dict = None) -> requests.Response:
+        url = f'{GRAPH_BASE}{path}'
+        resp = requests.patch(url, headers=self._headers(), json=json_body, timeout=30)
+        self._handle_throttle(resp)
+        return resp
+
     def _handle_throttle(self, resp: requests.Response):
         """Handle 429 throttling with Retry-After."""
         if resp.status_code == 429:
@@ -463,7 +469,34 @@ class MicrosoftGraphProvider(EmailProvider):
         bcc: Optional[List[str]] = None,
         body_html: Optional[str] = None,
     ) -> SendResult:
-        """Send a new message or reply (via /me/sendMail)."""
+        """Send a new message, or a THREADED reply when a reply target is given.
+
+        With ``in_reply_to_thread_id`` set, the reply is built server-side via
+        ``POST /me/messages/{id}/createReply`` so Graph stamps In-Reply-To /
+        References and Outlook threads it into the conversation; we then PATCH
+        the draft's body/recipients and ``/send`` it. Without a target (or when
+        the target cannot be resolved) we fall back to the plain
+        ``/me/sendMail`` lane, which cannot thread.
+        """
+        if in_reply_to_thread_id:
+            target_id = self._resolve_reply_target(in_reply_to_thread_id)
+            if target_id:
+                reply = self._send_reply(
+                    target_id=target_id,
+                    in_reply_to_thread_id=in_reply_to_thread_id,
+                    from_addr=from_addr,
+                    to_addr=to_addr,
+                    subject=subject,
+                    body=body,
+                    cc=cc,
+                    bcc=bcc,
+                    body_html=body_html,
+                )
+                if reply is not None:
+                    return reply
+            # Unresolvable / un-creatable reply target: degrade to the plain
+            # send lane (previous behavior) rather than refusing to send.
+
         message: Dict[str, Any] = {
             'subject': subject or '',
             'body': {
@@ -488,6 +521,119 @@ class MicrosoftGraphProvider(EmailProvider):
                 thread_id=in_reply_to_thread_id,
             )
         return SendResult(accepted=False, reason=f'graph_status_{resp.status_code}')
+
+    def _resolve_reply_target(self, reply_ref: str) -> Optional[str]:
+        """Resolve a caller-supplied reply reference to a Graph MESSAGE id.
+
+        Callers hand us whatever they stored: sometimes a message id, more
+        often the conversationId our own thread listings expose. Try the
+        direct message read first; otherwise treat it as a conversationId and
+        pick the newest message of that conversation. Returns None when
+        neither resolves.
+        """
+        try:
+            data = self._graph_get(f'/me/messages/{reply_ref}', params={'$select': 'id'})
+            if data.get('id'):
+                return data['id']
+        except Exception:
+            pass
+        # OData escapes a single quote inside a string literal by doubling it
+        # (same $filter injection guard as get_thread).
+        safe_ref = reply_ref.replace("'", "''")
+        try:
+            data = self._graph_get('/me/messages', params={
+                '$filter': f"conversationId eq '{safe_ref}'",
+                '$select': 'id,receivedDateTime',
+                # NOTE: deliberately NO $orderby -- Graph 400s when $orderby
+                # names a property other than the filtered one, so we sort
+                # client-side (same as get_thread).
+                '$top': 50,
+            })
+        except Exception:
+            return None
+        messages = data.get('value', [])
+        if not messages:
+            return None
+        # receivedDateTime is ISO-8601, so a lexical sort is chronological.
+        messages.sort(key=lambda m: m.get('receivedDateTime') or '')
+        return messages[-1].get('id')
+
+    def _send_reply(
+        self,
+        target_id: str,
+        in_reply_to_thread_id: str,
+        from_addr: str,
+        to_addr: str,
+        subject: str,
+        body: str,
+        cc: Optional[List[str]] = None,
+        bcc: Optional[List[str]] = None,
+        body_html: Optional[str] = None,
+    ) -> Optional[SendResult]:
+        """createReply -> PATCH -> send.
+
+        Returns None when the reply draft cannot even be created (the caller
+        then falls back to plain sendMail); past that point failures return an
+        accepted=False SendResult instead, because falling back after a
+        partially-executed reply could double-send.
+        """
+        create = self._graph_post(f'/me/messages/{target_id}/createReply')
+        if create.status_code not in (200, 201):
+            return None
+        try:
+            draft = create.json() or {}
+        except ValueError:
+            draft = {}
+        draft_id = draft.get('id')
+        if not draft_id:
+            return None
+
+        patch_body: Dict[str, Any] = {
+            'body': {
+                'contentType': 'HTML' if body_html else 'Text',
+                'content': body_html if body_html else (body or ''),
+            },
+            # createReply addresses the SENDER of the target message; a bump
+            # replies to our own sent message, so always pin the recipients
+            # the caller asked for.
+            'toRecipients': [{'emailAddress': {'address': to_addr}}],
+        }
+        if subject:
+            patch_body['subject'] = subject
+        if cc:
+            patch_body['ccRecipients'] = [{'emailAddress': {'address': a}} for a in cc if a]
+        if bcc:
+            patch_body['bccRecipients'] = [{'emailAddress': {'address': a}} for a in bcc if a]
+        if from_addr:
+            account = self._account_address()
+            if account and from_addr.strip().lower() != account:
+                # Same SendAs semantics as create_draft: set it explicitly so
+                # Graph can accept or refuse EXPLICITLY.
+                patch_body['from'] = {'emailAddress': {'address': from_addr}}
+
+        patched = self._graph_patch(f'/me/messages/{draft_id}', json_body=patch_body)
+        if patched.status_code != 200:
+            # Best-effort cleanup of the orphan reply draft.
+            try:
+                self._graph_delete(f'/me/messages/{draft_id}')
+            except Exception:
+                pass
+            return SendResult(accepted=False, reason=f'graph_reply_patch_{patched.status_code}')
+        try:
+            updated = patched.json() or {}
+        except ValueError:
+            updated = {}
+
+        sent = self._graph_post(f'/me/messages/{draft_id}/send')
+        if sent.status_code not in (200, 202):
+            return SendResult(accepted=False, reason=f'graph_reply_send_{sent.status_code}')
+        # NB: Graph message ids are folder-scoped and can change once the sent
+        # message lands in Sent Items; conversationId is the durable thread key.
+        return SendResult(
+            accepted=True,
+            provider_message_id=updated.get('id') or draft_id,
+            thread_id=updated.get('conversationId') or in_reply_to_thread_id,
+        )
 
     def create_draft(
         self,
