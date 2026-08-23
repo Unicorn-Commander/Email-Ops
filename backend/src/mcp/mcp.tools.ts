@@ -683,7 +683,7 @@ export class EmailOpsTools {
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
-    if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    if (role !== WorkspaceRole.OWNER) throw new ForbiddenException('ensureMailDomain: requires workspace OWNER role');
     const binding = await this.mailDomains.bindDomain(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -703,7 +703,7 @@ export class EmailOpsTools {
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
-    if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    if (role !== WorkspaceRole.OWNER) throw new ForbiddenException('removeMailDomain: requires workspace OWNER role');
     const binding = await this.mailDomains.assertWorkspaceOwnsDomain(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -723,7 +723,7 @@ export class EmailOpsTools {
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
-    if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    if (role !== WorkspaceRole.OWNER) throw new ForbiddenException('setMailboxQuota: requires workspace OWNER role');
     await this.mailDomains.assertWorkspaceOwnsDomain(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -751,7 +751,7 @@ export class EmailOpsTools {
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
-    if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    if (role !== WorkspaceRole.OWNER) throw new ForbiddenException('removeMailboxEngine: requires workspace OWNER role');
     await this.mailDomains.assertWorkspaceOwnsDomain(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
