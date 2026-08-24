@@ -74,17 +74,25 @@ export class EngineMailProvider extends MailProviderPort {
     const auth = await this.authFor(mailbox);
     if (!auth) return empty;
 
-    // Map app search operators onto Gmail `q` syntax (Microsoft maps a subset
-    // itself and returns search_supported:false for free-text it cannot honour).
+    // Query mapping is PER PROVIDER. Gmail wants app operators rewritten into
+    // Gmail `q` syntax. Microsoft must receive the RAW query and parse it itself
+    // (its provider maps pure free-text onto Graph $search and returns
+    // search_supported:false for operators it cannot honour) — handing Microsoft
+    // a Gmail-syntax string means its parser never engages, so the filter is lost
+    // AND the honest capability signal can never fire. Send each provider the
+    // query shape it actually understands.
     const rawQuery = opts.query?.trim() || '';
-    const gmailQ = rawQuery ? buildGmailQuery(parseSearchQuery(rawQuery)) : '';
+    const providerQuery =
+      auth.provider === 'microsoft'
+        ? rawQuery || null
+        : (rawQuery ? buildGmailQuery(parseSearchQuery(rawQuery)) : '') || null;
 
     const res = await this.engine.listMailThreads(
       auth.provider,
       auth.credentials,
       opts.folder,
       opts.limit,
-      gmailQ || null,
+      providerQuery,
       pageToken,
     );
     if (!res) return empty;

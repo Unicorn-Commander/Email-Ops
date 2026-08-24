@@ -160,6 +160,29 @@ describe('EngineMailProvider', () => {
     expect(out.threads).toHaveLength(1);
   });
 
+  it('microsoft receives the RAW query (NOT Gmail-mapped) so its own parser can honour or reject it', async () => {
+    const { provider, engine } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'mtok',
+      threads: { threads: [] },
+    });
+    await provider.listInbox(gmailbox({ provider: 'microsoft', kind: 'microsoft' }), {
+      folder: 'inbox',
+      limit: 10,
+      query: 'is:flagged',
+    });
+    // The raw operator query must reach the Microsoft provider untouched — a
+    // Gmail-mangled string would stop it raising the honest "not supported".
+    expect(engine.listMailThreads).toHaveBeenCalledWith(
+      'microsoft',
+      { access_token: 'mtok' },
+      'inbox',
+      10,
+      'is:flagged',
+      null,
+    );
+  });
+
   it('listInbox refuses numeric offset without pageToken (honest no-more-pages)', async () => {
     const { provider, engine } = make({
       user: { keycloakId: 'kc-sub-1' },
