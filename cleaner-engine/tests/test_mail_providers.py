@@ -330,7 +330,7 @@ class _FakeResp:
             raise RuntimeError(f"http {self.status_code}")
 
 
-def _make_ms(monkeypatch, get_router=None, post_router=None):
+def _make_ms(monkeypatch, get_router=None, post_router=None, patch_router=None, delete_router=None):
     provider = MicrosoftGraphProvider.__new__(MicrosoftGraphProvider)
     provider.client_id = ""
     provider.client_secret = ""
@@ -346,8 +346,18 @@ def _make_ms(monkeypatch, get_router=None, post_router=None):
         sink.append(("POST", url, json))
         return (post_router or (lambda u, b: _FakeResp(status_code=202)))(url, json)
 
+    def fake_patch(url, headers=None, json=None, timeout=None):
+        sink.append(("PATCH", url, json))
+        return (patch_router or (lambda u, b: _FakeResp()))(url, json)
+
+    def fake_delete(url, headers=None, timeout=None):
+        sink.append(("DELETE", url, None))
+        return (delete_router or (lambda u: _FakeResp(status_code=204)))(url)
+
     monkeypatch.setattr("providers.microsoft_provider.requests.get", fake_get)
     monkeypatch.setattr("providers.microsoft_provider.requests.post", fake_post)
+    monkeypatch.setattr("providers.microsoft_provider.requests.patch", fake_patch)
+    monkeypatch.setattr("providers.microsoft_provider.requests.delete", fake_delete)
     return provider, sink
 
 
@@ -674,3 +684,136 @@ def test_ms_list_threads_unsupported_operator_raises(monkeypatch):
     provider, _ = _make_ms(monkeypatch, get_router=get_router)
     with pytest.raises(ValueError, match="microsoft search not supported"):
         provider.list_threads(folder="inbox", limit=10, query="is:flagged")
+
+
+# ---------------------------------------------------------------------------
+# Microsoft Graph reply threading (createReply -> PATCH -> send)
+# ---------------------------------------------------------------------------
+
+def _reply_routers(captured, resolve_direct=True, patch_status=200, send_status=202):
+    """Routers that serve the reply lane: message-id probe (or conversation
+    listing), createReply, PATCH, /send."""
+
+    def get_router(url, params):
+        if url.endswith("/me/messages/m1"):
+            if resolve_direct:
+                return _FakeResp(200, {"id": "m1"})
+            return _FakeResp(404)
+        if url.endswith("/me/messages"):
+            # conversation fallback: newest message wins (client-side sort)
+            return _FakeResp(200, {"value": [
+                {"id": "m_old", "receivedDateTime": "2026-08-01T00:00:00Z"},
+                {"id": "m_new", "receivedDateTime": "2026-08-20T00:00:00Z"},
+            ]})
+        return _FakeResp(404)
+
+    def post_router(url, body):
+        if url.endswith("/createReply"):
+            captured["create_url"] = url
+            return _FakeResp(201, {"id": "draft1", "conversationId": "conv9"})
+        if url.endswith("/me/messages/draft1/send"):
+            captured["send_url"] = url
+            return _FakeResp(status_code=send_status)
+        captured["unexpected_post"] = url
+        return _FakeResp(status_code=202)
+
+    def patch_router(url, body):
+        captured["patch_url"] = url
+        captured["patch_body"] = body
+        return _FakeResp(patch_status, {"id": "draft1", "conversationId": "conv9"})
+
+    return get_router, post_router, patch_router
+
+
+def test_ms_send_reply_threads_via_createreply(monkeypatch):
+    captured = {}
+    get_router, post_router, patch_router = _reply_routers(captured)
+    provider, sink = _make_ms(
+        monkeypatch, get_router=get_router, post_router=post_router, patch_router=patch_router
+    )
+
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Re: Hello",
+        body="bump text",
+        in_reply_to_thread_id="m1",
+    )
+
+    assert result.accepted is True
+    assert result.provider_message_id == "draft1"
+    assert result.thread_id == "conv9"  # REAL conversationId, not the echo
+    assert captured["create_url"].endswith("/me/messages/m1/createReply")
+    assert captured["send_url"].endswith("/me/messages/draft1/send")
+    # PATCH pins body + recipients (createReply would address ourselves on a
+    # reply to our own sent message).
+    assert captured["patch_body"]["body"]["content"] == "bump text"
+    assert captured["patch_body"]["toRecipients"][0]["emailAddress"]["address"] == "you@example.com"
+    assert captured["patch_body"]["subject"] == "Re: Hello"
+    # the plain send lane must NOT be used
+    assert not any(u.endswith("/me/sendMail") for verb, u, _ in sink if verb == "POST")
+
+
+def test_ms_send_reply_resolves_conversation_id_to_newest_message(monkeypatch):
+    captured = {}
+    get_router, post_router, patch_router = _reply_routers(captured, resolve_direct=False)
+    provider, _ = _make_ms(
+        monkeypatch, get_router=get_router, post_router=post_router, patch_router=patch_router
+    )
+
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Re: Hello",
+        body="bump",
+        in_reply_to_thread_id="m1",  # unresolvable as a message id -> treated as conversationId
+    )
+
+    assert result.accepted is True
+    assert captured["create_url"].endswith("/me/messages/m_new/createReply")
+
+
+def test_ms_send_reply_patch_failure_cleans_up_without_sendmail_fallback(monkeypatch):
+    captured = {}
+    get_router, post_router, patch_router = _reply_routers(captured, patch_status=400)
+    provider, sink = _make_ms(
+        monkeypatch, get_router=get_router, post_router=post_router, patch_router=patch_router
+    )
+
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="s",
+        body="b",
+        in_reply_to_thread_id="m1",
+    )
+
+    assert result.accepted is False
+    assert result.reason == "graph_reply_patch_400"
+    # the orphan reply draft is cleaned up, and we never double-send
+    assert any(u.endswith("/me/messages/draft1") for verb, u, _ in sink if verb == "DELETE")
+    assert not any(u.endswith("/me/sendMail") for verb, u, _ in sink if verb == "POST")
+
+
+def test_ms_send_without_reply_target_posts_sendmail(monkeypatch):
+    captured = {}
+
+    def post_router(url, body):
+        captured["url"] = url
+        captured["body"] = body
+        return _FakeResp(status_code=202)
+
+    provider, sink = _make_ms(monkeypatch, post_router=post_router)
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Hello",
+        body="body text",
+    )
+
+    assert result.accepted is True
+    assert result.provider_message_id is None
+    assert result.thread_id is None
+    assert captured["url"].endswith("/me/sendMail")
+    # no reply-lane traffic at all
+    assert not any(verb in ("PATCH", "DELETE") for verb, _, _ in sink)

@@ -302,6 +302,7 @@ export class EmailOpsTools {
       in_reply_to_thread_id?: string;
       external_source: string;
       external_ref: string;
+      from_address?: string;
     },
   ): Promise<unknown> {
     const workspaceId = await this.resolve(user, args.workspace_id);
@@ -346,6 +347,12 @@ export class EmailOpsTools {
       externalSource: args.external_source,
       externalRef: args.external_ref,
       draftedBy: args.external_source,
+      // Explicit send identity. The service resolves it through the routing rule
+      // (Graph for M365, James for the sovereign domains) and applies the SAME
+      // send-as authorization as the web client: a HUMAN mailbox may only be used
+      // by its owner, SHARED by any member, an AGENT mailbox never. An address the
+      // workspace does not serve is REFUSED, not silently swapped for the default.
+      fromAddress: args.from_address ?? null,
     });
   }
 

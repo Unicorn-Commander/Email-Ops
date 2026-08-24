@@ -51,7 +51,8 @@ import { MAX_TARGET_ROWS } from '../connected-accounts/cleanup-targets';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { StalwartDraftRequest, StalwartMailFolder, StalwartMessageDetail, StalwartThread } from '../stalwart/stalwart.types';
-import { MailProviderPort } from '../mail-provider/mail-provider.port';
+import { MailProviderDraftRequest, MailProviderPort } from '../mail-provider/mail-provider.port';
+import { routeFromAddress, routingTable } from '../mail-provider/mail-routing';
 import {
   AGENT_REPLY_RUNTIME_SOURCE,
   AgentInboxDetailView,
@@ -158,8 +159,20 @@ interface EngineSendResult {
  * (the external send, outside any tx). `done` short-circuits (idempotent hit or a
  * staged draft — nothing to send); `send` carries the QUEUED row + the plan.
  */
+/**
+ * A staged draft that should ALSO be mirrored into the external provider's own
+ * Drafts folder, so the human reviews it in their real client (Outlook/Gmail).
+ * Carried out of the tx because the mirror is an external call. The mirror is a
+ * REVIEW COPY only — the agent-inbox item stays the approval choke point.
+ */
+type ComposeDraftMirror = {
+  inboxItemId: string;
+  mailbox: MailboxAccount;
+  req: MailProviderDraftRequest;
+};
+
 type ComposePrep =
-  | { done: MessageComposeView; notify?: ApprovalPendingNotice }
+  | { done: MessageComposeView; notify?: ApprovalPendingNotice; mirror?: ComposeDraftMirror }
   | {
       send: {
         messageId: string;
@@ -1405,11 +1418,17 @@ export class EmailService {
         // latent bug where an agent with a mailbox still sent from the ws default.
         // An explicit from-mailbox (the human client picks which inbox to send as)
         // wins when it's in-workspace; otherwise resolve the agent/default identity.
+        // Two ways to name it: the mailbox id (what the web client has) or the
+        // ADDRESS (what an agent/caller actually knows — "send as
+        // aaron@magicunicorn.tech"). The address form resolves through the
+        // explicit routing rule, which ALSO decides the lane (Graph vs James) and
+        // REFUSES an unregistered address instead of silently falling back to the
+        // workspace default. Same authorization gate applies to both forms.
         const explicitFrom = input.fromMailboxAccountId
           ? await tx.mailboxAccount.findFirst({
               where: { id: input.fromMailboxAccountId, workspaceId },
             })
-          : null;
+          : await this.resolveFromAddress(tx, workspaceId, input.fromAddress);
         // Send-as authorization: a human client may send AS a SHARED mailbox or one
         // they personally own — never spoof another person's (or an agent's) identity.
         // (The agent path doesn't set fromMailboxAccountId; it uses resolveSendMailbox.)
@@ -1563,7 +1582,30 @@ export class EmailService {
                 subject: input.subject,
               }
             : undefined;
-          return { done: this.composeView(msg), notify };
+          // Mirror the staged draft into the EXTERNAL provider's own Drafts
+          // folder (Graph POST /me/messages for M365) so the approver reads the
+          // exact text in Outlook rather than only in the agent inbox. Deferred
+          // out of the tx — it is an external call, and it must never be able to
+          // roll back a draft that is already safely staged. Sovereign (James)
+          // mailboxes are unaffected: no mirror, behaviour byte-identical.
+          const mirror: ComposeDraftMirror | undefined =
+            mailbox && this.mailProvider.handles(mailbox)
+              ? {
+                  inboxItemId: inboxItem.id,
+                  mailbox,
+                  req: {
+                    from: fromAddress ?? '',
+                    to: input.toAddress,
+                    subject: input.subject,
+                    body: input.body,
+                    bodyHtml: input.bodyHtml ?? null,
+                    cc: input.cc,
+                    bcc: input.bcc,
+                    inReplyToThreadId: input.inReplyToThreadId ?? null,
+                  },
+                }
+              : undefined;
+          return { done: this.composeView(msg), notify, mirror };
         }
 
         // Wave 7: the transparency footer rides ONLY on an AUTONOMOUS agent send
@@ -1654,6 +1696,7 @@ export class EmailService {
     // ping — a notify failure can no longer roll back mail state.
     if ('done' in prep) {
       if (prep.notify) this.fireApprovalNotice(prep.notify);
+      if (prep.mirror) await this.mirrorDraftToProvider(workspaceId, ucUid, prep.mirror);
       return prep.done;
     }
 
@@ -2188,7 +2231,13 @@ export class EmailService {
       );
     }
 
-    // The send was accepted — a SHORT tx to stamp SENT + flip the item to APPROVED.
+    // The send was accepted — the mirrored review copy in the user's real Drafts
+    // folder is now stale (it would read as an unsent duplicate of mail that
+    // already left), so reconcile it. Best-effort, after the send, before the
+    // status tx: a cleanup failure must never un-approve a delivered message.
+    await this.reconcileMirroredDraft(workspaceId, ucUid, prep.itemId, 'approved');
+
+    // A SHORT tx to stamp SENT + flip the item to APPROVED.
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const sent = await this.stampSendResult(tx, prep.messageId, result);
       const updated = await tx.agentInboxItem.update({
@@ -2225,6 +2274,10 @@ export class EmailService {
     itemId: string,
     note?: string | null,
   ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
+    // A rejected draft must not survive as a mirrored copy in the user's real
+    // Drafts folder. Run BEFORE the tx (external call), best-effort; a no-op when
+    // there was no mirror (every sovereign/James draft).
+    await this.reconcileMirroredDraft(workspaceId, ucUid, itemId, 'rejected');
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       // Tenant fence: scope by workspaceId so a foreign item id resolves to null
       // (→ 404) and can NEVER be acted on across tenants. RLS is inert under the
@@ -2619,6 +2672,164 @@ export class EmailService {
    * an unregistered agent / one with no mailbox falls back to the workspace
    * default — so the legacy + federation path is unchanged.
    */
+  /**
+   * Mirror a staged draft into the external provider's Drafts folder and record
+   * the reference on the agent-inbox item, so approve/reject can clean it up.
+   *
+   * STRICTLY best-effort and STRICTLY a review copy:
+   *   - it never sends (Graph POST /me/messages files an isDraft message);
+   *   - it never gates approval (the agent-inbox item is the choke point);
+   *   - a failure is logged and swallowed — the draft is already safely staged,
+   *     and losing the convenience copy must not fail the compose.
+   * The recorded ref is what makes the mirror reconcilable rather than litter.
+   */
+  private async mirrorDraftToProvider(
+    workspaceId: string,
+    ucUid: string | null,
+    mirror: ComposeDraftMirror,
+  ): Promise<void> {
+    try {
+      const res = await this.mailProvider.createDraft(mirror.mailbox, mirror.req);
+      if (!res.created || !res.draftId) {
+        this.logger.warn(
+          `compose_email draft mirror NOT created in ${mirror.mailbox.provider} for inbox item ` +
+            `${mirror.inboxItemId}${res.reason ? ` (${res.reason})` : ''} — the staged draft is unaffected`,
+        );
+        return;
+      }
+      await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+        const item = await tx.agentInboxItem.findFirst({
+          where: { id: mirror.inboxItemId, workspaceId },
+          select: { payload: true },
+        });
+        // Merge — never clobber the wave-7 `policy` payload written at staging.
+        const base =
+          item?.payload && typeof item.payload === 'object' && !Array.isArray(item.payload)
+            ? (item.payload as Record<string, unknown>)
+            : {};
+        await tx.agentInboxItem.update({
+          where: { id: mirror.inboxItemId },
+          data: {
+            payload: {
+              ...base,
+              providerDraft: {
+                provider: mirror.mailbox.provider,
+                mailboxAccountId: mirror.mailbox.id,
+                draftId: res.draftId,
+                webLink: res.webLink ?? null,
+                mirroredAt: new Date().toISOString(),
+              },
+            } as unknown as Prisma.InputJsonValue,
+          },
+        });
+      });
+      this.logger.log(
+        `compose_email draft mirrored into ${mirror.mailbox.provider} Drafts for ` +
+          `${mirror.mailbox.emailAddress} (inbox item ${mirror.inboxItemId})`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `compose_email draft mirror failed for inbox item ${mirror.inboxItemId}: ` +
+          `${(err as Error).message} — the staged draft is unaffected`,
+      );
+    }
+  }
+
+  /** The mirrored-draft reference stored on an agent-inbox item payload, if any. */
+  private providerDraftRefOf(
+    payload: unknown,
+  ): { mailboxAccountId: string; draftId: string } | null {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    const ref = (payload as Record<string, unknown>)['providerDraft'];
+    if (!ref || typeof ref !== 'object' || Array.isArray(ref)) return null;
+    const r = ref as Record<string, unknown>;
+    const draftId = typeof r['draftId'] === 'string' ? r['draftId'] : null;
+    const mailboxAccountId =
+      typeof r['mailboxAccountId'] === 'string' ? r['mailboxAccountId'] : null;
+    return draftId && mailboxAccountId ? { draftId, mailboxAccountId } : null;
+  }
+
+  /**
+   * Delete the mirrored provider draft once the agent-inbox item reaches a
+   * terminal state — APPROVED (the real send already left; a leftover draft
+   * would read as an unsent duplicate) or REJECTED (it must not linger at all).
+   * Best-effort: never throws, never blocks the approval/rejection.
+   */
+  private async reconcileMirroredDraft(
+    workspaceId: string,
+    ucUid: string | null,
+    itemId: string,
+    outcome: 'approved' | 'rejected',
+  ): Promise<void> {
+    try {
+      const row = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+        tx.agentInboxItem.findFirst({
+          where: { id: itemId, workspaceId },
+          select: { payload: true },
+        }),
+      );
+      const ref = this.providerDraftRefOf(row?.payload);
+      if (!ref) return;
+
+      const mailbox = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+        tx.mailboxAccount.findFirst({ where: { id: ref.mailboxAccountId, workspaceId } }),
+      );
+      if (!mailbox) return;
+
+      const ok = await this.mailProvider.deleteDraft(mailbox, ref.draftId);
+      this.logger.log(
+        `agent-inbox item ${itemId} ${outcome}: mirrored ${mailbox.provider} draft cleanup ` +
+          `${ok ? 'OK' : 'FAILED (left in Drafts)'}`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `agent-inbox item ${itemId} ${outcome}: mirrored draft cleanup failed: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Resolve an explicit send-from ADDRESS to its registered mailbox, using the
+   * explicit routing rule (see mail-provider/mail-routing.ts).
+   *
+   * FAILS LOUD on an address the workspace does not serve. That refusal is the
+   * whole point: before this, a caller who wanted to send as
+   * `aaron@magicunicorn.tech` had no way to say so, and the compose silently
+   * resolved to the workspace default (`email-ops@magicunicorn.dev`, James) —
+   * i.e. the mail left from the wrong identity and nothing said a word.
+   *
+   * Returns null when no address was requested (the caller then falls back to
+   * the normal agent/default resolution, unchanged).
+   */
+  private async resolveFromAddress(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    fromAddress: string | null | undefined,
+  ) {
+    // autonomy's normalizeAddress is the superset (it also unwraps
+    // `Name <addr@host>`), so a display-name form routes correctly too.
+    const wanted = normalizeAddress(fromAddress ?? '');
+    if (!wanted) return null;
+
+    const mailboxes = await tx.mailboxAccount.findMany({ where: { workspaceId } });
+    const route = routeFromAddress(wanted, mailboxes);
+    if (!route.ok) {
+      const detail =
+        route.reason === 'mailbox_inactive'
+          ? `The mailbox ${wanted} is inactive.`
+          : `No mailbox is registered for ${wanted} in this workspace. ` +
+            `Registered send identities: ${routingTable(mailboxes)
+              .filter((r) => r.active)
+              .map((r) => `${r.address} (${r.lane})`)
+              .join(', ')}.`;
+      throw new BadRequestException(`Cannot send as ${wanted}. ${detail}`);
+    }
+    this.logger.log(
+      `compose_email from-address ${wanted} routed to lane '${route.lane}' (mailbox ${route.mailbox.id})`,
+    );
+    return mailboxes.find((m) => m.id === route.mailbox.id) ?? null;
+  }
+
   private async resolveSendMailbox(
     tx: WorkspaceTxClient,
     workspaceId: string,
@@ -2895,6 +3106,12 @@ export class EmailService {
         to: req.toAddress,
         subject: req.subject,
         body: req.body,
+        // cc/bcc/html ride the external lane too. They used to be dropped here
+        // silently, which is data loss on its own and would additionally make an
+        // approved draft send to fewer people than the approver was shown.
+        bodyHtml: req.bodyHtml ?? null,
+        cc: req.cc,
+        bcc: req.bcc,
         inReplyToThreadId: req.inReplyToThreadId,
       });
       return {

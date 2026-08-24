@@ -9,6 +9,7 @@ import {
   EngineAccountProfile,
   EngineInboxStats,
   EngineListMessagesResult,
+  EngineMailDraftResult,
   EngineMailFolder,
   EngineMailSendResult,
   EngineMailThreadActionResult,
@@ -468,6 +469,9 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       to: string;
       subject: string;
       body: string;
+      bodyHtml?: string | null;
+      cc?: string[];
+      bcc?: string[];
       inReplyToThreadId?: string | null;
     },
   ): Promise<EngineMailSendResult | null> {
@@ -478,7 +482,50 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       to: message.to,
       subject: message.subject,
       body: message.body,
+      body_html: message.bodyHtml ?? null,
+      cc: message.cc?.length ? message.cc : null,
+      bcc: message.bcc?.length ? message.bcc : null,
       in_reply_to_thread_id: message.inReplyToThreadId ?? null,
+    });
+  }
+
+  async createMailDraft(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    message: {
+      from: string;
+      to: string;
+      subject: string;
+      body: string;
+      bodyHtml?: string | null;
+      cc?: string[];
+      bcc?: string[];
+      inReplyToThreadId?: string | null;
+    },
+  ): Promise<EngineMailDraftResult | null> {
+    return this.postJson<EngineMailDraftResult>('/mail/draft', {
+      provider,
+      credentials,
+      from: message.from,
+      to: message.to,
+      subject: message.subject,
+      body: message.body,
+      body_html: message.bodyHtml ?? null,
+      cc: message.cc?.length ? message.cc : null,
+      bcc: message.bcc?.length ? message.bcc : null,
+      in_reply_to_thread_id: message.inReplyToThreadId ?? null,
+    });
+  }
+
+  async deleteMailDraft(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    draftId: string,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>('/mail/draft/delete', {
+      provider,
+      credentials,
+      draft_id: draftId,
     });
   }
 }

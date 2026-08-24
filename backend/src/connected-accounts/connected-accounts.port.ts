@@ -18,6 +18,7 @@ import {
   EngineAccountProfile,
   EngineInboxStats,
   EngineListMessagesResult,
+  EngineMailDraftResult,
   EngineMailFolder,
   EngineMailSendResult,
   EngineMailThreadActionResult,
@@ -189,7 +190,37 @@ export abstract class ConnectedAccountsEnginePort {
       to: string;
       subject: string;
       body: string;
+      bodyHtml?: string | null;
+      cc?: string[];
+      bcc?: string[];
       inReplyToThreadId?: string | null;
     },
   ): Promise<EngineMailSendResult | null>;
+
+  /**
+   * Create a REAL draft in the provider's Drafts folder. SENDS NOTHING — this is
+   * the review copy the human opens in their own Outlook/Gmail while the
+   * agent-inbox item awaits approval. null when the engine is dormant.
+   */
+  abstract createMailDraft(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    message: {
+      from: string;
+      to: string;
+      subject: string;
+      body: string;
+      bodyHtml?: string | null;
+      cc?: string[];
+      bcc?: string[];
+      inReplyToThreadId?: string | null;
+    },
+  ): Promise<EngineMailDraftResult | null>;
+
+  /** Delete a mirrored draft (reconciles the mirror after approve/reject). */
+  abstract deleteMailDraft(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    draftId: string,
+  ): Promise<EngineMailThreadActionResult | null>;
 }

@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
@@ -197,5 +197,76 @@ describe('EmailService — cross-tenant + send-identity guards (integration)', (
         fromMailboxAccountId: mb.id,
       }),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  // ── from_address (the M365 send-identity lane) ────────────────────────────
+  // compose_email gained an ADDRESS form of the send-identity choice so a caller
+  // can say "send as aaron@magicunicorn.tech". It must be exactly as guarded as
+  // the mailbox-id form, and must FAIL LOUD rather than silently falling back to
+  // the workspace default (which is how a .tech outreach mail would quietly leave
+  // as @magicunicorn.dev).
+
+  it('refuses from_address naming a HUMAN mailbox the caller does not own (no spoofing via the address form)', async () => {
+    await prisma.mailboxAccount.create({
+      data: {
+        workspaceId: A,
+        emailAddress: 'chair@xt.test',
+        ownerKind: 'HUMAN',
+        ownerKey: 'not-the-caller',
+        kind: 'human',
+      },
+    });
+    await expect(
+      service.composeEmail(A, 'uc-attacker', {
+        contactId: null,
+        toAddress: 'x@y.test',
+        subject: 's',
+        body: 'b',
+        mode: 'send',
+        externalSource: 'test',
+        externalRef: `spoof-addr-${Date.now()}`,
+        fromAddress: 'chair@xt.test',
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('REFUSES an unregistered from_address instead of silently using the workspace default', async () => {
+    await expect(
+      service.composeEmail(A, 'uc-a', {
+        contactId: null,
+        toAddress: 'x@y.test',
+        subject: 's',
+        body: 'b',
+        mode: 'draft',
+        externalSource: 'test',
+        externalRef: `unrouted-${Date.now()}`,
+        fromAddress: 'nobody@not-a-domain-we-serve.test',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('routes a from_address the caller DOES own, stamping that identity on the record', async () => {
+    const mine = await prisma.mailboxAccount.create({
+      data: {
+        workspaceId: A,
+        emailAddress: 'me@xt.test',
+        ownerKind: 'HUMAN',
+        ownerKey: 'uc-owner',
+        kind: 'human',
+      },
+    });
+    const res = await service.composeEmail(A, 'uc-owner', {
+      contactId: null,
+      toAddress: 'x@y.test',
+      subject: 's',
+      body: 'b',
+      mode: 'draft',
+      externalSource: 'test',
+      externalRef: `owned-${Date.now()}`,
+      fromAddress: '  ME@XT.TEST ', // case/space insensitive
+    });
+    const row = await prisma.emailMessage.findFirst({ where: { id: (res as { id: string }).id } });
+    expect(row!.fromAddress).toBe('me@xt.test');
+    expect(row!.mailboxAccountId).toBe(mine.id);
   });
 });

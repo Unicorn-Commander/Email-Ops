@@ -310,8 +310,7 @@
     },
     {
       "name": "compose_email",
-      "description": "Compose an outbound email to a customer’s contact. mode=send queues delivery now (Apache James, or Postmark for the transactional high-rep lane); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires the email-ops entitlement; a CROSS-APP compose (external_source=customer-ops) additionally requires customer-ops. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created.",
-      "input_schema": {
+      "description": "Compose an outbound email to a customer’s contact. mode=send queues delivery now (Apache James, or Postmark for the transactional high-rep lane); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires the email-ops entitlement; a CROSS-APP compose (external_source=customer-ops) additionally requires customer-ops. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created. SEND IDENTITY: pass from_address to choose which registered mailbox it leaves from; the lane follows the mailbox — Microsoft 365 addresses go out through Microsoft Graph, sovereign domains through Apache James (Postmark for the transactional high-rep lane). Omit from_address to use the agent’s own mailbox or the workspace default, as before.",      "input_schema": {
         "type": "object",
         "properties": {
           "workspace_id": {
@@ -355,6 +354,11 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 256
+          },
+          "from_address": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 320
           }
         },
         "required": [

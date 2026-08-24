@@ -25,6 +25,11 @@ export interface MailProviderSendRequest {
   to: string;
   subject: string;
   body: string;
+  /** HTML alternative. Sent as the Graph/MIME HTML body when present. */
+  bodyHtml?: string | null;
+  /** Carried on the external lane too — a silently dropped cc/bcc is data loss. */
+  cc?: string[];
+  bcc?: string[];
   inReplyToThreadId?: string | null;
 }
 
@@ -69,6 +74,26 @@ export interface MailProviderListOpts {
   offset?: number;
 }
 
+/**
+ * What to put in a provider-side draft. Identical to the send request — the
+ * draft and the send it becomes MUST carry the same fields, or the human would
+ * approve a draft showing recipients the send then quietly omits.
+ */
+export type MailProviderDraftRequest = MailProviderSendRequest;
+
+/**
+ * Result of mirroring a staged draft into the provider's own Drafts folder.
+ * `created:false` is the honest degrade — the caller must not claim a mirror
+ * that does not exist.
+ */
+export interface MailProviderDraftResult {
+  created: boolean;
+  draftId: string | null;
+  threadId: string | null;
+  webLink: string | null;
+  reason: string | null;
+}
+
 export abstract class MailProviderPort {
   /** True for mailboxes this port serves (external providers: gmail / microsoft). */
   abstract handles(mailbox: Pick<MailboxAccount, 'provider'>): boolean;
@@ -87,6 +112,26 @@ export abstract class MailProviderPort {
     mailbox: MailboxAccount,
     req: MailProviderSendRequest,
   ): Promise<MailProviderSendResult>;
+
+  /**
+   * Mirror a staged draft into the provider's REAL Drafts folder so the human
+   * reviews it in their own client (Outlook / Gmail) before approving.
+   *
+   * This is NOT a send and NOT an approval: the agent-inbox item stays the
+   * approval choke point, and this copy exists only to be read. created:false
+   * when not connected / the provider has no draft lane — never throws.
+   */
+  abstract createDraft(
+    mailbox: MailboxAccount,
+    req: MailProviderDraftRequest,
+  ): Promise<MailProviderDraftResult>;
+
+  /**
+   * Delete a previously mirrored draft — reconciles the mirror once the
+   * agent-inbox item is approved (the real send happened) or rejected (the
+   * draft must not linger). false when not connected; never throws.
+   */
+  abstract deleteDraft(mailbox: MailboxAccount, draftId: string): Promise<boolean>;
 
   // Thread-level TRIAGE verbs — make Archive/Trash/Spam/Inbox-restore/read-state
   // REAL in the external mailbox. The disposition overlay stays the UI's source

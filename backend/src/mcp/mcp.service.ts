@@ -351,8 +351,12 @@ export class McpService {
           'queues NO second send. Requires the email-ops entitlement; a CROSS-APP compose ' +
           '(external_source=customer-ops) additionally requires customer-ops. ' +
           'Email-Ops stores no contact record (contact_id is a thin reference) and is ' +
-          'the system-of-record for the message it created.',
-        inputSchema: {
+          'the system-of-record for the message it created. ' +
+          'SEND IDENTITY: pass from_address to choose which registered mailbox it leaves ' +
+          'from; the lane follows the mailbox — Microsoft 365 addresses go out through ' +
+          'Microsoft Graph, sovereign domains through Apache James (Postmark for the ' +
+          'transactional high-rep lane). Omit from_address to use the agent’s own mailbox ' +
+          'or the workspace default, as before.',        inputSchema: {
           workspace_id: z.string().optional(),
           contact_id: z.string().optional(),
           to_address: z.string().min(1).max(320),
@@ -362,6 +366,10 @@ export class McpService {
           in_reply_to_thread_id: z.string().max(200).optional(),
           external_source: z.string().min(1).max(64),
           external_ref: z.string().min(1).max(256),
+          // The send identity, by address. Authorized exactly like the web client's
+          // mailbox picker (own HUMAN box or a SHARED box; never an agent's), and
+          // REFUSED outright when the workspace has no mailbox for that address.
+          from_address: z.string().min(3).max(320).optional(),
         },
       },
       async (args: any) => wrap(await tools.composeEmail(user, args)),

@@ -262,6 +262,23 @@ export interface EngineMailSendResult {
 }
 
 /**
+ * Result of creating a REAL draft in the external provider's Drafts folder.
+ * A draft SENDS NOTHING — it is the review copy the human sees in their own
+ * Outlook/Gmail while the agent-inbox item waits for approval.
+ *
+ * `created:false` + `reason` is the honest degrade (provider unusable, provider
+ * has no draft lane, Graph refused). The caller must never report a mirror it
+ * did not actually create.
+ */
+export interface EngineMailDraftResult {
+  created: boolean;
+  draft_id: string | null;
+  thread_id: string | null;
+  web_link: string | null;
+  reason: string | null;
+}
+
+/**
  * Result of a thread-level TRIAGE verb (archive / trash / spam / inbox-restore /
  * read) applied in the REAL external mailbox; `moved` = messages the batch
  * touched. `ok:false` is the engine's degrade-clean answer (unusable provider /

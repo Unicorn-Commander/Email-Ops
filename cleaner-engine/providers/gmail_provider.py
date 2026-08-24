@@ -415,14 +415,28 @@ class GmailProvider(EmailProvider):
         subject: str,
         body: str,
         in_reply_to_thread_id: Optional[str] = None,
+        cc: Optional[List[str]] = None,
+        bcc: Optional[List[str]] = None,
+        body_html: Optional[str] = None,
     ) -> SendResult:
         """Send a new message or reply within a thread."""
         mime = MimeMessage()
         if from_addr:
             mime['From'] = from_addr
         mime['To'] = to_addr
+        if cc:
+            mime['Cc'] = ', '.join([a for a in cc if a])
+        # Bcc is deliberately NOT written as a header — Gmail strips it from the
+        # delivered copy, and writing it would leak the blind list to every
+        # recipient. It rides in the envelope via the raw send instead.
+        if bcc:
+            mime['Bcc'] = ', '.join([a for a in bcc if a])
         mime['Subject'] = subject or ''
-        mime.set_content(body or '')
+        if body_html:
+            mime.set_content(body or '')
+            mime.add_alternative(body_html, subtype='html')
+        else:
+            mime.set_content(body or '')
 
         send_body: dict = {}
         if in_reply_to_thread_id:
