@@ -49,6 +49,15 @@ class ThreadMessage:
     direction: str = "received"  # received | sent | draft
     sender: Optional[Address] = None  # serialised as "from"
     to: List[Address] = field(default_factory=list)
+    # Full message bodies for the /mail READER on the user's OWN connected
+    # mailbox. This is the scoped exception to the cleaner engine's
+    # metadata-only privacy rail: the cleaner analysis path
+    # (list_messages + get_message(format='metadata')) never populates these,
+    # but get_thread — which serves a human reading their own inbox — may,
+    # because that mail is already readable in Gmail/Outlook. Left None by
+    # providers that only fetch metadata.
+    body_text: Optional[str] = None
+    body_html: Optional[str] = None
 
 
 @dataclass

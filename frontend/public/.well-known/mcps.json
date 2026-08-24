@@ -454,7 +454,7 @@
     },
     {
       "name": "search_mail",
-      "description": "Full-text SEARCH a mailbox folder by query string q (subject/body/participants, via the engine's own search). Pass mailbox_id for one mailbox; omit it to search across every readable mailbox (unified). Optional folder (default inbox), limit (max 200, default 50), offset. Read-only / member-level. Returns { threads, count, q } - an empty list when the engine is dormant.",
+      "description": "Full-text SEARCH a mailbox folder by query string q (subject/body/participants), applied through each provider's native search - the sovereign James grammar, Gmail q, and Microsoft Graph $search for CONNECTED external accounts. Pass mailbox_id for one mailbox; omit it to search across every readable mailbox (unified), including connected Gmail/Microsoft accounts. Optional folder (default inbox), limit (max 200, default 50), offset. Read-only / member-level. Returns { threads, count, q, search_supported, has_more, next_page_token }. HONESTY RULE: when search_supported is false the provider could not express this query, so an empty threads list means COULD NOT FILTER, not no-matches - do not treat it as authoritative; an empty list with search_supported true (or a dormant engine) means no results.",
       "input_schema": {
         "type": "object",
         "properties": {

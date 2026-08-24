@@ -121,6 +121,10 @@ export class EngineMailProvider extends MailProviderPort {
       sent_at: m.sent_at,
       preview: m.preview,
       direction: m.direction,
+      // Pass the full bodies the reader path now supplies through to the
+      // MessageView; the frontend prefers html_body/text_body over preview.
+      html_body: m.body_html ?? null,
+      text_body: m.body_text ?? null,
     }));
   }
 

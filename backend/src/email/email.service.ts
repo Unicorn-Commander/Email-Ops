@@ -816,6 +816,81 @@ export class EmailService {
   }
 
   /**
+   * UNIFIED INBOX with an HONEST search-capability signal (agent/MCP wave).
+   *
+   * Same fan-out + merge as {@link listAggregateInbox}, but each mailbox is read
+   * through {@link listMailboxInboxPage} so we can surface whether the query was
+   * actually applied. `searchSupported` is the AND over every readable mailbox:
+   * it is `false` if ANY searched mailbox could not honour the filter (e.g. a
+   * Microsoft account handed an operator query it can't express), so the caller
+   * knows the merged result may be under-inclusive rather than treating an empty
+   * merge as an authoritative "no matches". Sovereign (James) mailboxes always
+   * support the query grammar, so a workspace with only sovereign + Gmail boxes
+   * reports `true`. A timed-out / failed mailbox is omitted from the merge AND
+   * pessimistically drops `searchSupported` to `false` when a query is present
+   * (we can't prove it was searched).
+   */
+  async listAggregateInboxPage(
+    workspaceId: string,
+    ucUid: string | null,
+    folder: MailFolder = 'inbox',
+    limit = 50,
+    query?: string | null,
+    offset = 0,
+  ): Promise<{ threads: ThreadView[]; searchSupported: boolean; hasMore: boolean }> {
+    const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      this.readableMailboxes(tx, workspaceId, ucUid),
+    );
+    const hasQuery = !!(query && query.trim());
+    const settled = await mapWithConcurrency(mailboxes, MAILBOX_FANOUT_CONCURRENCY, (mb) =>
+      withTimeout(
+        this.listMailboxInboxPage(workspaceId, ucUid, mb.id, limit, folder, query, offset).then(
+          (page) => ({
+            threads: page.threads.map((t) => ({
+              ...t,
+              mailbox_id: mb.id,
+              mailbox_address: mb.emailAddress,
+            })),
+            searchSupported: page.searchSupported,
+          }),
+        ),
+        MAILBOX_FANOUT_TIMEOUT_MS,
+        `aggregate inbox search for ${mb.emailAddress}`,
+      ),
+    );
+    const merged: ThreadView[] = [];
+    // Start true; any unsearched/failed mailbox (when a query is present) makes
+    // the merged answer potentially incomplete → report false, honestly.
+    let searchSupported = true;
+    settled.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        merged.push(...r.value.threads);
+        if (hasQuery && !r.value.searchSupported) searchSupported = false;
+      } else {
+        this.logger.warn(
+          `aggregate inbox search: mailbox ${mailboxes[i]?.emailAddress ?? '?'} failed (${(r.reason as Error)?.message ?? r.reason}) — omitted; search coverage marked incomplete`,
+        );
+        if (hasQuery) searchSupported = false;
+      }
+    });
+    const seen = new Set<string>();
+    const deduped = merged.filter((t) => {
+      const key = `${t.mailbox_id ?? ''}:${t.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    deduped.sort((a, b) => {
+      const dt = this.threadTime(b) - this.threadTime(a);
+      if (dt !== 0) return dt;
+      const ma = (a.mailbox_address ?? '').localeCompare(b.mailbox_address ?? '');
+      if (ma !== 0) return ma;
+      return a.id.localeCompare(b.id);
+    });
+    return { threads: deduped.slice(0, limit), searchSupported, hasMore: deduped.length > limit };
+  }
+
+  /**
    * COUNTS (webmail wave): the Inbox unread/total per workspace mailbox, via
    * the engine's Mailbox surface (JMAP role:inbox), fetched CONCURRENTLY. A
    * failing / unsupported account becomes a zeroed entry with `error: true`

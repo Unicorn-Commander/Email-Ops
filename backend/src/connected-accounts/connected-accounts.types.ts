@@ -248,6 +248,11 @@ export interface EngineMailMessage {
   sent_at: string | null;
   preview: string | null;
   direction: 'received' | 'sent' | 'draft';
+  // Full bodies for the /mail reader on the user's OWN connected mailbox.
+  // Populated by the engine's get_thread (reader path); the cleaner analysis
+  // path never sets these. Absent/null when the provider returned metadata only.
+  body_text?: string | null;
+  body_html?: string | null;
 }
 
 export interface EngineMailThreadResult {

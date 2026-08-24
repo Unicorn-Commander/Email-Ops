@@ -441,7 +441,11 @@ class MicrosoftGraphProvider(EmailProvider):
         safe_thread_id = thread_id.replace("'", "''")
         params = {
             '$filter': f"conversationId eq '{safe_thread_id}'",
-            '$select': 'id,conversationId,subject,from,toRecipients,sentDateTime,receivedDateTime,isDraft,bodyPreview',
+            # ``body`` gives the /mail READER the full message (text/HTML), not
+            # just bodyPreview — the reader-only exception to the cleaner's
+            # metadata-only rail. Fetched in the same $filter call, so no extra
+            # round-trips per thread.
+            '$select': 'id,conversationId,subject,from,toRecipients,sentDateTime,receivedDateTime,isDraft,bodyPreview,body',
             # NOTE: deliberately NO $orderby. Microsoft Graph returns 400 Bad
             # Request when $orderby names a property other than the one in
             # $filter (here we filter on conversationId), so we sort the
@@ -463,6 +467,15 @@ class MicrosoftGraphProvider(EmailProvider):
                 direction = 'sent'
             else:
                 direction = 'received'
+            body_text: Optional[str] = None
+            body_html: Optional[str] = None
+            body = msg.get('body') or {}
+            content = body.get('content')
+            if content:
+                if (body.get('contentType') or 'text').lower() == 'html':
+                    body_html = content
+                else:
+                    body_text = content
             out.append(ThreadMessage(
                 id=msg.get('id', ''),
                 thread_id=msg.get('conversationId', thread_id),
@@ -472,6 +485,8 @@ class MicrosoftGraphProvider(EmailProvider):
                 sent_at=to_iso8601(msg.get('sentDateTime') or msg.get('receivedDateTime')),
                 preview=msg.get('bodyPreview') or None,
                 direction=direction,
+                body_text=body_text,
+                body_html=body_html,
             ))
         return out
 

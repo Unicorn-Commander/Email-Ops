@@ -422,22 +422,56 @@ export class EmailOpsTools {
       limit?: number;
       offset?: number;
     },
-  ): Promise<{ threads: unknown[]; count: number; q: string }> {
+  ): Promise<{
+    threads: unknown[];
+    count: number;
+    q: string;
+    search_supported: boolean;
+    has_more: boolean;
+    next_page_token: string | null;
+  }> {
     const workspaceId = await this.resolve(user, args.workspace_id);
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
     const folder = (args.folder ?? 'inbox') as MailFolder;
-    const threads = args.mailbox_id
-      ? await this.email.listMailboxInbox(
-          workspaceId,
-          ucUid,
-          args.mailbox_id,
-          args.limit,
-          folder,
-          args.q,
-          args.offset,
-        )
-      : await this.email.listAggregateInbox(workspaceId, ucUid, folder, args.limit, args.q, args.offset);
-    return { threads, count: threads.length, q: args.q };
+    if (args.mailbox_id) {
+      const page = await this.email.listMailboxInboxPage(
+        workspaceId,
+        ucUid,
+        args.mailbox_id,
+        args.limit,
+        folder,
+        args.q,
+        args.offset,
+      );
+      // HONEST capability signal: when a connected provider can't express this
+      // query, search_supported is false and threads:[] means "couldn't filter",
+      // NOT "no matches" — the agent must not read an empty result as authoritative.
+      return {
+        threads: page.threads,
+        count: page.threads.length,
+        q: args.q,
+        search_supported: page.searchSupported,
+        has_more: page.hasMore,
+        next_page_token: page.nextPageToken,
+      };
+    }
+    const agg = await this.email.listAggregateInboxPage(
+      workspaceId,
+      ucUid,
+      folder,
+      args.limit,
+      args.q,
+      args.offset,
+    );
+    return {
+      threads: agg.threads,
+      count: agg.threads.length,
+      q: args.q,
+      // Aggregate: false if ANY searched mailbox couldn't honour the filter.
+      search_supported: agg.searchSupported,
+      has_more: agg.hasMore,
+      next_page_token: null,
+    };
   }
 
   /** Mark a thread read/unread — per-mailbox when mailbox_id is given, else across the workspace. */

@@ -373,19 +373,28 @@ class GmailProvider(EmailProvider):
         )
 
     def get_thread(self, thread_id: str) -> List[ThreadMessage]:
-        """Return the messages of a single thread in chronological order."""
+        """Return the messages of a single thread in chronological order.
+
+        Uses ``format='full'`` so the /mail READER gets real message bodies
+        (text + HTML), not just the ~200-char snippet. A single
+        ``threads().get`` returns every message in the thread fully, so this is
+        one API call per opened thread — no per-message fan-out. This is the
+        reader-only exception to the cleaner's metadata-only privacy rail
+        (see ThreadMessage.body_* and the cleaner analysis path, which is
+        unchanged and still never fetches bodies).
+        """
         thread = self.service.users().threads().get(
             userId='me',
             id=thread_id,
-            format='metadata',
-            metadataHeaders=['From', 'To', 'Subject', 'Date'],
+            format='full',
         ).execute()
 
         out: List[ThreadMessage] = []
         for msg in thread.get('messages', []):
+            payload = msg.get('payload', {})
             headers = {
                 h['name']: h['value']
-                for h in msg.get('payload', {}).get('headers', [])
+                for h in payload.get('headers', [])
             }
             labels = msg.get('labelIds', [])
             if 'DRAFT' in labels:
@@ -394,6 +403,7 @@ class GmailProvider(EmailProvider):
                 direction = 'sent'
             else:
                 direction = 'received'
+            body_text, body_html = self._extract_body(payload)
             out.append(ThreadMessage(
                 id=msg.get('id', ''),
                 thread_id=msg.get('threadId', thread_id),
@@ -405,6 +415,8 @@ class GmailProvider(EmailProvider):
                 ),
                 preview=msg.get('snippet') or None,
                 direction=direction,
+                body_text=body_text or None,
+                body_html=body_html or None,
             ))
         return out
 

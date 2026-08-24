@@ -101,4 +101,80 @@ describe('EmailOpsTools', () => {
       expect(result.status).toBe('ok');
     });
   });
+
+  describe('searchMail — honest capability signal on connected accounts', () => {
+    function toolsWith(email: Partial<EmailService>): EmailOpsTools {
+      const m = { resolveAndAuthorize: jest.fn().mockResolvedValue('ws-1') } as any;
+      return new EmailOpsTools(
+        m,
+        email as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+    }
+
+    it('single mailbox: surfaces search_supported=false so empty threads is not read as "no matches"', async () => {
+      const email: Partial<EmailService> = {
+        listMailboxInboxPage: jest.fn().mockResolvedValue({
+          threads: [],
+          nextPageToken: null,
+          hasMore: false,
+          pagingMode: 'page_token',
+          searchSupported: false, // e.g. a Microsoft account handed an operator query it can't express
+          reason: null,
+        }),
+      };
+      const t = toolsWith(email);
+      const res = await t.searchMail({} as any, {
+        workspace_id: 'ws-1',
+        mailbox_id: 'mb-ms',
+        q: 'is:flagged',
+      });
+      expect(res.search_supported).toBe(false);
+      expect(res.threads).toEqual([]);
+      expect(res.count).toBe(0);
+      // it must NOT silently fall back to the unfiltered aggregate path
+      expect(email.listMailboxInboxPage).toHaveBeenCalledTimes(1);
+    });
+
+    it('single mailbox: search_supported=true when the provider honoured the filter', async () => {
+      const email: Partial<EmailService> = {
+        listMailboxInboxPage: jest.fn().mockResolvedValue({
+          threads: [{ id: 't1' }],
+          nextPageToken: 'nx',
+          hasMore: true,
+          pagingMode: 'page_token',
+          searchSupported: true,
+          reason: null,
+        }),
+      };
+      const t = toolsWith(email);
+      const res = await t.searchMail({} as any, { workspace_id: 'ws-1', mailbox_id: 'mb-g', q: 'invoice' });
+      expect(res.search_supported).toBe(true);
+      expect(res.has_more).toBe(true);
+      expect(res.next_page_token).toBe('nx');
+      expect(res.count).toBe(1);
+    });
+
+    it('unified: aggregate search_supported=false when any mailbox could not filter', async () => {
+      const email: Partial<EmailService> = {
+        listAggregateInboxPage: jest.fn().mockResolvedValue({
+          threads: [{ id: 't1' }],
+          searchSupported: false,
+          hasMore: false,
+        }),
+      };
+      const t = toolsWith(email);
+      const res = await t.searchMail({} as any, { workspace_id: 'ws-1', q: 'from:a@b.com' });
+      expect(res.search_supported).toBe(false);
+      expect(res.next_page_token).toBeNull();
+      expect(email.listAggregateInboxPage).toHaveBeenCalledTimes(1);
+    });
+  });
 });
