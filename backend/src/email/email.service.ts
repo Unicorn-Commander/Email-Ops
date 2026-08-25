@@ -1016,7 +1016,7 @@ export class EmailService {
     ucUid: string | null,
     mailboxId: string,
     blobId: string,
-  ): Promise<{ data: Buffer; contentType: string | null } | null> {
+  ): Promise<{ data: Buffer; contentType: string | null; filename?: string | null } | null> {
     const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
     if (!mailbox) return null;
     if (this.mailProvider.handles(mailbox)) {
@@ -1028,7 +1028,9 @@ export class EmailService {
       const attachmentId = blobId.slice(sep + 2);
       if (!messageId || !attachmentId) return null;
       const res = await this.mailProvider.downloadAttachment(mailbox, messageId, attachmentId);
-      return res ? { data: res.data, contentType: res.contentType } : null;
+      // filename is ADDITIVE (Graph carries it; Gmail's attachments.get does not) —
+      // callers that need a name when it's null backfill from thread metadata.
+      return res ? { data: res.data, contentType: res.contentType, filename: res.filename } : null;
     }
     return this.stalwart.downloadBlob(mailbox.emailAddress, blobId);
   }

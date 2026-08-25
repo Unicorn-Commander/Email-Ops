@@ -51,7 +51,8 @@ describe('MCP PAT scope enforcement', () => {
   it('allows a grandfathered wildcard PAT to invoke every registered tool', () => {
     const toolNames = Object.keys(MCP_TOOL_SCOPES) as McpToolName[];
     // Wave 7: +3 trusted-correspondent tools (list/trust/untrust) → 59.
-    expect(toolNames).toHaveLength(59);
+    // Webmail attachments: +get_attachment (bytes by blob_id) → 60.
+    expect(toolNames).toHaveLength(60);
     for (const toolName of toolNames) {
       expect(() => enforceMcpToolScope(pat(['*']), toolName, NOW)).not.toThrow();
     }

@@ -1,7 +1,7 @@
-import { ForbiddenException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { WorkspaceRole } from '@prisma/client';
 import { MembershipService } from '../common/workspace/membership.service';
-import { EmailOpsTools } from './mcp.tools';
+import { EmailOpsTools, MCP_ATTACHMENT_MAX_BYTES } from './mcp.tools';
 import { EmailService } from '../email/email.service';
 import { AgentsService } from '../agents/agents.service';
 import { EmailHealthService } from '../email-health/email-health.service';
@@ -175,6 +175,130 @@ describe('EmailOpsTools', () => {
       expect(res.search_supported).toBe(false);
       expect(res.next_page_token).toBeNull();
       expect(email.listAggregateInboxPage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('getAttachment — bytes by blob_id', () => {
+    function toolsWith(email: Partial<EmailService>): EmailOpsTools {
+      const m = { resolveAndAuthorize: jest.fn().mockResolvedValue('ws-1') } as any;
+      return new EmailOpsTools(
+        m,
+        email as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+    }
+
+    it('returns base64 bytes + provider-carried name/mime (Graph lane)', async () => {
+      const email: Partial<EmailService> = {
+        downloadAttachment: jest.fn().mockResolvedValue({
+          data: Buffer.from('PK\x03\x04zip'),
+          contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          filename: 'report.docx',
+        }),
+      };
+      const t = toolsWith(email);
+      const res: any = await t.getAttachment({} as any, {
+        workspace_id: 'ws-1',
+        mailbox_id: 'mb-1',
+        blob_id: 'msg-1::att-1',
+      });
+      expect(res.name).toBe('report.docx');
+      expect(res.mime_type).toContain('wordprocessingml');
+      expect(res.size).toBe(Buffer.from('PK\x03\x04zip').length);
+      expect(Buffer.from(res.content_base64, 'base64').toString()).toBe('PK\x03\x04zip');
+      expect(email.downloadAttachment).toHaveBeenCalledWith('ws-1', '', 'mb-1', 'msg-1::att-1');
+    });
+
+    it('backfills name/mime from thread metadata when the byte-fetch lacks them (Gmail lane)', async () => {
+      const email: Partial<EmailService> = {
+        downloadAttachment: jest.fn().mockResolvedValue({
+          data: Buffer.from('bytes'),
+          contentType: null,
+          filename: null,
+        }),
+        listThreadMessages: jest.fn().mockResolvedValue([
+          {
+            id: 'm1',
+            attachments: [
+              { blob_id: 'msg-1::att-1', name: 'invoice.pdf', type: 'application/pdf', size: 5, cid: null },
+            ],
+          },
+        ]),
+      };
+      const t = toolsWith(email);
+      const res: any = await t.getAttachment({} as any, {
+        workspace_id: 'ws-1',
+        mailbox_id: 'mb-1',
+        blob_id: 'msg-1::att-1',
+        thread_id: 'thread-1',
+      });
+      expect(res.name).toBe('invoice.pdf');
+      expect(res.mime_type).toBe('application/pdf');
+      expect(email.listThreadMessages).toHaveBeenCalledWith('ws-1', '', 'thread-1', 'mb-1');
+    });
+
+    it('backfills by unique size within the message when Gmail rotated the attachment id', async () => {
+      // Gmail attachment ids are NOT stable across fetches: the fresh thread
+      // read returns a DIFFERENT composite blob_id, so exact-id match fails.
+      const email: Partial<EmailService> = {
+        downloadAttachment: jest.fn().mockResolvedValue({
+          data: Buffer.from('x'.repeat(13671)),
+          contentType: null,
+          filename: null,
+        }),
+        listThreadMessages: jest.fn().mockResolvedValue([
+          {
+            id: 'msg-1',
+            attachments: [
+              { blob_id: 'msg-1::ROTATED-A', name: 'analysis.docx', type: 'application/msword-x', size: 13671, cid: null },
+              { blob_id: 'msg-1::ROTATED-B', name: 'other.docx', type: 'application/msword-x', size: 19256, cid: null },
+            ],
+          },
+        ]),
+      };
+      const t = toolsWith(email);
+      const res: any = await t.getAttachment({} as any, {
+        workspace_id: 'ws-1',
+        mailbox_id: 'mb-1',
+        blob_id: 'msg-1::ORIGINAL-ID',
+        thread_id: 'thread-1',
+      });
+      expect(res.name).toBe('analysis.docx');
+      expect(res.mime_type).toBe('application/msword-x');
+    });
+
+    it('over the size cap: returns { error, size, max_bytes } and NO bytes (never truncates)', async () => {
+      const big = Buffer.alloc(MCP_ATTACHMENT_MAX_BYTES + 1);
+      const email: Partial<EmailService> = {
+        downloadAttachment: jest.fn().mockResolvedValue({ data: big, contentType: 'video/mp4', filename: 'big.mp4' }),
+      };
+      const t = toolsWith(email);
+      const res: any = await t.getAttachment({} as any, {
+        workspace_id: 'ws-1',
+        mailbox_id: 'mb-1',
+        blob_id: 'msg-1::att-2',
+      });
+      expect(res.content_base64).toBeUndefined();
+      expect(res.size).toBe(MCP_ATTACHMENT_MAX_BYTES + 1);
+      expect(res.max_bytes).toBe(MCP_ATTACHMENT_MAX_BYTES);
+      expect(String(res.error)).toContain(String(MCP_ATTACHMENT_MAX_BYTES + 1));
+    });
+
+    it('unknown blob / unreachable mailbox → NotFoundException (the service degrades to null)', async () => {
+      const email: Partial<EmailService> = {
+        downloadAttachment: jest.fn().mockResolvedValue(null),
+      };
+      const t = toolsWith(email);
+      await expect(
+        t.getAttachment({} as any, { workspace_id: 'ws-1', mailbox_id: 'mb-x', blob_id: 'nope' }),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 });

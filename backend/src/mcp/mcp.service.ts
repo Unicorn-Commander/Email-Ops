@@ -425,6 +425,30 @@ export class McpService {
     );
 
     registerTool(
+      'get_attachment',
+      {
+        title: 'Get attachment bytes',
+        description:
+          'Fetch one attachment’s BYTES (base64) by the blob_id get_thread returned. ' +
+          'Works on external (Gmail/Microsoft) mailboxes — blob_id is the composite ' +
+          '`<message_id>::<attachment_id>` from get_thread — AND on sovereign James ' +
+          'mailboxes (blob-store id). mailbox_id is required (the mailbox the thread ' +
+          'was read from). Pass thread_id too so the tool can backfill name/mime_type ' +
+          'when the provider byte-fetch does not carry them (Gmail, James). Read-only / ' +
+          'member-level, same fence as get_thread. Returns { name, mime_type, size, ' +
+          'content_base64 } — or { error, size, max_bytes } (no bytes, NEVER truncated) ' +
+          'when the attachment exceeds the 15 MB cap.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          blob_id: z.string().min(1),
+          thread_id: z.string().min(1).optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.getAttachment(user, args)),
+    );
+
+    registerTool(
       'search_mail',
       {
         title: 'Search mail',
