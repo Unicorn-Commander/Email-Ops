@@ -39,6 +39,7 @@ function make(opts: {
   flagSet?: unknown;
   stats?: unknown;
   attachment?: unknown;
+  poll?: unknown;
 }) {
   const broker = {
     getProviderAccessToken: jest.fn().mockResolvedValue(opts.token ?? null),
@@ -56,6 +57,7 @@ function make(opts: {
     flagMailThread: jest.fn().mockResolvedValue(opts.flagSet ?? null),
     getInboxStats: jest.fn().mockResolvedValue(opts.stats ?? null),
     getMailAttachment: jest.fn().mockResolvedValue(opts.attachment ?? null),
+    pollInbound: jest.fn().mockResolvedValue(opts.poll ?? null),
   } as unknown as ConnectedAccountsEnginePort;
   const prisma = {
     user: {
@@ -413,6 +415,31 @@ describe('EngineMailProvider', () => {
     ).toBeNull();
     expect(
       await make({ user: { keycloakId: 'k' }, token: null }).provider.downloadAttachment(gmailbox(), 'm', 'a'),
+    ).toBeNull();
+  });
+
+  it('pollInbound: maps the engine delta-poll to the InboundPollResult shape', async () => {
+    const { provider } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      poll: {
+        cursor: '2026-08-25T00:00:00Z',
+        new_messages: [
+          { thread_id: 't1', from_address: 'a@b.com', to_addresses: ['me@x.com'], subject: 'hi', received_at: '2026-08-24T00:00:00Z', agent_autoreply: false },
+        ],
+      },
+    });
+    const res = await provider.pollInbound(gmailbox(), '2026-08-23T00:00:00Z');
+    expect(res?.cursor).toBe('2026-08-25T00:00:00Z');
+    expect(res?.newMessages).toEqual([
+      { threadId: 't1', fromAddress: 'a@b.com', toAddresses: ['me@x.com'], subject: 'hi', receivedAt: '2026-08-24T00:00:00Z', agentAutoreply: false },
+    ]);
+  });
+
+  it('pollInbound degrades clean to null (no token / no result)', async () => {
+    expect(await make({ user: { keycloakId: 'k' }, token: null }).provider.pollInbound(gmailbox(), null)).toBeNull();
+    expect(
+      await make({ user: { keycloakId: 'k' }, token: 'gtok', poll: null }).provider.pollInbound(gmailbox(), null),
     ).toBeNull();
   });
 });

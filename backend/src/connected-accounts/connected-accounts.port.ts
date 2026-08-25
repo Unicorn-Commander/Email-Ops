@@ -21,6 +21,7 @@ import {
   EngineMailDraftResult,
   EngineMailFolder,
   EngineMailSendResult,
+  EngineInboundPollResult,
   EngineMailAttachmentBytes,
   EngineMailThreadActionResult,
   EngineMailThreadResult,
@@ -196,6 +197,12 @@ export abstract class ConnectedAccountsEnginePort {
     messageId: string,
     attachmentId: string,
   ): Promise<EngineMailAttachmentBytes | null>;
+
+  abstract pollInbound(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    sinceIso: string | null,
+  ): Promise<EngineInboundPollResult | null>;
 
   abstract sendMail(
     provider: 'gmail' | 'microsoft',

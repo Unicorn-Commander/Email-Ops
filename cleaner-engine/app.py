@@ -132,6 +132,12 @@ class MailThreadRequest(ProfileRequest):
     thread_id: str
 
 
+class MailPollInboundRequest(ProfileRequest):
+    # High-water cursor from the last poll (ISO-8601 UTC). None on the first poll
+    # (baseline): capture the cursor, process no backlog.
+    since_iso: Optional[str] = None
+
+
 class MailAttachmentInput(BaseModel):
     filename: str
     mime_type: str = "application/octet-stream"
@@ -630,6 +636,26 @@ def mail_thread(request: MailThreadRequest) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - degrade clean
         logger.warning("mail/thread failed for %s: %s", request.provider, exc)
         return {"messages": []}
+
+
+@app.post("/mail/poll-inbound", dependencies=[Depends(_require_engine_token)])
+def mail_poll_inbound(request: MailPollInboundRequest) -> dict[str, Any]:
+    """Detect NEW mail arriving at an external (Gmail / M365) mailbox since a
+    high-water cursor — external-mailbox parity with the sovereign James
+    ``pollInbound`` the backend inbound watcher already drives.
+
+    Degrade-clean like the other read-only /mail/* routes: an unusable provider
+    or any provider error yields a null-ish result ({cursor: since_iso,
+    new_messages: []}) so the watcher simply re-polls, never a 500.
+    """
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return {"cursor": request.since_iso, "new_messages": []}
+    try:
+        return provider.poll_inbound(request.since_iso)
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/poll-inbound failed for %s: %s", request.provider, exc)
+        return {"cursor": request.since_iso, "new_messages": []}
 
 
 @app.post("/mail/send", dependencies=[Depends(_require_engine_token)])

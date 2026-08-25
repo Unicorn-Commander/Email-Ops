@@ -268,6 +268,22 @@ export interface EngineMailMessage {
   attachments?: EngineMailAttachment[];
 }
 
+/** One newly-arrived inbound message (poll-inbound), for classification + rules. */
+export interface EngineInboundMessage {
+  thread_id: string;
+  from_address?: string | null;
+  to_addresses?: string[];
+  subject?: string | null;
+  received_at: string;
+  agent_autoreply?: boolean;
+}
+
+/** Result of an external inbox delta poll (mirrors the sovereign InboundPollResult). */
+export interface EngineInboundPollResult {
+  cursor: string | null;
+  new_messages: EngineInboundMessage[];
+}
+
 /** Bytes of one attachment, fetched on demand for the reader. */
 export interface EngineMailAttachmentBytes {
   found: boolean;

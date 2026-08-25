@@ -5,6 +5,7 @@ Microsoft 365 provider - uses MSAL for auth and Microsoft Graph API for mail.
 import time
 import base64
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple, Dict, Any
 
 import requests
@@ -47,6 +48,31 @@ _FOLDER_ID = {
     'spam': 'junkemail',
     'archive': 'archive',
 }
+
+
+def _poll_result(refs: List[dict], since_iso: Optional[str]) -> dict:
+    """Assemble the frozen poll-inbound shape from mapped inbox message refs.
+
+    Mirrors the sovereign James ``pollInbound`` cursor logic exactly: on baseline
+    (``since_iso`` is None) stamp the newest ``received_at`` (or NOW when the inbox
+    is empty — never a null cursor) and return no backlog; otherwise return the
+    strictly-newer messages ascending and advance the cursor to the max seen.
+    ISO-8601 UTC strings sort chronologically, so every compare is lexical.
+    """
+    max_cursor = since_iso or ''
+    for r in refs:
+        if r['received_at'] > max_cursor:
+            max_cursor = r['received_at']
+    if since_iso is None:
+        return {
+            'cursor': max_cursor or datetime.now(timezone.utc).isoformat(),
+            'new_messages': [],
+        }
+    new_messages = sorted(
+        (r for r in refs if r['received_at'] > since_iso),
+        key=lambda r: r['received_at'],
+    )
+    return {'cursor': max_cursor or since_iso, 'new_messages': new_messages}
 
 
 class MicrosoftGraphProvider(EmailProvider):
@@ -542,6 +568,68 @@ class MicrosoftGraphProvider(EmailProvider):
                 'contentBytes': base64.b64encode(att.get('data') or b'').decode('ascii'),
             })
         return out
+
+    def poll_inbound(self, since_iso: Optional[str]) -> dict:
+        """Detect NEW inbox mail past a high-water cursor (external-mailbox parity
+        with the sovereign James ``pollInbound``).
+
+        BASELINE (``since_iso`` is None): capture the cursor (the newest inbox
+        ``received_at``, or NOW for an empty inbox so the cursor is never null) and
+        process NO backlog. INCREMENTAL (``since_iso`` set): ``new_messages`` =
+        messages strictly newer than the cursor, ascending; the returned cursor
+        advances to the max ``received_at`` seen (else ``since_iso``). ISO-8601 UTC
+        strings sort chronologically, so the compare is lexical (matches James).
+
+        EFFICIENCY: on an incremental poll Graph server-side filters with
+        ``$filter=receivedDateTime gt <since_iso>`` (the ISO literal is unquoted for
+        a datetimeoffset); on baseline fetch only the newest one to stamp the cursor.
+
+        Degrade-clean: any provider error -> {'cursor': since_iso, 'new_messages': []}.
+        """
+        try:
+            params: Dict[str, Any] = {
+                '$select': (
+                    'id,conversationId,subject,from,toRecipients,'
+                    'receivedDateTime,internetMessageHeaders'
+                ),
+                '$orderby': 'receivedDateTime desc',
+                '$top': 50,
+            }
+            if since_iso:
+                # Graph accepts the ISO literal unquoted for a datetimeoffset.
+                params['$filter'] = f'receivedDateTime gt {since_iso}'
+            else:
+                params['$top'] = 1
+            data = self._graph_get('/me/mailFolders/inbox/messages', params=params)
+
+            refs: List[dict] = []
+            for msg in data.get('value', []):
+                received_at = to_iso8601(msg.get('receivedDateTime'))
+                if not received_at:
+                    continue
+                sender = self._address(msg.get('from', {}).get('emailAddress'))
+                to_addresses = [
+                    a.address
+                    for a in (self._address(r.get('emailAddress')) for r in msg.get('toRecipients', []))
+                    if a
+                ]
+                refs.append({
+                    'thread_id': msg.get('conversationId', ''),
+                    'from_address': sender.address if sender else None,
+                    'to_addresses': to_addresses,
+                    'subject': msg.get('subject') or None,
+                    'received_at': received_at,
+                    # Present + non-empty header ⇒ an agent runtime auto-sent this.
+                    'agent_autoreply': any(
+                        str(h.get('name') or '').lower() == 'x-uc-agent-autoreply'
+                        and str(h.get('value') or '').strip()
+                        for h in (msg.get('internetMessageHeaders') or [])
+                    ),
+                })
+
+            return _poll_result(refs, since_iso)
+        except Exception:  # noqa: BLE001 - degrade clean like the other read routes
+            return {'cursor': since_iso, 'new_messages': []}
 
     def send_message(
         self,

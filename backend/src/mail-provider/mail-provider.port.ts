@@ -19,6 +19,7 @@
 
 import { MailboxAccount } from '@prisma/client';
 import { MailFolder, MessageView, ThreadView } from '../email/email.types';
+import { InboundPollResult } from '../stalwart/stalwart.types';
 
 export interface MailProviderSendRequest {
   from: string;
@@ -196,6 +197,18 @@ export abstract class MailProviderPort {
     messageId: string,
     attachmentId: string,
   ): Promise<{ data: Buffer; contentType: string | null; filename: string | null } | null>;
+
+  /**
+   * Delta-poll the external inbox for messages newer than `sinceIso` (the
+   * per-mailbox high-water cursor), so the inbound watcher can classify + apply
+   * rules on Gmail/M365 arrivals just like a sovereign mailbox. Baseline on the
+   * first poll (sinceIso null → cursor stamped, no backlog). null when the
+   * account isn't connected / the engine is dormant — the watcher skips it.
+   */
+  abstract pollInbound(
+    mailbox: MailboxAccount,
+    sinceIso: string | null,
+  ): Promise<InboundPollResult | null>;
 
   /**
    * The authoritative linked address for (provider, owning user) — fetched from

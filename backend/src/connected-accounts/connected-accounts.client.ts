@@ -11,6 +11,7 @@ import {
   EngineListMessagesResult,
   EngineMailDraftResult,
   EngineMailFolder,
+  EngineInboundPollResult,
   EngineMailAttachmentBytes,
   EngineMailSendResult,
   EngineMailThreadActionResult,
@@ -473,6 +474,18 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       credentials,
       message_id: messageId,
       attachment_id: attachmentId,
+    });
+  }
+
+  async pollInbound(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    sinceIso: string | null,
+  ): Promise<EngineInboundPollResult | null> {
+    return this.postJson<EngineInboundPollResult>('/mail/poll-inbound', {
+      provider,
+      credentials,
+      since_iso: sinceIso,
     });
   }
 

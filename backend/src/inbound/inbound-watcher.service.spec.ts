@@ -8,6 +8,7 @@ describe('InboundWatcherService', () => {
   function make(opts: {
     mailboxes: any[];
     poll: (mb: string, since: string | null) => any;
+    providerPoll?: (mb: any, since: string | null) => any;
     rules?: any[];
     rulesFindMany?: jest.Mock;
     applyInbound?: jest.Mock;
@@ -24,17 +25,27 @@ describe('InboundWatcherService', () => {
       withWorkspace: jest.fn((_ws: string, _uc: string, cb: any) => cb({ mailboxAccount: { update } })),
     };
     const stalwart = { pollInbound: jest.fn(opts.poll) };
+    // handles() is provider-aware: sovereign/undefined-provider mailboxes take
+    // the stalwart path; gmail/microsoft take the provider pollInbound path.
+    const mailProvider = {
+      handles: jest.fn((mb: any) => mb?.provider === 'gmail' || mb?.provider === 'microsoft'),
+      pollInbound: jest.fn(opts.providerPoll ?? (async () => null)),
+    };
     const svc = new InboundWatcherService(
       prisma as any,
       stalwart as any,
+      mailProvider as any,
       { classifyInbound } as any,
       { applyInbound } as any,
       { draftReplyForInbound } as any,
     );
-    return { svc, classifyInbound, update, findMany, stalwart, rulesFindMany, applyInbound, draftReplyForInbound };
+    return { svc, classifyInbound, update, findMany, stalwart, mailProvider, rulesFindMany, applyInbound, draftReplyForInbound };
   }
 
-  afterEach(() => delete process.env.INBOUND_WATCHER_ENABLED);
+  afterEach(() => {
+    delete process.env.INBOUND_WATCHER_ENABLED;
+    delete process.env.INBOUND_WATCHER_EXTERNAL_ENABLED;
+  });
 
   it('classifies each new message and advances the cursor to the high-water mark', async () => {
     const { svc, classifyInbound, update } = make({
@@ -57,6 +68,43 @@ describe('InboundWatcherService', () => {
       subject: 'hi',
     });
     expect(update).toHaveBeenCalledWith({ where: { id: 'mb1' }, data: { inboundCursor: '2026-02-01T00:00:00Z' } });
+  });
+
+  it('gates external polling behind INBOUND_WATCHER_EXTERNAL_ENABLED (default → sovereign-only query)', async () => {
+    const { svc, findMany } = make({ mailboxes: [], poll: async () => ({ cursor: null, newMessages: [] }) });
+    await svc.runSweep();
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { active: true, provider: 'stalwart' } }));
+    findMany.mockClear();
+    process.env.INBOUND_WATCHER_EXTERNAL_ENABLED = 'true';
+    await svc.runSweep();
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { active: true } }));
+  });
+
+  it('polls an EXTERNAL (gmail/microsoft) mailbox through the provider port, not James', async () => {
+    process.env.INBOUND_WATCHER_EXTERNAL_ENABLED = 'true';
+    const { svc, classifyInbound, update, stalwart, mailProvider } = make({
+      mailboxes: [
+        { id: 'mbx', workspaceId: 'ws1', emailAddress: 'aaron@x.tech', provider: 'gmail', inboundCursor: '2026-01-01T00:00:00Z', ownerKind: 'HUMAN' },
+      ],
+      poll: async () => ({ cursor: null, newMessages: [] }), // sovereign path (unused here)
+      providerPoll: async () => ({
+        cursor: '2026-02-01T00:00:00Z',
+        newMessages: [{ threadId: 'tg', fromAddress: 'sender@ext.com', subject: 'ext', receivedAt: '2026-01-20T00:00:00Z' }],
+      }),
+    });
+    expect(await svc.runSweep()).toBe(1);
+    // The external mailbox was polled via the provider, NOT the sovereign engine.
+    expect(mailProvider.pollInbound).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'gmail', id: 'mbx' }),
+      '2026-01-01T00:00:00Z',
+    );
+    expect(stalwart.pollInbound).not.toHaveBeenCalled();
+    expect(classifyInbound).toHaveBeenCalledWith('ws1', 'inbound-watcher', {
+      threadId: 'tg',
+      fromAddress: 'sender@ext.com',
+      subject: 'ext',
+    });
+    expect(update).toHaveBeenCalledWith({ where: { id: 'mbx' }, data: { inboundCursor: '2026-02-01T00:00:00Z' } });
   });
 
   it('baselines a fresh mailbox: advances the cursor, classifies nothing', async () => {
@@ -183,6 +231,7 @@ describe('InboundWatcherService', () => {
     const svc = new InboundWatcherService(
       prisma as any,
       stalwart as any,
+      { handles: jest.fn().mockReturnValue(false), pollInbound: jest.fn() } as any,
       { classifyInbound } as any,
       { applyInbound: jest.fn() } as any,
       { draftReplyForInbound: jest.fn().mockResolvedValue(null) } as any,
@@ -243,6 +292,7 @@ describe('InboundWatcherService', () => {
       'a@x.test',
       expect.objectContaining({ threadId: 't-a@x.test', fromAddress: 'p@q.test', subject: 'hi' }),
       [ruleRow],
+      expect.objectContaining({ id: 'mb1' }),
     );
   });
 

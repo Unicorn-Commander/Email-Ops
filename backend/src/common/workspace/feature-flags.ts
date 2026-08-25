@@ -74,3 +74,13 @@ export function webhooksEnabled(getEnv: EnvGetter = defaultGetter): boolean {
 export function inboundWatcherEnabled(getEnv: EnvGetter = defaultGetter): boolean {
   return truthy(getEnv('INBOUND_WATCHER_ENABLED'), false);
 }
+
+/**
+ * Whether the inbound watcher ALSO polls external (Gmail/M365) mailboxes, not
+ * just sovereign James ones. Separate + default-OFF so shipping external
+ * inbound automation deploys inert on a ring where the watcher is already on —
+ * it starts touching real personal mail only when deliberately enabled.
+ */
+export function inboundWatcherExternalEnabled(getEnv: EnvGetter = defaultGetter): boolean {
+  return truthy(getEnv('INBOUND_WATCHER_EXTERNAL_ENABLED'), false);
+}

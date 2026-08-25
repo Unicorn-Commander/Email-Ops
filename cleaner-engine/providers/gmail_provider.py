@@ -4,6 +4,7 @@ Gmail provider - wraps Google Gmail API.
 
 import base64
 import socket
+from datetime import datetime, timezone
 from email.message import EmailMessage as MimeMessage
 from typing import List, Optional, Tuple
 
@@ -84,6 +85,31 @@ _FOLDER_QUERY = {
     'spam': 'in:spam',
     'archive': '-in:inbox -in:trash -in:spam -in:drafts',
 }
+
+
+def _poll_result(refs: List[dict], since_iso: Optional[str]) -> dict:
+    """Assemble the frozen poll-inbound shape from mapped inbox message refs.
+
+    Mirrors the sovereign James ``pollInbound`` cursor logic exactly: on baseline
+    (``since_iso`` is None) stamp the newest ``received_at`` (or NOW when the inbox
+    is empty — never a null cursor) and return no backlog; otherwise return the
+    strictly-newer messages ascending and advance the cursor to the max seen.
+    ISO-8601 UTC strings sort chronologically, so every compare is lexical.
+    """
+    max_cursor = since_iso or ''
+    for r in refs:
+        if r['received_at'] > max_cursor:
+            max_cursor = r['received_at']
+    if since_iso is None:
+        return {
+            'cursor': max_cursor or datetime.now(timezone.utc).isoformat(),
+            'new_messages': [],
+        }
+    new_messages = sorted(
+        (r for r in refs if r['received_at'] > since_iso),
+        key=lambda r: r['received_at'],
+    )
+    return {'cursor': max_cursor or since_iso, 'new_messages': new_messages}
 
 
 class GmailProvider(EmailProvider):
@@ -453,6 +479,91 @@ class GmailProvider(EmailProvider):
                 attachments=self._extract_attachments(payload),
             ))
         return out
+
+    def poll_inbound(self, since_iso: Optional[str]) -> dict:
+        """Detect NEW inbox mail past a high-water cursor (external-mailbox parity
+        with the sovereign James ``pollInbound``).
+
+        BASELINE (``since_iso`` is None): capture the cursor (the newest inbox
+        ``received_at``, or NOW for an empty inbox so the cursor is never null and
+        the very next arrival is treated as new) and process NO backlog.
+
+        INCREMENTAL (``since_iso`` set): ``new_messages`` = messages strictly newer
+        than the cursor, ascending; the returned cursor advances to the max
+        ``received_at`` seen (else ``since_iso``). ISO-8601 UTC strings sort
+        chronologically, so the compare is lexical (matches James).
+
+        EFFICIENCY: on an incremental poll narrow the fetch with a Gmail
+        ``after:<epoch>`` query (day/second-granular + inclusive-ish — the strict
+        ``received_at > since_iso`` filter below is authoritative); on baseline
+        list only the newest one just to stamp the cursor.
+
+        Degrade-clean: any provider error -> {'cursor': since_iso, 'new_messages': []}.
+        """
+        try:
+            if since_iso:
+                epoch = self._iso_to_epoch(since_iso)
+                query = f'in:inbox after:{epoch - 1}' if epoch is not None else 'in:inbox'
+                max_results = 50
+            else:
+                query = 'in:inbox'
+                max_results = 1
+
+            listed = self.service.users().messages().list(
+                userId='me', q=query, maxResults=max_results,
+            ).execute(num_retries=3)
+
+            refs: List[dict] = []
+            for stub in listed.get('messages', []):
+                msg = self.service.users().messages().get(
+                    userId='me',
+                    id=stub['id'],
+                    format='metadata',
+                    # X-UC-Agent-Autoreply must be requested explicitly: with
+                    # format='metadata' Gmail returns ONLY the metadataHeaders asked
+                    # for, and this is the Wave-7 loop-protection marker.
+                    metadataHeaders=['From', 'To', 'Subject', 'Date', 'X-UC-Agent-Autoreply'],
+                ).execute(num_retries=3)
+                payload_headers = msg.get('payload', {}).get('headers', [])
+                headers = {h['name']: h['value'] for h in payload_headers}
+                received_at = to_iso8601(headers.get('Date')) or epoch_ms_to_iso8601(
+                    int(msg['internalDate']) if msg.get('internalDate') else None
+                )
+                if not received_at:
+                    continue
+                sender = parse_address(headers.get('From'))
+                refs.append({
+                    'thread_id': msg.get('threadId', ''),
+                    'from_address': sender.address if sender else None,
+                    # The REAL To recipients — rules' 'to' conditions match these.
+                    'to_addresses': [a.address for a in parse_address_list(headers.get('To'))],
+                    'subject': headers.get('Subject') or None,
+                    'received_at': received_at,
+                    # Present + non-empty header ⇒ an agent runtime auto-sent this.
+                    'agent_autoreply': any(
+                        (h.get('name') or '').lower() == 'x-uc-agent-autoreply'
+                        and (h.get('value') or '').strip()
+                        for h in payload_headers
+                    ),
+                })
+
+            return _poll_result(refs, since_iso)
+        except Exception:  # noqa: BLE001 - degrade clean like the other read routes
+            return {'cursor': since_iso, 'new_messages': []}
+
+    @staticmethod
+    def _iso_to_epoch(value: str) -> Optional[int]:
+        """Parse an ISO-8601 timestamp to integer epoch seconds (UTC), or None."""
+        try:
+            text = value.strip()
+            if text.endswith('Z'):
+                text = text[:-1] + '+00:00'
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except (ValueError, TypeError):
+            return None
 
     def send_message(
         self,

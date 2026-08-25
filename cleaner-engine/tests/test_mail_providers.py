@@ -45,13 +45,24 @@ class _FakeThreads:
 
 
 class _FakeMessages:
-    def __init__(self, send_result, sink):
+    def __init__(self, send_result, sink, list_result=None, get_results=None):
         self._send_result = send_result
         self._sink = sink
+        # poll_inbound drives messages().list + messages().get (metadata).
+        self._list_result = list_result or {}
+        self._get_results = get_results or {}
 
     def send(self, **kwargs):
         self._sink.append(("messages.send", kwargs))
         return _GmailExec(self._send_result)
+
+    def list(self, **kwargs):
+        self._sink.append(("messages.list", kwargs))
+        return _GmailExec(self._list_result)
+
+    def get(self, **kwargs):
+        self._sink.append(("messages.get", kwargs))
+        return _GmailExec(self._get_results[kwargs["id"]])
 
     def batchModify(self, **kwargs):
         self._sink.append(("messages.batchModify", kwargs))
@@ -86,10 +97,21 @@ def _headers(**kv):
     return [{"name": k, "value": v} for k, v in kv.items()]
 
 
-def _make_gmail(list_result=None, get_results=None, send_result=None):
+def _make_gmail(
+    list_result=None,
+    get_results=None,
+    send_result=None,
+    msg_list_result=None,
+    msg_get_results=None,
+):
     sink: list = []
     threads = _FakeThreads(list_result or {}, get_results or {}, sink)
-    messages = _FakeMessages(send_result or {}, sink)
+    messages = _FakeMessages(
+        send_result or {},
+        sink,
+        list_result=msg_list_result,
+        get_results=msg_get_results,
+    )
     provider = GmailProvider()
     provider.service = _FakeGmailService(threads, messages)
     return provider, sink
@@ -330,6 +352,98 @@ def test_gmail_import_message_without_labels_omits_labelids():
     provider.import_message(b"raw", label_ids=None)
     body = [c for c in sink if c[0] == "messages.import_"][0][1]["body"]
     assert "labelIds" not in body
+
+
+# ---------------------------------------------------------------------------
+# Gmail poll_inbound (inbound-watcher parity with the sovereign James pollInbound)
+# ---------------------------------------------------------------------------
+
+def _gmail_msg(msg_id, thread_id, internal_ms, *, from_="a@example.com",
+               to="me@example.com", subject="Hi", autoreply=False):
+    headers = _headers(**{"From": from_, "To": to, "Subject": subject})
+    if autoreply:
+        headers.append({"name": "X-UC-Agent-Autoreply", "value": "1"})
+    return {
+        "id": msg_id,
+        "threadId": thread_id,
+        "internalDate": str(internal_ms),
+        "payload": {"headers": headers},
+    }
+
+
+def test_gmail_poll_inbound_baseline_captures_cursor_no_backlog():
+    """since_iso=None: list only the newest (maxResults=1) to STAMP a non-null
+    cursor and return NO backlog."""
+    provider, sink = _make_gmail(
+        msg_list_result={"messages": [{"id": "m1"}]},
+        msg_get_results={"m1": _gmail_msg("m1", "t1", 1704196800000)},  # 2024-01-02T12:00Z
+    )
+
+    result = provider.poll_inbound(None)
+
+    # Baseline query narrows to the single newest inbox message.
+    list_call = next(c for c in sink if c[0] == "messages.list")
+    assert list_call[1]["q"] == "in:inbox"
+    assert list_call[1]["maxResults"] == 1
+
+    assert result["new_messages"] == []
+    assert result["cursor"] == "2024-01-02T12:00:00+00:00"
+
+
+def test_gmail_poll_inbound_empty_inbox_still_stamps_cursor():
+    """An empty inbox must never re-baseline to null — stamp a non-null cursor."""
+    provider, _ = _make_gmail(msg_list_result={"messages": []})
+    result = provider.poll_inbound(None)
+    assert result["new_messages"] == []
+    assert result["cursor"]  # non-null (current time)
+
+
+def test_gmail_poll_inbound_incremental_only_newer_ascending():
+    """since_iso set: return only strictly-newer messages, ascending, with
+    from/to/subject/thread_id populated; cursor = max received_at."""
+    since = "2024-01-01T12:00:00+00:00"
+    provider, sink = _make_gmail(
+        # Returned OUT of order on purpose to prove the ascending sort.
+        msg_list_result={"messages": [{"id": "m_new2"}, {"id": "m_old"}, {"id": "m_new1"}]},
+        msg_get_results={
+            "m_old": _gmail_msg("m_old", "t_old", 1704067200000),   # 2024-01-01T00:00Z (older)
+            "m_new1": _gmail_msg("m_new1", "t_new1", 1704196800000,  # 2024-01-02T12:00Z
+                                 from_="Alice <alice@example.com>", to="me@example.com", subject="One"),
+            "m_new2": _gmail_msg("m_new2", "t_new2", 1704283200000,  # 2024-01-03T12:00Z
+                                 from_="bob@example.com", to="me@example.com", subject="Two"),
+        },
+    )
+
+    result = provider.poll_inbound(since)
+
+    # Incremental query narrows candidates with an epoch after: filter.
+    list_call = next(c for c in sink if c[0] == "messages.list")
+    assert list_call[1]["q"].startswith("in:inbox after:")
+    assert list_call[1]["maxResults"] == 50
+
+    ids = [m["thread_id"] for m in result["new_messages"]]
+    assert ids == ["t_new1", "t_new2"]  # ascending, older excluded
+    first = result["new_messages"][0]
+    assert first["from_address"] == "alice@example.com"
+    assert first["to_addresses"] == ["me@example.com"]
+    assert first["subject"] == "One"
+    assert first["received_at"] == "2024-01-02T12:00:00+00:00"
+    assert all(m["agent_autoreply"] is False for m in result["new_messages"])
+    assert result["cursor"] == "2024-01-03T12:00:00+00:00"
+
+
+def test_gmail_poll_inbound_flags_agent_autoreply_header():
+    """A message carrying X-UC-Agent-Autoreply is flagged agent_autoreply=True."""
+    since = "2024-01-01T00:00:00+00:00"
+    provider, _ = _make_gmail(
+        msg_list_result={"messages": [{"id": "m1"}]},
+        msg_get_results={
+            "m1": _gmail_msg("m1", "t1", 1704196800000, autoreply=True),
+        },
+    )
+    result = provider.poll_inbound(since)
+    assert len(result["new_messages"]) == 1
+    assert result["new_messages"][0]["agent_autoreply"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -886,3 +1000,101 @@ def test_ms_send_without_reply_target_posts_sendmail(monkeypatch):
     assert captured["url"].endswith("/me/sendMail")
     # no reply-lane traffic at all
     assert not any(verb in ("PATCH", "DELETE") for verb, _, _ in sink)
+
+
+# ---------------------------------------------------------------------------
+# Microsoft Graph poll_inbound (inbound-watcher parity with James pollInbound)
+# ---------------------------------------------------------------------------
+
+def test_ms_poll_inbound_incremental_filters_and_maps(monkeypatch):
+    """Incremental poll: $filter carries receivedDateTime gt, and each message
+    maps conversationId->thread_id with a normalised received_at (ascending)."""
+    since = "2024-01-01T00:00:00+00:00"
+    page = {
+        "value": [
+            {
+                "id": "m2",
+                "conversationId": "c2",
+                "subject": "Two",
+                "from": {"emailAddress": {"address": "b@example.com", "name": "B"}},
+                "toRecipients": [{"emailAddress": {"address": "me@example.com"}}],
+                "receivedDateTime": "2024-01-03T10:00:00Z",
+            },
+            {
+                "id": "m1",
+                "conversationId": "c1",
+                "subject": "One",
+                "from": {"emailAddress": {"address": "a@example.com"}},
+                "toRecipients": [{"emailAddress": {"address": "me@example.com"}}],
+                "receivedDateTime": "2024-01-02T10:00:00Z",
+            },
+        ]
+    }
+
+    captured = {}
+
+    def get_router(url, params):
+        assert url.endswith("/me/mailFolders/inbox/messages")
+        captured["params"] = params
+        return _FakeResp(json_data=page)
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    result = provider.poll_inbound(since)
+
+    assert captured["params"]["$filter"] == "receivedDateTime gt 2024-01-01T00:00:00+00:00"
+    assert captured["params"]["$orderby"] == "receivedDateTime desc"
+
+    # Only newer messages, ascending by received_at, conversationId -> thread_id.
+    assert [m["thread_id"] for m in result["new_messages"]] == ["c1", "c2"]
+    first = result["new_messages"][0]
+    assert first["from_address"] == "a@example.com"
+    assert first["to_addresses"] == ["me@example.com"]
+    assert first["subject"] == "One"
+    assert first["received_at"] == "2024-01-02T10:00:00+00:00"
+    assert result["cursor"] == "2024-01-03T10:00:00+00:00"
+
+
+def test_ms_poll_inbound_baseline_stamps_cursor_no_backlog(monkeypatch):
+    """Baseline (since None): no $filter, $top=1, non-null cursor, no backlog."""
+    page = {"value": [{
+        "id": "m1", "conversationId": "c1", "subject": "Hi",
+        "from": {"emailAddress": {"address": "a@example.com"}},
+        "toRecipients": [{"emailAddress": {"address": "me@example.com"}}],
+        "receivedDateTime": "2024-01-02T10:00:00Z",
+    }]}
+    captured = {}
+
+    def get_router(url, params):
+        captured["params"] = params
+        return _FakeResp(json_data=page)
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    result = provider.poll_inbound(None)
+
+    assert "$filter" not in captured["params"]
+    assert captured["params"]["$top"] == 1
+    assert result["new_messages"] == []
+    assert result["cursor"] == "2024-01-02T10:00:00+00:00"
+
+
+def test_ms_poll_inbound_flags_agent_autoreply_header(monkeypatch):
+    """A message whose internetMessageHeaders carry X-UC-Agent-Autoreply is
+    flagged agent_autoreply=True (case-insensitive, non-empty value)."""
+    since = "2024-01-01T00:00:00+00:00"
+    page = {"value": [{
+        "id": "m1", "conversationId": "c1", "subject": "Auto",
+        "from": {"emailAddress": {"address": "a@example.com"}},
+        "toRecipients": [{"emailAddress": {"address": "me@example.com"}}],
+        "receivedDateTime": "2024-01-02T10:00:00Z",
+        "internetMessageHeaders": [
+            {"name": "x-uc-agent-autoreply", "value": "yes"},
+        ],
+    }]}
+
+    def get_router(url, params):
+        return _FakeResp(json_data=page)
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    result = provider.poll_inbound(since)
+    assert len(result["new_messages"]) == 1
+    assert result["new_messages"][0]["agent_autoreply"] is True

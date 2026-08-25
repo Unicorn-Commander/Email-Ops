@@ -26,6 +26,7 @@ import {
   MailProviderSendResult,
 } from './mail-provider.port';
 import { parseSearchQuery, buildGmailQuery } from '../stalwart/search-query';
+import { InboundPollResult } from '../stalwart/stalwart.types';
 
 type ExternalProvider = 'gmail' | 'microsoft';
 
@@ -302,6 +303,27 @@ export class EngineMailProvider extends MailProviderPort {
     const stats = await this.engine.getInboxStats(auth.provider, auth.credentials);
     if (!stats) return null;
     return { inboxUnread: stats.unread_count ?? 0, inboxTotal: stats.total_messages ?? 0 };
+  }
+
+  async pollInbound(
+    mailbox: MailboxAccount,
+    sinceIso: string | null,
+  ): Promise<InboundPollResult | null> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return null;
+    const res = await this.engine.pollInbound(auth.provider, auth.credentials, sinceIso);
+    if (!res) return null;
+    return {
+      cursor: res.cursor ?? null,
+      newMessages: (res.new_messages ?? []).map((m) => ({
+        threadId: m.thread_id,
+        fromAddress: m.from_address ?? null,
+        toAddresses: m.to_addresses ?? [],
+        subject: m.subject ?? null,
+        receivedAt: m.received_at,
+        agentAutoreply: m.agent_autoreply === true,
+      })),
+    };
   }
 
   async downloadAttachment(
