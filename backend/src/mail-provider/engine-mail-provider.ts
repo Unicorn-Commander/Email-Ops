@@ -104,6 +104,9 @@ export class EngineMailProvider extends MailProviderPort {
         subject: t.subject,
         message_count: t.message_count,
         unread: t.unread,
+        // Read-back so a really-starred thread shows starred (the star no longer
+        // reverts on refresh). Omitted → undefined → renders unstarred, honestly.
+        flagged: t.flagged ?? false,
         last_message_at: t.last_message_at,
         last_snippet: t.last_snippet,
         participants: t.participants.map((p) => ({ address: p.address, name: p.name })),
@@ -133,6 +136,16 @@ export class EngineMailProvider extends MailProviderPort {
       // MessageView; the frontend prefers html_body/text_body over preview.
       html_body: m.body_html ?? null,
       text_body: m.body_text ?? null,
+      // Attachment metadata (bytes fetched on demand). The blob_id is a composite
+      // `${messageId}::${attachmentId}` so the download route can address the
+      // per-message provider attachment id (Gmail/Graph have no global blob store).
+      attachments: (m.attachments ?? []).map((a) => ({
+        blob_id: `${m.id}::${a.id}`,
+        name: a.filename ?? null,
+        type: a.mime_type ?? null,
+        size: a.size ?? null,
+        cid: a.cid ?? null,
+      })),
     }));
   }
 
@@ -266,6 +279,48 @@ export class EngineMailProvider extends MailProviderPort {
       read,
     );
     return res?.ok === true;
+  }
+
+  async setThreadFlagged(
+    mailbox: MailboxAccount,
+    threadId: string,
+    flagged: boolean,
+  ): Promise<boolean> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return false;
+    const res = await this.engine.flagMailThread(auth.provider, auth.credentials, threadId, flagged);
+    return res?.ok === true;
+  }
+
+  async getInboxCounts(
+    mailbox: MailboxAccount,
+  ): Promise<{ inboxUnread: number; inboxTotal: number } | null> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return null;
+    const stats = await this.engine.getInboxStats(auth.provider, auth.credentials);
+    if (!stats) return null;
+    return { inboxUnread: stats.unread_count ?? 0, inboxTotal: stats.total_messages ?? 0 };
+  }
+
+  async downloadAttachment(
+    mailbox: MailboxAccount,
+    messageId: string,
+    attachmentId: string,
+  ): Promise<{ data: Buffer; contentType: string | null; filename: string | null } | null> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return null;
+    const res = await this.engine.getMailAttachment(
+      auth.provider,
+      auth.credentials,
+      messageId,
+      attachmentId,
+    );
+    if (!res || res.found !== true || !res.content_base64) return null;
+    return {
+      data: Buffer.from(res.content_base64, 'base64'),
+      contentType: res.mime_type ?? null,
+      filename: res.filename ?? null,
+    };
   }
 
   /**

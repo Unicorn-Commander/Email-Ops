@@ -21,6 +21,7 @@ import {
   EngineMailDraftResult,
   EngineMailFolder,
   EngineMailSendResult,
+  EngineMailAttachmentBytes,
   EngineMailThreadActionResult,
   EngineMailThreadResult,
   EngineMailThreadsResult,
@@ -181,6 +182,20 @@ export abstract class ConnectedAccountsEnginePort {
     threadId: string,
     read: boolean,
   ): Promise<EngineMailThreadActionResult | null>;
+
+  abstract flagMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+    flagged: boolean,
+  ): Promise<EngineMailThreadActionResult | null>;
+
+  abstract getMailAttachment(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageId: string,
+    attachmentId: string,
+  ): Promise<EngineMailAttachmentBytes | null>;
 
   abstract sendMail(
     provider: 'gmail' | 'microsoft',

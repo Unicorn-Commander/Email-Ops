@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import logging
@@ -157,6 +158,15 @@ class MailDraftDeleteRequest(ProfileRequest):
 
 class MailReadRequest(ProfileRequest):
     read: bool = True
+
+
+class MailFlagRequest(ProfileRequest):
+    flagged: bool = True
+
+
+class MailAttachmentRequest(ProfileRequest):
+    message_id: str
+    attachment_id: str
 
 
 class ThreadActionResponse(BaseModel):
@@ -711,6 +721,42 @@ def mail_thread_read(thread_id: str, request: MailReadRequest) -> ThreadActionRe
         return ThreadActionResponse(ok=True, moved=moved)
     except Exception as exc:  # noqa: BLE001 - degrade clean
         logger.warning("mail/threads/read failed for %s: %s", request.provider, exc)
+        return ThreadActionResponse(ok=False, moved=0)
+
+
+@app.post("/mail/attachment", dependencies=[Depends(_require_engine_token)])
+def mail_attachment(request: MailAttachmentRequest) -> dict[str, Any]:
+    """Fetch one attachment's BYTES for the reader (base64). The reader path —
+    metadata comes with the thread; bytes are pulled only when the user opens
+    the attachment. Degrade-clean: found=False (never a 500) when unreachable."""
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return {"found": False}
+    try:
+        att = provider.get_attachment(request.message_id, request.attachment_id)
+        return {
+            "found": True,
+            "content_base64": base64.b64encode(att.data).decode("ascii"),
+            "mime_type": att.mime_type or None,
+            "filename": att.filename or None,
+            "size": att.size_bytes,
+        }
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/attachment failed for %s: %s", request.provider, exc)
+        return {"found": False}
+
+
+@app.post("/mail/threads/{thread_id:path}/flag", dependencies=[Depends(_require_engine_token)])
+def mail_thread_flag(thread_id: str, request: MailFlagRequest) -> ThreadActionResponse:
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return ThreadActionResponse(ok=False, moved=0)
+    try:
+        ids = _thread_triage_ids(request.provider, provider.get_thread(thread_id), "flag")
+        moved = provider.batch_set_flagged(ids, request.flagged) if ids else 0
+        return ThreadActionResponse(ok=True, moved=moved)
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/threads/flag failed for %s: %s", request.provider, exc)
         return ThreadActionResponse(ok=False, moved=0)
 
 

@@ -24,6 +24,7 @@ from providers.base import (
 from providers.mail_client import (
     Address,
     DraftResult,
+    MailAttachment,
     SendResult,
     ThreadMessage,
     ThreadSummary,
@@ -349,7 +350,7 @@ class MicrosoftGraphProvider(EmailProvider):
             # Over-fetch a little so grouping by conversation still yields ~limit threads.
             params: Dict[str, Any] = {
                 '$top': min(limit * 2, 200),
-                '$select': 'id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview',
+                '$select': 'id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview,flag',
                 '$orderby': 'receivedDateTime desc',
             }
             if user_q:
@@ -393,6 +394,8 @@ class MicrosoftGraphProvider(EmailProvider):
             summary.message_count += 1
             if not msg.get('isRead', True):
                 summary.unread = True
+            if (msg.get('flag') or {}).get('flagStatus') == 'flagged':
+                summary.flagged = True
 
             for candidate in [msg.get('from', {}).get('emailAddress')] + [
                 r.get('emailAddress') for r in msg.get('toRecipients', [])
@@ -446,6 +449,9 @@ class MicrosoftGraphProvider(EmailProvider):
             # metadata-only rail. Fetched in the same $filter call, so no extra
             # round-trips per thread.
             '$select': 'id,conversationId,subject,from,toRecipients,sentDateTime,receivedDateTime,isDraft,bodyPreview,body',
+            # Attachment METADATA only ($select excludes contentBytes) — bytes are
+            # fetched on demand by the download route, not carried in the thread.
+            '$expand': 'attachments($select=id,name,contentType,size,isInline,contentId)',
             # NOTE: deliberately NO $orderby. Microsoft Graph returns 400 Bad
             # Request when $orderby names a property other than the one in
             # $filter (here we filter on conversationId), so we sort the
@@ -487,6 +493,18 @@ class MicrosoftGraphProvider(EmailProvider):
                 direction=direction,
                 body_text=body_text,
                 body_html=body_html,
+                attachments=[
+                    MailAttachment(
+                        id=att.get('id', ''),
+                        filename=att.get('name') or None,
+                        mime_type=att.get('contentType') or None,
+                        size=int(att.get('size') or 0),
+                        is_inline=bool(att.get('isInline')),
+                        cid=(att.get('contentId') or None),
+                    )
+                    for att in (msg.get('attachments') or [])
+                    if att.get('id')
+                ],
             ))
         return out
 
@@ -871,6 +889,30 @@ class MicrosoftGraphProvider(EmailProvider):
                         'method': 'PATCH',
                         'url': f'/me/messages/{mid}',
                         'body': {'isRead': read},
+                        'headers': {'Content-Type': 'application/json'},
+                    }
+                    for j, mid in enumerate(batch)
+                ]
+            }
+            resp = self._graph_post('/$batch', json_body=batch_body)
+            if resp.status_code == 200:
+                results = resp.json().get('responses', [])
+                changed += sum(1 for r in results if r.get('status', 0) in (200, 201))
+        return changed
+
+    def batch_set_flagged(self, message_ids: List[str], flagged: bool = True) -> int:
+        """PATCH flag.flagStatus on each message (Graph $batch). Returns count changed."""
+        flag_status = 'flagged' if flagged else 'notFlagged'
+        changed = 0
+        for i in range(0, len(message_ids), 20):
+            batch = message_ids[i:i + 20]
+            batch_body = {
+                'requests': [
+                    {
+                        'id': str(j),
+                        'method': 'PATCH',
+                        'url': f'/me/messages/{mid}',
+                        'body': {'flag': {'flagStatus': flag_status}},
                         'headers': {'Content-Type': 'application/json'},
                     }
                     for j, mid in enumerate(batch)

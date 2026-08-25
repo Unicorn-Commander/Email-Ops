@@ -206,6 +206,8 @@ export interface EngineMailThread {
   last_snippet: string | null;
   message_count: number;
   unread: boolean;
+  /** Any message in the thread starred (Gmail STARRED) / flagged (Graph). */
+  flagged?: boolean;
 }
 
 export interface EngineMailThreadsResult {
@@ -239,6 +241,15 @@ export interface EngineUnsubscribeResult {
   results: EngineUnsubscribeSenderResult[];
 }
 
+export interface EngineMailAttachment {
+  id: string;
+  filename?: string | null;
+  mime_type?: string | null;
+  size?: number;
+  is_inline?: boolean;
+  cid?: string | null;
+}
+
 export interface EngineMailMessage {
   id: string;
   thread_id: string;
@@ -253,6 +264,17 @@ export interface EngineMailMessage {
   // path never sets these. Absent/null when the provider returned metadata only.
   body_text?: string | null;
   body_html?: string | null;
+  // Attachment metadata (no bytes) — bytes fetched on demand via getMailAttachment.
+  attachments?: EngineMailAttachment[];
+}
+
+/** Bytes of one attachment, fetched on demand for the reader. */
+export interface EngineMailAttachmentBytes {
+  found: boolean;
+  content_base64?: string;
+  mime_type?: string | null;
+  filename?: string | null;
+  size?: number;
 }
 
 export interface EngineMailThreadResult {

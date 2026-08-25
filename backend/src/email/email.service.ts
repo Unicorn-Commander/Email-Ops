@@ -906,9 +906,16 @@ export class EmailService {
     // Same bounded + timed fan-out as the aggregate: a slow account times out
     // into a rejected slot (→ error:true below) instead of stalling the row.
     const settled = await mapWithConcurrency(mailboxes, MAILBOX_FANOUT_CONCURRENCY, (mb) => {
-      // External-provider mailboxes have no engine counts surface (yet) —
-      // honest zeros + error:true, same as a failing sovereign account.
-      if (this.mailProvider.handles(mb)) return Promise.resolve(null);
+      // External-provider mailboxes read their inbox counts through the engine
+      // (Gmail label counts / Graph mailFolders/inbox). null (unconnected /
+      // dormant / expired token) still falls through to error:true below.
+      if (this.mailProvider.handles(mb)) {
+        return withTimeout(
+          this.mailProvider.getInboxCounts(mb),
+          MAILBOX_FANOUT_TIMEOUT_MS,
+          `mail counts for ${mb.emailAddress}`,
+        );
+      }
       return withTimeout(
         this.stalwart.getMailboxCounts(mb.emailAddress),
         MAILBOX_FANOUT_TIMEOUT_MS,
@@ -977,8 +984,22 @@ export class EmailService {
     flags: { flagged?: boolean; seen?: boolean },
   ): Promise<{ thread_id: string; flagged?: boolean; seen?: boolean; updated: boolean }> {
     const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
-    if (!mailbox || this.mailProvider.handles(mailbox)) {
+    if (!mailbox) {
       return { thread_id: threadId, ...flags, updated: false };
+    }
+    if (this.mailProvider.handles(mailbox)) {
+      // External: reconcile the real Gmail/M365 star/flag so it persists.
+      // `flagged` is the only flag the provider star maps to; a `seen`-only
+      // call goes through setThreadReadState, so honour whichever is present.
+      let updated = false;
+      if (flags.flagged !== undefined) {
+        updated = await this.mailProvider.setThreadFlagged(mailbox, threadId, flags.flagged);
+      }
+      if (flags.seen !== undefined) {
+        const readUpdated = await this.mailProvider.setThreadRead(mailbox, threadId, flags.seen);
+        updated = updated || readUpdated;
+      }
+      return { thread_id: threadId, ...flags, updated };
     }
     const updated = await this.stalwart.setThreadFlags(mailbox.emailAddress, threadId, flags);
     return { thread_id: threadId, ...flags, updated };
@@ -997,7 +1018,18 @@ export class EmailService {
     blobId: string,
   ): Promise<{ data: Buffer; contentType: string | null } | null> {
     const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
-    if (!mailbox || this.mailProvider.handles(mailbox)) return null;
+    if (!mailbox) return null;
+    if (this.mailProvider.handles(mailbox)) {
+      // External: the reader carries a composite blob_id `${messageId}::${attachmentId}`
+      // because Gmail/Graph address bytes per-message, not by a global blob store.
+      const sep = blobId.indexOf('::');
+      if (sep < 0) return null;
+      const messageId = blobId.slice(0, sep);
+      const attachmentId = blobId.slice(sep + 2);
+      if (!messageId || !attachmentId) return null;
+      const res = await this.mailProvider.downloadAttachment(mailbox, messageId, attachmentId);
+      return res ? { data: res.data, contentType: res.contentType } : null;
+    }
     return this.stalwart.downloadBlob(mailbox.emailAddress, blobId);
   }
 

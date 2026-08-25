@@ -24,6 +24,7 @@ from providers.base import (
 )
 from providers.mail_client import (
     Address,
+    MailAttachment,
     SendResult,
     ThreadMessage,
     ThreadSummary,
@@ -176,11 +177,15 @@ class GmailProvider(EmailProvider):
             total_threads=profile.total_threads,
         )
 
-        # Quick estimates via resultSizeEstimate
+        # Quick estimates via resultSizeEstimate. total_messages/unread_count are
+        # scoped to the INBOX (in:inbox) so they match the sovereign counts surface
+        # and Microsoft's /mailFolders/inbox — the method is get_INBOX_stats, and a
+        # whole-mailbox total next to an inbox total in the same badge row is wrong.
         for query, attr in [
             ('category:promotions', 'promotional_count'),
-            ('is:unread', 'unread_count'),
+            ('in:inbox is:unread', 'unread_count'),
             ('category:social', 'social_count'),
+            ('in:inbox', 'total_messages'),
         ]:
             try:
                 result = self.service.users().messages().list(
@@ -297,6 +302,29 @@ class GmailProvider(EmailProvider):
         else:
             yield payload
 
+    def _extract_attachments(self, payload: dict) -> List[MailAttachment]:
+        """Attachment METADATA (no bytes) for the reader. A Gmail attachment part
+        carries body.attachmentId (bytes fetched on demand via get_attachment)."""
+        out: List[MailAttachment] = []
+        for part in self._iter_parts(payload):
+            body = part.get('body', {})
+            attachment_id = body.get('attachmentId')
+            if not attachment_id:
+                continue
+            headers = {h.get('name', '').lower(): h.get('value', '') for h in part.get('headers', [])}
+            disposition = headers.get('content-disposition', '')
+            cid = (headers.get('content-id') or '').strip('<>') or None
+            is_inline = 'inline' in disposition.lower() or bool(cid)
+            out.append(MailAttachment(
+                id=attachment_id,
+                filename=part.get('filename') or None,
+                mime_type=part.get('mimeType') or None,
+                size=int(body.get('size') or 0),
+                is_inline=is_inline,
+                cid=cid,
+            ))
+        return out
+
     # ------------------------------------------------------------------
     # Unified mail client (threads / thread / send)
     # ------------------------------------------------------------------
@@ -344,6 +372,7 @@ class GmailProvider(EmailProvider):
         seen: set = set()
         subject: Optional[str] = None
         unread = False
+        flagged = False
 
         for msg in messages:
             headers = {
@@ -352,8 +381,11 @@ class GmailProvider(EmailProvider):
             }
             if subject is None and headers.get('Subject'):
                 subject = headers['Subject']
-            if 'UNREAD' in msg.get('labelIds', []):
+            labels = msg.get('labelIds', [])
+            if 'UNREAD' in labels:
                 unread = True
+            if 'STARRED' in labels:
+                flagged = True
             for raw in (headers.get('From'), headers.get('To')):
                 for addr in parse_address_list(raw):
                     key = addr.address.lower()
@@ -370,6 +402,7 @@ class GmailProvider(EmailProvider):
             last_snippet=last.get('snippet') or None,
             message_count=len(messages),
             unread=unread,
+            flagged=flagged,
         )
 
     def get_thread(self, thread_id: str) -> List[ThreadMessage]:
@@ -417,6 +450,7 @@ class GmailProvider(EmailProvider):
                 direction=direction,
                 body_text=body_text or None,
                 body_html=body_html or None,
+                attachments=self._extract_attachments(payload),
             ))
         return out
 
@@ -542,6 +576,19 @@ class GmailProvider(EmailProvider):
             self.service.users().messages().batchModify(
                 userId='me',
                 body={'ids': batch, label_op: ['UNREAD']},
+            ).execute()
+            changed += len(batch)
+        return changed
+
+    def batch_set_flagged(self, message_ids: List[str], flagged: bool = True) -> int:
+        """Set/clear the STARRED label (Gmail's star). Returns count changed."""
+        changed = 0
+        label_op = 'addLabelIds' if flagged else 'removeLabelIds'
+        for i in range(0, len(message_ids), 100):
+            batch = message_ids[i:i + 100]
+            self.service.users().messages().batchModify(
+                userId='me',
+                body={'ids': batch, label_op: ['STARRED']},
             ).execute()
             changed += len(batch)
         return changed

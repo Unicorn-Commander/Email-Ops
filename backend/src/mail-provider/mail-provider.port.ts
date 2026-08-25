@@ -159,6 +159,38 @@ export abstract class MailProviderPort {
   ): Promise<boolean>;
 
   /**
+   * Set/clear the star/flag on the thread in the real external mailbox
+   * (Gmail STARRED label / Graph flag). Makes the star PERSIST instead of
+   * reverting on the next refresh. false when not connected; never throws.
+   */
+  abstract setThreadFlagged(
+    mailbox: MailboxAccount,
+    threadId: string,
+    flagged: boolean,
+  ): Promise<boolean>;
+
+  /**
+   * Inbox unread/total for an external mailbox (Gmail label counts / Graph
+   * mailFolders/inbox). null when not connected / engine dormant — the caller
+   * maps null to an honest error entry, never a confident "0".
+   */
+  abstract getInboxCounts(
+    mailbox: MailboxAccount,
+  ): Promise<{ inboxUnread: number; inboxTotal: number } | null>;
+
+  /**
+   * Fetch one attachment's BYTES on demand for the reader. For external
+   * providers a message id is required alongside the provider attachment id
+   * (the reader carries a composite blob_id `${messageId}::${attachmentId}`).
+   * null when not connected / the blob is unknown — the caller maps null to 404.
+   */
+  abstract downloadAttachment(
+    mailbox: MailboxAccount,
+    messageId: string,
+    attachmentId: string,
+  ): Promise<{ data: Buffer; contentType: string | null; filename: string | null } | null>;
+
+  /**
    * The authoritative linked address for (provider, owning user) — fetched from
    * the provider, so connecting registers the real Gmail/M365 address even when
    * it differs from the user's login identity. null when not connected.

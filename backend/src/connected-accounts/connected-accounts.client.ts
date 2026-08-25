@@ -11,6 +11,7 @@ import {
   EngineListMessagesResult,
   EngineMailDraftResult,
   EngineMailFolder,
+  EngineMailAttachmentBytes,
   EngineMailSendResult,
   EngineMailThreadActionResult,
   EngineMailThreadResult,
@@ -447,6 +448,32 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       `/mail/threads/${encodeURIComponent(threadId)}/inbox`,
       { provider, credentials },
     );
+  }
+
+  async flagMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+    flagged: boolean,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>(
+      `/mail/threads/${encodeURIComponent(threadId)}/flag`,
+      { provider, credentials, flagged },
+    );
+  }
+
+  async getMailAttachment(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageId: string,
+    attachmentId: string,
+  ): Promise<EngineMailAttachmentBytes | null> {
+    return this.postJson<EngineMailAttachmentBytes>('/mail/attachment', {
+      provider,
+      credentials,
+      message_id: messageId,
+      attachment_id: attachmentId,
+    });
   }
 
   async setMailThreadRead(

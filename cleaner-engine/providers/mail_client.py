@@ -37,6 +37,20 @@ class ThreadSummary:
     last_snippet: Optional[str] = None
     message_count: int = 0
     unread: bool = False
+    flagged: bool = False  # any message starred (Gmail STARRED) / flagged (Graph)
+
+
+@dataclass
+class MailAttachment:
+    """Attachment METADATA on a thread message (no bytes). ``id`` is the
+    provider's per-message attachment handle (Gmail attachmentId / Graph
+    attachment id), used by the download route to fetch the bytes on demand."""
+    id: str
+    filename: Optional[str] = None
+    mime_type: Optional[str] = None
+    size: int = 0
+    is_inline: bool = False
+    cid: Optional[str] = None  # Content-ID for an inline image, else None
 
 
 @dataclass
@@ -58,6 +72,7 @@ class ThreadMessage:
     # providers that only fetch metadata.
     body_text: Optional[str] = None
     body_html: Optional[str] = None
+    attachments: List["MailAttachment"] = field(default_factory=list)
 
 
 @dataclass
