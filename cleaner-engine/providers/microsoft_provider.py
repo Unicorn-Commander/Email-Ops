@@ -4,6 +4,7 @@ Microsoft 365 provider - uses MSAL for auth and Microsoft Graph API for mail.
 
 import time
 import base64
+import logging
 from typing import List, Optional, Tuple, Dict, Any
 
 import requests
@@ -12,6 +13,8 @@ try:
     import msal
 except ImportError:
     msal = None  # Optional dependency; error raised on use
+
+logger = logging.getLogger(__name__)
 
 from providers.base import (
     EmailProvider,
@@ -448,10 +451,11 @@ class MicrosoftGraphProvider(EmailProvider):
             # just bodyPreview — the reader-only exception to the cleaner's
             # metadata-only rail. Fetched in the same $filter call, so no extra
             # round-trips per thread.
-            '$select': 'id,conversationId,subject,from,toRecipients,sentDateTime,receivedDateTime,isDraft,bodyPreview,body',
-            # Attachment METADATA only ($select excludes contentBytes) — bytes are
-            # fetched on demand by the download route, not carried in the thread.
-            '$expand': 'attachments($select=id,name,contentType,size,isInline,contentId)',
+            '$select': 'id,conversationId,subject,from,toRecipients,sentDateTime,receivedDateTime,isDraft,bodyPreview,body,hasAttachments',
+            # NOTE: attachment METADATA is fetched per-message below (only when
+            # hasAttachments) — NOT via $expand here: Graph 400s on
+            # $expand=attachments over a $filter'd /me/messages collection, and
+            # that would break the whole thread read (bodies included).
             # NOTE: deliberately NO $orderby. Microsoft Graph returns 400 Bad
             # Request when $orderby names a property other than the one in
             # $filter (here we filter on conversationId), so we sort the
@@ -493,18 +497,35 @@ class MicrosoftGraphProvider(EmailProvider):
                 direction=direction,
                 body_text=body_text,
                 body_html=body_html,
-                attachments=[
-                    MailAttachment(
-                        id=att.get('id', ''),
-                        filename=att.get('name') or None,
-                        mime_type=att.get('contentType') or None,
-                        size=int(att.get('size') or 0),
-                        is_inline=bool(att.get('isInline')),
-                        cid=(att.get('contentId') or None),
-                    )
-                    for att in (msg.get('attachments') or [])
-                    if att.get('id')
-                ],
+                attachments=self._message_attachments(msg),
+            ))
+        return out
+
+    def _message_attachments(self, msg: dict) -> List[MailAttachment]:
+        """Attachment METADATA for one message (no bytes), fetched only when the
+        message actually has attachments. Kept off the thread $filter query
+        because Graph 400s on $expand=attachments there. Degrade-clean: [] on any
+        error — attachments are a nice-to-have, never a reason to lose the body."""
+        if not msg.get('hasAttachments'):
+            return []
+        try:
+            data = self._graph_get(
+                f"/me/messages/{msg['id']}/attachments",
+                params={'$select': 'id,name,contentType,size,isInline'},
+            )
+        except Exception as exc:  # noqa: BLE001 - degrade clean
+            logger.warning("microsoft attachments fetch failed for %s: %s", msg.get('id'), exc)
+            return []
+        out: List[MailAttachment] = []
+        for att in data.get('value', []):
+            if not att.get('id'):
+                continue
+            out.append(MailAttachment(
+                id=att.get('id', ''),
+                filename=att.get('name') or None,
+                mime_type=att.get('contentType') or None,
+                size=int(att.get('size') or 0),
+                is_inline=bool(att.get('isInline')),
             ))
         return out
 
