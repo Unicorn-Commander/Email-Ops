@@ -132,6 +132,12 @@ class MailThreadRequest(ProfileRequest):
     thread_id: str
 
 
+class MailAttachmentInput(BaseModel):
+    filename: str
+    mime_type: str = "application/octet-stream"
+    content_base64: str
+
+
 class MailSendRequest(ProfileRequest):
     from_: str = Field(default="", alias="from")
     to: str
@@ -144,6 +150,9 @@ class MailSendRequest(ProfileRequest):
     cc: Optional[List[str]] = None
     bcc: Optional[List[str]] = None
     body_html: Optional[str] = None
+    # Outbound attachment bytes (base64), staged by the backend. The provider
+    # folds them into the Gmail MIME / Graph attachments array.
+    attachments: Optional[List[MailAttachmentInput]] = None
 
     model_config = {"populate_by_name": True}
 
@@ -274,6 +283,24 @@ def _mail_message_to_dict(message: Any) -> dict[str, Any]:
     data = asdict(message)
     data["from"] = data.pop("sender", None)
     return data
+
+
+def _decode_attachments(attachments: Any) -> list[dict[str, Any]]:
+    """Decode base64 outbound-attachment inputs to provider-ready dicts
+    ``{filename, mime_type, data(bytes)}``. Empty list when none."""
+    out: list[dict[str, Any]] = []
+    for att in (attachments or []):
+        try:
+            data = base64.b64decode(att.content_base64)
+        except Exception:  # noqa: BLE001 - skip a corrupt part, never fail the send
+            logger.warning("skipping un-decodable attachment %s", getattr(att, "filename", "?"))
+            continue
+        out.append({
+            "filename": att.filename,
+            "mime_type": att.mime_type or "application/octet-stream",
+            "data": data,
+        })
+    return out
 
 
 def _thread_triage_ids(provider_name: str, messages: list[Any], verb: str) -> list[str]:
@@ -620,6 +647,7 @@ def mail_send(request: MailSendRequest) -> dict[str, Any]:
             cc=request.cc,
             bcc=request.bcc,
             body_html=request.body_html,
+            attachments=_decode_attachments(request.attachments),
         )
         return _dataclass_to_dict(result)
     except Exception as exc:  # noqa: BLE001 - degrade clean
@@ -653,6 +681,7 @@ def mail_draft(request: MailDraftRequest) -> dict[str, Any]:
             cc=request.cc,
             bcc=request.bcc,
             body_html=request.body_html,
+            attachments=_decode_attachments(request.attachments),
         )
         return _dataclass_to_dict(result)
     except Exception as exc:  # noqa: BLE001 - degrade clean

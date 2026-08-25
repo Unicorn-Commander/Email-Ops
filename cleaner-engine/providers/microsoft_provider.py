@@ -529,6 +529,20 @@ class MicrosoftGraphProvider(EmailProvider):
             ))
         return out
 
+    @staticmethod
+    def _graph_file_attachments(attachments: Optional[List[dict]]) -> List[Dict[str, Any]]:
+        """Build Graph fileAttachment objects (contentBytes = base64 STRING).
+        Inline in sendMail/createDraft; Graph caps inline contentBytes at ~3MB."""
+        out: List[Dict[str, Any]] = []
+        for att in (attachments or []):
+            out.append({
+                '@odata.type': '#microsoft.graph.fileAttachment',
+                'name': att.get('filename') or 'attachment',
+                'contentType': att.get('mime_type') or 'application/octet-stream',
+                'contentBytes': base64.b64encode(att.get('data') or b'').decode('ascii'),
+            })
+        return out
+
     def send_message(
         self,
         from_addr: str,
@@ -539,6 +553,7 @@ class MicrosoftGraphProvider(EmailProvider):
         cc: Optional[List[str]] = None,
         bcc: Optional[List[str]] = None,
         body_html: Optional[str] = None,
+        attachments: Optional[List[dict]] = None,
     ) -> SendResult:
         """Send a new message, or a THREADED reply when a reply target is given.
 
@@ -562,6 +577,7 @@ class MicrosoftGraphProvider(EmailProvider):
                     cc=cc,
                     bcc=bcc,
                     body_html=body_html,
+                    attachments=attachments,
                 )
                 if reply is not None:
                     return reply
@@ -582,6 +598,9 @@ class MicrosoftGraphProvider(EmailProvider):
             message['bccRecipients'] = [{'emailAddress': {'address': a}} for a in bcc if a]
         if from_addr:
             message['from'] = {'emailAddress': {'address': from_addr}}
+        file_atts = self._graph_file_attachments(attachments)
+        if file_atts:
+            message['attachments'] = file_atts
 
         resp = self._graph_post('/me/sendMail', json_body={'message': message, 'saveToSentItems': True})
         if resp.status_code in (200, 202):
@@ -640,8 +659,9 @@ class MicrosoftGraphProvider(EmailProvider):
         cc: Optional[List[str]] = None,
         bcc: Optional[List[str]] = None,
         body_html: Optional[str] = None,
+        attachments: Optional[List[dict]] = None,
     ) -> Optional[SendResult]:
-        """createReply -> PATCH -> send.
+        """createReply -> PATCH -> (attach) -> send.
 
         Returns None when the reply draft cannot even be created (the caller
         then falls back to plain sendMail); past that point failures return an
@@ -695,6 +715,18 @@ class MicrosoftGraphProvider(EmailProvider):
         except ValueError:
             updated = {}
 
+        # Attach files to the reply draft BEFORE sending. A failed attachment
+        # POST cleans up the draft and refuses (never send a reply missing the
+        # file the user attached) — symmetric with the PATCH-failure path.
+        for file_att in self._graph_file_attachments(attachments):
+            att_resp = self._graph_post(f'/me/messages/{draft_id}/attachments', json_body=file_att)
+            if att_resp.status_code not in (200, 201):
+                try:
+                    self._graph_delete(f'/me/messages/{draft_id}')
+                except Exception:
+                    pass
+                return SendResult(accepted=False, reason=f'graph_reply_attach_{att_resp.status_code}')
+
         sent = self._graph_post(f'/me/messages/{draft_id}/send')
         if sent.status_code not in (200, 202):
             return SendResult(accepted=False, reason=f'graph_reply_send_{sent.status_code}')
@@ -716,6 +748,7 @@ class MicrosoftGraphProvider(EmailProvider):
         cc: Optional[List[str]] = None,
         bcc: Optional[List[str]] = None,
         body_html: Optional[str] = None,
+        attachments: Optional[List[dict]] = None,
     ) -> DraftResult:
         """Create a REAL draft in the mailbox's Drafts folder (POST /me/messages).
 
@@ -747,6 +780,9 @@ class MicrosoftGraphProvider(EmailProvider):
             # Sending/drafting AS another mailbox needs an explicit SendAs grant;
             # set it so Graph can accept or refuse EXPLICITLY.
             message['from'] = {'emailAddress': {'address': from_addr}}
+        file_atts = self._graph_file_attachments(attachments)
+        if file_atts:
+            message['attachments'] = file_atts
 
         resp = self._graph_post('/me/messages', json_body=message)
         if resp.status_code in (200, 201):

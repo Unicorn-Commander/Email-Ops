@@ -209,6 +209,7 @@ export abstract class ConnectedAccountsEnginePort {
       cc?: string[];
       bcc?: string[];
       inReplyToThreadId?: string | null;
+      attachments?: { filename: string; mimeType: string; contentBase64: string }[];
     },
   ): Promise<EngineMailSendResult | null>;
 
@@ -229,6 +230,7 @@ export abstract class ConnectedAccountsEnginePort {
       cc?: string[];
       bcc?: string[];
       inReplyToThreadId?: string | null;
+      attachments?: { filename: string; mimeType: string; contentBase64: string }[];
     },
   ): Promise<EngineMailDraftResult | null>;
 

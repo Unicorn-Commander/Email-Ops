@@ -166,6 +166,7 @@ export class EngineMailProvider extends MailProviderPort {
       cc: req.cc,
       bcc: req.bcc,
       inReplyToThreadId: req.inReplyToThreadId ?? null,
+      attachments: req.attachments,
     });
     if (!res) {
       return { accepted: false, providerMessageId: null, threadId: null, reason: 'engine_unavailable' };
@@ -207,6 +208,7 @@ export class EngineMailProvider extends MailProviderPort {
       cc: req.cc,
       bcc: req.bcc,
       inReplyToThreadId: req.inReplyToThreadId ?? null,
+      attachments: req.attachments,
     });
     if (!res) {
       return {

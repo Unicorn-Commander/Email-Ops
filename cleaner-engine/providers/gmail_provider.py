@@ -464,6 +464,7 @@ class GmailProvider(EmailProvider):
         cc: Optional[List[str]] = None,
         bcc: Optional[List[str]] = None,
         body_html: Optional[str] = None,
+        attachments: Optional[List[dict]] = None,
     ) -> SendResult:
         """Send a new message or reply within a thread."""
         mime = MimeMessage()
@@ -483,6 +484,17 @@ class GmailProvider(EmailProvider):
             mime.add_alternative(body_html, subtype='html')
         else:
             mime.set_content(body or '')
+
+        # add_attachment restructures the message into multipart/mixed as needed;
+        # each attachment carries its bytes + a Content-Disposition filename.
+        for att in (attachments or []):
+            maintype, _, subtype = (att.get('mime_type') or 'application/octet-stream').partition('/')
+            mime.add_attachment(
+                att.get('data') or b'',
+                maintype=maintype or 'application',
+                subtype=subtype or 'octet-stream',
+                filename=att.get('filename') or 'attachment',
+            )
 
         send_body: dict = {}
         if in_reply_to_thread_id:

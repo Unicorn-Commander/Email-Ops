@@ -48,10 +48,8 @@ export interface ReplyComposerHandle {
 
 /** Plain-language banner when replying via a connected Gmail/Outlook account. */
 const EXTERNAL_REPLY_LIMITS =
-  'Sending from a connected Gmail/Outlook account through Email-Ops sends plain text only — CC, formatting, and attachments won\u2019t be included.';
+  'Sending from a connected Gmail/Outlook account sends plain text (no CC or rich formatting here); attachments ARE included.';
 
-const ATTACH_UNAVAILABLE_EXTERNAL =
-  'Attachments aren\u2019t supported when sending from connected Gmail/Outlook yet — attach in Gmail or Outlook instead.';
 
 export const ReplyComposer = forwardRef<
   ReplyComposerHandle,
@@ -289,7 +287,7 @@ export const ReplyComposer = forwardRef<
     invalidCount === 0 &&
     bodyPlain.length > 0 &&
     !sending &&
-    (limitedExternalSend || !uploads.uploading);
+    !uploads.uploading;
 
   async function saveAndCollapse() {
     await persistDraft();
@@ -317,6 +315,7 @@ export const ReplyComposer = forwardRef<
             to_address: to.join(', '),
             subject: subject.trim() || undefined,
             body: body.trim() || undefined,
+            ...(uploads.refs().length > 0 ? { attachments: uploads.refs() } : {}),
             ...(inReplyTo ? { in_reply_to: inReplyTo } : {}),
             ...(draftId ? { draft_id: draftId } : {}),
           }
@@ -351,7 +350,6 @@ export const ReplyComposer = forwardRef<
   function handleDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
     setDragging(false);
-    if (limitedExternalSend) return;
     if (uploads.supported && e.dataTransfer.files.length > 0) {
       uploads.addFiles(e.dataTransfer.files);
     }
@@ -364,7 +362,7 @@ export const ReplyComposer = forwardRef<
         dragging && 'bg-accent/5 ring-2 ring-inset ring-accent/40',
       )}
       onDragOver={(e) => {
-        if (!limitedExternalSend && uploads.supported) {
+        if (uploads.supported) {
           e.preventDefault();
           setDragging(true);
         }
@@ -490,7 +488,7 @@ export const ReplyComposer = forwardRef<
           </label>
         )}
 
-        {!limitedExternalSend && (
+        {uploads.supported && (
           <ComposerAttachments items={uploads.items} onRemove={uploads.remove} disabled={sending} />
         )}
 
@@ -522,11 +520,10 @@ export const ReplyComposer = forwardRef<
         </div>
 
         <div className="flex items-center justify-end gap-2">
-          {(uploads.supported || limitedExternalSend) && (
+          {uploads.supported && (
             <AttachButton
               onFiles={uploads.addFiles}
-              disabled={sending || !mailboxId || limitedExternalSend}
-              unavailableReason={limitedExternalSend ? ATTACH_UNAVAILABLE_EXTERNAL : undefined}
+              disabled={sending || !mailboxId}
               className="mr-auto"
             />
           )}
@@ -541,7 +538,7 @@ export const ReplyComposer = forwardRef<
           <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
             {sending
               ? 'Sending…'
-              : !limitedExternalSend && uploads.uploading
+              : uploads.uploading
                 ? 'Uploading…'
                 : confirmExternal
                   ? 'Send anyway'

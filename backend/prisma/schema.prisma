@@ -412,6 +412,7 @@ model Workspace {
   senderPolicies     SenderPolicy[]
   snoozedThreads     SnoozedThread[]
   scheduledSends     ScheduledSend[]
+  outboundAttachments OutboundAttachment[]
   mailRules          MailRule[]
   trustedCorrespondents TrustedCorrespondent[]
   spaces             Space[]
@@ -617,6 +618,7 @@ model MailboxAccount {
   contacts       MailContact[]
   snoozedThreads SnoozedThread[]
   scheduledSends ScheduledSend[]
+  outboundAttachments OutboundAttachment[]
   mailRules      MailRule[]
 
   // One mailbox identity per address per workspace.
@@ -906,6 +908,29 @@ model ScheduledSend {
   @@index([workspaceId, mailboxId, state, sendAt])
   @@index([state, sendAt])
   @@map("scheduled_sends")
+}
+
+// Short-lived staging for OUTBOUND attachment bytes on the EXTERNAL send lane.
+// Sovereign sends stage bytes in the James blob store; Gmail/Graph have no such
+// store, so a composed attachment's bytes land here (RLS-fenced, bytea) and are
+// referenced by id as the compose blob_id, then streamed to the provider at
+// send time and deleted. Bounded by the 25MB upload cap; never a long-term home.
+model OutboundAttachment {
+  id          String   @id @default(uuid())
+  workspaceId String
+  mailboxId   String
+  filename    String
+  mimeType    String
+  size        Int
+  bytes       Bytes
+  createdAt   DateTime @default(now())
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, mailboxId])
+  @@index([createdAt])
+  @@map("outbound_attachments")
 }
 
 // A per-mailbox inbound mail rule. `match` / `actions` hold the rule-engine

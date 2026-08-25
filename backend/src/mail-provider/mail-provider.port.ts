@@ -31,6 +31,13 @@ export interface MailProviderSendRequest {
   cc?: string[];
   bcc?: string[];
   inReplyToThreadId?: string | null;
+  /**
+   * Outbound attachments, bytes INLINE as base64. The sovereign lane references
+   * James blob ids; Gmail/Graph have no such store, so the backend resolves the
+   * staged bytes and passes them here for the provider to fold into the MIME
+   * (Gmail) / attachments array (Graph). Empty/omitted → no attachments.
+   */
+  attachments?: { filename: string; mimeType: string; contentBase64: string }[];
 }
 
 export interface MailProviderSendResult {

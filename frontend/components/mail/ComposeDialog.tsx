@@ -73,10 +73,8 @@ function plainToHtml(text: string): string {
 
 /** Copy for the external-provider composer honesty banner (plain language). */
 const EXTERNAL_SEND_LIMITS =
-  'Sending from a connected Gmail/Outlook account through Email-Ops sends plain text only — CC, BCC, formatting, and attachments won\u2019t be included.';
+  'Sending from a connected Gmail/Outlook account sends plain text (no CC/BCC or rich formatting here); attachments ARE included.';
 
-const ATTACH_UNAVAILABLE_EXTERNAL =
-  'Attachments aren\u2019t supported when sending from connected Gmail/Outlook yet — attach in Gmail or Outlook instead.';
 
 export function ComposeDialog({
   open,
@@ -336,7 +334,7 @@ export function ComposeDialog({
     to.length > 0 &&
     invalidCount === 0 &&
     !sending &&
-    (limitedExternalSend || !uploads.uploading);
+    !uploads.uploading;
   const noSubject = subject.trim() === '';
   const noBody = (limitedExternalSend ? body : htmlToText(body)).trim() === '';
 
@@ -351,12 +349,16 @@ export function ComposeDialog({
   }
 
   function buildComposeBody() {
-    // External port: plain text only — never claim CC/BCC/HTML/attachments went out.
+    // External port: plain-text body + CC/BCC intentionally kept simple, but
+    // attachments DO go out now (staged server-side, folded into the provider
+    // MIME/Graph send). Only claim what actually ships.
     if (limitedExternalSend) {
+      const externalAttachments = uploads.refs();
       return {
         to_address: to.join(', '),
         subject: subject.trim() || undefined,
         body: body.trim() || undefined,
+        ...(externalAttachments.length > 0 ? { attachments: externalAttachments } : {}),
         ...(draftId ? { draft_id: draftId } : {}),
       };
     }
@@ -439,7 +441,6 @@ export function ComposeDialog({
   function handleDrop(e: DragEvent<HTMLFormElement>) {
     e.preventDefault();
     setDragging(false);
-    if (limitedExternalSend) return;
     if (uploads.supported && e.dataTransfer.files.length > 0) {
       uploads.addFiles(e.dataTransfer.files);
     }
@@ -462,11 +463,10 @@ export function ComposeDialog({
       }
       footer={
         <>
-          {(uploads.supported || limitedExternalSend) && (
+          {uploads.supported && (
             <AttachButton
               onFiles={uploads.addFiles}
-              disabled={sending || !mailboxId || limitedExternalSend}
-              unavailableReason={limitedExternalSend ? ATTACH_UNAVAILABLE_EXTERNAL : undefined}
+              disabled={sending || !mailboxId}
               className="mr-auto"
             />
           )}
@@ -512,7 +512,7 @@ export function ComposeDialog({
           <Button size="sm" disabled={!canSend} onClick={() => void handleSend()}>
             {sending
               ? 'Sending…'
-              : !limitedExternalSend && uploads.uploading
+              : uploads.uploading
                 ? 'Uploading…'
                 : confirmExternal
                   ? 'Send anyway'
@@ -538,7 +538,7 @@ export function ComposeDialog({
           void handleSend();
         }}
         onDragOver={(e) => {
-          if (!limitedExternalSend && uploads.supported) {
+          if (uploads.supported) {
             e.preventDefault();
             setDragging(true);
           }
@@ -657,7 +657,7 @@ export function ComposeDialog({
           </label>
         )}
 
-        {!limitedExternalSend && (
+        {uploads.supported && (
           <ComposerAttachments items={uploads.items} onRemove={uploads.remove} disabled={sending} />
         )}
 

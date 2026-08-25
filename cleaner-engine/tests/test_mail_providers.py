@@ -248,6 +248,26 @@ def test_gmail_send_builds_mime_and_threads_reply():
     assert "hello body" in parsed.get_content()
 
 
+def test_gmail_send_includes_attachment_part():
+    """An outbound attachment lands as a real MIME part with its filename+bytes."""
+    provider, sink = _make_gmail(send_result={"id": "s1", "threadId": "t9"})
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Files",
+        body="see attached",
+        attachments=[{"filename": "hello.txt", "mime_type": "text/plain", "data": b"hi there"}],
+    )
+    assert result.accepted is True
+    send_call = next(c for c in sink if c[0] == "messages.send")
+    decoded = base64.urlsafe_b64decode(send_call[1]["body"]["raw"].encode("ascii"))
+    parsed = email.message_from_bytes(decoded, policy=policy.default)
+    parts = list(parsed.walk())
+    att = next(p for p in parts if p.get_filename() == "hello.txt")
+    assert att.get_content_type() == "text/plain"
+    assert att.get_content().strip() == "hi there"
+
+
 def test_gmail_batch_spam_adds_spam_and_drops_inbox():
     """Spam is a LABEL edit: add SPAM, remove INBOX (batchModify, one call/100)."""
     provider, sink = _make_gmail()
@@ -554,6 +574,55 @@ def test_ms_send_posts_sendmail(monkeypatch):
     assert msg["subject"] == "Hello"
     assert msg["toRecipients"][0]["emailAddress"]["address"] == "you@example.com"
     assert msg["body"]["content"] == "body text"
+
+
+def test_ms_send_sendmail_includes_file_attachment(monkeypatch):
+    captured = {}
+
+    def post_router(url, body):
+        captured["body"] = body
+        return _FakeResp(status_code=202)
+
+    provider, _ = _make_ms(monkeypatch, post_router=post_router)
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Files",
+        body="see attached",
+        attachments=[{"filename": "a.txt", "mime_type": "text/plain", "data": b"hi"}],
+    )
+    assert result.accepted is True
+    atts = captured["body"]["message"]["attachments"]
+    assert atts[0]["@odata.type"] == "#microsoft.graph.fileAttachment"
+    assert atts[0]["name"] == "a.txt"
+    assert base64.b64decode(atts[0]["contentBytes"]) == b"hi"
+
+
+def test_ms_send_reply_attaches_before_send(monkeypatch):
+    captured = {"attach_urls": []}
+    get_router, post_router, patch_router = _reply_routers(captured)
+
+    def post_with_attach(url, body):
+        if url.endswith("/attachments"):
+            captured["attach_urls"].append(url)
+            return _FakeResp(status_code=201, json_data={"id": "att1"})
+        return post_router(url, body)
+
+    provider, sink = _make_ms(
+        monkeypatch, get_router=get_router, post_router=post_with_attach, patch_router=patch_router
+    )
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Re: Hi",
+        body="bump",
+        in_reply_to_thread_id="m1",
+        attachments=[{"filename": "a.txt", "mime_type": "text/plain", "data": b"hi"}],
+    )
+    assert result.accepted is True
+    # the attachment POST hit the reply DRAFT, and the send happened after it
+    assert captured["attach_urls"] and captured["attach_urls"][0].endswith("/me/messages/draft1/attachments")
+    assert captured["send_url"].endswith("/me/messages/draft1/send")
 
 
 def test_ms_send_returns_accepted_false_on_error_status(monkeypatch):

@@ -500,6 +500,7 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       cc?: string[];
       bcc?: string[];
       inReplyToThreadId?: string | null;
+      attachments?: { filename: string; mimeType: string; contentBase64: string }[];
     },
   ): Promise<EngineMailSendResult | null> {
     return this.postJson<EngineMailSendResult>('/mail/send', {
@@ -513,6 +514,13 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       cc: message.cc?.length ? message.cc : null,
       bcc: message.bcc?.length ? message.bcc : null,
       in_reply_to_thread_id: message.inReplyToThreadId ?? null,
+      attachments: message.attachments?.length
+        ? message.attachments.map((a) => ({
+            filename: a.filename,
+            mime_type: a.mimeType,
+            content_base64: a.contentBase64,
+          }))
+        : null,
     });
   }
 
@@ -528,6 +536,7 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       cc?: string[];
       bcc?: string[];
       inReplyToThreadId?: string | null;
+      attachments?: { filename: string; mimeType: string; contentBase64: string }[];
     },
   ): Promise<EngineMailDraftResult | null> {
     return this.postJson<EngineMailDraftResult>('/mail/draft', {
@@ -541,6 +550,13 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       cc: message.cc?.length ? message.cc : null,
       bcc: message.bcc?.length ? message.bcc : null,
       in_reply_to_thread_id: message.inReplyToThreadId ?? null,
+      attachments: message.attachments?.length
+        ? message.attachments.map((a) => ({
+            filename: a.filename,
+            mime_type: a.mimeType,
+            content_base64: a.contentBase64,
+          }))
+        : null,
     });
   }
 

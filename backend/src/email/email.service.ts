@@ -1048,10 +1048,61 @@ export class EmailService {
     filename: string,
   ): Promise<{ blob_id: string; name: string; type: string; size: number } | null> {
     const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
-    if (!mailbox || this.mailProvider.handles(mailbox)) return null;
+    if (!mailbox) return null;
+    if (this.mailProvider.handles(mailbox)) {
+      // External (Gmail/M365): no James blob store, so stage the bytes in the
+      // RLS-fenced outbound_attachments table; the row id is the compose blob_id,
+      // resolved + streamed to the provider at send time, then deleted.
+      const row = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+        tx.outboundAttachment.create({
+          data: {
+            workspaceId,
+            mailboxId: mailbox.id,
+            filename,
+            mimeType: type,
+            size: file.length,
+            bytes: file,
+          },
+          select: { id: true },
+        }),
+      );
+      return { blob_id: row.id, name: filename, type, size: file.length };
+    }
     const up = await this.stalwart.uploadBlob(mailbox.emailAddress, file, type, filename);
     if (!up) return null;
     return { blob_id: up.blobId, name: filename, type: up.type, size: up.size };
+  }
+
+  /**
+   * Resolve staged external outbound-attachment blob ids to inline bytes for the
+   * provider send, and DELETE the rows (consume-on-send). Ids that don't resolve
+   * (foreign / already consumed) are skipped — a caller that references a stale
+   * id simply sends without that file rather than 500ing. Scoped to the
+   * mailbox's workspace via RLS.
+   */
+  private async resolveOutboundAttachments(
+    mailbox: MailboxAccount,
+    blobIds: string[],
+  ): Promise<{ filename: string; mimeType: string; contentBase64: string }[]> {
+    if (!blobIds.length) return [];
+    return this.prisma.withWorkspace(mailbox.workspaceId, null, async (tx) => {
+      const rows = await tx.outboundAttachment.findMany({
+        where: { id: { in: blobIds }, mailboxId: mailbox.id },
+      });
+      if (rows.length) {
+        await tx.outboundAttachment.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
+      }
+      // Preserve the caller's order (findMany does not guarantee it).
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      return blobIds
+        .map((id) => byId.get(id))
+        .filter((r): r is NonNullable<typeof r> => !!r)
+        .map((r) => ({
+          filename: r.filename,
+          mimeType: r.mimeType,
+          contentBase64: Buffer.from(r.bytes).toString('base64'),
+        }));
+    });
   }
 
   /**
@@ -3194,20 +3245,14 @@ export class EmailService {
 
     private async callEngine(mailbox: MailboxAccount | null, req: SendReq): Promise<EngineSendResult> {
     if (mailbox && this.mailProvider.handles(mailbox)) {
-      // The external-provider send path (Gmail/M365) does not carry attachments yet.
-      // Fail loud rather than deliver a message that silently dropped its attachment —
-      // accepted:true with a missing file is worse than a clear failure. (In practice
-      // uploadAttachment returns null for provider mailboxes, so req.attachments is
-      // normally empty; this guards a stale/forged ref or a post-engine-switch draft.)
-      if (req.attachments?.length) {
-        return {
-          accepted: false,
-          providerMessageId: null,
-          threadId: req.inReplyToThreadId ?? null,
-          lane: null,
-          reason: `attachments are not supported for ${mailbox.provider} sends yet — nothing was sent`,
-        };
-      }
+      // Resolve staged external attachment bytes (consume-on-send) and pass them
+      // inline to the provider, which folds them into the Gmail MIME / Graph
+      // attachments array. A stale/foreign blob id simply resolves to nothing
+      // rather than failing the send.
+      const attachments = await this.resolveOutboundAttachments(
+        mailbox,
+        (req.attachments ?? []).map((a) => a.blobId),
+      );
       const r = await this.mailProvider.send(mailbox, {
         from: req.fromAddress,
         to: req.toAddress,
@@ -3220,6 +3265,7 @@ export class EmailService {
         cc: req.cc,
         bcc: req.bcc,
         inReplyToThreadId: req.inReplyToThreadId,
+        attachments,
       });
       return {
         accepted: r.accepted,
