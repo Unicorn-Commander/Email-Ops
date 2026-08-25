@@ -429,11 +429,15 @@ export class McpService {
       {
         title: 'Search mail',
         description:
-          'Full-text SEARCH a mailbox folder by query string q (subject/body/participants, ' +
-          'via the engine’s own search). Pass mailbox_id for ONE mailbox; omit it to search ' +
-          'across every readable mailbox (unified). Optional folder (default inbox), limit ' +
-          '(≤200, default 50), offset. Read-only / member-level. Returns { threads, count, ' +
-          'q } — an empty list when the engine is dormant.',
+          'Full-text SEARCH a mailbox folder by query string q (subject/body/participants), ' +
+          'applied through each provider’s native search — sovereign James, Gmail q, and ' +
+          'Microsoft Graph $search for CONNECTED external accounts. Pass mailbox_id for ONE ' +
+          'mailbox; omit it to search across every readable mailbox (unified), external ' +
+          'accounts included. Optional folder (default inbox), limit (≤200, default 50), ' +
+          'offset. Read-only / member-level. Returns { threads, count, q, search_supported, ' +
+          'has_more, next_page_token }. When search_supported is false the provider could ' +
+          'not express the query, so an empty list means “could not filter”, NOT “no ' +
+          'matches” — do not treat it as authoritative.',
         inputSchema: {
           workspace_id: z.string().optional(),
           mailbox_id: z.string().optional(),
@@ -454,8 +458,9 @@ export class McpService {
           'Set or clear the read ($seen) state on every message in a thread. Pass ' +
           'mailbox_id to target ONE mailbox; omit it to apply across the workspace’s ' +
           'sovereign mailboxes (the bulk path). Member-level write; runs AS the calling ' +
-          'user. Returns { thread_id, read, updated } — updated:false when the engine ' +
-          'could not apply it (e.g. dormant, or an external provider mailbox).',
+          'user. Read-state reconciles on external (Gmail/M365) mailboxes too. ' +
+          'Returns { thread_id, read, updated } — updated:false only when the engine ' +
+          'could not apply it (dormant / unconnected).',
         inputSchema: {
           workspace_id: z.string().optional(),
           thread_id: z.string().min(1),

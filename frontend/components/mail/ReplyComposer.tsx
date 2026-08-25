@@ -213,7 +213,11 @@ export const ReplyComposer = forwardRef<
   }
 
   async function persistDraft(): Promise<{ draft_id: string | null; updated: boolean } | null> {
-    if (!workspaceId || !mailboxId || sending || draftSaving || !hasDraftContent()) return null;
+    // External (Gmail/M365) drafts are not persisted by the backend, so don't
+    // attempt a save that would flash a false "Draft saved". The reply text
+    // stays in the composer while it's open.
+    if (!workspaceId || !mailboxId || sending || draftSaving || limitedExternalSend || !hasDraftContent())
+      return null;
     const attachments = limitedExternalSend ? [] : uploads.refs();
     const plain = (limitedExternalSend ? body : htmlToText(body)).trim();
     const payload = {

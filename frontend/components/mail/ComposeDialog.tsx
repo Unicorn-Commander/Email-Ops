@@ -304,9 +304,10 @@ export function ComposeDialog({
 
   // Debounced autosave while the dialog is open. The first render after a seed
   // does not force a save; we only persist when the user has actually changed
-  // the snapshot.
+  // the snapshot. Skipped on the external (Gmail/M365) send path — the backend
+  // does not persist those drafts, so claiming "Draft saved" would be a lie.
   useEffect(() => {
-    if (!open) return;
+    if (!open || limitedExternalSend) return;
     const snapshot = buildSnapshot();
     if (snapshot === lastSavedSnapshot.current) return;
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
@@ -316,7 +317,7 @@ export function ComposeDialog({
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
     };
-  }, [open, to, cc, bcc, subject, body, draftId, workspaceId, mailboxId, sending, draftSaving, uploads.items]);
+  }, [open, limitedExternalSend, to, cc, bcc, subject, body, draftId, workspaceId, mailboxId, sending, draftSaving, uploads.items]);
 
   useEffect(() => {
     if (!draftSavedAt) return;
