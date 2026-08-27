@@ -10,13 +10,14 @@
  * projection.
  *
  * Outbound: transactional sends route to Postmark (the high-rep lane), exactly
- * as on Stalwart. Non-transactional sends also go via Postmark when it is
- * configured — Postmark is the only SPF-authorised egress for these domains
- * (SPF = include:spf.mtasv.net), so routing James' app-sends through it keeps
- * DMARC/SPF aligned. When Postmark is unset, a best-effort JMAP EmailSubmission
- * is attempted against James. (A real IMAP/SMTP client still submits to James
- * directly; James relays out via its Postmark smarthost — an engine config, not
- * app logic.)
+ * as on Stalwart, falling back to JMAP EmailSubmission when Postmark is unset.
+ * NON-transactional sends (mailboxes with postmark_lane=false — the sovereign
+ * outreach lane) route via James JMAP EmailSubmission and NEVER touch Postmark:
+ * bulk/cold mail on Postmark violates its AUP, and the outreach domains are
+ * SPF-authorised for James' own egress (e.g. outreach.magicunicorn.tech =
+ * ip4:203.0.113.10), not Postmark's. A non-transactional send with the JMAP
+ * lane unconfigured fails loud rather than falling back. (A real IMAP/SMTP
+ * client still submits to James directly.)
  *
  * ATTACHMENT-SEND ROUTING DEVIATION (webmail wave, flagged in the wave report):
  * an attachment-bearing send is ALWAYS routed via JMAP EmailSubmission
@@ -1055,38 +1056,67 @@ export class JamesClient extends StalwartPort {
     transactional: boolean,
   ): Promise<StalwartSendResult> {
     const hasAttachments = (request.attachments?.length ?? 0) > 0;
-    // Postmark is the only SPF-authorised egress for these domains, so route
-    // through it whenever it is configured (transactional and otherwise) — EXCEPT
-    // an attachment-bearing send, which routes via JMAP (see the file banner).
-    if (this.postmarkConfigured && !hasAttachments) {
-      return this.sendViaPostmark(request);
-    }
-    if (this.jmapUrl) {
-      return this.sendViaJames(request);
-    }
-    if (this.postmarkConfigured) {
-      // Reached only with attachments present AND JAMES_JMAP_URL unset (a misconfig):
-      // the Postmark lane cannot carry the blob reference. FAIL LOUD rather than
-      // silently sending without the attachment — an accepted:true that dropped the
-      // file is worse than a clear failure the caller can surface and retry.
-      this.logger.error(
-        'send: attachments requested but JAMES_JMAP_URL unset — refusing to send WITHOUT them',
-      );
-      return {
-        accepted: false,
-        providerMessageId: null,
-        threadId: request.inReplyToThreadId ?? null,
-        lane: null,
-        reason: 'attachments require the JMAP lane, but JAMES_JMAP_URL is not configured',
-      };
-    }
-    return {
+    const notConfigured: StalwartSendResult = {
       accepted: false,
       providerMessageId: null,
       threadId: request.inReplyToThreadId ?? null,
       lane: null,
       reason: 'mail engine not configured (JAMES_JMAP_URL + POSTMARK_SERVER_TOKEN unset)',
     };
+    // An attachment-bearing send needs the JMAP blob store regardless of lane
+    // (see the file banner): the Postmark API cannot reference James blobs.
+    if (hasAttachments) {
+      if (this.jmapUrl) {
+        return this.sendViaJames(request);
+      }
+      if (this.postmarkConfigured) {
+        // The Postmark lane cannot carry the blob reference. FAIL LOUD rather than
+        // silently sending without the attachment — an accepted:true that dropped the
+        // file is worse than a clear failure the caller can surface and retry.
+        this.logger.error(
+          'send: attachments requested but JAMES_JMAP_URL unset — refusing to send WITHOUT them',
+        );
+        return {
+          accepted: false,
+          providerMessageId: null,
+          threadId: request.inReplyToThreadId ?? null,
+          lane: null,
+          reason: 'attachments require the JMAP lane, but JAMES_JMAP_URL is not configured',
+        };
+      }
+      return notConfigured;
+    }
+    // A NON-transactional send (a postmark_lane=false mailbox — the sovereign
+    // outreach lane) must NEVER touch Postmark: bulk/cold mail on Postmark
+    // violates its AUP, and the outreach domains are SPF-authorised for James'
+    // own egress, not Postmark's. FAIL LOUD rather than fall back — a silent
+    // Postmark fallback is exactly the policy hazard the lane flag exists for.
+    if (!transactional) {
+      if (this.jmapUrl) {
+        return this.sendViaJames(request);
+      }
+      if (this.postmarkConfigured) {
+        this.logger.error(
+          'send: non-transactional (james-lane) send but JAMES_JMAP_URL unset — refusing the Postmark fallback',
+        );
+        return {
+          accepted: false,
+          providerMessageId: null,
+          threadId: request.inReplyToThreadId ?? null,
+          lane: null,
+          reason: 'james lane required (postmark_lane=false) but JAMES_JMAP_URL is not configured',
+        };
+      }
+      return notConfigured;
+    }
+    // Transactional, no attachments: prefer the high-rep Postmark lane.
+    if (this.postmarkConfigured) {
+      return this.sendViaPostmark(request);
+    }
+    if (this.jmapUrl) {
+      return this.sendViaJames(request);
+    }
+    return notConfigured;
   }
 
   /** Ensure a Message-ID-shaped value is wrapped in angle brackets for a mail header. */

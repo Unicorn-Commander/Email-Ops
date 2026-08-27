@@ -684,7 +684,7 @@ describe('JamesClient', () => {
       expect(r.reason).toMatch(/attachments require the JMAP lane/i);
     });
 
-    it('a plain send (no attachments) still prefers Postmark when configured, carrying cc/bcc/in-reply-to/references', async () => {
+    it('a plain TRANSACTIONAL send (no attachments) prefers Postmark when configured, carrying cc/bcc/in-reply-to/references', async () => {
       const CONFIGURED_WITH_POSTMARK = { ...CONFIGURED, POSTMARK_SERVER_TOKEN: 'pm-token' };
       let postmarkBody: any = null;
       const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
@@ -710,7 +710,7 @@ describe('JamesClient', () => {
           inReplyTo: 'orig@acme.test',
           references: ['orig@acme.test'],
         },
-        false,
+        true,
       );
       expect(r).toMatchObject({ accepted: true, lane: 'postmark', providerMessageId: 'pm-123' });
       expect(postmarkBody).toMatchObject({
@@ -721,6 +721,51 @@ describe('JamesClient', () => {
           { Name: 'References', Value: '<orig@acme.test>' },
         ],
       });
+    });
+
+    it('a NON-transactional plain send routes via James even when Postmark IS configured (the sovereign outreach lane never touches Postmark)', async () => {
+      const CONFIGURED_WITH_POSTMARK = { ...CONFIGURED, POSTMARK_SERVER_TOKEN: 'pm-token' };
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        if (String(url).includes('postmarkapp.com')) {
+          throw new Error('must not call Postmark for a non-transactional send');
+        }
+        const body = JSON.parse((init as RequestInit).body as string);
+        if (body.methodCalls.some((c: any[]) => c[0] === 'Identity/get')) {
+          return jsonResponse({
+            methodResponses: [['Identity/get', { list: [{ id: 'ident-1', email: 'sales@unicorncommander.ai' }] }, '0']],
+          });
+        }
+        if (body.methodCalls.some((c: any[]) => c[0] === 'Mailbox/query')) {
+          return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-sent-1'] }, '0']] });
+        }
+        return jsonResponse({
+          methodResponses: [['Email/set', { created: { outbound: { id: 'em-cold-1', threadId: 'th-cold-1' } } }, '0']],
+        });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED_WITH_POSTMARK));
+      const r = await client.send(
+        'sales@unicorncommander.ai',
+        { fromAddress: 'sales@unicorncommander.ai', toAddress: 'jane@acme.test', subject: 's', body: 'b' },
+        false,
+      );
+      expect(r).toMatchObject({ accepted: true, lane: 'james', providerMessageId: 'em-cold-1' });
+    });
+
+    it('a NON-transactional send FAILS LOUD when JMAP is unset — never falls back to Postmark', async () => {
+      // Postmark configured, JMAP dormant, postmark_lane=false: a silent Postmark
+      // fallback would put cold mail on the AUP-protected lane — exactly the bug
+      // that stranded the 2026-08-25 outreach seed test. Refuse instead.
+      const client = new JamesClient(makeConfig({ POSTMARK_SERVER_TOKEN: 'pm-token' }));
+      const r = await client.send(
+        'sales@unicorncommander.ai',
+        { fromAddress: 'sales@unicorncommander.ai', toAddress: 'jane@acme.test', subject: 's', body: 'b' },
+        false,
+      );
+      expect(r.accepted).toBe(false);
+      expect(r.lane).toBeNull();
+      expect(r.reason).toMatch(/james lane required/i);
     });
 
     it('toAddresses fans out to multiple recipients on BOTH the Postmark and JMAP send lanes', async () => {
@@ -745,7 +790,7 @@ describe('JamesClient', () => {
           subject: 's',
           body: 'b',
         },
-        false,
+        true,
       );
       expect(postmarkBody.To).toBe('a@acme.test, b@acme.test');
 
