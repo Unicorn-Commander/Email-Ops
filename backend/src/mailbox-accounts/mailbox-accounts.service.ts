@@ -143,7 +143,7 @@ export class MailboxAccountsService {
             ownerKind,
             ownerKey: input.ownerKey ?? null,
             kind: ownerKind.toLowerCase(),
-            postmarkLane: input.postmarkLane ?? true,
+            postmarkLane: input.postmarkLane ?? false,
             // provisionState defaults REGISTERED; isDefault false; active true.
           },
         });

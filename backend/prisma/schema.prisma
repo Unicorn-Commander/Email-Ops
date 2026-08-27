@@ -580,8 +580,10 @@ model MailboxAccount {
   // Whether this is the workspace's default outbound mailbox (one per workspace).
   isDefault    Boolean  @default(false)
   // Whether transactional sends from this account should route via Postmark
-  // (the high-rep lane) rather than Stalwart SMTP (per the suite comms lanes).
-  postmarkLane Boolean  @default(true)
+  // (the high-rep lane) rather than the sovereign James lane. Default FALSE
+  // (2026-08-27): the Postmark lane is AUP-protected (no cold/bulk mail), so a
+  // mailbox must OPT IN to it explicitly rather than land there by omission.
+  postmarkLane Boolean  @default(false)
   active       Boolean  @default(true)
   // Which mail backend fronts this mailbox: 'stalwart' (the sovereign engine —
   // the back-compat default for every pre-existing row) or an EXTERNAL connected
