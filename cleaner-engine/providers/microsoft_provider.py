@@ -114,10 +114,17 @@ class MicrosoftGraphProvider(EmailProvider):
 
     def _graph_get(self, path: str, params: dict = None) -> dict:
         url = f'{GRAPH_BASE}{path}'
-        resp = requests.get(url, headers=self._headers(), params=params, timeout=30)
-        self._handle_throttle(resp)
-        resp.raise_for_status()
-        return resp.json()
+        # GETs are idempotent, so a 429 is retried after Retry-After (bounded).
+        # Write verbs must NOT get this treatment — a retried POST could
+        # double-send mail — they keep the sleep-and-raise in _handle_throttle.
+        for attempt in range(3):
+            resp = requests.get(url, headers=self._headers(), params=params, timeout=30)
+            if resp.status_code == 429 and attempt < 2:
+                time.sleep(int(resp.headers.get('Retry-After', 5)))
+                continue
+            self._handle_throttle(resp)
+            resp.raise_for_status()
+            return resp.json()
 
     def _graph_post(self, path: str, json_body: dict = None) -> requests.Response:
         url = f'{GRAPH_BASE}{path}'

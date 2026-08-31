@@ -1296,3 +1296,44 @@ def test_ms_poll_inbound_flags_agent_autoreply_header(monkeypatch):
     result = provider.poll_inbound(since)
     assert len(result["new_messages"]) == 1
     assert result["new_messages"][0]["agent_autoreply"] is True
+
+
+def test_ms_graph_get_retries_once_after_429(monkeypatch):
+    """A throttled GET is retried after Retry-After instead of failing the
+    enrichment call — live plan_cleanup bursts hit Graph 429s and every 429'd
+    get_message degraded its row back to size-unknown."""
+    slept = []
+    monkeypatch.setattr("providers.microsoft_provider.time.sleep", lambda s: slept.append(s))
+    calls = {"n": 0}
+
+    def get_router(url, params):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            resp = _FakeResp(status_code=429)
+            resp.headers = {"Retry-After": "1"}
+            return resp
+        return _FakeResp(json_data={"id": "m1", "conversationId": "c1", "subject": "S",
+                                    "from": {"emailAddress": {"address": "a@x.com"}},
+                                    "toRecipients": [], "receivedDateTime": "2026-01-01T00:00:00Z",
+                                    "isRead": True})
+
+    provider, sink = _make_ms(monkeypatch, get_router=get_router)
+    result = provider._graph_get("/me/messages/m1")
+    assert result["id"] == "m1"
+    assert calls["n"] == 2
+    assert slept == [1]
+
+
+def test_ms_graph_get_gives_up_after_bounded_retries(monkeypatch):
+    """Persistent 429s still raise (bounded retry, no infinite loop)."""
+    monkeypatch.setattr("providers.microsoft_provider.time.sleep", lambda s: None)
+
+    def get_router(url, params):
+        resp = _FakeResp(status_code=429)
+        resp.headers = {"Retry-After": "0"}
+        return resp
+
+    provider, sink = _make_ms(monkeypatch, get_router=get_router)
+    with pytest.raises(Exception):
+        provider._graph_get("/me/messages/m1")
+    assert len(sink) == 3
