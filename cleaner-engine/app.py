@@ -482,11 +482,25 @@ def accounts_stats(request: StatsRequest) -> dict[str, Any]:
 @app.post("/messages/list", dependencies=[Depends(_require_engine_token)])
 def messages_list(request: ListMessagesRequest) -> dict[str, Any]:
     provider = _create_authenticated_provider(request.provider, request.credentials.model_dump())
-    messages, next_token = provider.list_messages(
-        query=request.query,
-        max_results=request.max_results,
-        page_token=request.page_token,
-    )
+    try:
+        messages, next_token = provider.list_messages(
+            query=request.query,
+            max_results=request.max_results,
+            page_token=request.page_token,
+        )
+    except ValueError as exc:
+        # The provider refused an unmappable query rather than silently listing
+        # the unfiltered mailbox — surface that refusal, never a 500.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unsupported query for {request.provider}: {exc}",
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - surface as a clean 502, never an anonymous 500
+        logger.warning("messages/list failed for %s: %s", request.provider, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"messages list failed: {exc}",
+        ) from exc
     return {
         "messages": _dataclass_to_dict(messages),
         "next_token": next_token,

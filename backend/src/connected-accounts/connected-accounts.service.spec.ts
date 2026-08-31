@@ -1,4 +1,4 @@
-import { BadGatewayException, ForbiddenException } from '@nestjs/common';
+import { BadGatewayException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { CleanupActionKind, CleanupBatchState, User } from '@prisma/client';
 import { KeycloakBrokerService } from '../auth/keycloak-broker.service';
 import { MembershipService } from '../common/workspace/membership.service';
@@ -449,5 +449,96 @@ describe('ConnectedAccountsService', () => {
     expect(tx.agentInboxItem.create).toHaveBeenCalled();
     expect(engine.batchTrash).not.toHaveBeenCalled();
     expect(engine.batchDelete).not.toHaveBeenCalled();
+  });
+
+  it('SAFETY: a queried row that does not visibly match the query is NOT safe', async () => {
+    // The live Microsoft bug: an unhonoured filter returned the unfiltered
+    // mailbox and "hasQuery" blanket-marked 496 rows — the user's own mail
+    // included — as safe. Rows must now VISIBLY match the query.
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        { id: 'm-1', sender: 'Shop <deals@shop.com>', subject: 'Sale', snippet: 'buy', size_bytes: 100, labels: [], is_starred: false },
+        { id: 'm-2', sender: 'Wife <jordan@example.com>', subject: 'dinner', snippet: 'tonight?', size_bytes: 200, labels: [], is_starred: false },
+      ],
+      next_token: null,
+    });
+
+    const fromPlan = await service().planCleanup(user, 'gmail', { query: 'from:deals@shop.com' });
+    expect(fromPlan.counts.reviewed).toBe(2);
+    expect(fromPlan.safe.map((r) => r.id)).toEqual(['m-1']);
+
+    const textPlan = await service().planCleanup(user, 'gmail', { query: 'gmktec' });
+    // Neither row mentions the free text anywhere visible → nothing is safe.
+    expect(textPlan.counts.reviewed).toBe(2);
+    expect(textPlan.safe).toEqual([]);
+  });
+
+  it('free-text queries match against sender, subject and snippet (case-insensitive)', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        { id: 'm-1', sender: 'Shop <deals@shop.com>', subject: 'GMKtec mini PC deal', snippet: 'sale', size_bytes: 100, labels: [], is_starred: false },
+        { id: 'm-2', sender: 'Shop <deals@shop.com>', subject: 'Other', snippet: 'your gmktec order shipped', size_bytes: 200, labels: [], is_starred: false },
+        { id: 'm-3', sender: 'Wife <jordan@example.com>', subject: 'dinner', snippet: 'tonight?', size_bytes: 300, labels: [], is_starred: false },
+      ],
+      next_token: null,
+    });
+
+    const plan = await service().planCleanup(user, 'gmail', { query: 'gmktec' });
+    expect(plan.safe.map((r) => r.id)).toEqual(['m-1', 'm-2']);
+  });
+
+  it('throws ServiceUnavailable when the FIRST listing page fails — never reviewed:0 "success"', async () => {
+    // The engine client maps a non-2xx (e.g. the Graph 400 a from:/category:
+    // query used to hit) to null. That must abort the plan loudly, not surface
+    // as a "successful" plan that reviewed nothing.
+    (engine.listMessages as jest.Mock).mockResolvedValue(null);
+
+    await expect(
+      service().planCleanup(user, 'gmail', { query: 'from:deals@shop.com' }),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+    // The read-only lanes keep their degrade-clean contract.
+    (engine.analyzeInbox as jest.Mock).mockResolvedValue(null);
+    const analysis = await service().analyzeInbox(user, 'gmail');
+    expect(analysis.available).toBe(false);
+    (engine.getInboxStats as jest.Mock).mockResolvedValue(null);
+    const stats = await service().getInboxStats(user, 'gmail');
+    expect(stats.available).toBe(false);
+  });
+
+  it('freesBytes sums the real sizes of the safe rows', async () => {
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        { id: 'm-1', sender: 'Shop <deals@shop.com>', subject: 'Sale', size_bytes: 1111, labels: [], is_starred: false },
+        { id: 'm-2', sender: 'Shop <deals@shop.com>', subject: 'Sale 2', size_bytes: 2222, labels: [], is_starred: false },
+        { id: 'm-3', sender: 'Wife <jordan@example.com>', subject: 'dinner', size_bytes: 9999, labels: [], is_starred: false },
+      ],
+      next_token: null,
+    });
+
+    const plan = await service().planCleanup(user, 'gmail', { query: 'from:deals@shop.com' });
+    expect(plan.safe.map((r) => r.id)).toEqual(['m-1', 'm-2']);
+    expect(plan.freesBytes).toBe(3333); // real sizes, not the fake 0 Microsoft used to report
+  });
+
+  it('classifies Microsoft-shaped rows (empty labels, importance-starred, real sizes)', async () => {
+    // Microsoft rows carry labels: [] (Outlook categories, not Gmail labels),
+    // is_starred from importance, and size_bytes from PidTagMessageSize. They
+    // must classify without enrichment round-trips, matching rows ARE safe, and
+    // starred (high-importance) mail stays protected.
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        { id: 'm-1', sender: 'GMKtec <sales@gmktec.com>', subject: 'Order', snippet: 'thanks', size_bytes: 4096, labels: [], is_starred: false },
+        { id: 'm-2', sender: 'GMKtec <sales@gmktec.com>', subject: 'Warranty', snippet: 'info', size_bytes: 2048, labels: [], is_starred: true },
+      ],
+      next_token: null,
+    });
+
+    const plan = await service().planCleanup(user, 'microsoft', { query: 'from:sales@gmktec.com' });
+    expect(engine.getMessage).not.toHaveBeenCalled(); // rows were complete
+    expect(plan.counts.reviewed).toBe(2);
+    expect(plan.safe.map((r) => r.id)).toEqual(['m-1']);
+    expect(plan.protected[0]).toMatchObject({ id: 'm-2', reason: 'starred' });
+    expect(plan.freesBytes).toBe(4096);
   });
 });

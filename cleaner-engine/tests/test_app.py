@@ -414,6 +414,44 @@ def test_messages_get(client):
     assert response.json()["body_text"] == "Body text"
 
 
+def test_messages_list_unsupported_query_is_400(client, monkeypatch):
+    # A provider that refuses an unmappable query (Microsoft raising ValueError
+    # instead of listing the unfiltered mailbox) must surface as an explicit 400
+    # the backend can distinguish from "nothing matched" — never a 200 [] or 500.
+    class RefusingProvider(FakeProvider):
+        def list_messages(self, query="", max_results=100, page_token=None, folder=None):
+            raise ValueError(f"microsoft search not supported for query {query!r}")
+
+    factory = FakeProviderFactory(provider_cls=RefusingProvider)
+    monkeypatch.setattr(app.provider_factory, "create_provider", factory.create_provider)
+
+    response = client.post(
+        "/messages/list",
+        headers=_auth_headers(),
+        json={"provider": "microsoft", "credentials": {"token": "abc"}, "query": "from:x@y.com is:unread"},
+    )
+    assert response.status_code == 400
+    assert "unsupported query" in response.json()["detail"]
+
+
+def test_messages_list_surfaces_provider_failure_as_502(client, monkeypatch):
+    # A provider/Graph failure must be a clean 502, not an anonymous 500 that the
+    # backend client logs as an opaque engine error.
+    class RaisingProvider(FakeProvider):
+        def list_messages(self, query="", max_results=100, page_token=None, folder=None):
+            raise RuntimeError("graph 503 mailbox busy")
+
+    factory = FakeProviderFactory(provider_cls=RaisingProvider)
+    monkeypatch.setattr(app.provider_factory, "create_provider", factory.create_provider)
+
+    response = client.post(
+        "/messages/list",
+        headers=_auth_headers(),
+        json={"provider": "microsoft", "credentials": {"token": "abc"}, "query": "from:x@y.com"},
+    )
+    assert response.status_code == 502
+
+
 def test_cleanup_trash(client):
     response = client.post(
         "/cleanup/trash",

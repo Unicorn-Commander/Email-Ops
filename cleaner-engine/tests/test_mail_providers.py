@@ -657,11 +657,35 @@ def test_ms_get_thread_no_orderby_sorts_client_side(monkeypatch):
 
 
 def test_ms_translate_query_escapes_from_sender_single_quote(monkeypatch):
-    """A from: sender containing a single quote is OData-escaped (doubled)."""
+    """A from: sender containing a single quote is OData-escaped (doubled),
+    and a multi-term injection attempt is refused outright — term-honest
+    translation never lets trailing terms ride inside the address literal."""
     provider, _ = _make_ms(monkeypatch)
-    filt = provider.translate_query("from:a' or isRead eq true or x eq 'b")
-    assert filt == "from/emailAddress/address eq 'a'' or isRead eq true or x eq ''b'"
-    assert "address eq 'a' or isRead eq true" not in filt
+    filt = provider.translate_query("from:o'brien@example.com")
+    assert filt == "from/emailAddress/address eq 'o''brien@example.com'"
+    # The old best-effort translator swallowed everything after from: into the
+    # literal; now a query mixing free text/unknown terms refuses translation.
+    assert provider.translate_query("from:a' or isRead eq true or x eq 'b") == ''
+
+
+def test_ms_translate_query_or_of_from_builds_disjunction(monkeypatch):
+    """senderGroup criteria ("from:a OR from:b") become an or-chained filter."""
+    provider, _ = _make_ms(monkeypatch)
+    filt = provider.translate_query("from:a@x.com OR from:b@y.com")
+    assert filt == "(from/emailAddress/address eq 'a@x.com' or from/emailAddress/address eq 'b@y.com')"
+    # A disjunction with a non-from operand has no faithful translation.
+    assert provider.translate_query("from:a@x.com OR is:unread") == ''
+
+
+def test_ms_translate_query_never_drops_terms(monkeypatch):
+    """Mixed free text + operators is refused, never partially applied — the
+    old code turned 'gmktec older_than:30d' into an unscoped all-old-mail
+    filter by silently dropping the free text."""
+    provider, _ = _make_ms(monkeypatch)
+    assert provider.translate_query("gmktec older_than:30d") == ''
+    # All-operator conjunctions translate every term.
+    filt = provider.translate_query("is:unread older_than:30d")
+    assert "isRead eq false and receivedDateTime le " in filt
 
 
 def test_ms_send_posts_sendmail(monkeypatch):
@@ -867,6 +891,148 @@ def test_ms_list_threads_unsupported_operator_raises(monkeypatch):
     provider, _ = _make_ms(monkeypatch, get_router=get_router)
     with pytest.raises(ValueError, match="microsoft search not supported"):
         provider.list_threads(folder="inbox", limit=10, query="is:flagged")
+
+
+# ---------------------------------------------------------------------------
+# Microsoft Graph list_messages (cleaner lane) — criteria honesty
+# ---------------------------------------------------------------------------
+
+def _ms_list_msg(msg_id, received, **overrides):
+    msg = {
+        "id": msg_id,
+        "conversationId": f"c-{msg_id}",
+        "subject": f"Subject {msg_id}",
+        "from": {"emailAddress": {"address": "a@example.com"}},
+        "receivedDateTime": received,
+        "isRead": True,
+        "hasAttachments": False,
+        "bodyPreview": "preview",
+    }
+    msg.update(overrides)
+    return msg
+
+
+def test_ms_list_messages_free_text_uses_search_no_filter_no_orderby(monkeypatch):
+    """The live bug: plan_cleanup("gmktec") listed the newest 500 UNFILTERED
+    messages. Free text must go through $search — never a dropped filter."""
+    page = {"value": [_ms_list_msg("m1", "2024-01-01T10:00:00Z")]}
+    provider, sink = _make_ms(monkeypatch, get_router=lambda u, p: _FakeResp(json_data=page))
+
+    messages, next_token = provider.list_messages("gmktec")
+
+    assert next_token is None
+    assert [m.id for m in messages] == ["m1"]
+    (_, url, params) = sink[0]
+    assert url.endswith("/me/messages")
+    assert params["$search"] == '"gmktec"'
+    assert "$filter" not in params
+    # Graph rejects $search combined with $orderby.
+    assert "$orderby" not in params
+
+
+def test_ms_list_messages_search_escapes_embedded_double_quotes(monkeypatch):
+    page = {"value": []}
+    provider, sink = _make_ms(monkeypatch, get_router=lambda u, p: _FakeResp(json_data=page))
+    provider.list_messages('say "hi"')
+    (_, _, params) = sink[0]
+    assert params["$search"] == '"say \\"hi\\""'
+
+
+def test_ms_list_messages_from_filter_no_orderby_sorts_client_side(monkeypatch):
+    """from: queries were 400ing live ($filter + $orderby on different
+    properties); the filter must be sent WITHOUT $orderby, sorted client-side."""
+    page = {
+        "value": [
+            _ms_list_msg("m_old", "2024-01-01T10:00:00Z"),
+            _ms_list_msg("m_new", "2024-01-03T10:00:00Z"),
+            _ms_list_msg("m_mid", "2024-01-02T10:00:00Z"),
+        ]
+    }
+    provider, sink = _make_ms(monkeypatch, get_router=lambda u, p: _FakeResp(json_data=page))
+
+    messages, _ = provider.list_messages("from:x@y.com")
+
+    (_, _, params) = sink[0]
+    assert params["$filter"] == "from/emailAddress/address eq 'x@y.com'"
+    assert "$orderby" not in params
+    assert "$search" not in params
+    # Newest first despite Graph returning them shuffled.
+    assert [m.id for m in messages] == ["m_new", "m_mid", "m_old"]
+
+
+def test_ms_list_messages_category_filter_no_orderby(monkeypatch):
+    page = {"value": []}
+    provider, sink = _make_ms(monkeypatch, get_router=lambda u, p: _FakeResp(json_data=page))
+
+    provider.list_messages("category:promotions")
+
+    (_, _, params) = sink[0]
+    assert params["$filter"] == "inferenceClassification eq 'other'"
+    assert "$orderby" not in params
+    assert "$search" not in params
+
+
+def test_ms_list_messages_untranslatable_query_raises_without_fetching(monkeypatch):
+    """An unmappable operator query must RAISE — never silently fetch the whole
+    mailbox (the root cause of 496 'safe' rows including the user's own mail)."""
+    provider, sink = _make_ms(monkeypatch)
+
+    with pytest.raises(ValueError, match="microsoft search not supported"):
+        provider.list_messages("gmktec from:x@y.com")
+    assert sink == []  # refused BEFORE touching Graph
+
+
+def test_ms_list_messages_maps_starred_labels_and_real_size(monkeypatch):
+    """Rows must carry is_starred (importance), labels (categories) and a REAL
+    size from the PidTagMessageSize expand — None when unknown, never a fake 0."""
+    page = {
+        "value": [
+            _ms_list_msg(
+                "m1",
+                "2024-01-02T10:00:00Z",
+                importance="high",
+                categories=["Promotions"],
+                # Graph normalises the property id casing in responses.
+                singleValueExtendedProperties=[{"id": "Integer 0xe08", "value": "2048"}],
+            ),
+            _ms_list_msg("m2", "2024-01-01T10:00:00Z", importance="normal"),
+        ]
+    }
+    provider, sink = _make_ms(monkeypatch, get_router=lambda u, p: _FakeResp(json_data=page))
+
+    messages, _ = provider.list_messages("")
+
+    (_, _, params) = sink[0]
+    assert "importance" in params["$select"] and "categories" in params["$select"]
+    assert params["$expand"] == "singleValueExtendedProperties($filter=id eq 'Integer 0x0E08')"
+    by_id = {m.id: m for m in messages}
+    assert by_id["m1"].is_starred is True
+    assert by_id["m1"].labels == ["Promotions"]
+    assert by_id["m1"].size_bytes == 2048
+    assert by_id["m2"].is_starred is False
+    assert by_id["m2"].labels == []
+    assert by_id["m2"].size_bytes is None  # unknown, not a fake 0
+
+
+def test_ms_get_message_maps_labels_and_size(monkeypatch):
+    msg = _ms_list_msg(
+        "m1",
+        "2024-01-02T10:00:00Z",
+        importance="high",
+        categories=["Receipts"],
+        toRecipients=[],
+        singleValueExtendedProperties=[{"id": "Integer 0x0E08", "value": "4096"}],
+    )
+    provider, sink = _make_ms(monkeypatch, get_router=lambda u, p: _FakeResp(json_data=msg))
+
+    email_msg = provider.get_message("m1")
+
+    (_, _, params) = sink[0]
+    assert "categories" in params["$select"]
+    assert "$expand" in params
+    assert email_msg.is_starred is True
+    assert email_msg.labels == ["Receipts"]
+    assert email_msg.size_bytes == 4096
 
 
 # ---------------------------------------------------------------------------

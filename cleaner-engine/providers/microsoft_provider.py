@@ -223,6 +223,28 @@ class MicrosoftGraphProvider(EmailProvider):
     # Messages
     # ------------------------------------------------------------------
 
+    # PidTagMessageSize — the MAPI extended property carrying the message's size in
+    # bytes. Graph does not expose size on the message resource itself, so we
+    # $expand this property to report REAL sizes instead of a fake 0.
+    _SIZE_PROPERTY = "singleValueExtendedProperties($filter=id eq 'Integer 0x0E08')"
+
+    @staticmethod
+    def _message_size_bytes(msg: dict) -> Optional[int]:
+        """PidTagMessageSize from an expanded extended property, or None.
+
+        None means UNKNOWN (property missing / expand not honoured) — never a
+        fake 0, so the backend can tell "no size" from "zero bytes".
+        """
+        for prop in msg.get('singleValueExtendedProperties') or []:
+            # Graph normalises the id casing ('Integer 0xe08' vs 'Integer 0x0E08').
+            prop_id = str(prop.get('id') or '').lower().replace(' ', '')
+            if prop_id in ('integer0xe08', 'integer0x0e08'):
+                try:
+                    return int(prop.get('value'))
+                except (TypeError, ValueError):
+                    return None
+        return None
+
     def list_messages(
         self,
         query: str = '',
@@ -232,12 +254,37 @@ class MicrosoftGraphProvider(EmailProvider):
     ) -> Tuple[List[EmailMessage], Optional[str]]:
         params: Dict[str, Any] = {
             '$top': min(max_results, 50),  # Graph limit per page
-            '$select': 'id,conversationId,subject,from,receivedDateTime,isRead,hasAttachments,bodyPreview',
+            '$select': 'id,conversationId,subject,from,receivedDateTime,isRead,hasAttachments,bodyPreview,importance,categories',
             '$orderby': 'receivedDateTime desc',
+            '$expand': self._SIZE_PROPERTY,
         }
 
-        if query:
-            params['$filter'] = self.translate_query(query)
+        # Same honesty gate as list_threads: an unmappable query RAISES instead
+        # of silently fetching the whole (unfiltered) mailbox — the live bug had
+        # plan_cleanup review the newest 500 messages of ALL mail and mark the
+        # user's own correspondence "safe".
+        user_q = (query or '').strip()
+        client_sort = False
+        if user_q:
+            odata = self._thread_search_filter(user_q)
+            if odata is None:
+                raise ValueError(
+                    f"microsoft search not supported for query {user_q!r} — "
+                    "refusing unfiltered results"
+                )
+            if odata:
+                params['$filter'] = odata
+                # Graph 400s when $orderby names a property not in $filter (see
+                # get_thread), so drop it and sort the page client-side instead.
+                params.pop('$orderby', None)
+                client_sort = True
+            else:
+                # Pure free text: use $search instead of $filter. Graph rejects
+                # $search combined with $orderby, and expects quoted terms —
+                # escape embedded double quotes so the term stays one literal.
+                params.pop('$orderby', None)
+                escaped = user_q.replace('"', '\\"')
+                params['$search'] = f'"{escaped}"'
 
         # Scope to a mail folder the Graph-correct way (an OData path segment),
         # rather than a $filter — /me/messages spans every folder incl. Sent.
@@ -248,15 +295,21 @@ class MicrosoftGraphProvider(EmailProvider):
             endpoint = '/me/messages'
 
         if page_token:
-            # page_token is a full URL for Graph API
+            # page_token is a full URL for Graph API (it carries the same query
+            # options, so filter/search mode is preserved across pages).
             resp = requests.get(page_token, headers=self._headers(), timeout=30)
             resp.raise_for_status()
             data = resp.json()
         else:
             data = self._graph_get(endpoint, params=params)
 
+        rows = data.get('value', [])
+        if client_sort:
+            # receivedDateTime is ISO-8601, so a lexical sort is chronological.
+            rows = sorted(rows, key=lambda m: m.get('receivedDateTime') or '', reverse=True)
+
         messages = []
-        for msg in data.get('value', []):
+        for msg in rows:
             from_addr = ''
             if msg.get('from', {}).get('emailAddress'):
                 from_addr = msg['from']['emailAddress'].get('address', '')
@@ -268,8 +321,11 @@ class MicrosoftGraphProvider(EmailProvider):
                 sender=from_addr,
                 date=msg.get('receivedDateTime', ''),
                 snippet=msg.get('bodyPreview', ''),
+                labels=list(msg.get('categories') or []),
                 is_read=msg.get('isRead', False),
+                is_starred=msg.get('importance', '') == 'high',
                 has_attachments=msg.get('hasAttachments', False),
+                size_bytes=self._message_size_bytes(msg),
                 raw_data=msg,
             ))
 
@@ -279,12 +335,15 @@ class MicrosoftGraphProvider(EmailProvider):
     def get_message(self, message_id: str, format: str = 'metadata') -> EmailMessage:
         select = (
             'id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,'
-            'importance,hasAttachments,bodyPreview,internetMessageHeaders'
+            'importance,categories,hasAttachments,bodyPreview,internetMessageHeaders'
         )
         if format == 'full':
             select += ',body'
 
-        msg = self._graph_get(f'/me/messages/{message_id}', params={'$select': select})
+        msg = self._graph_get(
+            f'/me/messages/{message_id}',
+            params={'$select': select, '$expand': self._SIZE_PROPERTY},
+        )
 
         from_addr = ''
         if msg.get('from', {}).get('emailAddress'):
@@ -310,9 +369,11 @@ class MicrosoftGraphProvider(EmailProvider):
             recipient=', '.join(to_addrs),
             date=msg.get('receivedDateTime', ''),
             snippet=msg.get('bodyPreview', ''),
+            labels=list(msg.get('categories') or []),
             is_read=msg.get('isRead', False),
             is_starred=msg.get('importance', '') == 'high',
             has_attachments=msg.get('hasAttachments', False),
+            size_bytes=self._message_size_bytes(msg),
             headers=headers,
             raw_data=msg,
         )
@@ -1118,11 +1179,49 @@ class MicrosoftGraphProvider(EmailProvider):
 
     def translate_query(self, canonical_query: str) -> str:
         """Translate Gmail-style queries to OData $filter syntax.
-        This handles common patterns; complex queries may need manual adjustment.
-        """
-        q = canonical_query.strip()
 
-        # Direct mappings for common canonical queries
+        Term-honest: EVERY term must translate or the whole query returns ''
+        (the caller then decides between $search and refusing). A term is never
+        silently dropped — the old best-effort version turned
+        "gmktec older_than:30d" into an unscoped fetch of ALL mail older than
+        30 days, which fed the cleanup lane's safe-marking.
+        """
+        import re
+
+        q = canonical_query.strip()
+        if not q:
+            return ''
+
+        # senderGroup criteria arrive as "from:a@x OR from:b@y" — translate the
+        # whole disjunction or refuse it; collapsing it into a single eq literal
+        # produced a match-nothing filter presented as a successful empty plan.
+        or_parts = re.split(r'\s+OR\s+', q)
+        if len(or_parts) > 1:
+            clauses = []
+            for part in or_parts:
+                part = part.strip()
+                if not part.startswith('from:'):
+                    return ''
+                clause = self._single_term_filter(part)
+                if clause is None:
+                    return ''
+                clauses.append(clause)
+            return '(' + ' or '.join(clauses) + ')'
+
+        clauses = []
+        for term in q.split():
+            clause = self._single_term_filter(term)
+            if clause is None:
+                return ''
+            clauses.append(clause)
+        return ' and '.join(clauses)
+
+    def _single_term_filter(self, term: str) -> Optional[str]:
+        """One query term → one OData clause, or None when it has no faithful
+        translation (free text included — that is the caller's $search case)."""
+        import re
+        from datetime import timedelta
+
         translations = {
             'category:promotions': "inferenceClassification eq 'other'",
             'category:social': "categories/any(c: c eq 'Social')",
@@ -1131,34 +1230,19 @@ class MicrosoftGraphProvider(EmailProvider):
             'is:starred': "importance eq 'high'",
             'has:attachment': 'hasAttachments eq true',
         }
+        if term in translations:
+            return translations[term]
 
-        if q in translations:
-            return translations[q]
+        match = re.fullmatch(r'older_than:(\d+)d', term)
+        if match:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=int(match.group(1)))).strftime('%Y-%m-%dT%H:%M:%SZ')
+            return f"receivedDateTime le {cutoff}"
 
-        # Handle 'older_than:Nd' pattern
-        if 'older_than:' in q:
-            import re
-            from datetime import datetime, timedelta, timezone
-            match = re.search(r'older_than:(\d+)d', q)
-            if match:
-                days = int(match.group(1))
-                cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%dT%H:%M:%SZ')
-                base_filter = f"receivedDateTime le {cutoff}"
-
-                # Combine with other parts
-                remaining = q.replace(match.group(0), '').strip()
-                if remaining and remaining in translations:
-                    return f"{translations[remaining]} and {base_filter}"
-                return base_filter
-
-        # Handle 'from:' queries
-        if q.startswith('from:'):
-            sender = q[5:].strip()
+        if term.startswith('from:') and len(term) > len('from:'):
+            sender = term[len('from:'):].strip()
             # ``sender`` is caller-supplied; escape OData single quotes (double
             # them) before interpolating into the string literal.
             safe_sender = sender.replace("'", "''")
             return f"from/emailAddress/address eq '{safe_sender}'"
 
-        # Fallback: use $search instead of $filter for free-text
-        # Return empty to let the caller use $search param instead
-        return ''
+        return None

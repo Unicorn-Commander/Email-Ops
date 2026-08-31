@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   AgentInboxKind,
@@ -230,17 +231,17 @@ export class ConnectedAccountsService {
     }
 
     const fetched = await this.collectMessages(provider, accessToken, criteria);
-    const hasQuery = typeof criteria.query === 'string' && criteria.query.trim().length > 0;
+    const queryText = typeof criteria.query === 'string' ? criteria.query.trim() : '';
     const categories = Array.isArray(criteria.categories)
       ? criteria.categories.map((c) => String(c).toLowerCase())
       : [];
     const plans = fetched.map((message) => this.classifyMessage(message));
     const protectedRows = plans.filter((row) => row.protected);
     // SAFETY: a message is "safe to delete" only when the user actually targeted
-    // it (category label match or an explicit query) — never just "not protected",
-    // which had swept in personal and Sent mail.
+    // it (category label match or a query the row VISIBLY matches) — never just
+    // "not protected", which had swept in personal and Sent mail.
     const safeRows = plans.filter(
-      (row) => !row.protected && this.isCleanupCandidate(row, categories, hasQuery),
+      (row, i) => !row.protected && this.isCleanupCandidate(row, fetched[i], categories, queryText),
     );
 
     return {
@@ -1260,7 +1261,22 @@ export class ConnectedAccountsService {
 
     for (let page = 0; page < 10 && messages.length < reviewCap; page += 1) {
       const res = await this.engine.listMessages(provider, credentials, query, perPage, pageToken ?? null);
-      if (!res) break;
+      if (!res) {
+        // The engine client maps any non-2xx (unsupported query, provider/Graph
+        // failure, engine down) to null. A null FIRST page means the plan
+        // reviewed nothing at all — letting that surface as reviewed:0
+        // "success" would make a failed query indistinguishable from a clean
+        // mailbox, so fail loudly instead. (collectMessages only serves the
+        // cleanup lane — planCleanup and its callers; getInboxStats /
+        // analyzeInbox use their own engine calls and keep degrading clean.)
+        // A null LATER page degrades to the partial preview already collected.
+        if (page === 0) {
+          throw new ServiceUnavailableException(
+            `Cleaner Engine could not list ${provider} messages for query "${query}" — cleanup plan aborted (a failed listing must never read as "nothing matched").`,
+          );
+        }
+        break;
+      }
       const pageMessages = Array.isArray(res.messages) ? res.messages : [];
       messages.push(...pageMessages);
       pageToken = res.next_token ?? null;
@@ -1418,21 +1434,66 @@ export class ConnectedAccountsService {
 
   /**
    * SAFETY GATE for what may be marked "safe to delete". A message qualifies only
-   * when the user actually targeted it: either they gave a free-text query (which
-   * already scoped the fetch to their intent), or the message carries one of the
-   * selected categories' labels. Everything else — personal mail, Sent — is kept.
+   * when the user actually targeted it: either they gave a query the row VISIBLY
+   * matches (a query alone is not enough — a provider that mistranslates or
+   * silently ignores the filter had marked the user's own mail safe), or the
+   * message carries one of the selected categories' labels. Everything else —
+   * personal mail, Sent — is kept.
    */
   private isCleanupCandidate(
     row: CleanupPlanMessageView,
+    message: EngineMessageSummary,
     categories: string[],
-    hasQuery: boolean,
+    query: string,
   ): boolean {
-    if (hasQuery) return true;
+    if (query) return this.matchesQuery(row, message, query);
     if (!categories.length) return false;
     const wantedLabels = new Set(categories.flatMap((c) => CATEGORY_LABELS[c] ?? []));
     if (!wantedLabels.size) return false;
     const labels = Array.isArray(row.labels) ? row.labels.map((l) => String(l).toUpperCase()) : [];
     return labels.some((l) => wantedLabels.has(l));
+  }
+
+  /**
+   * Client-side verification that a fetched row actually matches the user's
+   * query. The provider is asked to scope the fetch, but a filter it dropped or
+   * mistranslated must never turn into "everything fetched is safe" — a row that
+   * does not visibly match is NOT a cleanup candidate (conservative).
+   */
+  private matchesQuery(
+    row: CleanupPlanMessageView,
+    message: EngineMessageSummary,
+    query: string,
+  ): boolean {
+    // from:<addr> (possibly several, OR-joined): the sender address must equal
+    // the value, or end on it as an @domain / .suffix boundary (quotes
+    // stripped, case-insensitive). A bare substring test let from:shop.com
+    // match x@myshop.company.
+    const fromValues = [...query.matchAll(/(?:^|\s)from:("[^"]*"|\S+)/gi)]
+      .map((m) => m[1].replace(/^"|"$/g, '').toLowerCase())
+      .filter(Boolean);
+    if (fromValues.length) {
+      const senderAddress = this.extractAddress(row.sender).toLowerCase();
+      return fromValues.some(
+        (value) =>
+          senderAddress === value ||
+          senderAddress.endsWith(`@${value}`) ||
+          senderAddress.endsWith(`.${value}`) ||
+          (value.includes('@') && senderAddress.endsWith(value)),
+      );
+    }
+    // Other operator queries (category:, is:, has:, older_than:) are enforced
+    // server-side by the provider filter — or refused outright by the engine —
+    // and are not visible in row metadata, so trust the scoped fetch. Anchored
+    // to start-or-whitespace so free text like "check-in: reminder" doesn't
+    // read as an operator.
+    if (/(?:^|\s)(?:category|is|has|older_than|label|in):/i.test(query)) return true;
+    // Free text: the row must visibly contain the text in sender, subject or snippet.
+    const needle = query.toLowerCase();
+    const snippet = typeof message.snippet === 'string' ? message.snippet : null;
+    return [row.sender, row.subject, snippet].some(
+      (haystack) => typeof haystack === 'string' && haystack.toLowerCase().includes(needle),
+    );
   }
 
   private batchSummary(mode: string, provider: ConnectedProvider, count: number, backupRef: string | null): string {
@@ -1460,10 +1521,14 @@ export class ConnectedAccountsService {
     return this.cleanString(sender);
   }
 
-  private extractDomain(sender: string | null): string {
+  private extractAddress(sender: string | null): string {
     if (!sender) return '';
     const match = sender.match(/<([^>]+)>/);
-    const address = match?.[1] ?? sender;
+    return (match?.[1] ?? sender).trim();
+  }
+
+  private extractDomain(sender: string | null): string {
+    const address = this.extractAddress(sender);
     const at = address.lastIndexOf('@');
     if (at < 0) return '';
     return address.slice(at + 1).trim().toLowerCase();
