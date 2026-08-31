@@ -25,7 +25,7 @@
  * RLS transaction.
  */
 
-import { ForbiddenException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import {
   AgentInboxKind,
   AgentInboxState,
@@ -42,7 +42,7 @@ import { listMyWorkspaces, MyWorkspace } from '../common/workspace/list-my-works
 import { tenancyEnabled } from '../common/workspace/feature-flags';
 import { entitlementsOf, ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { EmailService } from '../email/email.service';
-import { MailFolder } from '../email/email.types';
+import { AttachmentView, MailFolder } from '../email/email.types';
 import { checkComposeEntitlement } from '../email/entitlement';
 import { AgentsService } from '../agents/agents.service';
 import { EmailHealthService } from '../email-health/email-health.service';
@@ -68,6 +68,13 @@ import { MailRuleView } from '../mail-rules/mail-rules.types';
 import { TrustedCorrespondentsService } from '../trusted-correspondents/trusted-correspondents.service';
 import { TrustedCorrespondentView } from '../email/email.types';
 import { enforceExtraScope, PatTaggedIdentity } from './mcp-scopes';
+
+/**
+ * get_attachment size cap: bytes ride the JSON-RPC response as base64 (~4/3
+ * inflation), so anything over this returns an error carrying the real size
+ * instead of a truncated payload the caller can't detect.
+ */
+export const MCP_ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024;
 
 export class EmailOpsTools {
   constructor(
@@ -411,6 +418,89 @@ export class EmailOpsTools {
     return { messages, count: messages.length };
   }
 
+  /**
+   * ATTACHMENT BYTES: fetch one attachment's content (base64) by the blob_id
+   * get_thread returned — the missing half of the read surface (metadata came
+   * with the thread; nothing served the bytes). Same lane as the mail BFF's
+   * GET .../blobs/:blobId: EmailService.downloadAttachment resolves the mailbox
+   * (owner fence intact) and routes sovereign blob-store vs external composite
+   * `${messageId}::${attachmentId}` ids. Read-only / member-level. Capped at
+   * MCP_ATTACHMENT_MAX_BYTES — an oversized blob returns an error WITH the size
+   * (never truncated bytes).
+   */
+  async getAttachment(
+    user: User,
+    args: { workspace_id?: string; mailbox_id: string; blob_id: string; thread_id?: string },
+  ): Promise<
+    | { name: string; mime_type: string | null; size: number; content_base64: string }
+    | { error: string; size: number; max_bytes: number }
+  > {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    const blob = await this.email.downloadAttachment(
+      workspaceId,
+      ucUid,
+      args.mailbox_id,
+      args.blob_id,
+    );
+    if (!blob) {
+      throw new NotFoundException(
+        'Attachment not found — check mailbox_id + blob_id (use the blob_id from get_thread), or the mail engine cannot serve it.',
+      );
+    }
+    if (blob.data.length > MCP_ATTACHMENT_MAX_BYTES) {
+      return {
+        error: `attachment is ${blob.data.length} bytes, over the ${MCP_ATTACHMENT_MAX_BYTES}-byte tool cap — download it via the mail UI instead`,
+        size: blob.data.length,
+        max_bytes: MCP_ATTACHMENT_MAX_BYTES,
+      };
+    }
+    let name = blob.filename?.trim() || null;
+    let mime = blob.contentType?.trim() || null;
+    if ((!name || !mime) && args.thread_id) {
+      // Backfill name/mime from thread metadata (Gmail's attachments.get and the
+      // James blob store return bytes only). Best-effort: a failed lookup never
+      // fails the fetch — the bytes are already in hand. ⚠️Gmail attachment ids
+      // are NOT stable across fetches, so a fresh thread read can return a
+      // DIFFERENT composite blob_id for the same attachment — match exact id
+      // first, then fall back within the same message: sole attachment, else a
+      // unique byte-size match.
+      try {
+        const messages = (await this.email.listThreadMessages(
+          workspaceId,
+          ucUid,
+          args.thread_id,
+          args.mailbox_id,
+        )) as { id?: string; attachments?: AttachmentView[] }[];
+        const sep = args.blob_id.indexOf('::');
+        const messageId = sep > 0 ? args.blob_id.slice(0, sep) : null;
+        let att =
+          messages.flatMap((m) => m.attachments ?? []).find((a) => a.blob_id === args.blob_id) ??
+          null;
+        if (!att && messageId) {
+          const inMessage = messages.find((m) => m.id === messageId)?.attachments ?? [];
+          if (inMessage.length === 1) att = inMessage[0];
+          else {
+            const bySize = inMessage.filter((a) => a.size === blob.data.length);
+            if (bySize.length === 1) att = bySize[0];
+          }
+        }
+        if (att) {
+          name = name ?? (att.name?.trim() || null);
+          mime = mime ?? (att.type?.trim() || null);
+        }
+      } catch {
+        // metadata backfill is optional — keep the bytes
+      }
+    }
+    return {
+      name: name ?? 'attachment',
+      mime_type: mime,
+      size: blob.data.length,
+      content_base64: blob.data.toString('base64'),
+    };
+  }
+
   /** Full-text search over a mailbox (or the unified inbox), reusing the engine's `q` path. */
   async searchMail(
     user: User,
@@ -422,22 +512,56 @@ export class EmailOpsTools {
       limit?: number;
       offset?: number;
     },
-  ): Promise<{ threads: unknown[]; count: number; q: string }> {
+  ): Promise<{
+    threads: unknown[];
+    count: number;
+    q: string;
+    search_supported: boolean;
+    has_more: boolean;
+    next_page_token: string | null;
+  }> {
     const workspaceId = await this.resolve(user, args.workspace_id);
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
     const folder = (args.folder ?? 'inbox') as MailFolder;
-    const threads = args.mailbox_id
-      ? await this.email.listMailboxInbox(
-          workspaceId,
-          ucUid,
-          args.mailbox_id,
-          args.limit,
-          folder,
-          args.q,
-          args.offset,
-        )
-      : await this.email.listAggregateInbox(workspaceId, ucUid, folder, args.limit, args.q, args.offset);
-    return { threads, count: threads.length, q: args.q };
+    if (args.mailbox_id) {
+      const page = await this.email.listMailboxInboxPage(
+        workspaceId,
+        ucUid,
+        args.mailbox_id,
+        args.limit,
+        folder,
+        args.q,
+        args.offset,
+      );
+      // HONEST capability signal: when a connected provider can't express this
+      // query, search_supported is false and threads:[] means "couldn't filter",
+      // NOT "no matches" — the agent must not read an empty result as authoritative.
+      return {
+        threads: page.threads,
+        count: page.threads.length,
+        q: args.q,
+        search_supported: page.searchSupported,
+        has_more: page.hasMore,
+        next_page_token: page.nextPageToken,
+      };
+    }
+    const agg = await this.email.listAggregateInboxPage(
+      workspaceId,
+      ucUid,
+      folder,
+      args.limit,
+      args.q,
+      args.offset,
+    );
+    return {
+      threads: agg.threads,
+      count: agg.threads.length,
+      q: args.q,
+      // Aggregate: false if ANY searched mailbox couldn't honour the filter.
+      search_supported: agg.searchSupported,
+      has_more: agg.hasMore,
+      next_page_token: null,
+    };
   }
 
   /** Mark a thread read/unread — per-mailbox when mailbox_id is given, else across the workspace. */
@@ -690,7 +814,7 @@ export class EmailOpsTools {
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
-    if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    if (role !== WorkspaceRole.OWNER) throw new ForbiddenException('ensureMailDomain: requires workspace OWNER role');
     const binding = await this.mailDomains.bindDomain(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -710,7 +834,7 @@ export class EmailOpsTools {
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
-    if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    if (role !== WorkspaceRole.OWNER) throw new ForbiddenException('removeMailDomain: requires workspace OWNER role');
     const binding = await this.mailDomains.assertWorkspaceOwnsDomain(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -730,7 +854,7 @@ export class EmailOpsTools {
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
-    if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    if (role !== WorkspaceRole.OWNER) throw new ForbiddenException('setMailboxQuota: requires workspace OWNER role');
     await this.mailDomains.assertWorkspaceOwnsDomain(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -758,7 +882,7 @@ export class EmailOpsTools {
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
-    if (role !== WorkspaceRole.OWNER) return { status: 'forbidden' };
+    if (role !== WorkspaceRole.OWNER) throw new ForbiddenException('removeMailboxEngine: requires workspace OWNER role');
     await this.mailDomains.assertWorkspaceOwnsDomain(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),

@@ -84,6 +84,7 @@ import {
   splitRecipients,
 } from './autonomy';
 import { mapWithConcurrency, withTimeout } from '../common/async/concurrency';
+import { mayActThroughMailbox } from '../common/mailbox/mailbox-fence';
 import { ApprovalPendingNotice, StableNotifierService } from '../notify/stable-notifier.service';
 
 /**
@@ -273,16 +274,7 @@ export class EmailService {
     mailbox: { ownerKind: string; ownerKey: string | null },
     ucUid: string | null,
   ): Promise<boolean> {
-    if ((mailbox.ownerKind as string) !== 'HUMAN') return true; // SHARED/AGENT = workspace resource
-    if (!mailbox.ownerKey || !ucUid) return false;
-    if (mailbox.ownerKey === ucUid) return true;
-    // ownerKey is canonically the keycloakId, but ucUid can arrive as the local
-    // User.id (auth-path dependent) — resolve the caller by EITHER identity and
-    // accept a match on either, so a legitimate owner is never falsely fenced out.
-    const u = await this.prisma.user.findFirst({
-      where: { OR: [{ keycloakId: ucUid }, { id: ucUid }] },
-    });
-    return !!u && (mailbox.ownerKey === u.keycloakId || mailbox.ownerKey === u.id);
+    return mayActThroughMailbox(this.prisma, mailbox, ucUid);
   }
 
   // ── 1. list_threads_with_contact ───────────────────────────────────────
@@ -824,6 +816,81 @@ export class EmailService {
   }
 
   /**
+   * UNIFIED INBOX with an HONEST search-capability signal (agent/MCP wave).
+   *
+   * Same fan-out + merge as {@link listAggregateInbox}, but each mailbox is read
+   * through {@link listMailboxInboxPage} so we can surface whether the query was
+   * actually applied. `searchSupported` is the AND over every readable mailbox:
+   * it is `false` if ANY searched mailbox could not honour the filter (e.g. a
+   * Microsoft account handed an operator query it can't express), so the caller
+   * knows the merged result may be under-inclusive rather than treating an empty
+   * merge as an authoritative "no matches". Sovereign (James) mailboxes always
+   * support the query grammar, so a workspace with only sovereign + Gmail boxes
+   * reports `true`. A timed-out / failed mailbox is omitted from the merge AND
+   * pessimistically drops `searchSupported` to `false` when a query is present
+   * (we can't prove it was searched).
+   */
+  async listAggregateInboxPage(
+    workspaceId: string,
+    ucUid: string | null,
+    folder: MailFolder = 'inbox',
+    limit = 50,
+    query?: string | null,
+    offset = 0,
+  ): Promise<{ threads: ThreadView[]; searchSupported: boolean; hasMore: boolean }> {
+    const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      this.readableMailboxes(tx, workspaceId, ucUid),
+    );
+    const hasQuery = !!(query && query.trim());
+    const settled = await mapWithConcurrency(mailboxes, MAILBOX_FANOUT_CONCURRENCY, (mb) =>
+      withTimeout(
+        this.listMailboxInboxPage(workspaceId, ucUid, mb.id, limit, folder, query, offset).then(
+          (page) => ({
+            threads: page.threads.map((t) => ({
+              ...t,
+              mailbox_id: mb.id,
+              mailbox_address: mb.emailAddress,
+            })),
+            searchSupported: page.searchSupported,
+          }),
+        ),
+        MAILBOX_FANOUT_TIMEOUT_MS,
+        `aggregate inbox search for ${mb.emailAddress}`,
+      ),
+    );
+    const merged: ThreadView[] = [];
+    // Start true; any unsearched/failed mailbox (when a query is present) makes
+    // the merged answer potentially incomplete → report false, honestly.
+    let searchSupported = true;
+    settled.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        merged.push(...r.value.threads);
+        if (hasQuery && !r.value.searchSupported) searchSupported = false;
+      } else {
+        this.logger.warn(
+          `aggregate inbox search: mailbox ${mailboxes[i]?.emailAddress ?? '?'} failed (${(r.reason as Error)?.message ?? r.reason}) — omitted; search coverage marked incomplete`,
+        );
+        if (hasQuery) searchSupported = false;
+      }
+    });
+    const seen = new Set<string>();
+    const deduped = merged.filter((t) => {
+      const key = `${t.mailbox_id ?? ''}:${t.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    deduped.sort((a, b) => {
+      const dt = this.threadTime(b) - this.threadTime(a);
+      if (dt !== 0) return dt;
+      const ma = (a.mailbox_address ?? '').localeCompare(b.mailbox_address ?? '');
+      if (ma !== 0) return ma;
+      return a.id.localeCompare(b.id);
+    });
+    return { threads: deduped.slice(0, limit), searchSupported, hasMore: deduped.length > limit };
+  }
+
+  /**
    * COUNTS (webmail wave): the Inbox unread/total per workspace mailbox, via
    * the engine's Mailbox surface (JMAP role:inbox), fetched CONCURRENTLY. A
    * failing / unsupported account becomes a zeroed entry with `error: true`
@@ -839,9 +906,16 @@ export class EmailService {
     // Same bounded + timed fan-out as the aggregate: a slow account times out
     // into a rejected slot (→ error:true below) instead of stalling the row.
     const settled = await mapWithConcurrency(mailboxes, MAILBOX_FANOUT_CONCURRENCY, (mb) => {
-      // External-provider mailboxes have no engine counts surface (yet) —
-      // honest zeros + error:true, same as a failing sovereign account.
-      if (this.mailProvider.handles(mb)) return Promise.resolve(null);
+      // External-provider mailboxes read their inbox counts through the engine
+      // (Gmail label counts / Graph mailFolders/inbox). null (unconnected /
+      // dormant / expired token) still falls through to error:true below.
+      if (this.mailProvider.handles(mb)) {
+        return withTimeout(
+          this.mailProvider.getInboxCounts(mb),
+          MAILBOX_FANOUT_TIMEOUT_MS,
+          `mail counts for ${mb.emailAddress}`,
+        );
+      }
       return withTimeout(
         this.stalwart.getMailboxCounts(mb.emailAddress),
         MAILBOX_FANOUT_TIMEOUT_MS,
@@ -910,8 +984,22 @@ export class EmailService {
     flags: { flagged?: boolean; seen?: boolean },
   ): Promise<{ thread_id: string; flagged?: boolean; seen?: boolean; updated: boolean }> {
     const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
-    if (!mailbox || this.mailProvider.handles(mailbox)) {
+    if (!mailbox) {
       return { thread_id: threadId, ...flags, updated: false };
+    }
+    if (this.mailProvider.handles(mailbox)) {
+      // External: reconcile the real Gmail/M365 star/flag so it persists.
+      // `flagged` is the only flag the provider star maps to; a `seen`-only
+      // call goes through setThreadReadState, so honour whichever is present.
+      let updated = false;
+      if (flags.flagged !== undefined) {
+        updated = await this.mailProvider.setThreadFlagged(mailbox, threadId, flags.flagged);
+      }
+      if (flags.seen !== undefined) {
+        const readUpdated = await this.mailProvider.setThreadRead(mailbox, threadId, flags.seen);
+        updated = updated || readUpdated;
+      }
+      return { thread_id: threadId, ...flags, updated };
     }
     const updated = await this.stalwart.setThreadFlags(mailbox.emailAddress, threadId, flags);
     return { thread_id: threadId, ...flags, updated };
@@ -928,9 +1016,22 @@ export class EmailService {
     ucUid: string | null,
     mailboxId: string,
     blobId: string,
-  ): Promise<{ data: Buffer; contentType: string | null } | null> {
+  ): Promise<{ data: Buffer; contentType: string | null; filename?: string | null } | null> {
     const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
-    if (!mailbox || this.mailProvider.handles(mailbox)) return null;
+    if (!mailbox) return null;
+    if (this.mailProvider.handles(mailbox)) {
+      // External: the reader carries a composite blob_id `${messageId}::${attachmentId}`
+      // because Gmail/Graph address bytes per-message, not by a global blob store.
+      const sep = blobId.indexOf('::');
+      if (sep < 0) return null;
+      const messageId = blobId.slice(0, sep);
+      const attachmentId = blobId.slice(sep + 2);
+      if (!messageId || !attachmentId) return null;
+      const res = await this.mailProvider.downloadAttachment(mailbox, messageId, attachmentId);
+      // filename is ADDITIVE (Graph carries it; Gmail's attachments.get does not) —
+      // callers that need a name when it's null backfill from thread metadata.
+      return res ? { data: res.data, contentType: res.contentType, filename: res.filename } : null;
+    }
     return this.stalwart.downloadBlob(mailbox.emailAddress, blobId);
   }
 
@@ -949,10 +1050,61 @@ export class EmailService {
     filename: string,
   ): Promise<{ blob_id: string; name: string; type: string; size: number } | null> {
     const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
-    if (!mailbox || this.mailProvider.handles(mailbox)) return null;
+    if (!mailbox) return null;
+    if (this.mailProvider.handles(mailbox)) {
+      // External (Gmail/M365): no James blob store, so stage the bytes in the
+      // RLS-fenced outbound_attachments table; the row id is the compose blob_id,
+      // resolved + streamed to the provider at send time, then deleted.
+      const row = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+        tx.outboundAttachment.create({
+          data: {
+            workspaceId,
+            mailboxId: mailbox.id,
+            filename,
+            mimeType: type,
+            size: file.length,
+            bytes: file,
+          },
+          select: { id: true },
+        }),
+      );
+      return { blob_id: row.id, name: filename, type, size: file.length };
+    }
     const up = await this.stalwart.uploadBlob(mailbox.emailAddress, file, type, filename);
     if (!up) return null;
     return { blob_id: up.blobId, name: filename, type: up.type, size: up.size };
+  }
+
+  /**
+   * Resolve staged external outbound-attachment blob ids to inline bytes for the
+   * provider send, and DELETE the rows (consume-on-send). Ids that don't resolve
+   * (foreign / already consumed) are skipped — a caller that references a stale
+   * id simply sends without that file rather than 500ing. Scoped to the
+   * mailbox's workspace via RLS.
+   */
+  private async resolveOutboundAttachments(
+    mailbox: MailboxAccount,
+    blobIds: string[],
+  ): Promise<{ filename: string; mimeType: string; contentBase64: string }[]> {
+    if (!blobIds.length) return [];
+    return this.prisma.withWorkspace(mailbox.workspaceId, null, async (tx) => {
+      const rows = await tx.outboundAttachment.findMany({
+        where: { id: { in: blobIds }, mailboxId: mailbox.id },
+      });
+      if (rows.length) {
+        await tx.outboundAttachment.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
+      }
+      // Preserve the caller's order (findMany does not guarantee it).
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      return blobIds
+        .map((id) => byId.get(id))
+        .filter((r): r is NonNullable<typeof r> => !!r)
+        .map((r) => ({
+          filename: r.filename,
+          mimeType: r.mimeType,
+          contentBase64: Buffer.from(r.bytes).toString('base64'),
+        }));
+    });
   }
 
   /**
@@ -3095,20 +3247,14 @@ export class EmailService {
 
     private async callEngine(mailbox: MailboxAccount | null, req: SendReq): Promise<EngineSendResult> {
     if (mailbox && this.mailProvider.handles(mailbox)) {
-      // The external-provider send path (Gmail/M365) does not carry attachments yet.
-      // Fail loud rather than deliver a message that silently dropped its attachment —
-      // accepted:true with a missing file is worse than a clear failure. (In practice
-      // uploadAttachment returns null for provider mailboxes, so req.attachments is
-      // normally empty; this guards a stale/forged ref or a post-engine-switch draft.)
-      if (req.attachments?.length) {
-        return {
-          accepted: false,
-          providerMessageId: null,
-          threadId: req.inReplyToThreadId ?? null,
-          lane: null,
-          reason: `attachments are not supported for ${mailbox.provider} sends yet — nothing was sent`,
-        };
-      }
+      // Resolve staged external attachment bytes (consume-on-send) and pass them
+      // inline to the provider, which folds them into the Gmail MIME / Graph
+      // attachments array. A stale/foreign blob id simply resolves to nothing
+      // rather than failing the send.
+      const attachments = await this.resolveOutboundAttachments(
+        mailbox,
+        (req.attachments ?? []).map((a) => a.blobId),
+      );
       const r = await this.mailProvider.send(mailbox, {
         from: req.fromAddress,
         to: req.toAddress,
@@ -3121,6 +3267,7 @@ export class EmailService {
         cc: req.cc,
         bcc: req.bcc,
         inReplyToThreadId: req.inReplyToThreadId,
+        attachments,
       });
       return {
         accepted: r.accepted,

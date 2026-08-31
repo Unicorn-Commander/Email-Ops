@@ -4,6 +4,7 @@ Gmail provider - wraps Google Gmail API.
 
 import base64
 import socket
+from datetime import datetime, timezone
 from email.message import EmailMessage as MimeMessage
 from typing import List, Optional, Tuple
 
@@ -24,6 +25,7 @@ from providers.base import (
 )
 from providers.mail_client import (
     Address,
+    MailAttachment,
     SendResult,
     ThreadMessage,
     ThreadSummary,
@@ -83,6 +85,31 @@ _FOLDER_QUERY = {
     'spam': 'in:spam',
     'archive': '-in:inbox -in:trash -in:spam -in:drafts',
 }
+
+
+def _poll_result(refs: List[dict], since_iso: Optional[str]) -> dict:
+    """Assemble the frozen poll-inbound shape from mapped inbox message refs.
+
+    Mirrors the sovereign James ``pollInbound`` cursor logic exactly: on baseline
+    (``since_iso`` is None) stamp the newest ``received_at`` (or NOW when the inbox
+    is empty — never a null cursor) and return no backlog; otherwise return the
+    strictly-newer messages ascending and advance the cursor to the max seen.
+    ISO-8601 UTC strings sort chronologically, so every compare is lexical.
+    """
+    max_cursor = since_iso or ''
+    for r in refs:
+        if r['received_at'] > max_cursor:
+            max_cursor = r['received_at']
+    if since_iso is None:
+        return {
+            'cursor': max_cursor or datetime.now(timezone.utc).isoformat(),
+            'new_messages': [],
+        }
+    new_messages = sorted(
+        (r for r in refs if r['received_at'] > since_iso),
+        key=lambda r: r['received_at'],
+    )
+    return {'cursor': max_cursor or since_iso, 'new_messages': new_messages}
 
 
 class GmailProvider(EmailProvider):
@@ -176,11 +203,15 @@ class GmailProvider(EmailProvider):
             total_threads=profile.total_threads,
         )
 
-        # Quick estimates via resultSizeEstimate
+        # Quick estimates via resultSizeEstimate. total_messages/unread_count are
+        # scoped to the INBOX (in:inbox) so they match the sovereign counts surface
+        # and Microsoft's /mailFolders/inbox — the method is get_INBOX_stats, and a
+        # whole-mailbox total next to an inbox total in the same badge row is wrong.
         for query, attr in [
             ('category:promotions', 'promotional_count'),
-            ('is:unread', 'unread_count'),
+            ('in:inbox is:unread', 'unread_count'),
             ('category:social', 'social_count'),
+            ('in:inbox', 'total_messages'),
         ]:
             try:
                 result = self.service.users().messages().list(
@@ -297,6 +328,29 @@ class GmailProvider(EmailProvider):
         else:
             yield payload
 
+    def _extract_attachments(self, payload: dict) -> List[MailAttachment]:
+        """Attachment METADATA (no bytes) for the reader. A Gmail attachment part
+        carries body.attachmentId (bytes fetched on demand via get_attachment)."""
+        out: List[MailAttachment] = []
+        for part in self._iter_parts(payload):
+            body = part.get('body', {})
+            attachment_id = body.get('attachmentId')
+            if not attachment_id:
+                continue
+            headers = {h.get('name', '').lower(): h.get('value', '') for h in part.get('headers', [])}
+            disposition = headers.get('content-disposition', '')
+            cid = (headers.get('content-id') or '').strip('<>') or None
+            is_inline = 'inline' in disposition.lower() or bool(cid)
+            out.append(MailAttachment(
+                id=attachment_id,
+                filename=part.get('filename') or None,
+                mime_type=part.get('mimeType') or None,
+                size=int(body.get('size') or 0),
+                is_inline=is_inline,
+                cid=cid,
+            ))
+        return out
+
     # ------------------------------------------------------------------
     # Unified mail client (threads / thread / send)
     # ------------------------------------------------------------------
@@ -344,6 +398,7 @@ class GmailProvider(EmailProvider):
         seen: set = set()
         subject: Optional[str] = None
         unread = False
+        flagged = False
 
         for msg in messages:
             headers = {
@@ -352,8 +407,11 @@ class GmailProvider(EmailProvider):
             }
             if subject is None and headers.get('Subject'):
                 subject = headers['Subject']
-            if 'UNREAD' in msg.get('labelIds', []):
+            labels = msg.get('labelIds', [])
+            if 'UNREAD' in labels:
                 unread = True
+            if 'STARRED' in labels:
+                flagged = True
             for raw in (headers.get('From'), headers.get('To')):
                 for addr in parse_address_list(raw):
                     key = addr.address.lower()
@@ -370,22 +428,32 @@ class GmailProvider(EmailProvider):
             last_snippet=last.get('snippet') or None,
             message_count=len(messages),
             unread=unread,
+            flagged=flagged,
         )
 
     def get_thread(self, thread_id: str) -> List[ThreadMessage]:
-        """Return the messages of a single thread in chronological order."""
+        """Return the messages of a single thread in chronological order.
+
+        Uses ``format='full'`` so the /mail READER gets real message bodies
+        (text + HTML), not just the ~200-char snippet. A single
+        ``threads().get`` returns every message in the thread fully, so this is
+        one API call per opened thread — no per-message fan-out. This is the
+        reader-only exception to the cleaner's metadata-only privacy rail
+        (see ThreadMessage.body_* and the cleaner analysis path, which is
+        unchanged and still never fetches bodies).
+        """
         thread = self.service.users().threads().get(
             userId='me',
             id=thread_id,
-            format='metadata',
-            metadataHeaders=['From', 'To', 'Subject', 'Date'],
+            format='full',
         ).execute()
 
         out: List[ThreadMessage] = []
         for msg in thread.get('messages', []):
+            payload = msg.get('payload', {})
             headers = {
                 h['name']: h['value']
-                for h in msg.get('payload', {}).get('headers', [])
+                for h in payload.get('headers', [])
             }
             labels = msg.get('labelIds', [])
             if 'DRAFT' in labels:
@@ -394,6 +462,7 @@ class GmailProvider(EmailProvider):
                 direction = 'sent'
             else:
                 direction = 'received'
+            body_text, body_html = self._extract_body(payload)
             out.append(ThreadMessage(
                 id=msg.get('id', ''),
                 thread_id=msg.get('threadId', thread_id),
@@ -405,8 +474,96 @@ class GmailProvider(EmailProvider):
                 ),
                 preview=msg.get('snippet') or None,
                 direction=direction,
+                body_text=body_text or None,
+                body_html=body_html or None,
+                attachments=self._extract_attachments(payload),
             ))
         return out
+
+    def poll_inbound(self, since_iso: Optional[str]) -> dict:
+        """Detect NEW inbox mail past a high-water cursor (external-mailbox parity
+        with the sovereign James ``pollInbound``).
+
+        BASELINE (``since_iso`` is None): capture the cursor (the newest inbox
+        ``received_at``, or NOW for an empty inbox so the cursor is never null and
+        the very next arrival is treated as new) and process NO backlog.
+
+        INCREMENTAL (``since_iso`` set): ``new_messages`` = messages strictly newer
+        than the cursor, ascending; the returned cursor advances to the max
+        ``received_at`` seen (else ``since_iso``). ISO-8601 UTC strings sort
+        chronologically, so the compare is lexical (matches James).
+
+        EFFICIENCY: on an incremental poll narrow the fetch with a Gmail
+        ``after:<epoch>`` query (day/second-granular + inclusive-ish — the strict
+        ``received_at > since_iso`` filter below is authoritative); on baseline
+        list only the newest one just to stamp the cursor.
+
+        Degrade-clean: any provider error -> {'cursor': since_iso, 'new_messages': []}.
+        """
+        try:
+            if since_iso:
+                epoch = self._iso_to_epoch(since_iso)
+                query = f'in:inbox after:{epoch - 1}' if epoch is not None else 'in:inbox'
+                max_results = 50
+            else:
+                query = 'in:inbox'
+                max_results = 1
+
+            listed = self.service.users().messages().list(
+                userId='me', q=query, maxResults=max_results,
+            ).execute(num_retries=3)
+
+            refs: List[dict] = []
+            for stub in listed.get('messages', []):
+                msg = self.service.users().messages().get(
+                    userId='me',
+                    id=stub['id'],
+                    format='metadata',
+                    # X-UC-Agent-Autoreply must be requested explicitly: with
+                    # format='metadata' Gmail returns ONLY the metadataHeaders asked
+                    # for, and this is the Wave-7 loop-protection marker.
+                    metadataHeaders=['From', 'To', 'Subject', 'Date', 'X-UC-Agent-Autoreply'],
+                ).execute(num_retries=3)
+                payload_headers = msg.get('payload', {}).get('headers', [])
+                headers = {h['name']: h['value'] for h in payload_headers}
+                received_at = to_iso8601(headers.get('Date')) or epoch_ms_to_iso8601(
+                    int(msg['internalDate']) if msg.get('internalDate') else None
+                )
+                if not received_at:
+                    continue
+                sender = parse_address(headers.get('From'))
+                refs.append({
+                    'thread_id': msg.get('threadId', ''),
+                    'from_address': sender.address if sender else None,
+                    # The REAL To recipients — rules' 'to' conditions match these.
+                    'to_addresses': [a.address for a in parse_address_list(headers.get('To'))],
+                    'subject': headers.get('Subject') or None,
+                    'received_at': received_at,
+                    # Present + non-empty header ⇒ an agent runtime auto-sent this.
+                    'agent_autoreply': any(
+                        (h.get('name') or '').lower() == 'x-uc-agent-autoreply'
+                        and (h.get('value') or '').strip()
+                        for h in payload_headers
+                    ),
+                })
+
+            return _poll_result(refs, since_iso)
+        except Exception:  # noqa: BLE001 - degrade clean like the other read routes
+            return {'cursor': since_iso, 'new_messages': []}
+
+    @staticmethod
+    def _iso_to_epoch(value: str) -> Optional[int]:
+        """Parse an ISO-8601 timestamp to integer epoch seconds (UTC), or None."""
+        try:
+            text = value.strip()
+            if text.endswith('Z'):
+                text = text[:-1] + '+00:00'
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except (ValueError, TypeError):
+            return None
 
     def send_message(
         self,
@@ -418,6 +575,7 @@ class GmailProvider(EmailProvider):
         cc: Optional[List[str]] = None,
         bcc: Optional[List[str]] = None,
         body_html: Optional[str] = None,
+        attachments: Optional[List[dict]] = None,
     ) -> SendResult:
         """Send a new message or reply within a thread."""
         mime = MimeMessage()
@@ -437,6 +595,17 @@ class GmailProvider(EmailProvider):
             mime.add_alternative(body_html, subtype='html')
         else:
             mime.set_content(body or '')
+
+        # add_attachment restructures the message into multipart/mixed as needed;
+        # each attachment carries its bytes + a Content-Disposition filename.
+        for att in (attachments or []):
+            maintype, _, subtype = (att.get('mime_type') or 'application/octet-stream').partition('/')
+            mime.add_attachment(
+                att.get('data') or b'',
+                maintype=maintype or 'application',
+                subtype=subtype or 'octet-stream',
+                filename=att.get('filename') or 'attachment',
+            )
 
         send_body: dict = {}
         if in_reply_to_thread_id:
@@ -530,6 +699,19 @@ class GmailProvider(EmailProvider):
             self.service.users().messages().batchModify(
                 userId='me',
                 body={'ids': batch, label_op: ['UNREAD']},
+            ).execute()
+            changed += len(batch)
+        return changed
+
+    def batch_set_flagged(self, message_ids: List[str], flagged: bool = True) -> int:
+        """Set/clear the STARRED label (Gmail's star). Returns count changed."""
+        changed = 0
+        label_op = 'addLabelIds' if flagged else 'removeLabelIds'
+        for i in range(0, len(message_ids), 100):
+            batch = message_ids[i:i + 100]
+            self.service.users().messages().batchModify(
+                userId='me',
+                body={'ids': batch, label_op: ['STARRED']},
             ).execute()
             changed += len(batch)
         return changed

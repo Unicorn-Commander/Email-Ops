@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
+import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { MailRulesService } from './mail-rules.service';
 
 describe('MailRulesService', () => {
@@ -66,8 +67,14 @@ describe('MailRulesService', () => {
       moveThreadToFolder: jest.fn().mockResolvedValue(true),
       setThreadRead: jest.fn().mockResolvedValue(true),
     } as unknown as StalwartPort;
-    const service = new MailRulesService(prisma, stalwart);
-    return { service, prisma, tx: tx as any, systemClient: systemClient as any, stalwart: stalwart as any };
+    const mailProvider = {
+      handles: jest.fn().mockReturnValue(false),
+      archiveThread: jest.fn().mockResolvedValue(true),
+      trashThread: jest.fn().mockResolvedValue(true),
+      setThreadRead: jest.fn().mockResolvedValue(true),
+    } as unknown as MailProviderPort;
+    const service = new MailRulesService(prisma, stalwart, mailProvider);
+    return { service, prisma, tx: tx as any, systemClient: systemClient as any, stalwart: stalwart as any, mailProvider: mailProvider as any };
   }
 
   const inboundMsg = { threadId: 'thr-1', fromAddress: 'digest@news.test', subject: 'Weekly digest' };
@@ -337,21 +344,35 @@ describe('MailRulesService', () => {
     ).rejects.toThrow('name must be 1..120 characters.');
   });
 
-  it('refuses CREATE on an external (gmail/microsoft) or inactive mailbox — the watcher never runs rules there', async () => {
+  it('ALLOWS CREATE on an active external (gmail/microsoft) mailbox with a provider-supported action', async () => {
+    // The watcher now runs rules on external mailboxes too, so an ARCHIVE rule
+    // on a connected Gmail account is a real, firing rule — not a silent no-op.
     const { service, tx } = make();
-    (tx.mailboxAccount.findFirst as jest.Mock).mockResolvedValue({
-      ...mailbox,
-      provider: 'gmail',
-    });
+    (tx.mailboxAccount.findFirst as jest.Mock).mockResolvedValue({ ...mailbox, provider: 'gmail' });
     await expect(
       service.create(WS, UC, 'mb-1', {
-        name: 'Dead rule',
-        match: { all: [{ field: 'from', op: 'contains', value: 'x' }] },
+        name: 'Archive newsletters',
+        match: { all: [{ field: 'from', op: 'contains', value: 'newsletter' }] },
         actions: [{ type: 'ARCHIVE' }],
+      }),
+    ).resolves.toBeDefined();
+    expect(tx.mailRule.create).toHaveBeenCalled();
+  });
+
+  it('refuses a MOVE_TO_FOLDER rule on external (no folder model) and any rule on an INACTIVE mailbox', async () => {
+    const { service, tx } = make();
+    // External + MOVE_TO_FOLDER → rejected (would never fire there).
+    (tx.mailboxAccount.findFirst as jest.Mock).mockResolvedValue({ ...mailbox, provider: 'microsoft' });
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'Move rule',
+        match: { all: [{ field: 'from', op: 'contains', value: 'x' }] },
+        actions: [{ type: 'MOVE_TO_FOLDER', value: 'some-folder-id' }],
       }),
     ).rejects.toThrow(BadRequestException);
     expect(tx.mailRule.create).not.toHaveBeenCalled();
 
+    // Inactive mailbox (any provider) → rejected.
     (tx.mailboxAccount.findFirst as jest.Mock).mockResolvedValue({ ...mailbox, active: false });
     await expect(
       service.create(WS, UC, 'mb-1', {
@@ -409,6 +430,7 @@ describe('MailRulesService', () => {
           findFirst: jest.fn().mockResolvedValue({ id: 'mb-1', ownerKind: 'HUMAN', ownerKey: 'someone-else' }),
         },
         mailRule: { findMany: jest.fn() },
+        user: { findFirst: jest.fn().mockResolvedValue(null) },
       },
     });
     await expect(service.list(WS, UC, 'mb-1')).rejects.toBeInstanceOf(ForbiddenException);
@@ -478,6 +500,25 @@ describe('MailRulesService', () => {
       where: { id: { in: ['rule-1'] }, workspaceId: WS, mailboxId: 'mb-1' },
       data: { hitCount: { increment: 1 }, lastHitAt: expect.any(Date) },
     });
+  });
+
+  it('routes rule actions through the PROVIDER for an external mailbox (ARCHIVE/MARK_READ), skipping MOVE_TO_FOLDER', async () => {
+    const { service, stalwart, mailProvider } = make();
+    (mailProvider.handles as jest.Mock).mockReturnValue(true);
+    const rules = [
+      ruleRow({ actions: [{ type: 'ARCHIVE' }, { type: 'MARK_READ' }, { type: 'MOVE_TO_FOLDER', value: 'fld-9' }] }),
+    ];
+    const extMailbox = { id: 'mb-1', provider: 'gmail', emailAddress: 'aaron@x.tech', ownerKey: 'kc', workspaceId: WS };
+
+    const out = await service.applyInbound(WS, 'mb-1', 'aaron@x.tech', inboundMsg, rules as any, extMailbox as any);
+
+    // Actions hit the provider triage verbs, NOT James.
+    expect(mailProvider.archiveThread).toHaveBeenCalledWith(extMailbox, 'thr-1');
+    expect(mailProvider.setThreadRead).toHaveBeenCalledWith(extMailbox, 'thr-1', true);
+    expect(stalwart.moveThreadToFolder).not.toHaveBeenCalled();
+    expect(stalwart.moveThreadToMailbox).not.toHaveBeenCalled();
+    // MOVE_TO_FOLDER has no external equivalent → not counted as applied.
+    expect(out).toEqual({ matched: 1, applied: 2 });
   });
 
   it("evaluates 'to' conditions against the message's REAL recipients, never the mailbox address", async () => {

@@ -2,12 +2,14 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
+import { MailProviderPort } from '../mail-provider/mail-provider.port';
+import { InboundPollResult } from '../stalwart/stalwart.types';
 import { MailTriageService } from '../mail-triage/mail-triage.service';
 import { MailRulesService } from '../mail-rules/mail-rules.service';
 import { MailRuleRow } from '../mail-rules/mail-rules.types';
-import { inboundWatcherEnabled } from '../common/workspace/feature-flags';
+import { inboundWatcherEnabled, inboundWatcherExternalEnabled } from '../common/workspace/feature-flags';
 import { AgentReplyService } from '../agent-reply/agent-reply.service';
-import { MessageDisposition } from '@prisma/client';
+import { MailboxAccount, MessageDisposition } from '@prisma/client';
 
 /**
  * The inbound half of the agent-email fabric: a per-mailbox JMAP delta poll that
@@ -31,6 +33,7 @@ export class InboundWatcherService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stalwart: StalwartPort,
+    private readonly mailProvider: MailProviderPort,
     private readonly triage: MailTriageService,
     private readonly rules: MailRulesService,
     private readonly agentReply: AgentReplyService,
@@ -51,17 +54,18 @@ export class InboundWatcherService {
     }
   }
 
-  /** Poll every sovereign mailbox once; returns how many new messages were classified. */
+  /**
+   * Poll every active mailbox once — sovereign (James) AND external (Gmail/M365)
+   * — returns how many new messages were classified. External mailboxes are
+   * HUMAN-owned, so they get classification + rules but never the agent
+   * auto-reply hand-off (that stays gated to AGENT mailboxes below).
+   */
   async runSweep(): Promise<number> {
+    // External (Gmail/M365) polling is gated separately + default-off, so this
+    // deploys inert on a ring where the watcher already runs on sovereign mail.
+    const includeExternal = inboundWatcherExternalEnabled();
     const mailboxes = await this.prisma.systemClient.mailboxAccount.findMany({
-      where: { provider: 'stalwart', active: true },
-      select: {
-        id: true,
-        workspaceId: true,
-        emailAddress: true,
-        inboundCursor: true,
-        ownerKind: true,
-      },
+      where: includeExternal ? { active: true } : { active: true, provider: 'stalwart' },
       take: 500,
       orderBy: { updatedAt: 'asc' },
     });
@@ -107,16 +111,14 @@ export class InboundWatcherService {
   }
 
   private async pollOne(
-    mb: {
-      id: string;
-      workspaceId: string;
-      emailAddress: string;
-      inboundCursor: string | null;
-      ownerKind: string;
-    },
+    mb: MailboxAccount,
     mailboxRules?: MailRuleRow[],
   ): Promise<number> {
-    const result = await this.stalwart.pollInbound(mb.emailAddress, mb.inboundCursor);
+    // Route the delta-poll by mailbox kind: external (Gmail/M365) via the
+    // provider port, sovereign via James. Both return the same InboundPollResult.
+    const result: InboundPollResult | null = this.mailProvider.handles(mb)
+      ? await this.mailProvider.pollInbound(mb, mb.inboundCursor)
+      : await this.stalwart.pollInbound(mb.emailAddress, mb.inboundCursor);
     if (!result) return 0; // engine dormant / degrade-clean
 
     for (const msg of result.newMessages) {
@@ -132,7 +134,8 @@ export class InboundWatcherService {
         // and this guard is belt-and-braces — a rules failure must never block
         // triage of the remaining messages or the cursor advance below.
         try {
-          await this.rules.applyInbound(mb.workspaceId, mb.id, mb.emailAddress, msg, mailboxRules);
+          // Pass the full mailbox so external rule actions route to the provider.
+          await this.rules.applyInbound(mb.workspaceId, mb.id, mb.emailAddress, msg, mailboxRules, mb);
         } catch (err) {
           this.logger.warn(`rules apply failed for ${mb.emailAddress}: ${(err as Error).message}`);
         }

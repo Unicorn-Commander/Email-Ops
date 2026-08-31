@@ -26,6 +26,7 @@ import {
   MailProviderSendResult,
 } from './mail-provider.port';
 import { parseSearchQuery, buildGmailQuery } from '../stalwart/search-query';
+import { InboundPollResult } from '../stalwart/stalwart.types';
 
 type ExternalProvider = 'gmail' | 'microsoft';
 
@@ -74,17 +75,25 @@ export class EngineMailProvider extends MailProviderPort {
     const auth = await this.authFor(mailbox);
     if (!auth) return empty;
 
-    // Map app search operators onto Gmail `q` syntax (Microsoft maps a subset
-    // itself and returns search_supported:false for free-text it cannot honour).
+    // Query mapping is PER PROVIDER. Gmail wants app operators rewritten into
+    // Gmail `q` syntax. Microsoft must receive the RAW query and parse it itself
+    // (its provider maps pure free-text onto Graph $search and returns
+    // search_supported:false for operators it cannot honour) — handing Microsoft
+    // a Gmail-syntax string means its parser never engages, so the filter is lost
+    // AND the honest capability signal can never fire. Send each provider the
+    // query shape it actually understands.
     const rawQuery = opts.query?.trim() || '';
-    const gmailQ = rawQuery ? buildGmailQuery(parseSearchQuery(rawQuery)) : '';
+    const providerQuery =
+      auth.provider === 'microsoft'
+        ? rawQuery || null
+        : (rawQuery ? buildGmailQuery(parseSearchQuery(rawQuery)) : '') || null;
 
     const res = await this.engine.listMailThreads(
       auth.provider,
       auth.credentials,
       opts.folder,
       opts.limit,
-      gmailQ || null,
+      providerQuery,
       pageToken,
     );
     if (!res) return empty;
@@ -96,6 +105,9 @@ export class EngineMailProvider extends MailProviderPort {
         subject: t.subject,
         message_count: t.message_count,
         unread: t.unread,
+        // Read-back so a really-starred thread shows starred (the star no longer
+        // reverts on refresh). Omitted → undefined → renders unstarred, honestly.
+        flagged: t.flagged ?? false,
         last_message_at: t.last_message_at,
         last_snippet: t.last_snippet,
         participants: t.participants.map((p) => ({ address: p.address, name: p.name })),
@@ -121,6 +133,20 @@ export class EngineMailProvider extends MailProviderPort {
       sent_at: m.sent_at,
       preview: m.preview,
       direction: m.direction,
+      // Pass the full bodies the reader path now supplies through to the
+      // MessageView; the frontend prefers html_body/text_body over preview.
+      html_body: m.body_html ?? null,
+      text_body: m.body_text ?? null,
+      // Attachment metadata (bytes fetched on demand). The blob_id is a composite
+      // `${messageId}::${attachmentId}` so the download route can address the
+      // per-message provider attachment id (Gmail/Graph have no global blob store).
+      attachments: (m.attachments ?? []).map((a) => ({
+        blob_id: `${m.id}::${a.id}`,
+        name: a.filename ?? null,
+        type: a.mime_type ?? null,
+        size: a.size ?? null,
+        cid: a.cid ?? null,
+      })),
     }));
   }
 
@@ -141,6 +167,7 @@ export class EngineMailProvider extends MailProviderPort {
       cc: req.cc,
       bcc: req.bcc,
       inReplyToThreadId: req.inReplyToThreadId ?? null,
+      attachments: req.attachments,
     });
     if (!res) {
       return { accepted: false, providerMessageId: null, threadId: null, reason: 'engine_unavailable' };
@@ -182,6 +209,7 @@ export class EngineMailProvider extends MailProviderPort {
       cc: req.cc,
       bcc: req.bcc,
       inReplyToThreadId: req.inReplyToThreadId ?? null,
+      attachments: req.attachments,
     });
     if (!res) {
       return {
@@ -254,6 +282,69 @@ export class EngineMailProvider extends MailProviderPort {
       read,
     );
     return res?.ok === true;
+  }
+
+  async setThreadFlagged(
+    mailbox: MailboxAccount,
+    threadId: string,
+    flagged: boolean,
+  ): Promise<boolean> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return false;
+    const res = await this.engine.flagMailThread(auth.provider, auth.credentials, threadId, flagged);
+    return res?.ok === true;
+  }
+
+  async getInboxCounts(
+    mailbox: MailboxAccount,
+  ): Promise<{ inboxUnread: number; inboxTotal: number } | null> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return null;
+    const stats = await this.engine.getInboxStats(auth.provider, auth.credentials);
+    if (!stats) return null;
+    return { inboxUnread: stats.unread_count ?? 0, inboxTotal: stats.total_messages ?? 0 };
+  }
+
+  async pollInbound(
+    mailbox: MailboxAccount,
+    sinceIso: string | null,
+  ): Promise<InboundPollResult | null> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return null;
+    const res = await this.engine.pollInbound(auth.provider, auth.credentials, sinceIso);
+    if (!res) return null;
+    return {
+      cursor: res.cursor ?? null,
+      newMessages: (res.new_messages ?? []).map((m) => ({
+        threadId: m.thread_id,
+        fromAddress: m.from_address ?? null,
+        toAddresses: m.to_addresses ?? [],
+        subject: m.subject ?? null,
+        receivedAt: m.received_at,
+        agentAutoreply: m.agent_autoreply === true,
+      })),
+    };
+  }
+
+  async downloadAttachment(
+    mailbox: MailboxAccount,
+    messageId: string,
+    attachmentId: string,
+  ): Promise<{ data: Buffer; contentType: string | null; filename: string | null } | null> {
+    const auth = await this.authFor(mailbox);
+    if (!auth) return null;
+    const res = await this.engine.getMailAttachment(
+      auth.provider,
+      auth.credentials,
+      messageId,
+      attachmentId,
+    );
+    if (!res || res.found !== true || !res.content_base64) return null;
+    return {
+      data: Buffer.from(res.content_base64, 'base64'),
+      contentType: res.mime_type ?? null,
+      filename: res.filename ?? null,
+    };
   }
 
   /**

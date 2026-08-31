@@ -19,6 +19,7 @@
 
 import { MailboxAccount } from '@prisma/client';
 import { MailFolder, MessageView, ThreadView } from '../email/email.types';
+import { InboundPollResult } from '../stalwart/stalwart.types';
 
 export interface MailProviderSendRequest {
   from: string;
@@ -31,6 +32,13 @@ export interface MailProviderSendRequest {
   cc?: string[];
   bcc?: string[];
   inReplyToThreadId?: string | null;
+  /**
+   * Outbound attachments, bytes INLINE as base64. The sovereign lane references
+   * James blob ids; Gmail/Graph have no such store, so the backend resolves the
+   * staged bytes and passes them here for the provider to fold into the MIME
+   * (Gmail) / attachments array (Graph). Empty/omitted → no attachments.
+   */
+  attachments?: { filename: string; mimeType: string; contentBase64: string }[];
 }
 
 export interface MailProviderSendResult {
@@ -157,6 +165,50 @@ export abstract class MailProviderPort {
     threadId: string,
     read: boolean,
   ): Promise<boolean>;
+
+  /**
+   * Set/clear the star/flag on the thread in the real external mailbox
+   * (Gmail STARRED label / Graph flag). Makes the star PERSIST instead of
+   * reverting on the next refresh. false when not connected; never throws.
+   */
+  abstract setThreadFlagged(
+    mailbox: MailboxAccount,
+    threadId: string,
+    flagged: boolean,
+  ): Promise<boolean>;
+
+  /**
+   * Inbox unread/total for an external mailbox (Gmail label counts / Graph
+   * mailFolders/inbox). null when not connected / engine dormant — the caller
+   * maps null to an honest error entry, never a confident "0".
+   */
+  abstract getInboxCounts(
+    mailbox: MailboxAccount,
+  ): Promise<{ inboxUnread: number; inboxTotal: number } | null>;
+
+  /**
+   * Fetch one attachment's BYTES on demand for the reader. For external
+   * providers a message id is required alongside the provider attachment id
+   * (the reader carries a composite blob_id `${messageId}::${attachmentId}`).
+   * null when not connected / the blob is unknown — the caller maps null to 404.
+   */
+  abstract downloadAttachment(
+    mailbox: MailboxAccount,
+    messageId: string,
+    attachmentId: string,
+  ): Promise<{ data: Buffer; contentType: string | null; filename: string | null } | null>;
+
+  /**
+   * Delta-poll the external inbox for messages newer than `sinceIso` (the
+   * per-mailbox high-water cursor), so the inbound watcher can classify + apply
+   * rules on Gmail/M365 arrivals just like a sovereign mailbox. Baseline on the
+   * first poll (sinceIso null → cursor stamped, no backlog). null when the
+   * account isn't connected / the engine is dormant — the watcher skips it.
+   */
+  abstract pollInbound(
+    mailbox: MailboxAccount,
+    sinceIso: string | null,
+  ): Promise<InboundPollResult | null>;
 
   /**
    * The authoritative linked address for (provider, owning user) — fetched from

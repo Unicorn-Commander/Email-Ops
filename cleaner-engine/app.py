@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import logging
@@ -131,6 +132,18 @@ class MailThreadRequest(ProfileRequest):
     thread_id: str
 
 
+class MailPollInboundRequest(ProfileRequest):
+    # High-water cursor from the last poll (ISO-8601 UTC). None on the first poll
+    # (baseline): capture the cursor, process no backlog.
+    since_iso: Optional[str] = None
+
+
+class MailAttachmentInput(BaseModel):
+    filename: str
+    mime_type: str = "application/octet-stream"
+    content_base64: str
+
+
 class MailSendRequest(ProfileRequest):
     from_: str = Field(default="", alias="from")
     to: str
@@ -143,6 +156,9 @@ class MailSendRequest(ProfileRequest):
     cc: Optional[List[str]] = None
     bcc: Optional[List[str]] = None
     body_html: Optional[str] = None
+    # Outbound attachment bytes (base64), staged by the backend. The provider
+    # folds them into the Gmail MIME / Graph attachments array.
+    attachments: Optional[List[MailAttachmentInput]] = None
 
     model_config = {"populate_by_name": True}
 
@@ -157,6 +173,15 @@ class MailDraftDeleteRequest(ProfileRequest):
 
 class MailReadRequest(ProfileRequest):
     read: bool = True
+
+
+class MailFlagRequest(ProfileRequest):
+    flagged: bool = True
+
+
+class MailAttachmentRequest(ProfileRequest):
+    message_id: str
+    attachment_id: str
 
 
 class ThreadActionResponse(BaseModel):
@@ -264,6 +289,24 @@ def _mail_message_to_dict(message: Any) -> dict[str, Any]:
     data = asdict(message)
     data["from"] = data.pop("sender", None)
     return data
+
+
+def _decode_attachments(attachments: Any) -> list[dict[str, Any]]:
+    """Decode base64 outbound-attachment inputs to provider-ready dicts
+    ``{filename, mime_type, data(bytes)}``. Empty list when none."""
+    out: list[dict[str, Any]] = []
+    for att in (attachments or []):
+        try:
+            data = base64.b64decode(att.content_base64)
+        except Exception:  # noqa: BLE001 - skip a corrupt part, never fail the send
+            logger.warning("skipping un-decodable attachment %s", getattr(att, "filename", "?"))
+            continue
+        out.append({
+            "filename": att.filename,
+            "mime_type": att.mime_type or "application/octet-stream",
+            "data": data,
+        })
+    return out
 
 
 def _thread_triage_ids(provider_name: str, messages: list[Any], verb: str) -> list[str]:
@@ -595,6 +638,26 @@ def mail_thread(request: MailThreadRequest) -> dict[str, Any]:
         return {"messages": []}
 
 
+@app.post("/mail/poll-inbound", dependencies=[Depends(_require_engine_token)])
+def mail_poll_inbound(request: MailPollInboundRequest) -> dict[str, Any]:
+    """Detect NEW mail arriving at an external (Gmail / M365) mailbox since a
+    high-water cursor — external-mailbox parity with the sovereign James
+    ``pollInbound`` the backend inbound watcher already drives.
+
+    Degrade-clean like the other read-only /mail/* routes: an unusable provider
+    or any provider error yields a null-ish result ({cursor: since_iso,
+    new_messages: []}) so the watcher simply re-polls, never a 500.
+    """
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return {"cursor": request.since_iso, "new_messages": []}
+    try:
+        return provider.poll_inbound(request.since_iso)
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/poll-inbound failed for %s: %s", request.provider, exc)
+        return {"cursor": request.since_iso, "new_messages": []}
+
+
 @app.post("/mail/send", dependencies=[Depends(_require_engine_token)])
 def mail_send(request: MailSendRequest) -> dict[str, Any]:
     provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
@@ -610,6 +673,7 @@ def mail_send(request: MailSendRequest) -> dict[str, Any]:
             cc=request.cc,
             bcc=request.bcc,
             body_html=request.body_html,
+            attachments=_decode_attachments(request.attachments),
         )
         return _dataclass_to_dict(result)
     except Exception as exc:  # noqa: BLE001 - degrade clean
@@ -643,6 +707,7 @@ def mail_draft(request: MailDraftRequest) -> dict[str, Any]:
             cc=request.cc,
             bcc=request.bcc,
             body_html=request.body_html,
+            attachments=_decode_attachments(request.attachments),
         )
         return _dataclass_to_dict(result)
     except Exception as exc:  # noqa: BLE001 - degrade clean
@@ -711,6 +776,42 @@ def mail_thread_read(thread_id: str, request: MailReadRequest) -> ThreadActionRe
         return ThreadActionResponse(ok=True, moved=moved)
     except Exception as exc:  # noqa: BLE001 - degrade clean
         logger.warning("mail/threads/read failed for %s: %s", request.provider, exc)
+        return ThreadActionResponse(ok=False, moved=0)
+
+
+@app.post("/mail/attachment", dependencies=[Depends(_require_engine_token)])
+def mail_attachment(request: MailAttachmentRequest) -> dict[str, Any]:
+    """Fetch one attachment's BYTES for the reader (base64). The reader path —
+    metadata comes with the thread; bytes are pulled only when the user opens
+    the attachment. Degrade-clean: found=False (never a 500) when unreachable."""
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return {"found": False}
+    try:
+        att = provider.get_attachment(request.message_id, request.attachment_id)
+        return {
+            "found": True,
+            "content_base64": base64.b64encode(att.data).decode("ascii"),
+            "mime_type": att.mime_type or None,
+            "filename": att.filename or None,
+            "size": att.size_bytes,
+        }
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/attachment failed for %s: %s", request.provider, exc)
+        return {"found": False}
+
+
+@app.post("/mail/threads/{thread_id:path}/flag", dependencies=[Depends(_require_engine_token)])
+def mail_thread_flag(thread_id: str, request: MailFlagRequest) -> ThreadActionResponse:
+    provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
+    if provider is None:
+        return ThreadActionResponse(ok=False, moved=0)
+    try:
+        ids = _thread_triage_ids(request.provider, provider.get_thread(thread_id), "flag")
+        moved = provider.batch_set_flagged(ids, request.flagged) if ids else 0
+        return ThreadActionResponse(ok=True, moved=moved)
+    except Exception as exc:  # noqa: BLE001 - degrade clean
+        logger.warning("mail/threads/flag failed for %s: %s", request.provider, exc)
         return ThreadActionResponse(ok=False, moved=0)
 
 

@@ -4,6 +4,8 @@ Microsoft 365 provider - uses MSAL for auth and Microsoft Graph API for mail.
 
 import time
 import base64
+import logging
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple, Dict, Any
 
 import requests
@@ -12,6 +14,8 @@ try:
     import msal
 except ImportError:
     msal = None  # Optional dependency; error raised on use
+
+logger = logging.getLogger(__name__)
 
 from providers.base import (
     EmailProvider,
@@ -24,6 +28,7 @@ from providers.base import (
 from providers.mail_client import (
     Address,
     DraftResult,
+    MailAttachment,
     SendResult,
     ThreadMessage,
     ThreadSummary,
@@ -43,6 +48,31 @@ _FOLDER_ID = {
     'spam': 'junkemail',
     'archive': 'archive',
 }
+
+
+def _poll_result(refs: List[dict], since_iso: Optional[str]) -> dict:
+    """Assemble the frozen poll-inbound shape from mapped inbox message refs.
+
+    Mirrors the sovereign James ``pollInbound`` cursor logic exactly: on baseline
+    (``since_iso`` is None) stamp the newest ``received_at`` (or NOW when the inbox
+    is empty — never a null cursor) and return no backlog; otherwise return the
+    strictly-newer messages ascending and advance the cursor to the max seen.
+    ISO-8601 UTC strings sort chronologically, so every compare is lexical.
+    """
+    max_cursor = since_iso or ''
+    for r in refs:
+        if r['received_at'] > max_cursor:
+            max_cursor = r['received_at']
+    if since_iso is None:
+        return {
+            'cursor': max_cursor or datetime.now(timezone.utc).isoformat(),
+            'new_messages': [],
+        }
+    new_messages = sorted(
+        (r for r in refs if r['received_at'] > since_iso),
+        key=lambda r: r['received_at'],
+    )
+    return {'cursor': max_cursor or since_iso, 'new_messages': new_messages}
 
 
 class MicrosoftGraphProvider(EmailProvider):
@@ -98,6 +128,12 @@ class MicrosoftGraphProvider(EmailProvider):
     def _graph_delete(self, path: str) -> requests.Response:
         url = f'{GRAPH_BASE}{path}'
         resp = requests.delete(url, headers=self._headers(), timeout=30)
+        self._handle_throttle(resp)
+        return resp
+
+    def _graph_patch(self, path: str, json_body: dict = None) -> requests.Response:
+        url = f'{GRAPH_BASE}{path}'
+        resp = requests.patch(url, headers=self._headers(), json=json_body, timeout=30)
         self._handle_throttle(resp)
         return resp
 
@@ -343,7 +379,7 @@ class MicrosoftGraphProvider(EmailProvider):
             # Over-fetch a little so grouping by conversation still yields ~limit threads.
             params: Dict[str, Any] = {
                 '$top': min(limit * 2, 200),
-                '$select': 'id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview',
+                '$select': 'id,conversationId,subject,from,toRecipients,receivedDateTime,isRead,bodyPreview,flag',
                 '$orderby': 'receivedDateTime desc',
             }
             if user_q:
@@ -355,6 +391,12 @@ class MicrosoftGraphProvider(EmailProvider):
                     )
                 if odata:
                     params['$filter'] = odata
+                elif odata == '' and user_q:
+                    # Pure free text: use $search instead of $filter.
+                    # Graph rejects $search combined with $orderby.
+                    params.pop('$orderby', None)
+                    # VERIFY-AT-GATE: Graph $search expects quoted search terms.
+                    params['$search'] = f'"{user_q}"'
             data = self._graph_get(f'/me/mailFolders/{folder_id}/messages', params=params)
 
         threads: Dict[str, ThreadSummary] = {}
@@ -381,6 +423,8 @@ class MicrosoftGraphProvider(EmailProvider):
             summary.message_count += 1
             if not msg.get('isRead', True):
                 summary.unread = True
+            if (msg.get('flag') or {}).get('flagStatus') == 'flagged':
+                summary.flagged = True
 
             for candidate in [msg.get('from', {}).get('emailAddress')] + [
                 r.get('emailAddress') for r in msg.get('toRecipients', [])
@@ -396,18 +440,29 @@ class MicrosoftGraphProvider(EmailProvider):
     def _thread_search_filter(self, query: str) -> Optional[str]:
         """Map a small Gmail-ish query subset to Graph $filter, or None if unsupported.
 
-        Returns '' when the query is empty (no extra filter). Returns None when the
-        query cannot be mapped honestly — callers must NOT fall through to unfiltered.
+        Returns '' when the query is empty or pure free text (no operators).
+        Returns None when the query contains unsupported or mixed operators.
         """
         q = (query or '').strip()
         if not q:
             return ''
-        # Reuse translate_query for the exact operators it already handles.
-        translated = self.translate_query(q)
-        if translated:
-            return translated
-        # Free-text and anything else: refuse rather than lie.
-        return None
+        
+        # Check if query contains any operator-like tokens
+        # Supported operators: from:, is:, has:, older_than:, category:
+        import re
+        # Look for word-boundary followed by operator:
+        has_operators = bool(re.search(r'\b(?:from|is|has|older_than|category):', q))
+        
+        if has_operators:
+            # Try to translate
+            translated = self.translate_query(q)
+            if translated:
+                return translated
+            # If translate_query returned '' but we had operators, it's unsupported
+            return None
+        else:
+            # Pure free text
+            return ''
 
     def get_thread(self, thread_id: str) -> List[ThreadMessage]:
         """Return the messages of one conversation in chronological order."""
@@ -418,7 +473,15 @@ class MicrosoftGraphProvider(EmailProvider):
         safe_thread_id = thread_id.replace("'", "''")
         params = {
             '$filter': f"conversationId eq '{safe_thread_id}'",
-            '$select': 'id,conversationId,subject,from,toRecipients,sentDateTime,receivedDateTime,isDraft,bodyPreview',
+            # ``body`` gives the /mail READER the full message (text/HTML), not
+            # just bodyPreview — the reader-only exception to the cleaner's
+            # metadata-only rail. Fetched in the same $filter call, so no extra
+            # round-trips per thread.
+            '$select': 'id,conversationId,subject,from,toRecipients,sentDateTime,receivedDateTime,isDraft,bodyPreview,body,hasAttachments',
+            # NOTE: attachment METADATA is fetched per-message below (only when
+            # hasAttachments) — NOT via $expand here: Graph 400s on
+            # $expand=attachments over a $filter'd /me/messages collection, and
+            # that would break the whole thread read (bodies included).
             # NOTE: deliberately NO $orderby. Microsoft Graph returns 400 Bad
             # Request when $orderby names a property other than the one in
             # $filter (here we filter on conversationId), so we sort the
@@ -440,6 +503,15 @@ class MicrosoftGraphProvider(EmailProvider):
                 direction = 'sent'
             else:
                 direction = 'received'
+            body_text: Optional[str] = None
+            body_html: Optional[str] = None
+            body = msg.get('body') or {}
+            content = body.get('content')
+            if content:
+                if (body.get('contentType') or 'text').lower() == 'html':
+                    body_html = content
+                else:
+                    body_text = content
             out.append(ThreadMessage(
                 id=msg.get('id', ''),
                 thread_id=msg.get('conversationId', thread_id),
@@ -449,8 +521,115 @@ class MicrosoftGraphProvider(EmailProvider):
                 sent_at=to_iso8601(msg.get('sentDateTime') or msg.get('receivedDateTime')),
                 preview=msg.get('bodyPreview') or None,
                 direction=direction,
+                body_text=body_text,
+                body_html=body_html,
+                attachments=self._message_attachments(msg),
             ))
         return out
+
+    def _message_attachments(self, msg: dict) -> List[MailAttachment]:
+        """Attachment METADATA for one message (no bytes), fetched only when the
+        message actually has attachments. Kept off the thread $filter query
+        because Graph 400s on $expand=attachments there. Degrade-clean: [] on any
+        error — attachments are a nice-to-have, never a reason to lose the body."""
+        if not msg.get('hasAttachments'):
+            return []
+        try:
+            data = self._graph_get(
+                f"/me/messages/{msg['id']}/attachments",
+                params={'$select': 'id,name,contentType,size,isInline'},
+            )
+        except Exception as exc:  # noqa: BLE001 - degrade clean
+            logger.warning("microsoft attachments fetch failed for %s: %s", msg.get('id'), exc)
+            return []
+        out: List[MailAttachment] = []
+        for att in data.get('value', []):
+            if not att.get('id'):
+                continue
+            out.append(MailAttachment(
+                id=att.get('id', ''),
+                filename=att.get('name') or None,
+                mime_type=att.get('contentType') or None,
+                size=int(att.get('size') or 0),
+                is_inline=bool(att.get('isInline')),
+            ))
+        return out
+
+    @staticmethod
+    def _graph_file_attachments(attachments: Optional[List[dict]]) -> List[Dict[str, Any]]:
+        """Build Graph fileAttachment objects (contentBytes = base64 STRING).
+        Inline in sendMail/createDraft; Graph caps inline contentBytes at ~3MB."""
+        out: List[Dict[str, Any]] = []
+        for att in (attachments or []):
+            out.append({
+                '@odata.type': '#microsoft.graph.fileAttachment',
+                'name': att.get('filename') or 'attachment',
+                'contentType': att.get('mime_type') or 'application/octet-stream',
+                'contentBytes': base64.b64encode(att.get('data') or b'').decode('ascii'),
+            })
+        return out
+
+    def poll_inbound(self, since_iso: Optional[str]) -> dict:
+        """Detect NEW inbox mail past a high-water cursor (external-mailbox parity
+        with the sovereign James ``pollInbound``).
+
+        BASELINE (``since_iso`` is None): capture the cursor (the newest inbox
+        ``received_at``, or NOW for an empty inbox so the cursor is never null) and
+        process NO backlog. INCREMENTAL (``since_iso`` set): ``new_messages`` =
+        messages strictly newer than the cursor, ascending; the returned cursor
+        advances to the max ``received_at`` seen (else ``since_iso``). ISO-8601 UTC
+        strings sort chronologically, so the compare is lexical (matches James).
+
+        EFFICIENCY: on an incremental poll Graph server-side filters with
+        ``$filter=receivedDateTime gt <since_iso>`` (the ISO literal is unquoted for
+        a datetimeoffset); on baseline fetch only the newest one to stamp the cursor.
+
+        Degrade-clean: any provider error -> {'cursor': since_iso, 'new_messages': []}.
+        """
+        try:
+            params: Dict[str, Any] = {
+                '$select': (
+                    'id,conversationId,subject,from,toRecipients,'
+                    'receivedDateTime,internetMessageHeaders'
+                ),
+                '$orderby': 'receivedDateTime desc',
+                '$top': 50,
+            }
+            if since_iso:
+                # Graph accepts the ISO literal unquoted for a datetimeoffset.
+                params['$filter'] = f'receivedDateTime gt {since_iso}'
+            else:
+                params['$top'] = 1
+            data = self._graph_get('/me/mailFolders/inbox/messages', params=params)
+
+            refs: List[dict] = []
+            for msg in data.get('value', []):
+                received_at = to_iso8601(msg.get('receivedDateTime'))
+                if not received_at:
+                    continue
+                sender = self._address(msg.get('from', {}).get('emailAddress'))
+                to_addresses = [
+                    a.address
+                    for a in (self._address(r.get('emailAddress')) for r in msg.get('toRecipients', []))
+                    if a
+                ]
+                refs.append({
+                    'thread_id': msg.get('conversationId', ''),
+                    'from_address': sender.address if sender else None,
+                    'to_addresses': to_addresses,
+                    'subject': msg.get('subject') or None,
+                    'received_at': received_at,
+                    # Present + non-empty header ⇒ an agent runtime auto-sent this.
+                    'agent_autoreply': any(
+                        str(h.get('name') or '').lower() == 'x-uc-agent-autoreply'
+                        and str(h.get('value') or '').strip()
+                        for h in (msg.get('internetMessageHeaders') or [])
+                    ),
+                })
+
+            return _poll_result(refs, since_iso)
+        except Exception:  # noqa: BLE001 - degrade clean like the other read routes
+            return {'cursor': since_iso, 'new_messages': []}
 
     def send_message(
         self,
@@ -462,8 +641,37 @@ class MicrosoftGraphProvider(EmailProvider):
         cc: Optional[List[str]] = None,
         bcc: Optional[List[str]] = None,
         body_html: Optional[str] = None,
+        attachments: Optional[List[dict]] = None,
     ) -> SendResult:
-        """Send a new message or reply (via /me/sendMail)."""
+        """Send a new message, or a THREADED reply when a reply target is given.
+
+        With ``in_reply_to_thread_id`` set, the reply is built server-side via
+        ``POST /me/messages/{id}/createReply`` so Graph stamps In-Reply-To /
+        References and Outlook threads it into the conversation; we then PATCH
+        the draft's body/recipients and ``/send`` it. Without a target (or when
+        the target cannot be resolved) we fall back to the plain
+        ``/me/sendMail`` lane, which cannot thread.
+        """
+        if in_reply_to_thread_id:
+            target_id = self._resolve_reply_target(in_reply_to_thread_id)
+            if target_id:
+                reply = self._send_reply(
+                    target_id=target_id,
+                    in_reply_to_thread_id=in_reply_to_thread_id,
+                    from_addr=from_addr,
+                    to_addr=to_addr,
+                    subject=subject,
+                    body=body,
+                    cc=cc,
+                    bcc=bcc,
+                    body_html=body_html,
+                    attachments=attachments,
+                )
+                if reply is not None:
+                    return reply
+            # Unresolvable / un-creatable reply target: degrade to the plain
+            # send lane (previous behavior) rather than refusing to send.
+
         message: Dict[str, Any] = {
             'subject': subject or '',
             'body': {
@@ -478,6 +686,9 @@ class MicrosoftGraphProvider(EmailProvider):
             message['bccRecipients'] = [{'emailAddress': {'address': a}} for a in bcc if a]
         if from_addr:
             message['from'] = {'emailAddress': {'address': from_addr}}
+        file_atts = self._graph_file_attachments(attachments)
+        if file_atts:
+            message['attachments'] = file_atts
 
         resp = self._graph_post('/me/sendMail', json_body={'message': message, 'saveToSentItems': True})
         if resp.status_code in (200, 202):
@@ -489,6 +700,132 @@ class MicrosoftGraphProvider(EmailProvider):
             )
         return SendResult(accepted=False, reason=f'graph_status_{resp.status_code}')
 
+    def _resolve_reply_target(self, reply_ref: str) -> Optional[str]:
+        """Resolve a caller-supplied reply reference to a Graph MESSAGE id.
+
+        Callers hand us whatever they stored: sometimes a message id, more
+        often the conversationId our own thread listings expose. Try the
+        direct message read first; otherwise treat it as a conversationId and
+        pick the newest message of that conversation. Returns None when
+        neither resolves.
+        """
+        try:
+            data = self._graph_get(f'/me/messages/{reply_ref}', params={'$select': 'id'})
+            if data.get('id'):
+                return data['id']
+        except Exception:
+            pass
+        # OData escapes a single quote inside a string literal by doubling it
+        # (same $filter injection guard as get_thread).
+        safe_ref = reply_ref.replace("'", "''")
+        try:
+            data = self._graph_get('/me/messages', params={
+                '$filter': f"conversationId eq '{safe_ref}'",
+                '$select': 'id,receivedDateTime',
+                # NOTE: deliberately NO $orderby -- Graph 400s when $orderby
+                # names a property other than the filtered one, so we sort
+                # client-side (same as get_thread).
+                '$top': 50,
+            })
+        except Exception:
+            return None
+        messages = data.get('value', [])
+        if not messages:
+            return None
+        # receivedDateTime is ISO-8601, so a lexical sort is chronological.
+        messages.sort(key=lambda m: m.get('receivedDateTime') or '')
+        return messages[-1].get('id')
+
+    def _send_reply(
+        self,
+        target_id: str,
+        in_reply_to_thread_id: str,
+        from_addr: str,
+        to_addr: str,
+        subject: str,
+        body: str,
+        cc: Optional[List[str]] = None,
+        bcc: Optional[List[str]] = None,
+        body_html: Optional[str] = None,
+        attachments: Optional[List[dict]] = None,
+    ) -> Optional[SendResult]:
+        """createReply -> PATCH -> (attach) -> send.
+
+        Returns None when the reply draft cannot even be created (the caller
+        then falls back to plain sendMail); past that point failures return an
+        accepted=False SendResult instead, because falling back after a
+        partially-executed reply could double-send.
+        """
+        create = self._graph_post(f'/me/messages/{target_id}/createReply')
+        if create.status_code not in (200, 201):
+            return None
+        try:
+            draft = create.json() or {}
+        except ValueError:
+            draft = {}
+        draft_id = draft.get('id')
+        if not draft_id:
+            return None
+
+        patch_body: Dict[str, Any] = {
+            'body': {
+                'contentType': 'HTML' if body_html else 'Text',
+                'content': body_html if body_html else (body or ''),
+            },
+            # createReply addresses the SENDER of the target message; a bump
+            # replies to our own sent message, so always pin the recipients
+            # the caller asked for.
+            'toRecipients': [{'emailAddress': {'address': to_addr}}],
+        }
+        if subject:
+            patch_body['subject'] = subject
+        if cc:
+            patch_body['ccRecipients'] = [{'emailAddress': {'address': a}} for a in cc if a]
+        if bcc:
+            patch_body['bccRecipients'] = [{'emailAddress': {'address': a}} for a in bcc if a]
+        if from_addr:
+            account = self._account_address()
+            if account and from_addr.strip().lower() != account:
+                # Same SendAs semantics as create_draft: set it explicitly so
+                # Graph can accept or refuse EXPLICITLY.
+                patch_body['from'] = {'emailAddress': {'address': from_addr}}
+
+        patched = self._graph_patch(f'/me/messages/{draft_id}', json_body=patch_body)
+        if patched.status_code != 200:
+            # Best-effort cleanup of the orphan reply draft.
+            try:
+                self._graph_delete(f'/me/messages/{draft_id}')
+            except Exception:
+                pass
+            return SendResult(accepted=False, reason=f'graph_reply_patch_{patched.status_code}')
+        try:
+            updated = patched.json() or {}
+        except ValueError:
+            updated = {}
+
+        # Attach files to the reply draft BEFORE sending. A failed attachment
+        # POST cleans up the draft and refuses (never send a reply missing the
+        # file the user attached) — symmetric with the PATCH-failure path.
+        for file_att in self._graph_file_attachments(attachments):
+            att_resp = self._graph_post(f'/me/messages/{draft_id}/attachments', json_body=file_att)
+            if att_resp.status_code not in (200, 201):
+                try:
+                    self._graph_delete(f'/me/messages/{draft_id}')
+                except Exception:
+                    pass
+                return SendResult(accepted=False, reason=f'graph_reply_attach_{att_resp.status_code}')
+
+        sent = self._graph_post(f'/me/messages/{draft_id}/send')
+        if sent.status_code not in (200, 202):
+            return SendResult(accepted=False, reason=f'graph_reply_send_{sent.status_code}')
+        # NB: Graph message ids are folder-scoped and can change once the sent
+        # message lands in Sent Items; conversationId is the durable thread key.
+        return SendResult(
+            accepted=True,
+            provider_message_id=updated.get('id') or draft_id,
+            thread_id=updated.get('conversationId') or in_reply_to_thread_id,
+        )
+
     def create_draft(
         self,
         from_addr: str,
@@ -499,6 +836,7 @@ class MicrosoftGraphProvider(EmailProvider):
         cc: Optional[List[str]] = None,
         bcc: Optional[List[str]] = None,
         body_html: Optional[str] = None,
+        attachments: Optional[List[dict]] = None,
     ) -> DraftResult:
         """Create a REAL draft in the mailbox's Drafts folder (POST /me/messages).
 
@@ -530,6 +868,9 @@ class MicrosoftGraphProvider(EmailProvider):
             # Sending/drafting AS another mailbox needs an explicit SendAs grant;
             # set it so Graph can accept or refuse EXPLICITLY.
             message['from'] = {'emailAddress': {'address': from_addr}}
+        file_atts = self._graph_file_attachments(attachments)
+        if file_atts:
+            message['attachments'] = file_atts
 
         resp = self._graph_post('/me/messages', json_body=message)
         if resp.status_code in (200, 201):
@@ -693,6 +1034,30 @@ class MicrosoftGraphProvider(EmailProvider):
                         'method': 'PATCH',
                         'url': f'/me/messages/{mid}',
                         'body': {'isRead': read},
+                        'headers': {'Content-Type': 'application/json'},
+                    }
+                    for j, mid in enumerate(batch)
+                ]
+            }
+            resp = self._graph_post('/$batch', json_body=batch_body)
+            if resp.status_code == 200:
+                results = resp.json().get('responses', [])
+                changed += sum(1 for r in results if r.get('status', 0) in (200, 201))
+        return changed
+
+    def batch_set_flagged(self, message_ids: List[str], flagged: bool = True) -> int:
+        """PATCH flag.flagStatus on each message (Graph $batch). Returns count changed."""
+        flag_status = 'flagged' if flagged else 'notFlagged'
+        changed = 0
+        for i in range(0, len(message_ids), 20):
+            batch = message_ids[i:i + 20]
+            batch_body = {
+                'requests': [
+                    {
+                        'id': str(j),
+                        'method': 'PATCH',
+                        'url': f'/me/messages/{mid}',
+                        'body': {'flag': {'flagStatus': flag_status}},
                         'headers': {'Content-Type': 'application/json'},
                     }
                     for j, mid in enumerate(batch)

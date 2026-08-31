@@ -28,7 +28,7 @@ export class MailContactsService {
         select: { id: true, ownerKind: true, ownerKey: true },
       });
       if (!mailbox) throw new NotFoundException('Mailbox not found in this workspace.');
-      assertMayActThroughMailbox(mailbox, ucUid);
+      await assertMayActThroughMailbox(this.prisma, mailbox, ucUid);
       const rows = await tx.mailContact.findMany({
         where: {
           workspaceId,

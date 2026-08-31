@@ -162,7 +162,8 @@ class FakeProvider:
             )
         ]
 
-    def send_message(self, from_addr, to_addr, subject, body, in_reply_to_thread_id=None):
+    def send_message(self, from_addr, to_addr, subject, body, in_reply_to_thread_id=None,
+                     cc=None, bcc=None, body_html=None, attachments=None):
         from providers.mail_client import SendResult
 
         self.calls.append((
@@ -174,6 +175,9 @@ class FakeProvider:
                 "subject": subject,
                 "body": body,
                 "in_reply_to_thread_id": in_reply_to_thread_id,
+                "cc": cc,
+                "bcc": bcc,
+                "body_html": body_html,
             },
         ))
         return SendResult(
@@ -192,7 +196,8 @@ class FailingProvider(FakeProvider):
     def get_thread(self, thread_id: str):
         raise RuntimeError("403 forbidden")
 
-    def send_message(self, from_addr, to_addr, subject, body, in_reply_to_thread_id=None):
+    def send_message(self, from_addr, to_addr, subject, body, in_reply_to_thread_id=None,
+                     cc=None, bcc=None, body_html=None, attachments=None):
         raise RuntimeError("token expired")
 
 

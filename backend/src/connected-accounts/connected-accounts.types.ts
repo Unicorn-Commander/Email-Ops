@@ -206,6 +206,8 @@ export interface EngineMailThread {
   last_snippet: string | null;
   message_count: number;
   unread: boolean;
+  /** Any message in the thread starred (Gmail STARRED) / flagged (Graph). */
+  flagged?: boolean;
 }
 
 export interface EngineMailThreadsResult {
@@ -239,6 +241,15 @@ export interface EngineUnsubscribeResult {
   results: EngineUnsubscribeSenderResult[];
 }
 
+export interface EngineMailAttachment {
+  id: string;
+  filename?: string | null;
+  mime_type?: string | null;
+  size?: number;
+  is_inline?: boolean;
+  cid?: string | null;
+}
+
 export interface EngineMailMessage {
   id: string;
   thread_id: string;
@@ -248,6 +259,38 @@ export interface EngineMailMessage {
   sent_at: string | null;
   preview: string | null;
   direction: 'received' | 'sent' | 'draft';
+  // Full bodies for the /mail reader on the user's OWN connected mailbox.
+  // Populated by the engine's get_thread (reader path); the cleaner analysis
+  // path never sets these. Absent/null when the provider returned metadata only.
+  body_text?: string | null;
+  body_html?: string | null;
+  // Attachment metadata (no bytes) — bytes fetched on demand via getMailAttachment.
+  attachments?: EngineMailAttachment[];
+}
+
+/** One newly-arrived inbound message (poll-inbound), for classification + rules. */
+export interface EngineInboundMessage {
+  thread_id: string;
+  from_address?: string | null;
+  to_addresses?: string[];
+  subject?: string | null;
+  received_at: string;
+  agent_autoreply?: boolean;
+}
+
+/** Result of an external inbox delta poll (mirrors the sovereign InboundPollResult). */
+export interface EngineInboundPollResult {
+  cursor: string | null;
+  new_messages: EngineInboundMessage[];
+}
+
+/** Bytes of one attachment, fetched on demand for the reader. */
+export interface EngineMailAttachmentBytes {
+  found: boolean;
+  content_base64?: string;
+  mime_type?: string | null;
+  filename?: string | null;
+  size?: number;
 }
 
 export interface EngineMailThreadResult {

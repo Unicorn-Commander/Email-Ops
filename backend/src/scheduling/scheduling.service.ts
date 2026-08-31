@@ -13,6 +13,7 @@ import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { ucUidOf } from '../common/workspace/workspace.util';
+import { mayActThroughMailbox } from '../common/mailbox/mailbox-fence';
 import {
   ScheduledSendPayload,
   ScheduledSendView,
@@ -379,13 +380,7 @@ export class SchedulingService {
     mailbox: { ownerKind: string; ownerKey: string | null },
     ucUid: string | null,
   ): Promise<boolean> {
-    if (mailbox.ownerKind !== 'HUMAN') return true;
-    if (!mailbox.ownerKey || !ucUid) return false;
-    if (mailbox.ownerKey === ucUid) return true;
-    const u = await tx.user.findFirst({
-      where: { OR: [{ keycloakId: ucUid }, { id: ucUid }] },
-    });
-    return !!u && (mailbox.ownerKey === u.keycloakId || mailbox.ownerKey === u.id);
+    return mayActThroughMailbox(tx, mailbox, ucUid);
   }
 
   private normalizePayload(raw: unknown): ScheduledSendPayload | null {

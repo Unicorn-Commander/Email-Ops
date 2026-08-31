@@ -11,6 +11,8 @@ import {
   EngineListMessagesResult,
   EngineMailDraftResult,
   EngineMailFolder,
+  EngineInboundPollResult,
+  EngineMailAttachmentBytes,
   EngineMailSendResult,
   EngineMailThreadActionResult,
   EngineMailThreadResult,
@@ -449,6 +451,44 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
     );
   }
 
+  async flagMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+    flagged: boolean,
+  ): Promise<EngineMailThreadActionResult | null> {
+    return this.postJson<EngineMailThreadActionResult>(
+      `/mail/threads/${encodeURIComponent(threadId)}/flag`,
+      { provider, credentials, flagged },
+    );
+  }
+
+  async getMailAttachment(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageId: string,
+    attachmentId: string,
+  ): Promise<EngineMailAttachmentBytes | null> {
+    return this.postJson<EngineMailAttachmentBytes>('/mail/attachment', {
+      provider,
+      credentials,
+      message_id: messageId,
+      attachment_id: attachmentId,
+    });
+  }
+
+  async pollInbound(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    sinceIso: string | null,
+  ): Promise<EngineInboundPollResult | null> {
+    return this.postJson<EngineInboundPollResult>('/mail/poll-inbound', {
+      provider,
+      credentials,
+      since_iso: sinceIso,
+    });
+  }
+
   async setMailThreadRead(
     provider: 'gmail' | 'microsoft',
     credentials: Record<string, unknown>,
@@ -473,6 +513,7 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       cc?: string[];
       bcc?: string[];
       inReplyToThreadId?: string | null;
+      attachments?: { filename: string; mimeType: string; contentBase64: string }[];
     },
   ): Promise<EngineMailSendResult | null> {
     return this.postJson<EngineMailSendResult>('/mail/send', {
@@ -486,6 +527,13 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       cc: message.cc?.length ? message.cc : null,
       bcc: message.bcc?.length ? message.bcc : null,
       in_reply_to_thread_id: message.inReplyToThreadId ?? null,
+      attachments: message.attachments?.length
+        ? message.attachments.map((a) => ({
+            filename: a.filename,
+            mime_type: a.mimeType,
+            content_base64: a.contentBase64,
+          }))
+        : null,
     });
   }
 
@@ -501,6 +549,7 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       cc?: string[];
       bcc?: string[];
       inReplyToThreadId?: string | null;
+      attachments?: { filename: string; mimeType: string; contentBase64: string }[];
     },
   ): Promise<EngineMailDraftResult | null> {
     return this.postJson<EngineMailDraftResult>('/mail/draft', {
@@ -514,6 +563,13 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       cc: message.cc?.length ? message.cc : null,
       bcc: message.bcc?.length ? message.bcc : null,
       in_reply_to_thread_id: message.inReplyToThreadId ?? null,
+      attachments: message.attachments?.length
+        ? message.attachments.map((a) => ({
+            filename: a.filename,
+            mime_type: a.mimeType,
+            content_base64: a.contentBase64,
+          }))
+        : null,
     });
   }
 

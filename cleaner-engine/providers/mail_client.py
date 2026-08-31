@@ -37,6 +37,20 @@ class ThreadSummary:
     last_snippet: Optional[str] = None
     message_count: int = 0
     unread: bool = False
+    flagged: bool = False  # any message starred (Gmail STARRED) / flagged (Graph)
+
+
+@dataclass
+class MailAttachment:
+    """Attachment METADATA on a thread message (no bytes). ``id`` is the
+    provider's per-message attachment handle (Gmail attachmentId / Graph
+    attachment id), used by the download route to fetch the bytes on demand."""
+    id: str
+    filename: Optional[str] = None
+    mime_type: Optional[str] = None
+    size: int = 0
+    is_inline: bool = False
+    cid: Optional[str] = None  # Content-ID for an inline image, else None
 
 
 @dataclass
@@ -49,6 +63,16 @@ class ThreadMessage:
     direction: str = "received"  # received | sent | draft
     sender: Optional[Address] = None  # serialised as "from"
     to: List[Address] = field(default_factory=list)
+    # Full message bodies for the /mail READER on the user's OWN connected
+    # mailbox. This is the scoped exception to the cleaner engine's
+    # metadata-only privacy rail: the cleaner analysis path
+    # (list_messages + get_message(format='metadata')) never populates these,
+    # but get_thread — which serves a human reading their own inbox — may,
+    # because that mail is already readable in Gmail/Outlook. Left None by
+    # providers that only fetch metadata.
+    body_text: Optional[str] = None
+    body_html: Optional[str] = None
+    attachments: List["MailAttachment"] = field(default_factory=list)
 
 
 @dataclass

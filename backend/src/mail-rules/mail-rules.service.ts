@@ -3,6 +3,8 @@ import { MailRule, Prisma } from '@prisma/client';
 import { assertMayActThroughMailbox } from '../common/mailbox/mailbox-fence';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
+import { MailProviderPort } from '../mail-provider/mail-provider.port';
+import { MailboxAccount } from '@prisma/client';
 import {
   CompiledRule,
   Condition,
@@ -50,6 +52,7 @@ export class MailRulesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stalwart: StalwartPort,
+    private readonly mailProvider: MailProviderPort,
   ) {}
 
   async list(workspaceId: string, ucUid: string | null, mailboxId: string): Promise<MailRuleView[]> {
@@ -76,7 +79,15 @@ export class MailRulesService {
     const explicitPriority = input.priority === undefined ? null : this.normalizePriority(input.priority);
 
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      await this.assertMailbox(tx, workspaceId, ucUid, mailboxId, { requireSovereign: true });
+      const mbx = await this.assertMailbox(tx, workspaceId, ucUid, mailboxId, { requireActive: true });
+      // External (Gmail/M365) mailboxes have no folder model, so a MOVE_TO_FOLDER
+      // rule would never fire there — reject it at create so the rule isn't a
+      // silent no-op. ARCHIVE / TRASH / MARK_READ all map to provider triage verbs.
+      if (mbx.provider !== 'stalwart' && actions.some((a) => a.type === 'MOVE_TO_FOLDER')) {
+        throw new BadRequestException(
+          'Move-to-folder rules are not supported on connected Gmail/Microsoft mailboxes — use Archive, Trash, or Mark-read.',
+        );
+      }
       const count = await tx.mailRule.count({ where: { workspaceId, mailboxId } });
       if (count >= MAX_RULES_PER_MAILBOX) {
         throw new BadRequestException(
@@ -173,6 +184,10 @@ export class MailRulesService {
     mailboxEmail: string,
     msg: InboundRuleMessage,
     preloadedRules?: MailRuleRow[],
+    // The full mailbox row: when it is an EXTERNAL (Gmail/M365) account, rule
+    // actions execute through the provider instead of James. Omitted (tests /
+    // sovereign) → the James path, unchanged.
+    mailbox?: MailboxAccount,
   ): Promise<ApplyInboundSummary> {
     const none: ApplyInboundSummary = { matched: 0, applied: 0 };
     try {
@@ -233,7 +248,7 @@ export class MailRulesService {
       for (const action of actions) {
         if (action.type === 'STOP') continue; // evaluation terminator — no engine effect
         try {
-          const ok = await this.executeAction(mailboxEmail, msg.threadId, action);
+          const ok = await this.executeAction(mailboxEmail, msg.threadId, action, mailbox);
           if (ok === null) {
             this.logger.debug(`rules: skipping action ${action.type} (unsupported) mailbox=${mailboxId}`);
           } else if (ok) {
@@ -275,7 +290,24 @@ export class MailRulesService {
     mailboxEmail: string,
     threadId: string,
     action: RuleAction,
+    mailbox?: MailboxAccount,
   ): Promise<boolean | null> {
+    // EXTERNAL (Gmail/M365): actions execute through the provider triage verbs.
+    // MOVE_TO_FOLDER has no external equivalent (Gmail/Graph folders aren't
+    // modelled here), so it's an honest skip (null) rather than a silent no-op.
+    if (mailbox && this.mailProvider.handles(mailbox)) {
+      switch (action.type) {
+        case 'ARCHIVE':
+          return this.mailProvider.archiveThread(mailbox, threadId);
+        case 'TRASH':
+          return this.mailProvider.trashThread(mailbox, threadId);
+        case 'MARK_READ':
+          return this.mailProvider.setThreadRead(mailbox, threadId, true);
+        case 'MOVE_TO_FOLDER':
+        default:
+          return null; // MOVE_TO_FOLDER / LABEL unsupported on external — honest skip
+      }
+    }
     switch (action.type) {
       case 'MOVE_TO_FOLDER': {
         // Same primitive + identifier semantics as the webmail move flow
@@ -302,25 +334,23 @@ export class MailRulesService {
     workspaceId: string,
     ucUid: string | null,
     mailboxId: string,
-    opts?: { requireSovereign?: boolean },
-  ): Promise<void> {
+    opts?: { requireActive?: boolean },
+  ): Promise<{ id: string; provider: string; active: boolean }> {
     const mailbox = await tx.mailboxAccount.findFirst({
       where: { id: mailboxId, workspaceId },
       select: { id: true, ownerKind: true, ownerKey: true, provider: true, active: true },
     });
     if (!mailbox) throw new NotFoundException('Mailbox not found in this workspace.');
-    assertMayActThroughMailbox(mailbox, ucUid);
-    // CREATE-only fence: the inbound watcher only ever applies rules to active
-    // sovereign (James) mailboxes, so accepting a rule on a connected Gmail/
-    // Microsoft or inactive mailbox would be a silent no-op — refuse loudly
-    // instead (mirrors the scheduling service's sovereign fence). List/update/
-    // delete stay permissive so rules on a later-disconnected mailbox remain
-    // manageable.
-    if (opts?.requireSovereign && (mailbox.provider !== 'stalwart' || !mailbox.active)) {
-      throw new BadRequestException(
-        'Mail rules run only on active sovereign mailboxes — this mailbox is external or inactive.',
-      );
+    await assertMayActThroughMailbox(tx, mailbox, ucUid);
+    // CREATE-only fence: the inbound watcher now runs rules on active sovereign
+    // AND active external (Gmail/M365) mailboxes, so only an INACTIVE mailbox
+    // would make a rule a silent no-op — refuse that loudly. (Per-action
+    // provider compatibility, e.g. MOVE_TO_FOLDER on external, is validated by
+    // the caller which has the action list.) List/update/delete stay permissive.
+    if (opts?.requireActive && !mailbox.active) {
+      throw new BadRequestException('Mail rules run only on active mailboxes — this mailbox is inactive.');
     }
+    return { id: mailbox.id, provider: mailbox.provider, active: mailbox.active };
   }
 
   private normalizeName(raw: string): string {

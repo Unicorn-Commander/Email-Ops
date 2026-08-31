@@ -36,6 +36,10 @@ function make(opts: {
   spam?: unknown;
   restore?: unknown;
   readSet?: unknown;
+  flagSet?: unknown;
+  stats?: unknown;
+  attachment?: unknown;
+  poll?: unknown;
 }) {
   const broker = {
     getProviderAccessToken: jest.fn().mockResolvedValue(opts.token ?? null),
@@ -50,6 +54,10 @@ function make(opts: {
     spamMailThread: jest.fn().mockResolvedValue(opts.spam ?? null),
     restoreMailThreadToInbox: jest.fn().mockResolvedValue(opts.restore ?? null),
     setMailThreadRead: jest.fn().mockResolvedValue(opts.readSet ?? null),
+    flagMailThread: jest.fn().mockResolvedValue(opts.flagSet ?? null),
+    getInboxStats: jest.fn().mockResolvedValue(opts.stats ?? null),
+    getMailAttachment: jest.fn().mockResolvedValue(opts.attachment ?? null),
+    pollInbound: jest.fn().mockResolvedValue(opts.poll ?? null),
   } as unknown as ConnectedAccountsEnginePort;
   const prisma = {
     user: {
@@ -105,6 +113,8 @@ describe('EngineMailProvider', () => {
         subject: 'Hi',
         message_count: 2,
         unread: true,
+        // read-back defaults to unstarred when the engine omits `flagged`
+        flagged: false,
         last_message_at: '2026-06-24T00:00:00Z',
         last_snippet: 'hello',
         participants: [{ address: 'a@x.test', name: 'A' }],
@@ -158,6 +168,29 @@ describe('EngineMailProvider', () => {
     expect(out.nextPageToken).toBe('PAGE_2');
     expect(out.hasMore).toBe(true);
     expect(out.threads).toHaveLength(1);
+  });
+
+  it('microsoft receives the RAW query (NOT Gmail-mapped) so its own parser can honour or reject it', async () => {
+    const { provider, engine } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'mtok',
+      threads: { threads: [] },
+    });
+    await provider.listInbox(gmailbox({ provider: 'microsoft', kind: 'microsoft' }), {
+      folder: 'inbox',
+      limit: 10,
+      query: 'is:flagged',
+    });
+    // The raw operator query must reach the Microsoft provider untouched — a
+    // Gmail-mangled string would stop it raising the honest "not supported".
+    expect(engine.listMailThreads).toHaveBeenCalledWith(
+      'microsoft',
+      { access_token: 'mtok' },
+      'inbox',
+      10,
+      'is:flagged',
+      null,
+    );
   });
 
   it('listInbox refuses numeric offset without pageToken (honest no-more-pages)', async () => {
@@ -299,6 +332,114 @@ describe('EngineMailProvider', () => {
         'gmail',
         'k',
       ),
+    ).toBeNull();
+  });
+
+  it('setThreadFlagged: forwards to the engine flag route and maps ok', async () => {
+    const { provider, engine } = make({ user: { keycloakId: 'kc-sub-1' }, token: 'gtok', flagSet: { ok: true } });
+    expect(await provider.setThreadFlagged(gmailbox(), 't1', true)).toBe(true);
+    expect(engine.flagMailThread).toHaveBeenCalledWith('gmail', { token: 'gtok' }, 't1', true);
+  });
+
+  it('setThreadFlagged degrades clean to false when not connected', async () => {
+    const { provider } = make({ user: { keycloakId: 'kc-sub-1' }, token: null, flagSet: { ok: true } });
+    expect(await provider.setThreadFlagged(gmailbox(), 't1', true)).toBe(false);
+  });
+
+  it('listInbox reads flagged back so a starred thread shows starred', async () => {
+    const { provider } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      threads: { threads: [{ id: 't1', subject: 'S', participants: [], last_message_at: null, last_snippet: null, message_count: 1, unread: false, flagged: true }] },
+    });
+    const out = await provider.listInbox(gmailbox(), { folder: 'inbox', limit: 50 });
+    expect(out.threads[0].flagged).toBe(true);
+  });
+
+  it('getInboxCounts: maps engine stats to inbox unread/total', async () => {
+    const { provider } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      stats: { total_messages: 42, unread_count: 7 },
+    });
+    expect(await provider.getInboxCounts(gmailbox())).toEqual({ inboxUnread: 7, inboxTotal: 42 });
+  });
+
+  it('getInboxCounts degrades clean to null (no token / no stats)', async () => {
+    expect(await make({ user: { keycloakId: 'k' }, token: null }).provider.getInboxCounts(gmailbox())).toBeNull();
+    expect(
+      await make({ user: { keycloakId: 'k' }, token: 'gtok', stats: null }).provider.getInboxCounts(gmailbox()),
+    ).toBeNull();
+  });
+
+  it('listThreadMessages maps attachments to composite blob_ids', async () => {
+    const { provider } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      thread: {
+        messages: [
+          {
+            id: 'm1',
+            thread_id: 't1',
+            from: null,
+            to: [],
+            subject: 'S',
+            sent_at: null,
+            preview: 'p',
+            direction: 'received',
+            attachments: [{ id: 'att9', filename: 'doc.pdf', mime_type: 'application/pdf', size: 1234, cid: null }],
+          },
+        ],
+      },
+    });
+    const out = await provider.listThreadMessages(gmailbox(), 't1');
+    expect(out[0].attachments).toEqual([
+      { blob_id: 'm1::att9', name: 'doc.pdf', type: 'application/pdf', size: 1234, cid: null },
+    ]);
+  });
+
+  it('downloadAttachment: decodes engine base64 bytes', async () => {
+    const { provider } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      attachment: { found: true, content_base64: Buffer.from('hello').toString('base64'), mime_type: 'text/plain', filename: 'a.txt' },
+    });
+    const res = await provider.downloadAttachment(gmailbox(), 'm1', 'att9');
+    expect(res?.data.toString('utf8')).toBe('hello');
+    expect(res?.contentType).toBe('text/plain');
+  });
+
+  it('downloadAttachment degrades clean to null (not found / no token)', async () => {
+    expect(
+      await make({ user: { keycloakId: 'k' }, token: 'gtok', attachment: { found: false } }).provider.downloadAttachment(gmailbox(), 'm', 'a'),
+    ).toBeNull();
+    expect(
+      await make({ user: { keycloakId: 'k' }, token: null }).provider.downloadAttachment(gmailbox(), 'm', 'a'),
+    ).toBeNull();
+  });
+
+  it('pollInbound: maps the engine delta-poll to the InboundPollResult shape', async () => {
+    const { provider } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      poll: {
+        cursor: '2026-08-25T00:00:00Z',
+        new_messages: [
+          { thread_id: 't1', from_address: 'a@b.com', to_addresses: ['me@x.com'], subject: 'hi', received_at: '2026-08-24T00:00:00Z', agent_autoreply: false },
+        ],
+      },
+    });
+    const res = await provider.pollInbound(gmailbox(), '2026-08-23T00:00:00Z');
+    expect(res?.cursor).toBe('2026-08-25T00:00:00Z');
+    expect(res?.newMessages).toEqual([
+      { threadId: 't1', fromAddress: 'a@b.com', toAddresses: ['me@x.com'], subject: 'hi', receivedAt: '2026-08-24T00:00:00Z', agentAutoreply: false },
+    ]);
+  });
+
+  it('pollInbound degrades clean to null (no token / no result)', async () => {
+    expect(await make({ user: { keycloakId: 'k' }, token: null }).provider.pollInbound(gmailbox(), null)).toBeNull();
+    expect(
+      await make({ user: { keycloakId: 'k' }, token: 'gtok', poll: null }).provider.pollInbound(gmailbox(), null),
     ).toBeNull();
   });
 });

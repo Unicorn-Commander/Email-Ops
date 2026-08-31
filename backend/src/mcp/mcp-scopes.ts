@@ -22,6 +22,7 @@ export const MCP_TOOL_SCOPES = {
   compose_email: 'mail:write',
   list_threads: 'mail:read',
   get_thread: 'mail:read',
+  get_attachment: 'mail:read',
   search_mail: 'mail:read',
   set_read: 'mail:write',
   bulk_disposition: 'mail:write',

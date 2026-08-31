@@ -21,6 +21,8 @@ import {
   EngineMailDraftResult,
   EngineMailFolder,
   EngineMailSendResult,
+  EngineInboundPollResult,
+  EngineMailAttachmentBytes,
   EngineMailThreadActionResult,
   EngineMailThreadResult,
   EngineMailThreadsResult,
@@ -182,6 +184,26 @@ export abstract class ConnectedAccountsEnginePort {
     read: boolean,
   ): Promise<EngineMailThreadActionResult | null>;
 
+  abstract flagMailThread(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    threadId: string,
+    flagged: boolean,
+  ): Promise<EngineMailThreadActionResult | null>;
+
+  abstract getMailAttachment(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    messageId: string,
+    attachmentId: string,
+  ): Promise<EngineMailAttachmentBytes | null>;
+
+  abstract pollInbound(
+    provider: 'gmail' | 'microsoft',
+    credentials: Record<string, unknown>,
+    sinceIso: string | null,
+  ): Promise<EngineInboundPollResult | null>;
+
   abstract sendMail(
     provider: 'gmail' | 'microsoft',
     credentials: Record<string, unknown>,
@@ -194,6 +216,7 @@ export abstract class ConnectedAccountsEnginePort {
       cc?: string[];
       bcc?: string[];
       inReplyToThreadId?: string | null;
+      attachments?: { filename: string; mimeType: string; contentBase64: string }[];
     },
   ): Promise<EngineMailSendResult | null>;
 
@@ -214,6 +237,7 @@ export abstract class ConnectedAccountsEnginePort {
       cc?: string[];
       bcc?: string[];
       inReplyToThreadId?: string | null;
+      attachments?: { filename: string; mimeType: string; contentBase64: string }[];
     },
   ): Promise<EngineMailDraftResult | null>;
 

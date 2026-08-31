@@ -45,13 +45,24 @@ class _FakeThreads:
 
 
 class _FakeMessages:
-    def __init__(self, send_result, sink):
+    def __init__(self, send_result, sink, list_result=None, get_results=None):
         self._send_result = send_result
         self._sink = sink
+        # poll_inbound drives messages().list + messages().get (metadata).
+        self._list_result = list_result or {}
+        self._get_results = get_results or {}
 
     def send(self, **kwargs):
         self._sink.append(("messages.send", kwargs))
         return _GmailExec(self._send_result)
+
+    def list(self, **kwargs):
+        self._sink.append(("messages.list", kwargs))
+        return _GmailExec(self._list_result)
+
+    def get(self, **kwargs):
+        self._sink.append(("messages.get", kwargs))
+        return _GmailExec(self._get_results[kwargs["id"]])
 
     def batchModify(self, **kwargs):
         self._sink.append(("messages.batchModify", kwargs))
@@ -86,10 +97,21 @@ def _headers(**kv):
     return [{"name": k, "value": v} for k, v in kv.items()]
 
 
-def _make_gmail(list_result=None, get_results=None, send_result=None):
+def _make_gmail(
+    list_result=None,
+    get_results=None,
+    send_result=None,
+    msg_list_result=None,
+    msg_get_results=None,
+):
     sink: list = []
     threads = _FakeThreads(list_result or {}, get_results or {}, sink)
-    messages = _FakeMessages(send_result or {}, sink)
+    messages = _FakeMessages(
+        send_result or {},
+        sink,
+        list_result=msg_list_result,
+        get_results=msg_get_results,
+    )
     provider = GmailProvider()
     provider.service = _FakeGmailService(threads, messages)
     return provider, sink
@@ -248,6 +270,26 @@ def test_gmail_send_builds_mime_and_threads_reply():
     assert "hello body" in parsed.get_content()
 
 
+def test_gmail_send_includes_attachment_part():
+    """An outbound attachment lands as a real MIME part with its filename+bytes."""
+    provider, sink = _make_gmail(send_result={"id": "s1", "threadId": "t9"})
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Files",
+        body="see attached",
+        attachments=[{"filename": "hello.txt", "mime_type": "text/plain", "data": b"hi there"}],
+    )
+    assert result.accepted is True
+    send_call = next(c for c in sink if c[0] == "messages.send")
+    decoded = base64.urlsafe_b64decode(send_call[1]["body"]["raw"].encode("ascii"))
+    parsed = email.message_from_bytes(decoded, policy=policy.default)
+    parts = list(parsed.walk())
+    att = next(p for p in parts if p.get_filename() == "hello.txt")
+    assert att.get_content_type() == "text/plain"
+    assert att.get_content().strip() == "hi there"
+
+
 def test_gmail_batch_spam_adds_spam_and_drops_inbox():
     """Spam is a LABEL edit: add SPAM, remove INBOX (batchModify, one call/100)."""
     provider, sink = _make_gmail()
@@ -313,6 +355,98 @@ def test_gmail_import_message_without_labels_omits_labelids():
 
 
 # ---------------------------------------------------------------------------
+# Gmail poll_inbound (inbound-watcher parity with the sovereign James pollInbound)
+# ---------------------------------------------------------------------------
+
+def _gmail_msg(msg_id, thread_id, internal_ms, *, from_="a@example.com",
+               to="me@example.com", subject="Hi", autoreply=False):
+    headers = _headers(**{"From": from_, "To": to, "Subject": subject})
+    if autoreply:
+        headers.append({"name": "X-UC-Agent-Autoreply", "value": "1"})
+    return {
+        "id": msg_id,
+        "threadId": thread_id,
+        "internalDate": str(internal_ms),
+        "payload": {"headers": headers},
+    }
+
+
+def test_gmail_poll_inbound_baseline_captures_cursor_no_backlog():
+    """since_iso=None: list only the newest (maxResults=1) to STAMP a non-null
+    cursor and return NO backlog."""
+    provider, sink = _make_gmail(
+        msg_list_result={"messages": [{"id": "m1"}]},
+        msg_get_results={"m1": _gmail_msg("m1", "t1", 1704196800000)},  # 2024-01-02T12:00Z
+    )
+
+    result = provider.poll_inbound(None)
+
+    # Baseline query narrows to the single newest inbox message.
+    list_call = next(c for c in sink if c[0] == "messages.list")
+    assert list_call[1]["q"] == "in:inbox"
+    assert list_call[1]["maxResults"] == 1
+
+    assert result["new_messages"] == []
+    assert result["cursor"] == "2024-01-02T12:00:00+00:00"
+
+
+def test_gmail_poll_inbound_empty_inbox_still_stamps_cursor():
+    """An empty inbox must never re-baseline to null — stamp a non-null cursor."""
+    provider, _ = _make_gmail(msg_list_result={"messages": []})
+    result = provider.poll_inbound(None)
+    assert result["new_messages"] == []
+    assert result["cursor"]  # non-null (current time)
+
+
+def test_gmail_poll_inbound_incremental_only_newer_ascending():
+    """since_iso set: return only strictly-newer messages, ascending, with
+    from/to/subject/thread_id populated; cursor = max received_at."""
+    since = "2024-01-01T12:00:00+00:00"
+    provider, sink = _make_gmail(
+        # Returned OUT of order on purpose to prove the ascending sort.
+        msg_list_result={"messages": [{"id": "m_new2"}, {"id": "m_old"}, {"id": "m_new1"}]},
+        msg_get_results={
+            "m_old": _gmail_msg("m_old", "t_old", 1704067200000),   # 2024-01-01T00:00Z (older)
+            "m_new1": _gmail_msg("m_new1", "t_new1", 1704196800000,  # 2024-01-02T12:00Z
+                                 from_="Alice <alice@example.com>", to="me@example.com", subject="One"),
+            "m_new2": _gmail_msg("m_new2", "t_new2", 1704283200000,  # 2024-01-03T12:00Z
+                                 from_="bob@example.com", to="me@example.com", subject="Two"),
+        },
+    )
+
+    result = provider.poll_inbound(since)
+
+    # Incremental query narrows candidates with an epoch after: filter.
+    list_call = next(c for c in sink if c[0] == "messages.list")
+    assert list_call[1]["q"].startswith("in:inbox after:")
+    assert list_call[1]["maxResults"] == 50
+
+    ids = [m["thread_id"] for m in result["new_messages"]]
+    assert ids == ["t_new1", "t_new2"]  # ascending, older excluded
+    first = result["new_messages"][0]
+    assert first["from_address"] == "alice@example.com"
+    assert first["to_addresses"] == ["me@example.com"]
+    assert first["subject"] == "One"
+    assert first["received_at"] == "2024-01-02T12:00:00+00:00"
+    assert all(m["agent_autoreply"] is False for m in result["new_messages"])
+    assert result["cursor"] == "2024-01-03T12:00:00+00:00"
+
+
+def test_gmail_poll_inbound_flags_agent_autoreply_header():
+    """A message carrying X-UC-Agent-Autoreply is flagged agent_autoreply=True."""
+    since = "2024-01-01T00:00:00+00:00"
+    provider, _ = _make_gmail(
+        msg_list_result={"messages": [{"id": "m1"}]},
+        msg_get_results={
+            "m1": _gmail_msg("m1", "t1", 1704196800000, autoreply=True),
+        },
+    )
+    result = provider.poll_inbound(since)
+    assert len(result["new_messages"]) == 1
+    assert result["new_messages"][0]["agent_autoreply"] is True
+
+
+# ---------------------------------------------------------------------------
 # Microsoft Graph fakes (mock the `requests` layer the provider uses)
 # ---------------------------------------------------------------------------
 
@@ -330,7 +464,7 @@ class _FakeResp:
             raise RuntimeError(f"http {self.status_code}")
 
 
-def _make_ms(monkeypatch, get_router=None, post_router=None):
+def _make_ms(monkeypatch, get_router=None, post_router=None, patch_router=None, delete_router=None):
     provider = MicrosoftGraphProvider.__new__(MicrosoftGraphProvider)
     provider.client_id = ""
     provider.client_secret = ""
@@ -346,8 +480,18 @@ def _make_ms(monkeypatch, get_router=None, post_router=None):
         sink.append(("POST", url, json))
         return (post_router or (lambda u, b: _FakeResp(status_code=202)))(url, json)
 
+    def fake_patch(url, headers=None, json=None, timeout=None):
+        sink.append(("PATCH", url, json))
+        return (patch_router or (lambda u, b: _FakeResp()))(url, json)
+
+    def fake_delete(url, headers=None, timeout=None):
+        sink.append(("DELETE", url, None))
+        return (delete_router or (lambda u: _FakeResp(status_code=204)))(url)
+
     monkeypatch.setattr("providers.microsoft_provider.requests.get", fake_get)
     monkeypatch.setattr("providers.microsoft_provider.requests.post", fake_post)
+    monkeypatch.setattr("providers.microsoft_provider.requests.patch", fake_patch)
+    monkeypatch.setattr("providers.microsoft_provider.requests.delete", fake_delete)
     return provider, sink
 
 
@@ -546,6 +690,55 @@ def test_ms_send_posts_sendmail(monkeypatch):
     assert msg["body"]["content"] == "body text"
 
 
+def test_ms_send_sendmail_includes_file_attachment(monkeypatch):
+    captured = {}
+
+    def post_router(url, body):
+        captured["body"] = body
+        return _FakeResp(status_code=202)
+
+    provider, _ = _make_ms(monkeypatch, post_router=post_router)
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Files",
+        body="see attached",
+        attachments=[{"filename": "a.txt", "mime_type": "text/plain", "data": b"hi"}],
+    )
+    assert result.accepted is True
+    atts = captured["body"]["message"]["attachments"]
+    assert atts[0]["@odata.type"] == "#microsoft.graph.fileAttachment"
+    assert atts[0]["name"] == "a.txt"
+    assert base64.b64decode(atts[0]["contentBytes"]) == b"hi"
+
+
+def test_ms_send_reply_attaches_before_send(monkeypatch):
+    captured = {"attach_urls": []}
+    get_router, post_router, patch_router = _reply_routers(captured)
+
+    def post_with_attach(url, body):
+        if url.endswith("/attachments"):
+            captured["attach_urls"].append(url)
+            return _FakeResp(status_code=201, json_data={"id": "att1"})
+        return post_router(url, body)
+
+    provider, sink = _make_ms(
+        monkeypatch, get_router=get_router, post_router=post_with_attach, patch_router=patch_router
+    )
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Re: Hi",
+        body="bump",
+        in_reply_to_thread_id="m1",
+        attachments=[{"filename": "a.txt", "mime_type": "text/plain", "data": b"hi"}],
+    )
+    assert result.accepted is True
+    # the attachment POST hit the reply DRAFT, and the send happened after it
+    assert captured["attach_urls"] and captured["attach_urls"][0].endswith("/me/messages/draft1/attachments")
+    assert captured["send_url"].endswith("/me/messages/draft1/send")
+
+
 def test_ms_send_returns_accepted_false_on_error_status(monkeypatch):
     provider, _ = _make_ms(monkeypatch, post_router=lambda u, b: _FakeResp(status_code=403))
     result = provider.send_message("me@example.com", "you@example.com", "s", "b")
@@ -624,3 +817,284 @@ def test_ms_get_thread_degrades_when_account_lookup_fails(monkeypatch):
     messages = provider.get_thread("c1")
     # account == '' so even a self-sent message is reported as received (safe default)
     assert messages[0].direction == "received"
+
+
+def test_ms_list_threads_pure_free_text_uses_search(monkeypatch):
+    """Pure free text query should use $search and drop $orderby."""
+    messages_page = {
+        "value": [
+            {
+                "id": "m1",
+                "conversationId": "c1",
+                "subject": "Hello",
+                "from": {"emailAddress": {"address": "a@example.com"}},
+                "toRecipients": [],
+                "receivedDateTime": "2024-01-01T10:00:00Z",
+                "isRead": True,
+                "bodyPreview": "test",
+            }
+        ]
+    }
+
+    def get_router(url, params):
+        # Verify $search is present and $orderby is absent
+        assert "$search" in params
+        assert params["$search"] == '"hello world"'
+        assert "$orderby" not in params
+        assert "$filter" not in params
+        return _FakeResp(json_data=messages_page)
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    threads, _ = provider.list_threads(folder="inbox", limit=10, query="hello world")
+    assert len(threads) == 1
+
+
+def test_ms_list_threads_mixed_query_raises(monkeypatch):
+    """Mixed free text and operators should raise ValueError."""
+    def get_router(url, params):
+        return _FakeResp()
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    with pytest.raises(ValueError, match="microsoft search not supported"):
+        provider.list_threads(folder="inbox", limit=10, query="hello from:a@example.com")
+
+
+def test_ms_list_threads_unsupported_operator_raises(monkeypatch):
+    """Unsupported operator should raise ValueError."""
+    def get_router(url, params):
+        return _FakeResp()
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    with pytest.raises(ValueError, match="microsoft search not supported"):
+        provider.list_threads(folder="inbox", limit=10, query="is:flagged")
+
+
+# ---------------------------------------------------------------------------
+# Microsoft Graph reply threading (createReply -> PATCH -> send)
+# ---------------------------------------------------------------------------
+
+def _reply_routers(captured, resolve_direct=True, patch_status=200, send_status=202):
+    """Routers that serve the reply lane: message-id probe (or conversation
+    listing), createReply, PATCH, /send."""
+
+    def get_router(url, params):
+        if url.endswith("/me/messages/m1"):
+            if resolve_direct:
+                return _FakeResp(200, {"id": "m1"})
+            return _FakeResp(404)
+        if url.endswith("/me/messages"):
+            # conversation fallback: newest message wins (client-side sort)
+            return _FakeResp(200, {"value": [
+                {"id": "m_old", "receivedDateTime": "2026-08-01T00:00:00Z"},
+                {"id": "m_new", "receivedDateTime": "2026-08-20T00:00:00Z"},
+            ]})
+        return _FakeResp(404)
+
+    def post_router(url, body):
+        if url.endswith("/createReply"):
+            captured["create_url"] = url
+            return _FakeResp(201, {"id": "draft1", "conversationId": "conv9"})
+        if url.endswith("/me/messages/draft1/send"):
+            captured["send_url"] = url
+            return _FakeResp(status_code=send_status)
+        captured["unexpected_post"] = url
+        return _FakeResp(status_code=202)
+
+    def patch_router(url, body):
+        captured["patch_url"] = url
+        captured["patch_body"] = body
+        return _FakeResp(patch_status, {"id": "draft1", "conversationId": "conv9"})
+
+    return get_router, post_router, patch_router
+
+
+def test_ms_send_reply_threads_via_createreply(monkeypatch):
+    captured = {}
+    get_router, post_router, patch_router = _reply_routers(captured)
+    provider, sink = _make_ms(
+        monkeypatch, get_router=get_router, post_router=post_router, patch_router=patch_router
+    )
+
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Re: Hello",
+        body="bump text",
+        in_reply_to_thread_id="m1",
+    )
+
+    assert result.accepted is True
+    assert result.provider_message_id == "draft1"
+    assert result.thread_id == "conv9"  # REAL conversationId, not the echo
+    assert captured["create_url"].endswith("/me/messages/m1/createReply")
+    assert captured["send_url"].endswith("/me/messages/draft1/send")
+    # PATCH pins body + recipients (createReply would address ourselves on a
+    # reply to our own sent message).
+    assert captured["patch_body"]["body"]["content"] == "bump text"
+    assert captured["patch_body"]["toRecipients"][0]["emailAddress"]["address"] == "you@example.com"
+    assert captured["patch_body"]["subject"] == "Re: Hello"
+    # the plain send lane must NOT be used
+    assert not any(u.endswith("/me/sendMail") for verb, u, _ in sink if verb == "POST")
+
+
+def test_ms_send_reply_resolves_conversation_id_to_newest_message(monkeypatch):
+    captured = {}
+    get_router, post_router, patch_router = _reply_routers(captured, resolve_direct=False)
+    provider, _ = _make_ms(
+        monkeypatch, get_router=get_router, post_router=post_router, patch_router=patch_router
+    )
+
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Re: Hello",
+        body="bump",
+        in_reply_to_thread_id="m1",  # unresolvable as a message id -> treated as conversationId
+    )
+
+    assert result.accepted is True
+    assert captured["create_url"].endswith("/me/messages/m_new/createReply")
+
+
+def test_ms_send_reply_patch_failure_cleans_up_without_sendmail_fallback(monkeypatch):
+    captured = {}
+    get_router, post_router, patch_router = _reply_routers(captured, patch_status=400)
+    provider, sink = _make_ms(
+        monkeypatch, get_router=get_router, post_router=post_router, patch_router=patch_router
+    )
+
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="s",
+        body="b",
+        in_reply_to_thread_id="m1",
+    )
+
+    assert result.accepted is False
+    assert result.reason == "graph_reply_patch_400"
+    # the orphan reply draft is cleaned up, and we never double-send
+    assert any(u.endswith("/me/messages/draft1") for verb, u, _ in sink if verb == "DELETE")
+    assert not any(u.endswith("/me/sendMail") for verb, u, _ in sink if verb == "POST")
+
+
+def test_ms_send_without_reply_target_posts_sendmail(monkeypatch):
+    captured = {}
+
+    def post_router(url, body):
+        captured["url"] = url
+        captured["body"] = body
+        return _FakeResp(status_code=202)
+
+    provider, sink = _make_ms(monkeypatch, post_router=post_router)
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="you@example.com",
+        subject="Hello",
+        body="body text",
+    )
+
+    assert result.accepted is True
+    assert result.provider_message_id is None
+    assert result.thread_id is None
+    assert captured["url"].endswith("/me/sendMail")
+    # no reply-lane traffic at all
+    assert not any(verb in ("PATCH", "DELETE") for verb, _, _ in sink)
+
+
+# ---------------------------------------------------------------------------
+# Microsoft Graph poll_inbound (inbound-watcher parity with James pollInbound)
+# ---------------------------------------------------------------------------
+
+def test_ms_poll_inbound_incremental_filters_and_maps(monkeypatch):
+    """Incremental poll: $filter carries receivedDateTime gt, and each message
+    maps conversationId->thread_id with a normalised received_at (ascending)."""
+    since = "2024-01-01T00:00:00+00:00"
+    page = {
+        "value": [
+            {
+                "id": "m2",
+                "conversationId": "c2",
+                "subject": "Two",
+                "from": {"emailAddress": {"address": "b@example.com", "name": "B"}},
+                "toRecipients": [{"emailAddress": {"address": "me@example.com"}}],
+                "receivedDateTime": "2024-01-03T10:00:00Z",
+            },
+            {
+                "id": "m1",
+                "conversationId": "c1",
+                "subject": "One",
+                "from": {"emailAddress": {"address": "a@example.com"}},
+                "toRecipients": [{"emailAddress": {"address": "me@example.com"}}],
+                "receivedDateTime": "2024-01-02T10:00:00Z",
+            },
+        ]
+    }
+
+    captured = {}
+
+    def get_router(url, params):
+        assert url.endswith("/me/mailFolders/inbox/messages")
+        captured["params"] = params
+        return _FakeResp(json_data=page)
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    result = provider.poll_inbound(since)
+
+    assert captured["params"]["$filter"] == "receivedDateTime gt 2024-01-01T00:00:00+00:00"
+    assert captured["params"]["$orderby"] == "receivedDateTime desc"
+
+    # Only newer messages, ascending by received_at, conversationId -> thread_id.
+    assert [m["thread_id"] for m in result["new_messages"]] == ["c1", "c2"]
+    first = result["new_messages"][0]
+    assert first["from_address"] == "a@example.com"
+    assert first["to_addresses"] == ["me@example.com"]
+    assert first["subject"] == "One"
+    assert first["received_at"] == "2024-01-02T10:00:00+00:00"
+    assert result["cursor"] == "2024-01-03T10:00:00+00:00"
+
+
+def test_ms_poll_inbound_baseline_stamps_cursor_no_backlog(monkeypatch):
+    """Baseline (since None): no $filter, $top=1, non-null cursor, no backlog."""
+    page = {"value": [{
+        "id": "m1", "conversationId": "c1", "subject": "Hi",
+        "from": {"emailAddress": {"address": "a@example.com"}},
+        "toRecipients": [{"emailAddress": {"address": "me@example.com"}}],
+        "receivedDateTime": "2024-01-02T10:00:00Z",
+    }]}
+    captured = {}
+
+    def get_router(url, params):
+        captured["params"] = params
+        return _FakeResp(json_data=page)
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    result = provider.poll_inbound(None)
+
+    assert "$filter" not in captured["params"]
+    assert captured["params"]["$top"] == 1
+    assert result["new_messages"] == []
+    assert result["cursor"] == "2024-01-02T10:00:00+00:00"
+
+
+def test_ms_poll_inbound_flags_agent_autoreply_header(monkeypatch):
+    """A message whose internetMessageHeaders carry X-UC-Agent-Autoreply is
+    flagged agent_autoreply=True (case-insensitive, non-empty value)."""
+    since = "2024-01-01T00:00:00+00:00"
+    page = {"value": [{
+        "id": "m1", "conversationId": "c1", "subject": "Auto",
+        "from": {"emailAddress": {"address": "a@example.com"}},
+        "toRecipients": [{"emailAddress": {"address": "me@example.com"}}],
+        "receivedDateTime": "2024-01-02T10:00:00Z",
+        "internetMessageHeaders": [
+            {"name": "x-uc-agent-autoreply", "value": "yes"},
+        ],
+    }]}
+
+    def get_router(url, params):
+        return _FakeResp(json_data=page)
+
+    provider, _ = _make_ms(monkeypatch, get_router=get_router)
+    result = provider.poll_inbound(since)
+    assert len(result["new_messages"]) == 1
+    assert result["new_messages"][0]["agent_autoreply"] is True
