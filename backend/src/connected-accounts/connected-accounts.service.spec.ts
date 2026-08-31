@@ -541,4 +541,31 @@ describe('ConnectedAccountsService', () => {
     expect(plan.protected[0]).toMatchObject({ id: 'm-2', reason: 'starred' });
     expect(plan.freesBytes).toBe(4096);
   });
+
+  it('enriches rows whose size_bytes is NULL (Microsoft $search) and sums real sizes', async () => {
+    // Graph drops the size expand under $search, so the engine honestly reports
+    // size_bytes: null (Python None → JSON null). The live bug: needsEnrichment
+    // checked `=== undefined`, null slipped through un-enriched, and the plan
+    // showed size 0 / freesBytes 0. null must fire enrichment exactly like
+    // undefined; a row with a concrete size must NOT be re-fetched.
+    (engine.listMessages as jest.Mock).mockResolvedValue({
+      messages: [
+        { id: 'm-1', sender: 'GMKtec <service@gmktec.com>', subject: 'GMKtec order', snippet: 'thanks', size_bytes: null, labels: [], is_starred: false },
+        { id: 'm-2', sender: 'GMKtec <service@gmktec.com>', subject: 'GMKtec invoice', snippet: 'attached', size_bytes: 2048, labels: [], is_starred: false },
+      ],
+      next_token: null,
+    });
+    // get_message's standalone expand works, so the per-message fetch returns the real size.
+    (engine.getMessage as jest.Mock).mockResolvedValue({
+      id: 'm-1', sender: 'GMKtec <service@gmktec.com>', subject: 'GMKtec order', snippet: 'thanks', size_bytes: 86984, labels: [], is_starred: false,
+    });
+
+    const plan = await service().planCleanup(user, 'microsoft', { query: 'gmktec' });
+
+    // Only the size-unknown row was enriched; the concrete-size row was not re-fetched.
+    expect(engine.getMessage).toHaveBeenCalledTimes(1);
+    expect(engine.getMessage).toHaveBeenCalledWith('microsoft', { access_token: 'broker-token' }, 'm-1', 'metadata');
+    expect(plan.safe.map((r) => r.id)).toEqual(['m-1', 'm-2']);
+    expect(plan.freesBytes).toBe(86984 + 2048); // real sizes, never null-coerced 0
+  });
 });

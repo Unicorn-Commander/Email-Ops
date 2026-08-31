@@ -240,7 +240,7 @@ class LLMAnalyzer:
                 "from": email.get("sender", ""),
                 "subject": email.get("subject", ""),
                 "date": email.get("date", ""),
-                "size": email.get("size_bytes", 0),
+                "size": email.get("size_bytes") or 0,
                 "is_read": email.get("is_read", False),
                 "labels": email.get("labels", []),
             })

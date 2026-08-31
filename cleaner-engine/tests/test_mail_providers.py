@@ -928,6 +928,11 @@ def test_ms_list_messages_free_text_uses_search_no_filter_no_orderby(monkeypatch
     assert "$filter" not in params
     # Graph rejects $search combined with $orderby.
     assert "$orderby" not in params
+    # Graph silently drops the size expand under $search — don't send it, and
+    # the row is honestly size-UNKNOWN (None, never a fake 0); the backend
+    # enriches per message via get_message.
+    assert "$expand" not in params
+    assert messages[0].size_bytes is None
 
 
 def test_ms_list_messages_search_escapes_embedded_double_quotes(monkeypatch):
@@ -956,8 +961,35 @@ def test_ms_list_messages_from_filter_no_orderby_sorts_client_side(monkeypatch):
     assert params["$filter"] == "from/emailAddress/address eq 'x@y.com'"
     assert "$orderby" not in params
     assert "$search" not in params
+    # The $filter path KEEPS the size expand — it demonstrably works there.
+    assert params["$expand"] == "singleValueExtendedProperties($filter=id eq 'Integer 0x0E08')"
     # Newest first despite Graph returning them shuffled.
     assert [m.id for m in messages] == ["m_new", "m_mid", "m_old"]
+
+
+def test_ms_list_messages_filter_path_maps_real_size_search_path_none(monkeypatch):
+    """$filter rows carry the REAL PidTagMessageSize; $search rows (where Graph
+    drops the expand) carry None — never a fake 0 (the live freesBytes-0 bug)."""
+    sized = {
+        "value": [
+            _ms_list_msg(
+                "m1",
+                "2024-01-01T10:00:00Z",
+                singleValueExtendedProperties=[{"id": "Integer 0xe08", "value": "86984"}],
+            ),
+        ]
+    }
+    provider, sink = _make_ms(monkeypatch, get_router=lambda u, p: _FakeResp(json_data=sized))
+    messages, _ = provider.list_messages("from:service@gmktec.com")
+    assert messages[0].size_bytes == 86984
+
+    # Same message via $search: Graph returns it WITHOUT the property.
+    bare = {"value": [_ms_list_msg("m1", "2024-01-01T10:00:00Z")]}
+    provider, sink = _make_ms(monkeypatch, get_router=lambda u, p: _FakeResp(json_data=bare))
+    messages, _ = provider.list_messages("gmktec")
+    (_, _, params) = sink[0]
+    assert "$expand" not in params
+    assert messages[0].size_bytes is None
 
 
 def test_ms_list_messages_category_filter_no_orderby(monkeypatch):

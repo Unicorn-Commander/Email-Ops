@@ -1309,11 +1309,16 @@ export class ConnectedAccountsService {
   }
 
   private needsEnrichment(message: EngineMessageSummary): boolean {
+    // Absent-OR-null means UNKNOWN: the engine serialises Python None as JSON
+    // null, so `=== undefined` alone missed it — Microsoft $search rows arrive
+    // with size_bytes null (Graph drops the size expand under $search) and were
+    // skipping enrichment, so the plan showed size 0 / freesBytes 0. `== null`
+    // matches both null and undefined; concrete values (0 included) are known.
     return (
       !message.sender ||
-      message.size_bytes === undefined ||
-      message.is_starred === undefined ||
-      !message.labels
+      message.size_bytes == null ||
+      message.is_starred == null ||
+      message.labels == null
     );
   }
 

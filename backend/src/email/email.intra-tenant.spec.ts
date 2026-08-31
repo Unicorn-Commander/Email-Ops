@@ -35,7 +35,15 @@ const SENTINEL = {
 
 const externalProvider = {
   handles: (mb: { provider?: string }) => mb.provider === 'gmail' || mb.provider === 'microsoft',
-  listInbox: async () => [SENTINEL],
+  // The port contract is a MailProviderListResult PAGE (EmailService reads
+  // `page.threads`), not a bare thread array — mirror the real shape here.
+  listInbox: async () => ({
+    threads: [SENTINEL],
+    nextPageToken: null,
+    hasMore: false,
+    searchSupported: true,
+    reason: null,
+  }),
   listThreadMessages: async () => [
     {
       id: 'g-m1',

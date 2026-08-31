@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
-import { UiCommandKind, User } from '@prisma/client';
+import { MembershipStatus, UiCommandKind, User, WorkspaceRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TEST_DATABASE_URL } from '../../test/test-db';
 import { MembershipService } from '../common/workspace/membership.service';
@@ -43,6 +43,22 @@ describe('UiCommandService + UiControlTools (integration)', () => {
       where: { id: '00000000-0000-4000-8000-0000000000c1' },
       update: { keycloakId: KC },
       create: { id: '00000000-0000-4000-8000-0000000000c1', keycloakId: KC, email: 'ui@c.test', username: 'ui-user' },
+    });
+    // Tenancy defaults ON, so the UiControlTools path membership-gates: seed the
+    // ACTIVE membership the tool resolves against (userKey == keycloakId), the
+    // same fixture shape the workspaces cross-tenant spec uses. Upsert so the
+    // spec is self-sufficient on a fresh verify DB AND idempotent across runs;
+    // the afterAll workspace delete cascades it away.
+    await prisma.membership.upsert({
+      where: { userKey_workspaceId: { userKey: KC, workspaceId: A } },
+      update: { status: MembershipStatus.ACTIVE },
+      create: {
+        userKey: KC,
+        workspaceId: A,
+        role: WorkspaceRole.MEMBER,
+        status: MembershipStatus.ACTIVE,
+        isDefault: true,
+      },
     });
     service = new UiCommandService(prisma);
     tools = new UiControlTools(new MembershipService(prisma, new ConfigService()), service);

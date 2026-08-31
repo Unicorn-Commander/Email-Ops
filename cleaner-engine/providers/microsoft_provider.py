@@ -283,6 +283,15 @@ class MicrosoftGraphProvider(EmailProvider):
                 # $search combined with $orderby, and expects quoted terms —
                 # escape embedded double quotes so the term stays one literal.
                 params.pop('$orderby', None)
+                # Graph silently DROPS the singleValueExtendedProperties
+                # $expand under $search: rows come back (no error) but without
+                # the property — observed live as every $search row sized 0
+                # while the identical expand returned real sizes on the
+                # $filter path. Don't send the dead-weight expand; these rows
+                # are honestly size-unknown (size_bytes=None) and the backend
+                # enriches them per message via get_message, whose expand
+                # works standalone.
+                params.pop('$expand', None)
                 escaped = user_q.replace('"', '\\"')
                 params['$search'] = f'"{escaped}"'
 

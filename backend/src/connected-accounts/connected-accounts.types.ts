@@ -11,11 +11,13 @@ export interface EngineMessageSummary {
   recipient?: string | null;
   date?: string | null;
   snippet?: string | null;
-  labels?: string[];
+  labels?: string[] | null;
   is_read?: boolean;
-  is_starred?: boolean;
+  is_starred?: boolean | null;
   has_attachments?: boolean;
-  size_bytes?: number;
+  // null is a documented wire value: the engine sends Python None for
+  // size-unknown rows (Graph $search omits the size extended property).
+  size_bytes?: number | null;
   internal_date?: number | null;
   headers?: Record<string, string>;
   raw_data?: unknown;

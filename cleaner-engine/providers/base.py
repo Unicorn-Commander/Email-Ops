@@ -39,7 +39,10 @@ class EmailMessage:
     is_read: bool = False
     is_starred: bool = False
     has_attachments: bool = False
-    size_bytes: int = 0
+    # None means UNKNOWN (e.g. a Graph $search row, where the size expand is
+    # dropped) — never a fake 0. Consumers must treat None as "no size yet";
+    # the backend enriches unknown rows per message via get_message.
+    size_bytes: Optional[int] = None
     internal_date: Optional[int] = None  # epoch ms
     headers: Dict[str, str] = field(default_factory=dict)
     raw_data: Dict[str, Any] = field(default_factory=dict)
