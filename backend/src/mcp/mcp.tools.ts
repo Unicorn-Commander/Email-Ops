@@ -76,6 +76,13 @@ import { enforceExtraScope, PatTaggedIdentity } from './mcp-scopes';
  */
 export const MCP_ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024;
 
+/**
+ * bulk_disposition fan-out cap: each thread is a REAL provider move (Graph /
+ * Gmail call), so a 200-item batch fired all at once trips provider rate limits
+ * (Graph 429s). Small and steady wins the batch.
+ */
+export const BULK_DISPOSITION_CONCURRENCY = 5;
+
 export class EmailOpsTools {
   constructor(
     private readonly membership: MembershipService,
@@ -218,20 +225,30 @@ export class EmailOpsTools {
   // archive/trash a thread or route junk to Spam, and block/trust senders — only
   // within a workspace the calling user is a member of.
 
-  /** Move a thread to a folder (INBOX/ARCHIVE/TRASH/SPAM). */
+  /** Move a thread to a folder (INBOX/ARCHIVE/TRASH/SPAM) — the REAL move, not just the overlay. */
   async setDisposition(
     user: User,
     args: { workspace_id?: string; thread_id: string; disposition: string },
-  ): Promise<{ status: string; disposition: unknown }> {
+  ): Promise<{ status: string; disposition?: unknown; reason?: string }> {
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
     const workspaceId = await this.resolve(user, args.workspace_id);
-    const view = await this.disposition.setDisposition(
+    // Through EmailService.applyThreadDisposition — the SAME move-then-overlay
+    // path the REST triage routes use (James JMAP for sovereign boxes, the
+    // provider port for Gmail/M365) — NOT the overlay-only DispositionService.
+    // An overlay row alone is invisible to external mailbox reads, so reporting
+    // it as success was a false green (the live-fire M365 TRASH bug).
+    const view = await this.email.applyThreadDisposition(
       workspaceId,
       ucUid,
       args.thread_id,
       args.disposition as MessageDisposition,
       { agentKey: null },
     );
+    // ok = the provider really moved it, OR the overlay is view-effective (a
+    // sovereign-lane thread — including the engine-briefly-dormant degrade case).
+    if (!view.moved && !view.viewEffective) {
+      return { status: 'failed', reason: 'provider_move_failed', disposition: view };
+    }
     return { status: 'ok', disposition: view };
   }
 
@@ -583,7 +600,7 @@ export class EmailOpsTools {
     return { thread_id: args.thread_id, read: args.read, updated };
   }
 
-  /** Bulk-triage a SET of threads into a folder (the REST bulk-disposition path). */
+  /** Bulk-triage a SET of threads into a folder — REAL provider moves, honest failed[]. */
   async bulkDisposition(
     user: User,
     args: { workspace_id?: string; thread_ids: string[]; disposition: string },
@@ -593,16 +610,39 @@ export class EmailOpsTools {
     const target = args.disposition as MessageDisposition;
     const succeeded: string[] = [];
     const failed: string[] = [];
-    // Per-thread isolation: one failing thread never fails the batch (mirrors the
-    // mail.controller bulk route exactly — the SAME DispositionService.setDisposition).
-    const settled = await Promise.allSettled(
-      args.thread_ids.map((threadId) =>
-        this.disposition.setDisposition(workspaceId, ucUid, threadId, target, { agentKey: null }),
-      ),
+    // Each thread goes through EmailService.applyThreadDisposition — the real
+    // move-then-overlay path (James for sovereign, Gmail/M365 provider verbs for
+    // external). Per-thread isolation (allSettled semantics: one rejection never
+    // fails the batch), fanned out at most BULK_DISPOSITION_CONCURRENCY at a time
+    // so a 200-item batch doesn't trip Graph/Gmail rate limits (429s).
+    const results = new Array<{ moved: boolean; viewEffective: boolean } | null>(
+      args.thread_ids.length,
+    ).fill(null);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < args.thread_ids.length) {
+        const i = next++;
+        try {
+          results[i] = await this.email.applyThreadDisposition(
+            workspaceId,
+            ucUid,
+            args.thread_ids[i],
+            target,
+            { agentKey: null },
+          );
+        } catch {
+          results[i] = null; // isolated failure — the other threads keep going
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(BULK_DISPOSITION_CONCURRENCY, args.thread_ids.length) }, worker),
     );
-    settled.forEach((r, i) => {
+    results.forEach((r, i) => {
       const id = args.thread_ids[i];
-      if (r.status === 'fulfilled') succeeded.push(id);
+      // succeeded = the move really happened OR the overlay is view-effective
+      // (sovereign lane); anything else is an honest failure, never a fake green.
+      if (r && (r.moved || r.viewEffective)) succeeded.push(id);
       else failed.push(id);
     });
     return { succeeded, failed };

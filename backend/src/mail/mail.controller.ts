@@ -234,8 +234,11 @@ export class MailController {
           // archive/trash/spam/inbox — the EXACT same disposition logic as the
           // single-thread PUT .../disposition route: reconcile the real James
           // mailbox AND tag the overlay, so bulk triage doesn't undo itself.
-          await this.email.applyThreadDisposition(workspaceId, ucUid, threadId, target);
-          return true;
+          // succeeded means the thread actually moved or the overlay governs
+          // what this workspace sees — an external thread whose provider move
+          // failed lands in failed[], never in succeeded[].
+          const view = await this.email.applyThreadDisposition(workspaceId, ucUid, threadId, target);
+          return view.moved || view.viewEffective;
         }
         // read/unread — the same $seen keyword logic as PUT .../threads/:id/read,
         // resolved across the workspace's mailboxes (the bulk route has no mailbox

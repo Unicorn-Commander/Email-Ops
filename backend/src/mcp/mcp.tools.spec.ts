@@ -1,7 +1,7 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
-import { WorkspaceRole } from '@prisma/client';
+import { MessageDisposition, WorkspaceRole } from '@prisma/client';
 import { MembershipService } from '../common/workspace/membership.service';
-import { EmailOpsTools, MCP_ATTACHMENT_MAX_BYTES } from './mcp.tools';
+import { BULK_DISPOSITION_CONCURRENCY, EmailOpsTools, MCP_ATTACHMENT_MAX_BYTES } from './mcp.tools';
 import { EmailService } from '../email/email.service';
 import { AgentsService } from '../agents/agents.service';
 import { EmailHealthService } from '../email-health/email-health.service';
@@ -175,6 +175,146 @@ describe('EmailOpsTools', () => {
       expect(res.search_supported).toBe(false);
       expect(res.next_page_token).toBeNull();
       expect(email.listAggregateInboxPage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('set_disposition / bulk_disposition — real moves, honest failures', () => {
+    function toolsWith(email: Partial<EmailService>): EmailOpsTools {
+      const m = { resolveAndAuthorize: jest.fn().mockResolvedValue('ws-1') } as any;
+      return new EmailOpsTools(
+        m,
+        email as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        // DispositionService slot stays empty ON PURPOSE: any call into the
+        // overlay-only path would throw — the tools must go through EmailService.
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+    }
+
+    const view = (threadId: string, over: Partial<{ moved: boolean; viewEffective: boolean }> = {}) => ({
+      thread_id: threadId,
+      disposition: MessageDisposition.TRASH,
+      set_by_uc_uid: '',
+      set_by_agent_key: null,
+      updated_at: new Date().toISOString(),
+      moved: true,
+      viewEffective: false,
+      ...over,
+    });
+
+    it('set_disposition delegates to applyThreadDisposition; a real move → status ok', async () => {
+      const email: Partial<EmailService> = {
+        applyThreadDisposition: jest.fn().mockResolvedValue(view('t1', { moved: true })),
+      };
+      const t = toolsWith(email);
+      const res = await t.setDisposition({} as any, {
+        workspace_id: 'ws-1',
+        thread_id: 't1',
+        disposition: 'TRASH',
+      });
+      expect(res.status).toBe('ok');
+      expect(email.applyThreadDisposition).toHaveBeenCalledWith(
+        'ws-1',
+        '',
+        't1',
+        MessageDisposition.TRASH,
+        { agentKey: null },
+      );
+    });
+
+    it('set_disposition: external thread that could not be moved → status failed + reason (never a fake ok)', async () => {
+      const email: Partial<EmailService> = {
+        applyThreadDisposition: jest
+          .fn()
+          .mockResolvedValue(view('t-ext', { moved: false, viewEffective: false })),
+      };
+      const t = toolsWith(email);
+      const res = await t.setDisposition({} as any, {
+        workspace_id: 'ws-1',
+        thread_id: 't-ext',
+        disposition: 'TRASH',
+      });
+      expect(res.status).toBe('failed');
+      expect(res.reason).toBe('provider_move_failed');
+    });
+
+    it('set_disposition: sovereign engine-dormant (moved:false but viewEffective:true) → ok (degrade-clean)', async () => {
+      const email: Partial<EmailService> = {
+        applyThreadDisposition: jest
+          .fn()
+          .mockResolvedValue(view('t-sov', { moved: false, viewEffective: true })),
+      };
+      const t = toolsWith(email);
+      const res = await t.setDisposition({} as any, {
+        workspace_id: 'ws-1',
+        thread_id: 't-sov',
+        disposition: 'ARCHIVE',
+      });
+      expect(res.status).toBe('ok');
+    });
+
+    it('bulk_disposition: mixed batch — moved → succeeded; external-unmoved + rejection → failed (isolation)', async () => {
+      const email: Partial<EmailService> = {
+        applyThreadDisposition: jest.fn().mockImplementation(async (_ws, _uid, threadId) => {
+          if (threadId === 'a') return view('a', { moved: true });
+          if (threadId === 'b') return view('b', { moved: false, viewEffective: false });
+          throw new Error('provider 500'); // c — must not fail the batch
+        }),
+      };
+      const t = toolsWith(email);
+      const res = await t.bulkDisposition({} as any, {
+        workspace_id: 'ws-1',
+        thread_ids: ['a', 'b', 'c'],
+        disposition: 'TRASH',
+      });
+      expect(res.succeeded).toEqual(['a']);
+      expect(res.failed).toEqual(['b', 'c']);
+      expect(email.applyThreadDisposition).toHaveBeenCalledTimes(3);
+    });
+
+    it('bulk_disposition: sovereign engine-dormant threads (viewEffective:true) count as succeeded', async () => {
+      const email: Partial<EmailService> = {
+        applyThreadDisposition: jest
+          .fn()
+          .mockResolvedValue(view('s1', { moved: false, viewEffective: true })),
+      };
+      const t = toolsWith(email);
+      const res = await t.bulkDisposition({} as any, {
+        workspace_id: 'ws-1',
+        thread_ids: ['s1', 's2'],
+        disposition: 'ARCHIVE',
+      });
+      expect(res.succeeded).toEqual(['s1', 's2']);
+      expect(res.failed).toEqual([]);
+    });
+
+    it('bulk_disposition caps the provider fan-out (≤ BULK_DISPOSITION_CONCURRENCY in flight)', async () => {
+      let inFlight = 0;
+      let peak = 0;
+      const email: Partial<EmailService> = {
+        applyThreadDisposition: jest.fn().mockImplementation(async (_ws, _uid, threadId) => {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          await new Promise((r) => setTimeout(r, 5));
+          inFlight -= 1;
+          return view(threadId, { moved: true });
+        }),
+      };
+      const t = toolsWith(email);
+      const ids = Array.from({ length: 20 }, (_, i) => `t${i}`);
+      const res = await t.bulkDisposition({} as any, {
+        workspace_id: 'ws-1',
+        thread_ids: ids,
+        disposition: 'TRASH',
+      });
+      expect(res.succeeded).toEqual(ids);
+      expect(peak).toBeLessThanOrEqual(BULK_DISPOSITION_CONCURRENCY);
     });
   });
 

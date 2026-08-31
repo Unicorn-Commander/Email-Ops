@@ -1156,17 +1156,18 @@ export class EmailService {
    * thread ids are per-account — so try each readable mailbox until one owns the
    * thread. Sovereign boxes move via James (JMAP Email/set); EXTERNAL (Gmail/M365)
    * boxes reconcile ARCHIVE/TRASH/SPAM/INBOX-restore through the MailProviderPort
-   * so the triage is REAL in the provider mailbox too. Returns true when a real
-   * move happened; false when no account knew the thread. Best-effort: never
-   * throws, so a degraded engine/provider can't block the overlay write that
-   * follows.
+   * so the triage is REAL in the provider mailbox too. Returns { moved, lane }:
+   * moved:true when a real move happened, with lane naming which mailbox KIND
+   * accepted it ('sovereign' James vs 'external' Gmail/M365); moved:false +
+   * lane:null when no account knew the thread. Best-effort: never throws, so a
+   * degraded engine/provider can't block the overlay write that follows.
    */
   async moveThreadToFolderAcrossMailboxes(
     workspaceId: string,
     ucUid: string | null,
     threadId: string,
     disposition: MessageDisposition,
-  ): Promise<boolean> {
+  ): Promise<{ moved: boolean; lane: 'external' | 'sovereign' | null }> {
     const folder = this.dispositionFolder(disposition);
     const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
       this.readableMailboxes(tx, workspaceId, ucUid),
@@ -1178,25 +1179,25 @@ export class EmailService {
             disposition === MessageDisposition.ARCHIVE &&
             (await this.mailProvider.archiveThread(mb, threadId))
           ) {
-            return true;
+            return { moved: true, lane: 'external' };
           }
           if (
             disposition === MessageDisposition.TRASH &&
             (await this.mailProvider.trashThread(mb, threadId))
           ) {
-            return true;
+            return { moved: true, lane: 'external' };
           }
           if (
             disposition === MessageDisposition.SPAM &&
             (await this.mailProvider.spamThread(mb, threadId))
           ) {
-            return true;
+            return { moved: true, lane: 'external' };
           }
           if (
             disposition === MessageDisposition.INBOX &&
             (await this.mailProvider.restoreThreadToInbox(mb, threadId))
           ) {
-            return true;
+            return { moved: true, lane: 'external' };
           }
         } catch {
           // degrade-clean: try the next mailbox
@@ -1204,12 +1205,58 @@ export class EmailService {
         continue;
       }
       try {
-        if (await this.stalwart.moveThreadToFolder(mb.emailAddress, threadId, folder)) return true;
+        if (await this.stalwart.moveThreadToFolder(mb.emailAddress, threadId, folder)) {
+          return { moved: true, lane: 'sovereign' };
+        }
       } catch {
         // degrade-clean: try the next mailbox
       }
     }
-    return false;
+    return { moved: false, lane: null };
+  }
+
+  /**
+   * Is this thread known to the SOVEREIGN lane — i.e. can the overlay row change
+   * what any reader actually sees? Sovereign reads merge the overlay over James;
+   * external (Gmail/M365) reads NEVER consult it. Checked via the SoR
+   * (emailMessage rows carry the JMAP thread id) first, then a live engine probe
+   * of the sovereign mailboxes (best-effort; a dormant engine just can't confirm).
+   */
+  private async threadKnownToSovereignLane(
+    workspaceId: string,
+    ucUid: string | null,
+    threadId: string,
+  ): Promise<boolean> {
+    const known = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      tx.emailMessage.findFirst({ where: { workspaceId, threadId }, select: { id: true } }),
+    );
+    if (known) return true;
+    const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      this.readableMailboxes(tx, workspaceId, ucUid),
+    );
+    const sovereign = mailboxes.filter((mb) => !this.mailProvider.handles(mb));
+    if (!sovereign.length) return false;
+    if (!this.stalwart.isConfigured()) {
+      // Sovereign mailboxes exist but the engine can't be asked: degrade-clean —
+      // the overlay IS view-authoritative on this lane, so treat it as effective
+      // rather than failing every triage while James is dark.
+      return true;
+    }
+    let confirmedAbsent = false;
+    for (const mb of sovereign) {
+      try {
+        if ((await this.stalwart.getThreadDetail(mb.emailAddress, threadId)).length > 0) {
+          return true;
+        }
+        confirmedAbsent = true; // the engine answered: this mailbox doesn't hold it
+      } catch {
+        // unreachable mailbox — can't confirm either way; try the next
+      }
+    }
+    // Every sovereign probe THREW (engine briefly dormant): keep the documented
+    // degrade-clean contract — the overlay still governs sovereign reads once
+    // James returns. Only a clean "not found" answer makes the overlay inert.
+    return confirmedAbsent ? false : true;
   }
 
   /**
@@ -1218,9 +1265,16 @@ export class EmailService {
    * mailbox — James (Email/set move) for sovereign boxes, the provider port
    * (Gmail/M365 archive/trash/spam/inbox-restore) for external ones — AND write
    * the overlay in one step. Without the move, the thread stays in the real inbox and reappears on
-   * the next live refetch (the "triage undoes itself" bug). Best-effort move
-   * (never throws); the overlay is ALWAYS written so the view is correct even if
-   * the engine/provider is briefly unreachable.
+   * the next live refetch (the "triage undoes itself" bug).
+   *
+   * HONEST result: `moved` says whether a real mailbox move happened;
+   * `viewEffective` says whether the overlay row changes what readers see — true
+   * only for threads the SOVEREIGN lane knows (external reads never consult the
+   * overlay). The sovereign degrade-clean contract holds: engine briefly dormant
+   * → moved:false but viewEffective:true, and the overlay still lands. When the
+   * move failed AND the overlay is view-inert (an external/unknown thread id) the
+   * upsert is SKIPPED — that row would be dead weight no reader ever consults,
+   * dressed up as a triage. Best-effort move (never throws).
    */
   async applyThreadDisposition(
     workspaceId: string,
@@ -1228,13 +1282,35 @@ export class EmailService {
     threadId: string,
     disposition: MessageDisposition,
     opts?: { agentKey?: string | null },
-  ): Promise<DispositionView & { moved: boolean }> {
-    const moved = await this.moveThreadToFolderAcrossMailboxes(
+  ): Promise<DispositionView & { moved: boolean; viewEffective: boolean }> {
+    const { moved, lane } = await this.moveThreadToFolderAcrossMailboxes(
       workspaceId,
       ucUid,
       threadId,
       disposition,
     );
+    // A sovereign move proves the lane; an external move proves the overlay is
+    // NOT what readers consult; no move at all → probe the sovereign lane.
+    const viewEffective =
+      lane === 'sovereign'
+        ? true
+        : lane === 'external'
+          ? false
+          : await this.threadKnownToSovereignLane(workspaceId, ucUid, threadId);
+    if (!moved && !viewEffective) {
+      // External/unknown thread id and no real move: writing the overlay would
+      // fabricate a triage (the live-fire bulk_disposition TRASH bug). Report
+      // the failure honestly instead.
+      return {
+        thread_id: threadId,
+        disposition,
+        set_by_uc_uid: ucUid,
+        set_by_agent_key: opts?.agentKey ?? null,
+        updated_at: new Date().toISOString(),
+        moved: false,
+        viewEffective: false,
+      };
+    }
     const row = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
       tx.threadDisposition.upsert({
         where: { workspaceId_threadId: { workspaceId, threadId } },
@@ -1255,6 +1331,7 @@ export class EmailService {
       set_by_agent_key: row.setByAgentKey,
       updated_at: row.updatedAt.toISOString(),
       moved,
+      viewEffective,
     };
   }
 
@@ -2143,7 +2220,8 @@ export class EmailService {
   ): Promise<number> {
     let moved = 0;
     for (const threadId of threadIds) {
-      if (await this.moveThreadToFolderAcrossMailboxes(workspaceId, ucUid, threadId, disposition)) {
+      const res = await this.moveThreadToFolderAcrossMailboxes(workspaceId, ucUid, threadId, disposition);
+      if (res.moved) {
         moved += 1;
       }
     }

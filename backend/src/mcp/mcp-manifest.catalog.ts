@@ -197,7 +197,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "set_disposition",
-      "description": "Triage a thread into a folder by talking to an agent: INBOX (un-triage), ARCHIVE, TRASH, or SPAM (junk). Runs AS the calling user; only works in a workspace they are a member of. This is the agent analogue of the human triage UI — an agent on a loop can archive handled threads or route junk to Spam. Returns the updated disposition overlay row.",
+      "description": "Triage a thread into a folder by talking to an agent: INBOX (un-triage), ARCHIVE, TRASH, or SPAM (junk). Performs the REAL move in the mailbox that owns the thread — James (JMAP) for sovereign mailboxes; provider-side for connected accounts (Graph move to deleteditems/archive/junkemail/inbox for M365, TRASH/SPAM/label edits for Gmail). Runs AS the calling user; only works in a workspace they are a member of. Returns status ok with the disposition when the thread really moved (or the sovereign view reflects it); status failed with a reason when it could NOT be moved — never a fake success.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -587,7 +587,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "bulk_disposition",
-      "description": "Move a SET of threads into a folder in one call: ARCHIVE, TRASH, SPAM, or INBOX (un-triage) - the same disposition overlay the single-thread set_disposition writes. Per-thread isolation: one failing thread never fails the batch. Member-level write; runs AS the calling user. Returns { succeeded, failed } (thread ids). Up to 200 thread_ids per call.",
+      "description": "Move a SET of threads into a folder in one call: ARCHIVE, TRASH, SPAM, or INBOX (un-triage) - the same real move the single-thread set_disposition performs: James (JMAP) for sovereign mailboxes, provider-side for connected accounts (Graph move to deleteditems/archive/junkemail/inbox for M365, TRASH/SPAM/label edits for Gmail). Per-thread isolation: one failing thread never fails the batch. Member-level write; runs AS the calling user. Returns { succeeded, failed } (thread ids) - a thread that could not actually be moved comes back in failed, never as success. Up to 200 thread_ids per call.",
       "input_schema": {
         "type": "object",
         "properties": {

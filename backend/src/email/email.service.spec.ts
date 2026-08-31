@@ -735,6 +735,9 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       const out = await svc.applyThreadDisposition(WS, UC_UID, threadId, MessageDisposition.SPAM);
 
       expect(out.moved).toBe(true);
+      // External lane: the REAL move is the success signal — the overlay row is
+      // never consulted by external reads, so it is honestly not view-effective.
+      expect(out.viewEffective).toBe(false);
       expect(out.disposition).toBe(MessageDisposition.SPAM);
       expect(mailProvider.spamThread).toHaveBeenCalledWith(
         expect.objectContaining({ emailAddress: 'me.external@gmail.test' }),
@@ -771,7 +774,10 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       expect(row?.disposition).toBe(MessageDisposition.INBOX);
     });
 
-    it('degrades clean: a throwing provider verb → moved:false but the overlay is STILL written', async () => {
+    it('external/unknown thread that could NOT be moved → moved:false, viewEffective:false, NO overlay row', async () => {
+      // The live-fire bug: bulk TRASH on an external M365 thread wrote only the
+      // overlay row (which external reads never consult) and reported success.
+      // Now the failed move is reported honestly and the dead row is not written.
       const threadId = `ext-spam-broken-${Date.now()}`;
       const { service: svc } = externalService({
         spamThread: jest.fn().mockRejectedValue(new Error('provider 500')),
@@ -780,10 +786,36 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       const out = await svc.applyThreadDisposition(WS, UC_UID, threadId, MessageDisposition.SPAM);
 
       expect(out.moved).toBe(false);
+      expect(out.viewEffective).toBe(false);
       const row = await prisma.threadDisposition.findUnique({
         where: { workspaceId_threadId: { workspaceId: WS, threadId } },
       });
-      expect(row?.disposition).toBe(MessageDisposition.SPAM);
+      expect(row).toBeNull();
+    });
+
+    it('sovereign degrade-clean: engine dormant but the SoR knows the thread → viewEffective:true + overlay written', async () => {
+      // FakeStalwart.moveThreadToFolder is false (dormant move) and the provider
+      // verbs are false too — but an emailMessage row carries this thread id, so
+      // the overlay IS what sovereign readers see: overlay-only remains success.
+      const threadId = `sov-dormant-${Date.now()}`;
+      await prisma.emailMessage.create({
+        data: {
+          workspaceId: WS,
+          threadId,
+          toAddress: 'someone@acme.test',
+          subject: 'known sovereign thread',
+        },
+      });
+      const { service: svc } = externalService();
+
+      const out = await svc.applyThreadDisposition(WS, UC_UID, threadId, MessageDisposition.ARCHIVE);
+
+      expect(out.moved).toBe(false);
+      expect(out.viewEffective).toBe(true);
+      const row = await prisma.threadDisposition.findUnique({
+        where: { workspaceId_threadId: { workspaceId: WS, threadId } },
+      });
+      expect(row?.disposition).toBe(MessageDisposition.ARCHIVE);
     });
   });
 

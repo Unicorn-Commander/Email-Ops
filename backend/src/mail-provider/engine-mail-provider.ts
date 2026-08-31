@@ -238,27 +238,31 @@ export class EngineMailProvider extends MailProviderPort {
   }
 
   // Thread-level triage verbs: same auth chain as the reads, engine answers
-  // {ok, moved} — ok:false (or a dormant engine's null) maps to false.
+  // {ok, moved}. Success requires ok:true AND moved > 0 — the engine returns
+  // ok:true, moved:0 for a thread id it doesn't know (a foreign/sovereign id
+  // probed by the across-mailboxes loop), and that MUST read as "did not move"
+  // or the caller reports a triage that never happened. ok:false / a dormant
+  // engine's null map to false as before.
 
   async archiveThread(mailbox: MailboxAccount, threadId: string): Promise<boolean> {
     const auth = await this.authFor(mailbox);
     if (!auth) return false;
     const res = await this.engine.archiveMailThread(auth.provider, auth.credentials, threadId);
-    return res?.ok === true;
+    return res?.ok === true && (res.moved ?? 0) > 0;
   }
 
   async trashThread(mailbox: MailboxAccount, threadId: string): Promise<boolean> {
     const auth = await this.authFor(mailbox);
     if (!auth) return false;
     const res = await this.engine.trashMailThread(auth.provider, auth.credentials, threadId);
-    return res?.ok === true;
+    return res?.ok === true && (res.moved ?? 0) > 0;
   }
 
   async spamThread(mailbox: MailboxAccount, threadId: string): Promise<boolean> {
     const auth = await this.authFor(mailbox);
     if (!auth) return false;
     const res = await this.engine.spamMailThread(auth.provider, auth.credentials, threadId);
-    return res?.ok === true;
+    return res?.ok === true && (res.moved ?? 0) > 0;
   }
 
   async restoreThreadToInbox(mailbox: MailboxAccount, threadId: string): Promise<boolean> {
@@ -269,7 +273,7 @@ export class EngineMailProvider extends MailProviderPort {
       auth.credentials,
       threadId,
     );
-    return res?.ok === true;
+    return res?.ok === true && (res.moved ?? 0) > 0;
   }
 
   async setThreadRead(mailbox: MailboxAccount, threadId: string, read: boolean): Promise<boolean> {

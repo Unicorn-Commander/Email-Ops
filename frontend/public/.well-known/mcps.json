@@ -182,7 +182,7 @@
     },
     {
       "name": "set_disposition",
-      "description": "Triage a thread into a folder by talking to an agent: INBOX (un-triage), ARCHIVE, TRASH, or SPAM (junk). Runs AS the calling user; only works in a workspace they are a member of. This is the agent analogue of the human triage UI — an agent on a loop can archive handled threads or route junk to Spam. Returns the updated disposition overlay row.",
+      "description": "Triage a thread into a folder by talking to an agent: INBOX (un-triage), ARCHIVE, TRASH, or SPAM (junk). Performs the REAL move in the mailbox that owns the thread — James (JMAP) for sovereign mailboxes; provider-side for connected accounts (Graph move to deleteditems/archive/junkemail/inbox for M365, TRASH/SPAM/label edits for Gmail). Runs AS the calling user; only works in a workspace they are a member of. Returns status ok with the disposition when the thread really moved (or the sovereign view reflects it); status failed with a reason when it could NOT be moved — never a fake success.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -310,7 +310,8 @@
     },
     {
       "name": "compose_email",
-      "description": "Compose an outbound email to a customer’s contact. mode=send queues delivery now (Apache James, or Postmark for the transactional high-rep lane); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires the email-ops entitlement; a CROSS-APP compose (external_source=customer-ops) additionally requires customer-ops. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created. SEND IDENTITY: pass from_address to choose which registered mailbox it leaves from; the lane follows the mailbox — Microsoft 365 addresses go out through Microsoft Graph, sovereign domains through Apache James (Postmark for the transactional high-rep lane). Omit from_address to use the agent’s own mailbox or the workspace default, as before.",      "input_schema": {
+      "description": "Compose an outbound email to a customer’s contact. mode=send queues delivery now (Apache James, or Postmark for the transactional high-rep lane); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires the email-ops entitlement; a CROSS-APP compose (external_source=customer-ops) additionally requires customer-ops. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created. SEND IDENTITY: pass from_address to choose which registered mailbox it leaves from; the lane follows the mailbox — Microsoft 365 addresses go out through Microsoft Graph, sovereign domains through Apache James (Postmark for the transactional high-rep lane). Omit from_address to use the agent’s own mailbox or the workspace default, as before.",
+      "input_schema": {
         "type": "object",
         "properties": {
           "workspace_id": {
@@ -572,7 +573,7 @@
     },
     {
       "name": "bulk_disposition",
-      "description": "Move a SET of threads into a folder in one call: ARCHIVE, TRASH, SPAM, or INBOX (un-triage) - the same disposition overlay the single-thread set_disposition writes. Per-thread isolation: one failing thread never fails the batch. Member-level write; runs AS the calling user. Returns { succeeded, failed } (thread ids). Up to 200 thread_ids per call.",
+      "description": "Move a SET of threads into a folder in one call: ARCHIVE, TRASH, SPAM, or INBOX (un-triage) - the same real move the single-thread set_disposition performs: James (JMAP) for sovereign mailboxes, provider-side for connected accounts (Graph move to deleteditems/archive/junkemail/inbox for M365, TRASH/SPAM/label edits for Gmail). Per-thread isolation: one failing thread never fails the batch. Member-level write; runs AS the calling user. Returns { succeeded, failed } (thread ids) - a thread that could not actually be moved comes back in failed, never as success. Up to 200 thread_ids per call.",
       "input_schema": {
         "type": "object",
         "properties": {

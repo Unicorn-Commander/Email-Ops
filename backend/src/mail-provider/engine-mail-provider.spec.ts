@@ -246,7 +246,7 @@ describe('EngineMailProvider', () => {
     expect(notConnected.engine.sendMail).not.toHaveBeenCalled();
   });
 
-  it('archiveThread: routes through the engine triage verb; ok:true → true', async () => {
+  it('archiveThread: routes through the engine triage verb; ok && moved>0 → true', async () => {
     const { provider, engine } = make({
       user: { keycloakId: 'kc-sub-1' },
       token: 'gtok',
@@ -256,7 +256,7 @@ describe('EngineMailProvider', () => {
     expect(engine.archiveMailThread).toHaveBeenCalledWith('gmail', { token: 'gtok' }, 't1');
   });
 
-  it('trashThread: ok:true → true; not-connected → false without touching the engine', async () => {
+  it('trashThread: ok && moved>0 → true; not-connected → false without touching the engine', async () => {
     const happy = make({ user: { keycloakId: 'kc-sub-1' }, token: 'gtok', trash: { ok: true, moved: 2 } });
     expect(await happy.provider.trashThread(gmailbox(), 't1')).toBe(true);
     expect(happy.engine.trashMailThread).toHaveBeenCalledWith('gmail', { token: 'gtok' }, 't1');
@@ -266,7 +266,7 @@ describe('EngineMailProvider', () => {
     expect(notConnected.engine.trashMailThread).not.toHaveBeenCalled();
   });
 
-  it('spamThread: routes through the engine triage verb; ok:true → true', async () => {
+  it('spamThread: routes through the engine triage verb; ok && moved>0 → true', async () => {
     const { provider, engine } = make({
       user: { keycloakId: 'kc-sub-1' },
       token: 'gtok',
@@ -276,7 +276,7 @@ describe('EngineMailProvider', () => {
     expect(engine.spamMailThread).toHaveBeenCalledWith('gmail', { token: 'gtok' }, 't1');
   });
 
-  it('restoreThreadToInbox: ok:true → true; not-connected → false without touching the engine', async () => {
+  it('restoreThreadToInbox: ok && moved>0 → true; not-connected → false without touching the engine', async () => {
     const happy = make({ user: { keycloakId: 'kc-sub-1' }, token: 'gtok', restore: { ok: true, moved: 2 } });
     expect(await happy.provider.restoreThreadToInbox(gmailbox(), 't1')).toBe(true);
     expect(happy.engine.restoreMailThreadToInbox).toHaveBeenCalledWith('gmail', { token: 'gtok' }, 't1');
@@ -284,6 +284,17 @@ describe('EngineMailProvider', () => {
     const notConnected = make({ user: { keycloakId: 'kc-sub-1' }, token: null });
     expect(await notConnected.provider.restoreThreadToInbox(gmailbox(), 't1')).toBe(false);
     expect(notConnected.engine.restoreMailThreadToInbox).not.toHaveBeenCalled();
+  });
+
+  it('move verbs: ok:true but moved:0 (unknown/foreign thread id) → false, never a fake move', async () => {
+    // The engine answers ok:true, moved:0 for a thread id the provider mailbox
+    // doesn't know — the across-mailboxes probe relies on that reading as
+    // "did not move" so the loop keeps looking / the caller reports failure.
+    const base = { user: { keycloakId: 'kc-sub-1' }, token: 'gtok' };
+    expect(await make({ ...base, archive: { ok: true, moved: 0 } }).provider.archiveThread(gmailbox(), 't1')).toBe(false);
+    expect(await make({ ...base, trash: { ok: true, moved: 0 } }).provider.trashThread(gmailbox(), 't1')).toBe(false);
+    expect(await make({ ...base, spam: { ok: true, moved: 0 } }).provider.spamThread(gmailbox(), 't1')).toBe(false);
+    expect(await make({ ...base, restore: { ok: true, moved: 0 } }).provider.restoreThreadToInbox(gmailbox(), 't1')).toBe(false);
   });
 
   it('setThreadRead: forwards the read flag (microsoft credentials shape) and maps ok', async () => {
