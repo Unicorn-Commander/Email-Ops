@@ -48,7 +48,7 @@ export interface ReplyComposerHandle {
 
 /** Plain-language banner when replying via a connected Gmail/Outlook account. */
 const EXTERNAL_REPLY_LIMITS =
-  'Sending from a connected Gmail/Outlook account sends plain text (no CC or rich formatting here); attachments ARE included.';
+  'Sending from a connected Gmail/Outlook account sends plain text (no rich formatting here); CC and attachments ARE included.';
 
 
 export const ReplyComposer = forwardRef<
@@ -96,16 +96,9 @@ export const ReplyComposer = forwardRef<
   },
   ref,
 ) {
-  // Fold reply-all CC into To on external so those people still appear as recipients.
-  const [to, setTo] = useState<string[]>(() => {
-    const base = defaultTo.filter(Boolean);
-    if (limitedExternalSend) {
-      return Array.from(new Set([...base, ...(defaultCc ?? []).filter(Boolean)]));
-    }
-    return base;
-  });
-  const [cc, setCc] = useState<string[]>(() => (limitedExternalSend ? [] : (defaultCc ?? [])));
-  const [showCc, setShowCc] = useState(() => !limitedExternalSend && (defaultCc?.length ?? 0) > 0);
+  const [to, setTo] = useState<string[]>(() => defaultTo.filter(Boolean));
+  const [cc, setCc] = useState<string[]>(() => defaultCc ?? []);
+  const [showCc, setShowCc] = useState(() => (defaultCc?.length ?? 0) > 0);
   const [subject, setSubject] = useState(defaultSubject);
   const [body, setBody] = useState('');
   const [sending, setSending] = useState(false);
@@ -129,12 +122,9 @@ export const ReplyComposer = forwardRef<
   const uploads = useAttachmentUploads(workspaceId, mailboxId);
   useEffect(() => {
     const baseTo = defaultTo.filter(Boolean);
-    const seedTo = limitedExternalSend
-      ? Array.from(new Set([...baseTo, ...(defaultCc ?? []).filter(Boolean)]))
-      : baseTo;
     lastSavedSnapshot.current = JSON.stringify({
-      to: seedTo,
-      cc: limitedExternalSend ? [] : (defaultCc ?? []),
+      to: baseTo,
+      cc: defaultCc ?? [],
       subject: defaultSubject,
       body: '',
       attachments: [],
@@ -223,7 +213,7 @@ export const ReplyComposer = forwardRef<
       subject: subject.trim() || undefined,
       body: plain || undefined,
       ...(limitedExternalSend ? {} : { body_html: body.trim() || undefined }),
-      ...(!limitedExternalSend && cc.length > 0 ? { cc } : {}),
+      ...(cc.length > 0 ? { cc } : {}),
       ...(!limitedExternalSend && attachments.length > 0 ? { attachments } : {}),
       // inReplyTo is the MESSAGE id being replied to — send it as in_reply_to (the
       // header hint the backend resolves), NOT in_reply_to_thread_id. The backend
@@ -279,7 +269,7 @@ export const ReplyComposer = forwardRef<
     setConfirmExternal(false);
   }, [subject, body, hasUndoWindow]);
 
-  const recipientPool = limitedExternalSend ? to : [...to, ...cc];
+  const recipientPool = [...to, ...cc];
   const invalidCount = recipientPool.filter((a) => !isValidEmail(a)).length;
   const bodyPlain = (limitedExternalSend ? body : htmlToText(body)).trim();
   const canSend =
@@ -315,6 +305,7 @@ export const ReplyComposer = forwardRef<
             to_address: to.join(', '),
             subject: subject.trim() || undefined,
             body: body.trim() || undefined,
+            ...(cc.length > 0 ? { cc } : {}),
             ...(uploads.refs().length > 0 ? { attachments: uploads.refs() } : {}),
             ...(inReplyTo ? { in_reply_to: inReplyTo } : {}),
             ...(draftId ? { draft_id: draftId } : {}),
@@ -401,7 +392,7 @@ export const ReplyComposer = forwardRef<
           <div className="block min-w-0 flex-1">
             <div className="mb-1 flex items-center justify-between">
               <span className="block text-[11px] font-medium text-tertiary">To</span>
-              {!limitedExternalSend && !showCc && (
+              {!showCc && (
                 <button
                   type="button"
                   onClick={() => setShowCc(true)}
@@ -422,7 +413,7 @@ export const ReplyComposer = forwardRef<
           </div>
         </div>
 
-        {!limitedExternalSend && showCc && (
+        {showCc && (
           <label className="block">
             <span className="mb-1 block text-[11px] font-medium text-tertiary">Cc</span>
             <RecipientChips

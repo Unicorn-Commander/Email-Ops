@@ -270,6 +270,26 @@ def test_gmail_send_builds_mime_and_threads_reply():
     assert "hello body" in parsed.get_content()
 
 
+def test_gmail_send_honours_multi_to_and_cc():
+    provider, sink = _make_gmail(send_result={"id": "sent-2", "threadId": "t2"})
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="a@example.com",
+        subject="Hi",
+        body="hello",
+        to_addrs=["a@example.com", "b@example.com"],
+        cc=["c@example.com"],
+        bcc=["d@example.com"],
+    )
+    assert result.accepted is True
+    send_call = next(c for c in sink if c[0] == "messages.send")
+    decoded = base64.urlsafe_b64decode(send_call[1]["body"]["raw"].encode("ascii"))
+    parsed = email.message_from_bytes(decoded, policy=policy.default)
+    assert parsed["To"] == "a@example.com, b@example.com"
+    assert parsed["Cc"] == "c@example.com"
+    assert parsed["Bcc"] == "d@example.com"
+
+
 def test_gmail_send_includes_attachment_part():
     """An outbound attachment lands as a real MIME part with its filename+bytes."""
     provider, sink = _make_gmail(send_result={"id": "s1", "threadId": "t9"})
@@ -714,6 +734,34 @@ def test_ms_send_posts_sendmail(monkeypatch):
     assert msg["body"]["content"] == "body text"
 
 
+def test_ms_send_honours_multi_to_cc_bcc(monkeypatch):
+    captured = {}
+
+    def post_router(url, body):
+        captured["url"] = url
+        captured["body"] = body
+        return _FakeResp(status_code=202)
+
+    provider, _ = _make_ms(monkeypatch, post_router=post_router)
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="a@example.com",
+        subject="Hello",
+        body="body text",
+        to_addrs=["a@example.com", "b@example.com"],
+        cc=["c@example.com"],
+        bcc=["d@example.com"],
+    )
+    assert result.accepted is True
+    msg = captured["body"]["message"]
+    assert [r["emailAddress"]["address"] for r in msg["toRecipients"]] == [
+        "a@example.com",
+        "b@example.com",
+    ]
+    assert [r["emailAddress"]["address"] for r in msg["ccRecipients"]] == ["c@example.com"]
+    assert [r["emailAddress"]["address"] for r in msg["bccRecipients"]] == ["d@example.com"]
+
+
 def test_ms_send_sendmail_includes_file_attachment(monkeypatch):
     captured = {}
 
@@ -1133,6 +1181,32 @@ def test_ms_send_reply_threads_via_createreply(monkeypatch):
     assert captured["patch_body"]["subject"] == "Re: Hello"
     # the plain send lane must NOT be used
     assert not any(u.endswith("/me/sendMail") for verb, u, _ in sink if verb == "POST")
+
+
+def test_ms_send_reply_pins_full_to_list_and_cc_bcc(monkeypatch):
+    captured = {}
+    get_router, post_router, patch_router = _reply_routers(captured)
+    provider, _ = _make_ms(
+        monkeypatch, get_router=get_router, post_router=post_router, patch_router=patch_router
+    )
+    result = provider.send_message(
+        from_addr="me@example.com",
+        to_addr="a@example.com",
+        subject="Re: Hello",
+        body="bump",
+        in_reply_to_thread_id="m1",
+        to_addrs=["a@example.com", "b@example.com"],
+        cc=["c@example.com"],
+        bcc=["d@example.com"],
+    )
+    assert result.accepted is True
+    patch = captured["patch_body"]
+    assert [r["emailAddress"]["address"] for r in patch["toRecipients"]] == [
+        "a@example.com",
+        "b@example.com",
+    ]
+    assert [r["emailAddress"]["address"] for r in patch["ccRecipients"]] == ["c@example.com"]
+    assert [r["emailAddress"]["address"] for r in patch["bccRecipients"]] == ["d@example.com"]
 
 
 def test_ms_send_reply_resolves_conversation_id_to_newest_message(monkeypatch):

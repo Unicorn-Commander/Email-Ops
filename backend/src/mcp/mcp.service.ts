@@ -347,27 +347,46 @@ export class McpService {
       {
         title: 'Compose an outbound email',
         description:
-          'Compose an outbound email to a customer’s contact. mode=send queues delivery ' +
-          'now (Apache James, or Postmark for the transactional high-rep lane); mode=draft ' +
-          'stages it into the AGENT INBOX approval surface (a human approves before it ' +
-          'leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, ' +
-          'external_source, external_ref): a repeat returns the EXISTING message and ' +
-          'queues NO second send. Requires the email-ops entitlement; a CROSS-APP compose ' +
+          'Compose an outbound email. mode=send queues delivery now (Apache James, or ' +
+          'Postmark for the transactional high-rep lane, or the connected Gmail/Microsoft ' +
+          'Graph lane when from_address is a connected mailbox); mode=draft stages it into ' +
+          'the AGENT INBOX approval surface (a human approves before it leaves — the safe ' +
+          'default for an agent). IDEMPOTENT on (workspace_id, external_source, ' +
+          'external_ref): a repeat returns the EXISTING message and queues NO second send. ' +
+          'Requires the email-ops entitlement; a CROSS-APP compose ' +
           '(external_source=customer-ops) additionally requires customer-ops. ' +
-          'Email-Ops stores no contact record (contact_id is a thin reference) and is ' +
-          'the system-of-record for the message it created. ' +
+          'Email-Ops stores no contact record (contact_id is a thin reference) and is the ' +
+          'system-of-record for the message it created. ' +
           'SEND IDENTITY: pass from_address to choose which registered mailbox it leaves ' +
           'from; the lane follows the mailbox — Microsoft 365 addresses go out through ' +
-          'Microsoft Graph, sovereign domains through Apache James (Postmark for the ' +
-          'transactional high-rep lane). Omit from_address to use the agent’s own mailbox ' +
-          'or the workspace default, as before.',        inputSchema: {
+          'Microsoft Graph, Gmail through the Gmail API, sovereign domains through Apache ' +
+          'James (Postmark for the transactional high-rep lane). Omit from_address to use ' +
+          'the agent’s own mailbox or the workspace default, as before. ' +
+          'RECIPIENTS: to_address is the back-compat single To; to_addresses (1-50) is the ' +
+          'full To list — if both are set, to_address MUST equal the first entry. cc and ' +
+          'bcc are 0-50 addresses each; an address may not appear in both To/Cc and Bcc. ' +
+          'REPLY INTO A THREAD: pass in_reply_to_thread_id (the thread id from ' +
+          'list_threads / search_mail / get_thread for THAT mailbox) AND from_address = ' +
+          'that mailbox. On connected Gmail this sets threadId + In-Reply-To/References; ' +
+          'on Microsoft 365 it uses Graph createReply / conversationId so Outlook threads ' +
+          'it; on sovereign James it sets In-Reply-To/References. reply_all=true (default ' +
+          'false) with in_reply_to_thread_id derives To/Cc from the latest message in that ' +
+          'thread (everyone except the sending mailbox, matching Outlook Reply-all) then ' +
+          'merges any explicit to/cc/bcc. RETURNS the resolved recipient set (to, cc, bcc), ' +
+          'the mode actually applied (an unattended send may be downgraded to draft / ' +
+          'pending_approval), and thread_id (the provider conversation id on Gmail/M365).',
+        inputSchema: {
           workspace_id: z.string().optional(),
           contact_id: z.string().optional(),
-          to_address: z.string().min(1).max(320),
+          to_address: z.string().min(1).max(320).optional(),
+          to_addresses: z.array(z.string().min(1).max(320)).min(1).max(50).optional(),
+          cc: z.array(z.string().min(3).max(320)).max(50).optional(),
+          bcc: z.array(z.string().min(3).max(320)).max(50).optional(),
           subject: z.string().min(1).max(500),
           body: z.string().min(1).max(100000),
           mode: EMAIL_MODE.optional(),
-          in_reply_to_thread_id: z.string().max(200).optional(),
+          in_reply_to_thread_id: z.string().max(500).optional(),
+          reply_all: z.boolean().optional(),
           external_source: z.string().min(1).max(64),
           external_ref: z.string().min(1).max(256),
           // The send identity, by address. Authorized exactly like the web client's

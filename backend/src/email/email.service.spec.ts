@@ -889,4 +889,144 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       }
     });
   });
+
+  describe('compose_email — multi-recipient + reply_all', () => {
+    it('returns the resolved to/cc/bcc on the compose wire shape', async () => {
+      const result = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'a@acme.test',
+        toAddresses: ['a@acme.test', 'b@acme.test'],
+        cc: ['c@acme.test'],
+        bcc: ['d@acme.test'],
+        subject: 'Multi',
+        body: 'Hi',
+        mode: 'draft',
+        externalSource: 'customer-ops',
+        externalRef: `multi-${Date.now()}`,
+      });
+      expect(result.mode).toBe('draft');
+      expect(result.status).toBe('pending_approval');
+      expect(result.to).toEqual(['a@acme.test', 'b@acme.test']);
+      expect(result.cc).toEqual(['c@acme.test']);
+      expect(result.bcc).toEqual(['d@acme.test']);
+      const items = await service.listAgentInbox(WS, UC_UID);
+      const item = items.find((i) => i.message_id === result.id);
+      expect(item?.to_addresses).toEqual(['a@acme.test', 'b@acme.test']);
+      expect(item?.cc).toEqual(['c@acme.test']);
+      expect(item?.bcc).toEqual(['d@acme.test']);
+      expect(item?.summary).toMatch(/cc c@acme.test/);
+      expect(item?.summary).toMatch(/bcc d@acme.test/);
+    });
+
+    it('rejects an address that appears in both To and Bcc', async () => {
+      await expect(
+        service.composeEmail(WS, UC_UID, {
+          contactId: null,
+          toAddress: 'a@acme.test',
+          bcc: ['a@acme.test'],
+          subject: 'Bad',
+          body: 'Nope',
+          mode: 'draft',
+          externalSource: 'customer-ops',
+          externalRef: `badbcc-${Date.now()}`,
+        }),
+      ).rejects.toThrow(/To\/Cc and Bcc/);
+    });
+
+    it('reply_all derives Outlook recipients from the latest thread message (sovereign)', async () => {
+      const tid = `thread-ra-${Date.now()}`;
+      stalwart.threadDetails = [
+        {
+          id: 'live-ra-1',
+          threadId: tid,
+          from: { address: 'alice@acme.test', name: 'Alice' },
+          to: [
+            { address: 'desk@magicunicorn.tech', name: null },
+            { address: 'bob@acme.test', name: null },
+          ],
+          subject: 'Northbridge Tax',
+          sentAt: '2026-09-03T00:00:00Z',
+          preview: 'hello',
+          direction: 'received',
+          cc: [{ address: 'jordan@acme.test', name: null }],
+          bcc: [],
+          htmlBody: null,
+          textBody: null,
+          messageIdHeader: null,
+          references: null,
+          isUnread: false,
+          flagged: false,
+          attachments: [],
+        },
+      ];
+      const result = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: '',
+        replyAll: true,
+        inReplyToThreadId: tid,
+        subject: 'Re: Northbridge Tax',
+        body: 'Thanks',
+        mode: 'draft',
+        externalSource: 'customer-ops',
+        externalRef: `ra-${Date.now()}`,
+      });
+      expect(result.to).toEqual(['alice@acme.test']);
+      expect(result.cc).toEqual(['bob@acme.test', 'jordan@acme.test']);
+      expect(result.bcc).toEqual([]);
+      expect(result.thread_id).toBe(tid);
+    });
+
+    it('L1 autonomy downgrade to draft still preserves the full recipient set', async () => {
+      const key = `l1-multi-${Date.now()}`;
+      await prisma.agent.create({
+        data: {
+          workspaceId: WS,
+          key,
+          displayName: 'L1 Multi',
+          autonomyLevel: AgentAutonomyLevel.L1_APPROVE_TO_SEND,
+        },
+      });
+      const result = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'a@acme.test',
+        toAddresses: ['a@acme.test', 'b@acme.test'],
+        cc: ['c@acme.test'],
+        bcc: ['d@acme.test'],
+        subject: 'Held',
+        body: 'Please hold',
+        mode: 'send',
+        externalSource: key,
+        externalRef: `held-${Date.now()}`,
+        draftedBy: key,
+      });
+      expect(result.mode).toBe('draft');
+      expect(result.status).toBe('pending_approval');
+      expect(result.to).toEqual(['a@acme.test', 'b@acme.test']);
+      expect(result.cc).toEqual(['c@acme.test']);
+      expect(result.bcc).toEqual(['d@acme.test']);
+      expect(stalwart.sendCalls).toHaveLength(0);
+    });
+
+    it('APPROVE of a multi-recipient draft still sends the staged To/Cc/Bcc', async () => {
+      const ref = `appr-multi-${Date.now()}`;
+      const draft = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'a@acme.test',
+        toAddresses: ['a@acme.test', 'b@acme.test'],
+        cc: ['c@acme.test'],
+        bcc: ['d@acme.test'],
+        subject: 'Approve me',
+        body: 'Go',
+        mode: 'draft',
+        externalSource: 'customer-ops',
+        externalRef: ref,
+      });
+      const item = await prisma.agentInboxItem.findUniqueOrThrow({ where: { messageId: draft.id } });
+      await service.approveAgentInboxItem(WS, 'uc-approver', item.id, 'ok');
+      expect(stalwart.sendCalls).toHaveLength(1);
+      expect(stalwart.sendCalls[0].req.toAddresses).toEqual(['a@acme.test', 'b@acme.test']);
+      expect(stalwart.sendCalls[0].req.cc).toEqual(['c@acme.test']);
+      expect(stalwart.sendCalls[0].req.bcc).toEqual(['d@acme.test']);
+    });
+  });
 });

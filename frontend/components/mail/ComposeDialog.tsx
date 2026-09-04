@@ -73,7 +73,7 @@ function plainToHtml(text: string): string {
 
 /** Copy for the external-provider composer honesty banner (plain language). */
 const EXTERNAL_SEND_LIMITS =
-  'Sending from a connected Gmail/Outlook account sends plain text (no CC/BCC or rich formatting here); attachments ARE included.';
+  'Sending from a connected Gmail/Outlook account sends plain text (no rich formatting here); CC/BCC and attachments ARE included.';
 
 
 export function ComposeDialog({
@@ -115,8 +115,8 @@ export function ComposeDialog({
   ) => Promise<{ ok: boolean; error?: string }>;
   canSchedule?: boolean;
   /**
-   * Connected Gmail/Outlook send port: plain text only — hide CC/BCC, rich text,
-   * and attachments rather than silently dropping them.
+   * Connected Gmail/Outlook send port: plain text only — hide rich text
+   * rather than silently dropping HTML. CC/BCC and attachments ride the lane.
    */
   limitedExternalSend?: boolean;
   /**
@@ -151,8 +151,8 @@ export function ComposeDialog({
   const lastSavedSnapshot = useRef<string>('');
 
   // Seed the fields when the dialog re-opens. An explicit prefill (Forward /
-  // agent `ui_compose`) wins. On limited external sends, fold CC/BCC into To
-  // so recipients never silently disappear, and strip rich/attachments.
+  // agent `ui_compose`) wins. External sends are still plain-text; CC/BCC
+  // now ride the Gmail/Graph lane so they are no longer folded into To.
   useEffect(() => {
     if (!open) return;
     const limited = limitedExternalSend;
@@ -162,23 +162,12 @@ export function ComposeDialog({
       ? initial?.body ?? (initial?.bodyHtml ? htmlToText(initial.bodyHtml) : '')
       : seededHtml;
     const initialTo = toList(initial?.to);
-    const initialCc = limited ? [] : (initial?.cc ?? []);
-    const initialBcc = limited ? [] : (initial?.bcc ?? []);
-    // Preserve every named recipient: if the prefill had CC/BCC and this mailbox
-    // can't send them as CC/BCC, put them on To so the user still sees them.
-    const foldedTo = limited
-      ? Array.from(
-          new Set([
-            ...initialTo,
-            ...(initial?.cc ?? []).filter(Boolean),
-            ...(initial?.bcc ?? []).filter(Boolean),
-          ]),
-        )
-      : initialTo;
-    setTo(foldedTo);
+    const initialCc = initial?.cc ?? [];
+    const initialBcc = initial?.bcc ?? [];
+    setTo(initialTo);
     setCc(initialCc);
     setBcc(initialBcc);
-    setShowCcBcc(!limited && ((initial?.cc?.length ?? 0) > 0 || (initial?.bcc?.length ?? 0) > 0));
+    setShowCcBcc((initialCc.length ?? 0) > 0 || (initialBcc.length ?? 0) > 0);
     setSubject(initial?.subject ?? '');
     setBody(seededBody);
     setDraftId(initial?.draftId ?? null);
@@ -196,7 +185,7 @@ export function ComposeDialog({
     appliedSignature.current = '';
     const seedAttachments = limited ? [] : (initial?.attachments ?? []);
     lastSavedSnapshot.current = JSON.stringify({
-      to: foldedTo,
+      to: initialTo,
       cc: initialCc,
       bcc: initialBcc,
       subject: initial?.subject ?? '',
@@ -270,8 +259,8 @@ export function ComposeDialog({
       subject: subject.trim() || undefined,
       body: plain || undefined,
       ...(limitedExternalSend ? {} : { body_html: body.trim() || undefined }),
-      ...(!limitedExternalSend && cc.length > 0 ? { cc } : {}),
-      ...(!limitedExternalSend && bcc.length > 0 ? { bcc } : {}),
+      ...(cc.length > 0 ? { cc } : {}),
+      ...(bcc.length > 0 ? { bcc } : {}),
       ...(!limitedExternalSend && attachments.length > 0 ? { attachments } : {}),
       ...(draftId ? { draft_id: draftId } : {}),
     };
@@ -328,7 +317,7 @@ export function ComposeDialog({
     setConfirmExternal(false);
   }, [subject, body, canSchedule]);
 
-  const allRecipients = limitedExternalSend ? to : [...to, ...cc, ...bcc];
+  const allRecipients = [...to, ...cc, ...bcc];
   const invalidCount = allRecipients.filter((a) => !isValidEmail(a)).length;
   const canSend =
     to.length > 0 &&
@@ -358,6 +347,8 @@ export function ComposeDialog({
         to_address: to.join(', '),
         subject: subject.trim() || undefined,
         body: body.trim() || undefined,
+        ...(cc.length > 0 ? { cc } : {}),
+        ...(bcc.length > 0 ? { bcc } : {}),
         ...(externalAttachments.length > 0 ? { attachments: externalAttachments } : {}),
         ...(draftId ? { draft_id: draftId } : {}),
       };
@@ -558,7 +549,7 @@ export function ComposeDialog({
         <div className="block">
           <div className="mb-1 flex items-center justify-between">
             <span className="block text-[11px] font-medium text-tertiary">To</span>
-            {!limitedExternalSend && !showCcBcc && (
+            {!showCcBcc && (
               <Tooltip content="Add Cc (visible copy) and Bcc (hidden copy) recipient fields">
                 <button
                   type="button"
@@ -580,7 +571,7 @@ export function ComposeDialog({
           />
         </div>
 
-        {!limitedExternalSend && showCcBcc && (
+        {showCcBcc && (
           <>
             <label className="block">
               <span className="mb-1 block text-[11px] font-medium text-tertiary">Cc</span>

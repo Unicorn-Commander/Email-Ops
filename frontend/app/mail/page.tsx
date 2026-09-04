@@ -51,7 +51,7 @@ import { useAgentInbox } from '@/components/useAgentInbox';
 import { useAgents } from '@/components/useAgents';
 import { useAgentControls } from '@/components/useAgentControls';
 import { agentLabel } from '@/lib/agents';
-import type { AgentInboxItemView, AutonomyLevel } from '@/lib/api';
+import { agentInboxRecipientLine, type AgentInboxItemView, type AutonomyLevel } from '@/lib/api';
 import {
   ALL_INBOXES,
   formatWhen,
@@ -3887,7 +3887,7 @@ function DailyBrief({ brief }: { brief: BriefData }) {
                     </span>
                     <span className="mt-0.5 block truncate text-[12px] text-tertiary">
                       {agentLabel(it.drafted_by)} drafted
-                      {it.to_address ? ` → ${it.to_address}` : ''}
+                      {agentInboxRecipientLine(it) ? ` → ${agentInboxRecipientLine(it)}` : ''}
                     </span>
                     <PendingTargetLine item={it} />
                   </span>

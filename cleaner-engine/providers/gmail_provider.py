@@ -33,6 +33,7 @@ from providers.mail_client import (
     epoch_ms_to_iso8601,
     parse_address,
     parse_address_list,
+    recipient_list,
     to_iso8601,
 )
 
@@ -576,12 +577,14 @@ class GmailProvider(EmailProvider):
         bcc: Optional[List[str]] = None,
         body_html: Optional[str] = None,
         attachments: Optional[List[dict]] = None,
+        to_addrs: Optional[List[str]] = None,
     ) -> SendResult:
         """Send a new message or reply within a thread."""
         mime = MimeMessage()
         if from_addr:
             mime['From'] = from_addr
-        mime['To'] = to_addr
+        tos = recipient_list(to_addr, to_addrs)
+        mime['To'] = ', '.join(tos) if tos else to_addr
         if cc:
             mime['Cc'] = ', '.join([a for a in cc if a])
         # Bcc is deliberately NOT written as a header — Gmail strips it from the

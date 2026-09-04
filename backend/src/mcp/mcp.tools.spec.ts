@@ -441,4 +441,88 @@ describe('EmailOpsTools', () => {
       ).rejects.toThrow(NotFoundException);
     });
   });
+
+  describe('composeEmail — recipient mapping', () => {
+    const origMode = process.env.UC_ENTITLEMENT_MODE;
+    beforeEach(() => {
+      process.env.UC_ENTITLEMENT_MODE = 'open';
+    });
+    afterEach(() => {
+      if (origMode === undefined) delete process.env.UC_ENTITLEMENT_MODE;
+      else process.env.UC_ENTITLEMENT_MODE = origMode;
+    });
+
+    function toolsWith(email: Partial<EmailService>): EmailOpsTools {
+      const m = { resolveAndAuthorize: jest.fn().mockResolvedValue('ws-1') } as any;
+      return new EmailOpsTools(
+        m,
+        email as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+    }
+
+    const user = { __entitlements: ['email-ops'] } as any;
+    const base = {
+      workspace_id: 'ws-1',
+      subject: 'Hi',
+      body: 'Body',
+      mode: 'draft' as const,
+      external_source: 'email-ops-mcp',
+      external_ref: 'ref-1',
+    };
+
+    it('forwards to_addresses + cc + bcc + reply_all + in_reply_to_thread_id', async () => {
+      const composeEmail = jest.fn().mockResolvedValue({ id: 'm1', mode: 'draft' });
+      const t = toolsWith({ composeEmail } as any);
+      await t.composeEmail(user, {
+        ...base,
+        to_address: 'a@acme.test',
+        to_addresses: ['a@acme.test', 'b@acme.test'],
+        cc: ['c@acme.test'],
+        bcc: ['d@acme.test'],
+        reply_all: true,
+        in_reply_to_thread_id: 'thread-ms-1',
+        from_address: 'aaron@magicunicorn.tech',
+      });
+      expect(composeEmail).toHaveBeenCalledWith(
+        'ws-1',
+        expect.anything(),
+        expect.objectContaining({
+          toAddress: 'a@acme.test',
+          toAddresses: ['a@acme.test', 'b@acme.test'],
+          cc: ['c@acme.test'],
+          bcc: ['d@acme.test'],
+          replyAll: true,
+          inReplyToThreadId: 'thread-ms-1',
+          fromAddress: 'aaron@magicunicorn.tech',
+          mode: 'draft',
+        }),
+      );
+    });
+
+    it('uses the first to_addresses entry as toAddress when to_address is omitted', async () => {
+      const composeEmail = jest.fn().mockResolvedValue({ id: 'm1' });
+      const t = toolsWith({ composeEmail } as any);
+      await t.composeEmail(user, {
+        ...base,
+        to_addresses: ['a@acme.test', 'b@acme.test'],
+      });
+      expect(composeEmail).toHaveBeenCalledWith(
+        'ws-1',
+        expect.anything(),
+        expect.objectContaining({
+          toAddress: 'a@acme.test',
+          toAddresses: ['a@acme.test', 'b@acme.test'],
+          replyAll: false,
+        }),
+      );
+    });
+  });
 });

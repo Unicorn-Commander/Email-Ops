@@ -36,7 +36,7 @@ import { CleanupTargetsList, cleanupTargetsSentence } from '@/components/mail/Cl
 import { RobotIcon } from '@/components/mail/icons';
 import { agentLabel } from '@/lib/agents';
 import { cleanupReason, deriveCleanupTargets } from '@/lib/cleanupTargets';
-import { holdPolicyOf, type AgentInboxItemView, type AgentView, type AutoSentItemView } from '@/lib/api';
+import { agentInboxRecipientLine, holdPolicyOf, type AgentInboxItemView, type AgentView, type AutoSentItemView } from '@/lib/api';
 
 type QueueTab = 'pending' | 'auto-sent' | 'history';
 
@@ -376,7 +376,7 @@ function ReviewCard({
       description:
         item.kind === 'CLEANUP'
           ? cleanupDesc
-          : `It will be delivered to ${item.to_address ?? 'the recipient'}, drafted by ${agentLabel(item.drafted_by)}. This can't be unsent.`,
+          : `It will be delivered to ${agentInboxRecipientLine(item) || item.to_address || 'the recipient'}, drafted by ${agentLabel(item.drafted_by)}. This can't be unsent.`,
       confirmLabel: meta.approveVerb,
       cancelLabel: 'Not yet',
     });
@@ -432,8 +432,8 @@ function ReviewCard({
           <p className="mt-3 truncate text-sm font-medium text-primary group-hover:text-accent">
             {item.subject || item.summary || '(no subject)'}
           </p>
-          {item.to_address && (
-            <p className="mt-1 truncate font-mono text-xs text-tertiary">to {item.to_address}</p>
+          {agentInboxRecipientLine(item) && (
+            <p className="mt-1 truncate font-mono text-xs text-tertiary">to {agentInboxRecipientLine(item)}</p>
           )}
           {targets ? (
             <CleanupTargetsList targets={targets} className="mt-2.5" />

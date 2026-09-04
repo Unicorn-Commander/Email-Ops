@@ -12,12 +12,14 @@
  *       -> { threads: ThreadView[] }     (viewer-level; no dual SKU)
  *   - list_thread_messages(workspace_id, thread_id)
  *       -> { messages: MessageView[] }   (viewer-level; previews only)
- *   - compose_email(workspace_id, contact_id, to_address, subject, body, mode,
- *       in_reply_to_thread_id?, external_source, external_ref)
- *       -> MessageComposeView. mode='send' queues delivery; mode='draft' stages
- *       the agent-inbox approval surface. IDEMPOTENT on (workspace_id,
- *       external_source, external_ref). Requires email-ops; customer-ops too
- *       ONLY when external_source marks it a cross-app (Customer-Ops) compose.
+ *   - compose_email(workspace_id, contact_id, to_address, to_addresses?, cc?,
+ *       bcc?, reply_all?, subject, body, mode, in_reply_to_thread_id?,
+ *       external_source, external_ref, from_address?)
+ *       -> MessageComposeView (plus resolved to/cc/bcc + from_address).
+ *       mode='send' queues delivery; mode='draft' stages the agent-inbox
+ *       approval surface. IDEMPOTENT on (workspace_id, external_source,
+ *       external_ref). Requires email-ops; customer-ops too ONLY when
+ *       external_source marks it a cross-app (Customer-Ops) compose.
  *
  * Plus the foundation tools (health, list_my_workspaces) and the agent-inbox
  * approval tools (list_agent_inbox, approve_agent_inbox_item,
@@ -319,7 +321,11 @@ export class EmailOpsTools {
     args: {
       workspace_id?: string;
       contact_id?: string;
-      to_address: string;
+      to_address?: string;
+      to_addresses?: string[];
+      cc?: string[];
+      bcc?: string[];
+      reply_all?: boolean;
       subject: string;
       body: string;
       mode?: 'send' | 'draft';
@@ -363,7 +369,11 @@ export class EmailOpsTools {
 
     return this.email.composeEmail(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
       contactId: args.contact_id ?? null,
-      toAddress: args.to_address,
+      toAddress: args.to_address ?? args.to_addresses?.[0] ?? '',
+      toAddresses: args.to_addresses,
+      cc: args.cc,
+      bcc: args.bcc,
+      replyAll: args.reply_all === true,
       subject: args.subject,
       body: args.body,
       mode,

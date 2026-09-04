@@ -107,6 +107,14 @@ export interface MessageComposeView {
   external_source: string | null;
   external_ref: string | null;
   created_at: string | null;
+  /**
+   * Resolved recipient set actually staged/sent (additive; existing consumers
+   * ignore unknown fields). Always the post-validation, post-reply_all set.
+   */
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  from_address: string | null;
 }
 
 /** One uploaded compose attachment reference (webmail wave: compose extension). */
@@ -119,6 +127,10 @@ export interface ComposeAttachmentInput {
 /** Internal: the parsed compose request the service acts on. */
 export interface ComposeInput {
   contactId: string | null;
+  /**
+   * Back-compat single To. Empty string is allowed when `toAddresses` or
+   * `replyAll` supplies the recipient set (resolved before the SoR write).
+   */
   toAddress: string;
   /**
    * The full recipient list (webmail wave: `to_address` may arrive comma-joined
@@ -167,6 +179,14 @@ export interface ComposeInput {
   references?: string[];
   /** The server-side draft id to update/delete for persistent drafts. */
   draftId?: string | null;
+  /**
+   * When true AND `inReplyToThreadId` is set, derive To/Cc from the latest
+   * message in that thread (everyone except the sending mailbox — Outlook
+   * Reply-all), then merge any explicit to/cc/bcc. Works for sovereign James
+   * and connected Gmail/M365 mailboxes. Requires a resolvable sending mailbox
+   * (`fromAddress` / `fromMailboxAccountId` / workspace default).
+   */
+  replyAll?: boolean;
   // ── Wave 7 (agent-send autonomy matrix) — INTERNAL fields. Set only by
   // first-party runtimes (the agent-reply runtime); the REST/MCP controllers
   // never map them from wire input, so an external caller cannot forge them.
@@ -201,6 +221,10 @@ export interface AgentInboxView {
   drafted_by: string | null;
   summary: string | null;
   to_address: string | null;
+  to_addresses: string[];
+  cc: string[];
+  bcc: string[];
+  from_address: string | null;
   subject: string | null;
   // A short preview of the drafted BODY so the reviewer sees what the agent
   // actually wrote without opening the full message (Email-Ops' own agent-inbox

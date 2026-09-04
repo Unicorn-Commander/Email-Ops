@@ -129,6 +129,18 @@ def parse_address(raw: Optional[str]) -> Optional[Address]:
     return Address(address=addr, name=name or None)
 
 
+def recipient_list(to_addr: str, to_addrs: Optional[List[str]] = None) -> List[str]:
+    """Full To list for a send/draft.
+
+    Prefer ``to_addrs`` when the caller supplied a list (the MCP/REST multi-To
+    path). Otherwise split the single ``to_addr`` on commas so a joined To still
+    fans out on Graph (which cannot take ``"a@x, b@y"`` as one address).
+    """
+    if to_addrs:
+        return [a.strip() for a in to_addrs if a and str(a).strip()]
+    return [p.strip() for p in (to_addr or "").split(",") if p.strip()]
+
+
 def parse_address_list(raw: Optional[str]) -> List[Address]:
     """Parse a comma-separated RFC 5322 address list into Address objects."""
     if not raw:

@@ -507,6 +507,7 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
     message: {
       from: string;
       to: string;
+      toAddresses?: string[];
       subject: string;
       body: string;
       bodyHtml?: string | null;
@@ -521,6 +522,7 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       credentials,
       from: message.from,
       to: message.to,
+      to_addresses: message.toAddresses?.length ? message.toAddresses : null,
       subject: message.subject,
       body: message.body,
       body_html: message.bodyHtml ?? null,
@@ -543,6 +545,7 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
     message: {
       from: string;
       to: string;
+      toAddresses?: string[];
       subject: string;
       body: string;
       bodyHtml?: string | null;
@@ -557,6 +560,7 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
       credentials,
       from: message.from,
       to: message.to,
+      to_addresses: message.toAddresses?.length ? message.toAddresses : null,
       subject: message.subject,
       body: message.body,
       body_html: message.bodyHtml ?? null,

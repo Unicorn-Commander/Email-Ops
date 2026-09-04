@@ -120,7 +120,7 @@ gate re-derived server-side from the verified token).
 | :--- | :--- | :--- | :--- |
 | `list_threads_with_contact` | List threads with a contact | `workspace_id?`, `contact_id` | Yes |
 | `list_thread_messages` | List thread messages (previews) | `workspace_id?`, `thread_id` | Yes |
-| `compose_email` | Compose outbound email | `workspace_id?`, `contact_id?`, `to_address`, `subject`, `body`, `mode?`, `in_reply_to_thread_id?`, `external_source`, `external_ref` | No |
+| `compose_email` | Compose outbound email | `workspace_id?`, `contact_id?`, `to_address?`, `to_addresses?`, `cc?`, `bcc?`, `reply_all?`, `subject`, `body`, `mode?`, `in_reply_to_thread_id?`, `from_address?`, `external_source`, `external_ref` | No |
 
 ### Agent Inbox (Human-in-the-Loop)
 

@@ -147,6 +147,10 @@ class MailAttachmentInput(BaseModel):
 class MailSendRequest(ProfileRequest):
     from_: str = Field(default="", alias="from")
     to: str
+    # Full To list. `to` is its first entry (back-compat). Graph cannot honour a
+    # comma-joined To as one address, so the list is the honest multi-recipient
+    # path. Empty/omitted → providers split `to` on commas.
+    to_addresses: Optional[List[str]] = None
     subject: str = ""
     body: str = ""
     in_reply_to_thread_id: Optional[str] = None
@@ -688,6 +692,7 @@ def mail_send(request: MailSendRequest) -> dict[str, Any]:
             bcc=request.bcc,
             body_html=request.body_html,
             attachments=_decode_attachments(request.attachments),
+            to_addrs=request.to_addresses,
         )
         return _dataclass_to_dict(result)
     except Exception as exc:  # noqa: BLE001 - degrade clean
@@ -722,6 +727,7 @@ def mail_draft(request: MailDraftRequest) -> dict[str, Any]:
             bcc=request.bcc,
             body_html=request.body_html,
             attachments=_decode_attachments(request.attachments),
+            to_addrs=request.to_addresses,
         )
         return _dataclass_to_dict(result)
     except Exception as exc:  # noqa: BLE001 - degrade clean

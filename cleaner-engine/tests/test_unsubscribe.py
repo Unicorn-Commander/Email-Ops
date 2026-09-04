@@ -43,7 +43,7 @@ class _StubProvider:
         assert self._message is not None
         return self._message
 
-    def send_message(self, from_addr, to_addr, subject, body, in_reply_to_thread_id=None):
+    def send_message(self, from_addr, to_addr, subject, body, in_reply_to_thread_id=None, **kwargs):
         self.sent.append((to_addr, subject, body))
         return SendResult(accepted=self.send_ok, provider_message_id="s1", thread_id=None)
 

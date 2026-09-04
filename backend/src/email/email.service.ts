@@ -86,6 +86,13 @@ import {
 import { mapWithConcurrency, withTimeout } from '../common/async/concurrency';
 import { mayActThroughMailbox } from '../common/mailbox/mailbox-fence';
 import { ApprovalPendingNotice, StableNotifierService } from '../notify/stable-notifier.service';
+import {
+  deriveReplyAll,
+  mergeReplyAll,
+  parseExplicitRecipients,
+  toResolved,
+  type ResolvedComposeRecipients,
+} from './compose-recipients';
 
 /**
  * Fan-out bounds for the multi-mailbox webmail endpoints (unified inbox +
@@ -1590,6 +1597,18 @@ export class EmailService {
     ucUid: string | null,
     input: ComposeInput,
   ): Promise<MessageComposeView> {
+    // Resolve To/Cc/Bcc (and reply_all) BEFORE the write tx. reply_all reads
+    // the live thread (an external provider call) and must not sit inside the
+    // interactive transaction — same §3 lesson as the send itself.
+    const resolved = await this.resolveComposeRecipients(workspaceId, ucUid, input);
+    input = {
+      ...input,
+      toAddress: resolved.toAddress,
+      toAddresses: resolved.toAddresses,
+      cc: resolved.cc,
+      bcc: resolved.bcc,
+    };
+
     // PHASE 1 — validate, authorize, decide, and record the SoR row (a SHORT tx).
     // The external send is deferred to phase 2 so a slow provider (Gmail/Graph,
     // >5s) can't hold the Prisma interactive transaction open past its timeout and
@@ -1768,7 +1787,11 @@ export class EmailService {
           // here, so there are no other payload keys to preserve.
           const held = agentInitiated && policyReasons.length > 0;
           const itemSummary =
-            this.summary(input.subject, input.toAddress) +
+            this.summary(input.subject, input.toAddress, {
+              toAddresses: input.toAddresses,
+              cc: input.cc,
+              bcc: input.bcc,
+            }) +
             (held ? ` — held: ${policyReasons[0].code}` : '');
           const inboxItem = await tx.agentInboxItem.create({
             data: {
@@ -1833,6 +1856,7 @@ export class EmailService {
                   req: {
                     from: fromAddress ?? '',
                     to: input.toAddress,
+                    toAddresses: input.toAddresses?.length ? input.toAddresses : [input.toAddress],
                     subject: input.subject,
                     body: input.body,
                     bodyHtml: input.bodyHtml ?? null,
@@ -3027,6 +3051,75 @@ export class EmailService {
   }
 
   /**
+   * Validate + resolve To/Cc/Bcc, including reply_all derivation from the
+   * latest message in `inReplyToThreadId`. Runs OUTSIDE the compose write tx
+   * because reply_all reads the live thread (provider/JMAP).
+   */
+  private async resolveComposeRecipients(
+    workspaceId: string,
+    ucUid: string | null,
+    input: ComposeInput,
+  ): Promise<ResolvedComposeRecipients> {
+    const explicit = parseExplicitRecipients({
+      toAddress: input.toAddress,
+      toAddresses: input.toAddresses,
+      cc: input.cc,
+      bcc: input.bcc,
+    });
+    if (!input.replyAll) {
+      return toResolved(explicit);
+    }
+    if (!input.inReplyToThreadId) {
+      throw new BadRequestException(
+        'reply_all requires in_reply_to_thread_id (the thread id from list_threads / search_mail / get_thread for that mailbox).',
+      );
+    }
+    const mailbox = await this.peekSendMailbox(workspaceId, ucUid, input);
+    if (!mailbox) {
+      throw new BadRequestException(
+        'reply_all needs a sending mailbox (pass from_address for that mailbox).',
+      );
+    }
+    const messages = await this.listThreadMessages(
+      workspaceId,
+      ucUid,
+      input.inReplyToThreadId,
+      mailbox.id,
+    );
+    if (!messages.length) {
+      throw new BadRequestException(
+        `reply_all could not load thread ${input.inReplyToThreadId} on mailbox ${mailbox.emailAddress}.`,
+      );
+    }
+    const latest = messages[messages.length - 1];
+    const derived = deriveReplyAll({
+      from: latest.from?.address ?? null,
+      to: (latest.to ?? []).map((p) => p.address),
+      cc: (latest.cc ?? []).map((p) => p.address),
+      selfAddress: mailbox.emailAddress,
+    });
+    return toResolved(mergeReplyAll(derived, explicit));
+  }
+
+  /** Best-effort sending mailbox for reply_all self-exclusion (read-only). */
+  private async peekSendMailbox(
+    workspaceId: string,
+    ucUid: string | null,
+    input: ComposeInput,
+  ): Promise<MailboxAccount | null> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      if (input.fromMailboxAccountId) {
+        return tx.mailboxAccount.findFirst({
+          where: { id: input.fromMailboxAccountId, workspaceId },
+        });
+      }
+      const byAddress = await this.resolveFromAddress(tx, workspaceId, input.fromAddress);
+      if (byAddress) return byAddress;
+      return this.defaultMailbox(tx, workspaceId);
+    });
+  }
+
+  /**
    * Resolve an explicit send-from ADDRESS to its registered mailbox, using the
    * explicit routing rule (see mail-provider/mail-routing.ts).
    *
@@ -3333,14 +3426,18 @@ export class EmailService {
         mailbox,
         (req.attachments ?? []).map((a) => a.blobId),
       );
+      const toList = req.toAddresses?.length ? req.toAddresses : [req.toAddress];
       const r = await this.mailProvider.send(mailbox, {
         from: req.fromAddress,
-        to: req.toAddress,
+        to: toList[0],
+        toAddresses: toList,
         subject: req.subject,
         body: req.body,
         // cc/bcc/html ride the external lane too. They used to be dropped here
         // silently, which is data loss on its own and would additionally make an
         // approved draft send to fewer people than the approver was shown.
+        // toAddresses is the full To list — Graph/Gmail used to take only `to`
+        // (the first address), which silently dropped extra To recipients.
         bodyHtml: req.bodyHtml ?? null,
         cc: req.cc,
         bcc: req.bcc,
@@ -3563,7 +3660,14 @@ export class EmailService {
     externalSource: string | null;
     externalRef: string | null;
     createdAt: Date;
+    fromAddress?: string | null;
+    toAddress?: string | null;
+    toAddresses?: string[];
+    ccAddresses?: string[];
+    bccAddresses?: string[];
   }): MessageComposeView {
+    const to =
+      m.toAddresses?.length ? m.toAddresses : m.toAddress ? [m.toAddress] : [];
     return {
       id: m.id,
       thread_id: m.threadId ?? null,
@@ -3572,6 +3676,10 @@ export class EmailService {
       external_source: m.externalSource ?? null,
       external_ref: m.externalRef ?? null,
       created_at: m.createdAt ? m.createdAt.toISOString() : null,
+      to,
+      cc: m.ccAddresses ?? [],
+      bcc: m.bccAddresses ?? [],
+      from_address: m.fromAddress ?? null,
     };
   }
 
@@ -3591,6 +3699,10 @@ export class EmailService {
     },
     msg: {
       toAddress: string | null;
+      fromAddress?: string | null;
+      toAddresses?: string[];
+      ccAddresses?: string[];
+      bccAddresses?: string[];
       subject: string | null;
       body?: string | null;
       preview?: string | null;
@@ -3598,6 +3710,13 @@ export class EmailService {
   ): AgentInboxView {
     const payload = this.cleanupPayload(it.payload);
     const isCleanup = it.kind === AgentInboxKind.CLEANUP;
+    const toAddresses = isCleanup
+      ? []
+      : msg?.toAddresses?.length
+        ? msg.toAddresses
+        : msg?.toAddress
+          ? [msg.toAddress]
+          : [];
     return {
       id: it.id,
       message_id: it.messageId,
@@ -3606,6 +3725,10 @@ export class EmailService {
       drafted_by: it.draftedBy ?? null,
       summary: it.summary ?? (isCleanup ? this.cleanupSummary(payload) : null),
       to_address: isCleanup ? null : msg?.toAddress ?? null,
+      to_addresses: toAddresses,
+      cc: isCleanup ? [] : msg?.ccAddresses ?? [],
+      bcc: isCleanup ? [] : msg?.bccAddresses ?? [],
+      from_address: isCleanup ? null : msg?.fromAddress ?? null,
       subject: isCleanup ? this.cleanupSubject(payload) : msg?.subject ?? null,
       body_preview: isCleanup
         ? this.cleanupBodyPreview(payload)
@@ -3629,9 +3752,18 @@ export class EmailService {
     return flat.length > 140 ? `${flat.slice(0, 137)}…` : flat;
   }
 
-  private summary(subject: string | null | undefined, to: string | null | undefined): string {
+  private summary(
+    subject: string | null | undefined,
+    to: string | null | undefined,
+    extras?: { toAddresses?: string[]; cc?: string[]; bcc?: string[] },
+  ): string {
     const s = subject?.trim() || '(no subject)';
-    return to ? `${s} → ${to}` : s;
+    const tos = extras?.toAddresses?.length ? extras.toAddresses : to ? [to] : [];
+    const bits: string[] = [];
+    if (tos.length) bits.push(tos.join(', '));
+    if (extras?.cc?.length) bits.push(`cc ${extras.cc.join(', ')}`);
+    if (extras?.bcc?.length) bits.push(`bcc ${extras.bcc.join(', ')}`);
+    return bits.length ? `${s} → ${bits.join('; ')}` : s;
   }
 
   private cleanupPayload(value: unknown): Record<string, unknown> {

@@ -325,7 +325,8 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "compose_email",
-      "description": "Compose an outbound email to a customer’s contact. mode=send queues delivery now (Apache James, or Postmark for the transactional high-rep lane); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires the email-ops entitlement; a CROSS-APP compose (external_source=customer-ops) additionally requires customer-ops. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created. SEND IDENTITY: pass from_address to choose which registered mailbox it leaves from; the lane follows the mailbox — Microsoft 365 addresses go out through Microsoft Graph, sovereign domains through Apache James (Postmark for the transactional high-rep lane). Omit from_address to use the agent’s own mailbox or the workspace default, as before.",      "input_schema": {
+      "description": "Compose an outbound email. mode=send queues delivery now (Apache James, or Postmark for the transactional high-rep lane, or the connected Gmail/Microsoft Graph lane when from_address is a connected mailbox); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires the email-ops entitlement; a CROSS-APP compose (external_source=customer-ops) additionally requires customer-ops. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created. SEND IDENTITY: pass from_address to choose which registered mailbox it leaves from; the lane follows the mailbox — Microsoft 365 addresses go out through Microsoft Graph, Gmail through the Gmail API, sovereign domains through Apache James (Postmark for the transactional high-rep lane). Omit from_address to use the agent’s own mailbox or the workspace default, as before. RECIPIENTS: to_address is the back-compat single To; to_addresses (1-50) is the full To list — if both are set, to_address MUST equal the first entry. cc and bcc are 0-50 addresses each; an address may not appear in both To/Cc and Bcc. REPLY INTO A THREAD: pass in_reply_to_thread_id (the thread id from list_threads / search_mail / get_thread for THAT mailbox) AND from_address = that mailbox. On connected Gmail this sets threadId + In-Reply-To/References; on Microsoft 365 it uses Graph createReply / conversationId so Outlook threads it; on sovereign James it sets In-Reply-To/References. reply_all=true (default false) with in_reply_to_thread_id derives To/Cc from the latest message in that thread (everyone except the sending mailbox, matching Outlook Reply-all) then merges any explicit to/cc/bcc. RETURNS the resolved recipient set (to, cc, bcc), the mode actually applied (an unattended send may be downgraded to draft / pending_approval), and thread_id (the provider conversation id on Gmail/M365).",
+      "input_schema": {
         "type": "object",
         "properties": {
           "workspace_id": {
@@ -338,6 +339,34 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
             "type": "string",
             "minLength": 1,
             "maxLength": 320
+          },
+          "to_addresses": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 320
+            },
+            "minItems": 1,
+            "maxItems": 50
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 320
+            },
+            "maxItems": 50
+          },
+          "bcc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 320
+            },
+            "maxItems": 50
           },
           "subject": {
             "type": "string",
@@ -358,7 +387,10 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
           },
           "in_reply_to_thread_id": {
             "type": "string",
-            "maxLength": 200
+            "maxLength": 500
+          },
+          "reply_all": {
+            "type": "boolean"
           },
           "external_source": {
             "type": "string",
@@ -377,7 +409,6 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
           }
         },
         "required": [
-          "to_address",
           "subject",
           "body",
           "external_source",

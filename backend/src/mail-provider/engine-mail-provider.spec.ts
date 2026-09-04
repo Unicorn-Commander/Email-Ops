@@ -237,8 +237,26 @@ describe('EngineMailProvider', () => {
       token: 'gtok',
       send: { accepted: true, provider_message_id: 'pm-1', thread_id: 't9', reason: null },
     });
-    const ok = await happy.provider.send(gmailbox(), { from: 'person84@example.com', to: 'x@y.test', subject: 's', body: 'b' });
+    const ok = await happy.provider.send(gmailbox(), {
+      from: 'person84@example.com',
+      to: 'a@y.test',
+      toAddresses: ['a@y.test', 'b@y.test'],
+      subject: 's',
+      body: 'b',
+      cc: ['c@y.test'],
+      bcc: ['d@y.test'],
+    });
     expect(ok).toEqual({ accepted: true, providerMessageId: 'pm-1', threadId: 't9', reason: null });
+    expect(happy.engine.sendMail).toHaveBeenCalledWith(
+      'gmail',
+      { token: 'gtok' },
+      expect.objectContaining({
+        to: 'a@y.test',
+        toAddresses: ['a@y.test', 'b@y.test'],
+        cc: ['c@y.test'],
+        bcc: ['d@y.test'],
+      }),
+    );
 
     const notConnected = make({ user: { keycloakId: 'kc-sub-1' }, token: null });
     const res = await notConnected.provider.send(gmailbox(), { from: 'person84@example.com', to: 'x@y.test', subject: 's', body: 'b' });

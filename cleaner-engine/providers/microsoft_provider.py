@@ -33,6 +33,7 @@ from providers.mail_client import (
     ThreadMessage,
     ThreadSummary,
     clamp_limit,
+    recipient_list,
     to_iso8601,
 )
 
@@ -719,6 +720,7 @@ class MicrosoftGraphProvider(EmailProvider):
         bcc: Optional[List[str]] = None,
         body_html: Optional[str] = None,
         attachments: Optional[List[dict]] = None,
+        to_addrs: Optional[List[str]] = None,
     ) -> SendResult:
         """Send a new message, or a THREADED reply when a reply target is given.
 
@@ -743,19 +745,21 @@ class MicrosoftGraphProvider(EmailProvider):
                     bcc=bcc,
                     body_html=body_html,
                     attachments=attachments,
+                    to_addrs=to_addrs,
                 )
                 if reply is not None:
                     return reply
             # Unresolvable / un-creatable reply target: degrade to the plain
             # send lane (previous behavior) rather than refusing to send.
 
+        tos = recipient_list(to_addr, to_addrs)
         message: Dict[str, Any] = {
             'subject': subject or '',
             'body': {
                 'contentType': 'HTML' if body_html else 'Text',
                 'content': body_html if body_html else (body or ''),
             },
-            'toRecipients': [{'emailAddress': {'address': to_addr}}],
+            'toRecipients': [{'emailAddress': {'address': a}} for a in tos],
         }
         if cc:
             message['ccRecipients'] = [{'emailAddress': {'address': a}} for a in cc if a]
@@ -825,6 +829,7 @@ class MicrosoftGraphProvider(EmailProvider):
         bcc: Optional[List[str]] = None,
         body_html: Optional[str] = None,
         attachments: Optional[List[dict]] = None,
+        to_addrs: Optional[List[str]] = None,
     ) -> Optional[SendResult]:
         """createReply -> PATCH -> (attach) -> send.
 
@@ -844,6 +849,7 @@ class MicrosoftGraphProvider(EmailProvider):
         if not draft_id:
             return None
 
+        tos = recipient_list(to_addr, to_addrs)
         patch_body: Dict[str, Any] = {
             'body': {
                 'contentType': 'HTML' if body_html else 'Text',
@@ -851,8 +857,8 @@ class MicrosoftGraphProvider(EmailProvider):
             },
             # createReply addresses the SENDER of the target message; a bump
             # replies to our own sent message, so always pin the recipients
-            # the caller asked for.
-            'toRecipients': [{'emailAddress': {'address': to_addr}}],
+            # the caller asked for (the full To list, not just the first).
+            'toRecipients': [{'emailAddress': {'address': a}} for a in tos],
         }
         if subject:
             patch_body['subject'] = subject
@@ -914,6 +920,7 @@ class MicrosoftGraphProvider(EmailProvider):
         bcc: Optional[List[str]] = None,
         body_html: Optional[str] = None,
         attachments: Optional[List[dict]] = None,
+        to_addrs: Optional[List[str]] = None,
     ) -> DraftResult:
         """Create a REAL draft in the mailbox's Drafts folder (POST /me/messages).
 
@@ -927,13 +934,14 @@ class MicrosoftGraphProvider(EmailProvider):
         set it when it differs from the account address, and a Graph refusal is
         surfaced as created:False rather than silently dropping the identity.
         """
+        tos = recipient_list(to_addr, to_addrs)
         message: Dict[str, Any] = {
             'subject': subject or '',
             'body': {
                 'contentType': 'HTML' if body_html else 'Text',
                 'content': body_html if body_html else (body or ''),
             },
-            'toRecipients': [{'emailAddress': {'address': to_addr}}],
+            'toRecipients': [{'emailAddress': {'address': a}} for a in tos],
         }
         if cc:
             message['ccRecipients'] = [{'emailAddress': {'address': a}} for a in cc if a]

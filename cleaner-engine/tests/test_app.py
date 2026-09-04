@@ -163,7 +163,7 @@ class FakeProvider:
         ]
 
     def send_message(self, from_addr, to_addr, subject, body, in_reply_to_thread_id=None,
-                     cc=None, bcc=None, body_html=None, attachments=None):
+                     cc=None, bcc=None, body_html=None, attachments=None, to_addrs=None):
         from providers.mail_client import SendResult
 
         self.calls.append((
@@ -178,6 +178,7 @@ class FakeProvider:
                 "cc": cc,
                 "bcc": bcc,
                 "body_html": body_html,
+                "to_addrs": to_addrs,
             },
         ))
         return SendResult(
@@ -197,7 +198,7 @@ class FailingProvider(FakeProvider):
         raise RuntimeError("403 forbidden")
 
     def send_message(self, from_addr, to_addr, subject, body, in_reply_to_thread_id=None,
-                     cc=None, bcc=None, body_html=None, attachments=None):
+                     cc=None, bcc=None, body_html=None, attachments=None, to_addrs=None):
         raise RuntimeError("token expired")
 
 
@@ -712,6 +713,32 @@ def test_mail_send_happy_path(client, fake_provider_factory, provider):
     assert sent_call[2]["from_addr"] == "me@example.com"
     assert sent_call[2]["to_addr"] == "you@example.com"
     assert sent_call[2]["in_reply_to_thread_id"] == "thread-1"
+
+
+@pytest.mark.parametrize("provider", ["gmail", "microsoft"])
+def test_mail_send_forwards_to_addresses_cc_bcc(client, fake_provider_factory, provider):
+    response = client.post(
+        "/mail/send",
+        headers=_auth_headers(),
+        json={
+            "provider": provider,
+            "credentials": {"token": "abc"},
+            "from": "me@example.com",
+            "to": "a@example.com",
+            "to_addresses": ["a@example.com", "b@example.com"],
+            "cc": ["c@example.com"],
+            "bcc": ["d@example.com"],
+            "subject": "Hi",
+            "body": "Hello there",
+            "in_reply_to_thread_id": "thread-1",
+        },
+    )
+    assert response.status_code == 200
+    sent_call = fake_provider_factory.instances[-1].calls[-1]
+    assert sent_call[2]["to_addr"] == "a@example.com"
+    assert sent_call[2]["to_addrs"] == ["a@example.com", "b@example.com"]
+    assert sent_call[2]["cc"] == ["c@example.com"]
+    assert sent_call[2]["bcc"] == ["d@example.com"]
 
 
 def test_mail_routes_require_auth(client):

@@ -210,6 +210,7 @@ export abstract class ConnectedAccountsEnginePort {
     message: {
       from: string;
       to: string;
+      toAddresses?: string[];
       subject: string;
       body: string;
       bodyHtml?: string | null;
@@ -231,6 +232,7 @@ export abstract class ConnectedAccountsEnginePort {
     message: {
       from: string;
       to: string;
+      toAddresses?: string[];
       subject: string;
       body: string;
       bodyHtml?: string | null;

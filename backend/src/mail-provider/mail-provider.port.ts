@@ -24,6 +24,11 @@ import { InboundPollResult } from '../stalwart/stalwart.types';
 export interface MailProviderSendRequest {
   from: string;
   to: string;
+  /**
+   * Full To list. `to` is its first entry (back-compat). Graph/Gmail MUST honour
+   * every entry — a silently dropped extra To is data loss, same as cc/bcc.
+   */
+  toAddresses?: string[];
   subject: string;
   body: string;
   /** HTML alternative. Sent as the Graph/MIME HTML body when present. */

@@ -161,6 +161,7 @@ export class EngineMailProvider extends MailProviderPort {
     const res = await this.engine.sendMail(auth.provider, auth.credentials, {
       from: req.from,
       to: req.to,
+      toAddresses: req.toAddresses,
       subject: req.subject,
       body: req.body,
       bodyHtml: req.bodyHtml ?? null,
@@ -203,6 +204,7 @@ export class EngineMailProvider extends MailProviderPort {
     const res = await this.engine.createMailDraft(auth.provider, auth.credentials, {
       from: req.from,
       to: req.to,
+      toAddresses: req.toAddresses,
       subject: req.subject,
       body: req.body,
       bodyHtml: req.bodyHtml ?? null,

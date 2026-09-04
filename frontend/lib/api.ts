@@ -372,6 +372,10 @@ export interface AgentInboxItemView {
   drafted_by: string | null;
   summary: string | null;
   to_address: string | null;
+  to_addresses?: string[];
+  cc?: string[];
+  bcc?: string[];
+  from_address?: string | null;
   subject: string | null;
   body_preview: string | null;
   reviewed_by_uc_uid: string | null;
@@ -379,6 +383,16 @@ export interface AgentInboxItemView {
   review_note: string | null;
   created_at: string | null;
   payload?: Record<string, unknown> | null;
+}
+
+/** Compact "a, b; cc c; bcc d" line from an inbox item (falls back to to_address). */
+export function agentInboxRecipientLine(item: Pick<AgentInboxItemView, 'to_address' | 'to_addresses' | 'cc' | 'bcc'>): string {
+  const tos = item.to_addresses?.length ? item.to_addresses : item.to_address ? [item.to_address] : [];
+  const bits: string[] = [];
+  if (tos.length) bits.push(tos.join(', '));
+  if (item.cc?.length) bits.push(`cc ${item.cc.join(', ')}`);
+  if (item.bcc?.length) bits.push(`bcc ${item.bcc.join(', ')}`);
+  return bits.join('; ');
 }
 
 /** The compose/message projection echoed back on approve/reject. */
@@ -390,6 +404,10 @@ export interface MessageView {
   external_source: string | null;
   external_ref: string | null;
   created_at: string | null;
+  to?: string[];
+  cc?: string[];
+  bcc?: string[];
+  from_address?: string | null;
 }
 
 export interface AgentInboxListResponse {
