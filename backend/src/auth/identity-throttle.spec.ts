@@ -1,16 +1,23 @@
 import { credentialTracker, ipTracker, requestIp } from './identity-throttle';
 
 describe('identity-throttle trackers', () => {
-  it('requestIp prefers X-Forwarded-For first hop', () => {
+  it('requestIp ignores client-supplied X-Forwarded-For (spoofable) and uses req.ip', () => {
     expect(
       requestIp({
         headers: { 'x-forwarded-for': '203.0.113.9, 10.0.0.1' },
-        ip: '127.0.0.1',
+        ips: ['203.0.113.9', '10.0.0.1'],
+        ip: '10.0.0.1',
       }),
-    ).toBe('203.0.113.9');
+    ).toBe('10.0.0.1');
   });
 
-  it('requestIp falls back to req.ip', () => {
+  it('rotating fake X-Forwarded-For still lands in one ip bucket', async () => {
+    const a = await ipTracker({ ip: '10.0.0.1', headers: { 'x-forwarded-for': '1.1.1.1' } });
+    const b = await ipTracker({ ip: '10.0.0.1', headers: { 'x-forwarded-for': '2.2.2.2' } });
+    expect(a).toBe(b);
+  });
+
+  it('requestIp uses req.ip', () => {
     expect(requestIp({ headers: {}, ip: '192.0.2.10' })).toBe('192.0.2.10');
   });
 

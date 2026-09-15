@@ -18,17 +18,10 @@ import { createHash } from 'crypto';
 
 export const SKIP_ALL_THROTTLERS = { short: true, long: true, ip: true } as const;
 
+// req.ip only: main.ts sets `trust proxy` 1, so Express already resolves the
+// hop Traefik saw. The leftmost X-Forwarded-For (and req.ips[0]) is
+// client-supplied — reading it lets rotating fake XFF values bypass `ip`.
 export function requestIp(req: Record<string, any>): string {
-  const forwarded = req.headers?.['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.trim()) {
-    return forwarded.split(',')[0].trim();
-  }
-  if (Array.isArray(forwarded) && typeof forwarded[0] === 'string') {
-    return forwarded[0].split(',')[0].trim();
-  }
-  if (Array.isArray(req.ips) && typeof req.ips[0] === 'string' && req.ips[0]) {
-    return req.ips[0];
-  }
   if (typeof req.ip === 'string' && req.ip) {
     return req.ip;
   }
