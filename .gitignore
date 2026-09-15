@@ -4,3 +4,6 @@
 scripts/.backup.env
 __pycache__/
 cleaner-engine/*.egg-info/
+
+# your-prod-host prod runtime env (values live only on the host)
+infrastructure/.env.your-prod-host.prod
