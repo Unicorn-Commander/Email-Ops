@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
+import { credentialTracker, ipTracker } from './auth/identity-throttle';
 
 import { PrismaModule } from './prisma/prisma.module';
 import { WorkspaceModule } from './common/workspace/workspace.module';
@@ -41,10 +42,14 @@ import { NotifyModule } from './notify/notify.module';
       envFilePath: '.env',
     }),
 
-    // Rate limiting — named throttlers for different security levels.
+    // Rate limiting. short/long are PER CREDENTIAL (JWT/PAT digest, else IP)
+    // so MCP agents on the same NAT do not share one 20/60s bucket with the
+    // cockpit. `ip` is a high per-IP ceiling so rotating junk Bearers cannot
+    // unbounded-DoS. SkipThrottle maps must name all three (see SKIP_ALL_THROTTLERS).
     ThrottlerModule.forRoot([
-      { name: 'short', ttl: 60000, limit: 20 },
-      { name: 'long', ttl: 3600000, limit: 200 },
+      { name: 'short', ttl: 60000, limit: 20, getTracker: credentialTracker },
+      { name: 'long', ttl: 3600000, limit: 200, getTracker: credentialTracker },
+      { name: 'ip', ttl: 60000, limit: 200, getTracker: ipTracker },
     ]),
 
     // Core tenancy + identity.

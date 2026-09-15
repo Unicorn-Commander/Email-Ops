@@ -17,6 +17,7 @@
 
 import { Body, Controller, HttpCode, Logger, Post, UseGuards } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
+import { SKIP_ALL_THROTTLERS } from '../auth/identity-throttle';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { EmailService } from '../email/email.service';
 import { PostmarkWebhookGuard } from './postmark-webhook.guard';
@@ -37,9 +38,7 @@ interface WebhookAck {
 // Hidden from Swagger: it's a provider-only machine endpoint, not part of the
 // user-facing API surface.
 @ApiExcludeController()
-// Bare @SkipThrottle() is a no-op against the named throttlers in app.module, so
-// spell them out (matching the MCP controller).
-@SkipThrottle({ short: true, long: true })
+@SkipThrottle(SKIP_ALL_THROTTLERS)
 @Controller('webhooks')
 export class WebhooksController {
   private readonly logger = new Logger(WebhooksController.name);

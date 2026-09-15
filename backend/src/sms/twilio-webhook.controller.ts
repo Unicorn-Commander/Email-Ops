@@ -14,6 +14,7 @@
 
 import { Body, Controller, Header, HttpCode, Logger, Post, UseGuards } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
+import { SKIP_ALL_THROTTLERS } from '../auth/identity-throttle';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { SmsService } from './sms.service';
 import { TwilioWebhookGuard } from './twilio-webhook.guard';
@@ -28,7 +29,7 @@ interface TwilioInboundBody {
 const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
 
 @ApiExcludeController()
-@SkipThrottle({ short: true, long: true })
+@SkipThrottle(SKIP_ALL_THROTTLERS)
 @Controller('webhooks')
 export class TwilioWebhookController {
   private readonly logger = new Logger(TwilioWebhookController.name);

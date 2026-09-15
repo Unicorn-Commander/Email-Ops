@@ -1,14 +1,14 @@
 import { Controller, Get } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
+import { SKIP_ALL_THROTTLERS } from '../auth/identity-throttle';
 import { HealthCheck, HealthCheckService, MemoryHealthIndicator } from '@nestjs/terminus';
 import { PrismaHealthIndicator } from './prisma.health';
 
 @ApiTags('health')
-// Named throttlers ('short' + 'long') require an explicit map in
-// @nestjs/throttler v5 — bare @SkipThrottle() is a no-op against named
-// throttlers, so probes would 429 once probe + public traffic exceed the limit.
-@SkipThrottle({ short: true, long: true })
+// Named throttlers require an explicit map in @nestjs/throttler v5 — a bare
+// @SkipThrottle() is a no-op, and omitting `ip` would still enforce the ceiling.
+@SkipThrottle(SKIP_ALL_THROTTLERS)
 @Controller('health')
 export class HealthController {
   constructor(

@@ -10,6 +10,7 @@
 
 import { All, Controller, Logger, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { Request, Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { McpService } from './mcp.service';
@@ -17,9 +18,12 @@ import { User } from '@prisma/client';
 
 @ApiTags('mcp')
 @ApiBearerAuth()
-// The global ThrottlerModule (short: 20/60s, long: 200/hr — app.module) applies to
-// this MCP HTTP surface: agents/federation calls are rate-limited like any other
-// authenticated route. (Previously @SkipThrottle exempted it — a DoS/abuse gap.)
+// MCP stays under the global throttler (SkipThrottle here was a DoS gap).
+// Caps are PER CREDENTIAL (app.module credentialTracker), not shared NAT IP.
+// A sweep of search_mail/get_thread is several POSTs in one second — 20/60s
+// is the send-lane budget and is too tight for agent reads, so MCP gets a
+// higher short/long pair. The per-IP ceiling (`ip`) still applies.
+@Throttle({ short: { ttl: 60000, limit: 60 }, long: { ttl: 3600000, limit: 600 } })
 @Controller('mcp')
 export class McpController {
   private readonly logger = new Logger(McpController.name);
