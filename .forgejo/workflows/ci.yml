@@ -6,17 +6,9 @@
 #   engine    pip install .[dev] -> pytest (FastAPI TestClient, in-process)
 #   frontend  npm ci -> lint -> next build
 #
-# Runner notes (see also the lane report):
-#   * `runs-on: ubuntu-latest` must match a label your Forgejo runner advertises;
-#     rename if your instance uses a different label (e.g. `docker`, `ubuntu-22.04`).
-#   * The backend integration job reaches Postgres at 127.0.0.1:55444 — the exact
-#     historical verify-DB endpoint — so BOTH the env-driven specs (TEST_DATABASE_URL)
-#     and the two email.service specs a parallel lane still owns (which hardcode
-#     127.0.0.1:55444) converge on one database. This assumes the runner exposes
-#     service ports on the job's localhost (GitHub-Actions port-mapping semantics /
-#     host-executed act_runner). If your runner isolates jobs on a container network,
-#     services are reached by their label host instead — point TEST_DATABASE_URL +
-#     DATABASE_URL at `postgres:5432` AND ensure the email specs are converted first.
+# Containerized Forgejo jobs reach the isolated verify DB by service name.
+# Never publish service ports on the shared runner host. All 14 integration
+# suites read TEST_DATABASE_URL; local developer defaults remain unchanged.
 
 name: CI
 
@@ -41,18 +33,14 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: verify
           POSTGRES_DB: emailops
-        ports:
-          # Map the service to the historical verify-DB port so hardcoded specs work.
-          - 55444:5432
         options: >-
           --health-cmd "pg_isready -U postgres -d emailops"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 12
     env:
-      # Identical to the local-dev default in backend/test/test-db.ts, so CI
-      # behaves exactly like a local verify-DB run.
-      TEST_DATABASE_URL: postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public
+      # Private job-service DNS; no host-port dependency.
+      TEST_DATABASE_URL: postgresql://postgres:REMOVED@postgres:5432/emailops?schema=public
     steps:
       - uses: actions/checkout@v4
 
@@ -85,7 +73,7 @@ jobs:
       - name: Apply schema to the CI Postgres (prisma migrate deploy)
         run: npx prisma migrate deploy
         env:
-          DATABASE_URL: postgresql://postgres:REMOVED@127.0.0.1:55444/emailops?schema=public
+          DATABASE_URL: postgresql://postgres:REMOVED@postgres:5432/emailops?schema=public
 
       - name: Integration tests (against the Postgres service)
         run: npm run test:integration
