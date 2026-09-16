@@ -110,6 +110,7 @@ export class AuthService {
         !!(await this.prisma.invitation.findFirst({
           where: {
             email: email.trim().toLowerCase(), status: InvitationStatus.PENDING,
+            workspace: { status: 'active' },
             expiresAt: { gt: new Date() },
           },
           select: { id: true },

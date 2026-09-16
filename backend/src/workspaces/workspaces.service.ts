@@ -384,6 +384,12 @@ export class WorkspacesService {
       if (invite.email.trim().toLowerCase() !== (user.email ?? '').trim().toLowerCase()) {
         throw new ForbiddenException('This invitation was issued to a different email address.');
       }
+      // Serialize against workspace suspension/deletion before granting access.
+      await tx.$queryRaw`SELECT id FROM workspaces WHERE id = ${invite.workspaceId} FOR SHARE`;
+      const ws = await tx.workspace.findUniqueOrThrow({ where: { id: invite.workspaceId } });
+      if (ws.status !== 'active') {
+        throw new ForbiddenException('This organization is not active.');
+      }
       const userKey = MembershipService.membershipKey(user);
       const existing = await tx.membership.findFirst({
         where: { workspaceId: invite.workspaceId, userKey: { in: this.callerKeys(user) } },
@@ -403,7 +409,6 @@ export class WorkspacesService {
         where: { id: invite.id },
         data: { status: InvitationStatus.ACCEPTED, acceptedByKey: userKey, acceptedAt: new Date() },
       });
-      const ws = await tx.workspace.findUniqueOrThrow({ where: { id: invite.workspaceId } });
       return {
         workspace_id: invite.workspaceId, slug: ws.slug, display_name: ws.displayName,
         role: roleToWire(mine.role), is_default: mine.isDefault,

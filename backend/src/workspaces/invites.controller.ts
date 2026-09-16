@@ -15,6 +15,7 @@ import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
 import { IsString, MinLength } from 'class-validator';
 import { User } from '@prisma/client';
+import { InvitationSessionGuard } from '../auth/guards/invitation-session.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { WorkspacesService } from './workspaces.service';
@@ -29,7 +30,7 @@ class AcceptInviteDto {
 @ApiTags('invites')
 @ApiBearerAuth()
 @Controller('invites')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, InvitationSessionGuard)
 export class InvitesController {
   constructor(private readonly workspaces: WorkspacesService) {}
 

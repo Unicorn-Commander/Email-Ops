@@ -31,6 +31,7 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
 import { IsEmail, IsIn, IsOptional, IsString, MaxLength, Matches, MinLength } from 'class-validator';
 import { User } from '@prisma/client';
+import { InvitationSessionGuard } from '../auth/guards/invitation-session.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -179,7 +180,7 @@ export class WorkspacesController {
   }
 
   @Get(':workspaceId/invites')
-  @UseGuards(WorkspaceMembershipGuard)
+  @UseGuards(InvitationSessionGuard, WorkspaceMembershipGuard)
   @ApiOperation({ summary: 'List the organization’s pending invitations.' })
   @ApiResponse({ status: 200, description: 'The pending invitations + count.' })
   @ApiResponse({ status: 403, description: 'Requires the admin role or higher.' })
@@ -189,7 +190,7 @@ export class WorkspacesController {
   }
 
   @Post(':workspaceId/invites')
-  @UseGuards(WorkspaceMembershipGuard)
+  @UseGuards(InvitationSessionGuard, WorkspaceMembershipGuard)
   @ApiOperation({ summary: 'Invite an email address into the organization.' })
   @ApiResponse({ status: 201, description: 'The created invitation.' })
   @ApiResponse({ status: 400, description: 'Already a member, or invalid email.' })
@@ -206,7 +207,7 @@ export class WorkspacesController {
   }
 
   @Delete(':workspaceId/invites/:id')
-  @UseGuards(WorkspaceMembershipGuard)
+  @UseGuards(InvitationSessionGuard, WorkspaceMembershipGuard)
   @ApiOperation({ summary: 'Revoke a pending invitation.' })
   @ApiResponse({ status: 200, description: 'Revoked.' })
   @ApiResponse({ status: 403, description: 'Requires the admin role or higher.' })

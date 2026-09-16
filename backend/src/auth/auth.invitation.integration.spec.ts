@@ -10,6 +10,7 @@ import { PatService } from './pat.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { MembershipService } from '../common/workspace/membership.service';
 import { WorkspacesService } from '../workspaces/workspaces.service';
+import { WorkspacesController } from '../workspaces/workspaces.controller';
 import { InvitesController } from '../workspaces/invites.controller';
 import { TEST_DATABASE_URL } from '../../test/test-db';
 
@@ -33,10 +34,11 @@ describe('invitation-aware first login and atomic acceptance', () => {
     membership = new MembershipService(prisma, config);
     workspaces = new WorkspacesService(prisma, membership);
     const module = await Test.createTestingModule({
-      controllers: [InvitesController], providers: [JwtStrategy,
+      controllers: [InvitesController, WorkspacesController], providers: [JwtStrategy,
         { provide: ConfigService, useValue: config }, { provide: AuthService, useValue: auth },
         { provide: WorkspacesService, useValue: workspaces },
-        { provide: PatService, useValue: { resolvePatRecord: async () => null } },
+        { provide: MembershipService, useValue: membership },
+        { provide: PatService, useValue: new PatService(prisma) },
       ],
     }).compile();
     app = module.createNestApplication();
@@ -145,6 +147,43 @@ describe('invitation-aware first login and atomic acceptance', () => {
       await prisma.$executeRawUnsafe('DROP TRIGGER invite_test_fail ON invitations');
       await prisma.$executeRawUnsafe('DROP FUNCTION invite_test_fail()');
     }
+    expect((await accept(user,f.invite.token!)).status).toBe(201);
+  });
+
+  it('real narrow PAT cannot list/accept or administer invitations; signed sessions still can', async () => {
+    const f = await fixture();
+    const user = await auth.validateKeycloakUser(randomUUID(), {email:f.invitedEmail,email_verified:true});
+    for (const actor of [user, f.owner]) {
+      const pat = await new PatService(prisma).createPat(actor.id, 'isolated-invite-negative', {
+        scopes:['mail:read'], expiresAt:new Date(Date.now()+60000),
+      });
+      for (const [method,path,body] of [
+        ['GET','/invites/mine',null], ['POST','/invites/accept',{token:f.invite.token}],
+        ['GET',`/workspaces/${f.ws.workspace_id}/invites`,null],
+        ['POST',`/workspaces/${f.ws.workspace_id}/invites`,{email:email()}],
+        ['DELETE',`/workspaces/${f.ws.workspace_id}/invites/${f.invite.id}`,null],
+      ] as const) {
+        const response = await fetch(origin+path,{method,headers:{Authorization:`Bearer ${pat.token}`,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
+        expect(response.status).toBe(403);
+      }
+    }
+    expect((await prisma.invitation.findUniqueOrThrow({where:{id:f.invite.id}})).status).toBe('PENDING');
+    expect(await membership.listActiveMemberships(user)).toEqual([]);
+    expect((await accept(user,f.invite.token!)).status).toBe(201);
+  });
+  it('inactive workspaces cannot admit new identities or grant membership; legacy unbounded acceptance remains explicit', async () => {
+    const f = await fixture();
+    const user = await auth.validateKeycloakUser(randomUUID(),{email:f.invitedEmail,email_verified:true});
+    const otherEmail = email();
+    await workspaces.invite(f.ws.workspace_id,f.owner,{email:otherEmail});
+    for (const status of ['suspended','archived','deleting']) {
+      await prisma.workspace.update({where:{id:f.ws.workspace_id},data:{status}});
+      await expect(auth.validateKeycloakUser(randomUUID(),{email:otherEmail,email_verified:true})).rejects.toThrow();
+      expect((await accept(user,f.invite.token!)).status).toBe(403);
+      expect(await membership.listActiveMemberships(user)).toEqual([]);
+    }
+    await prisma.workspace.update({where:{id:f.ws.workspace_id},data:{status:'active'}});
+    await prisma.invitation.update({where:{id:f.invite.id},data:{expiresAt:null}});
     expect((await accept(user,f.invite.token!)).status).toBe(201);
   });
 
