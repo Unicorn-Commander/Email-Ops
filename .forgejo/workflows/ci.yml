@@ -13,8 +13,18 @@
 name: CI
 
 on:
+  # Push builds are limited to main. A branch with an open pull request already
+  # gets a full run from the pull_request event, and this workflow fans out into
+  # three jobs, so firing on both events cost six jobs per commit.
   push:
+    branches: [main]
   pull_request:
+
+# A newer commit on the same branch or pull request cancels the older in-flight
+# run. Without this, superseded runs kept occupying the shared runner.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
