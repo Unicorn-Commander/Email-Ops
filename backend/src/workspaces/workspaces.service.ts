@@ -363,68 +363,57 @@ export class WorkspacesService {
     }));
   }
 
-  /** Accept an invitation by its token → create the membership. Idempotent if the
-   * caller is already a member. The token is the authorization (magic-link). */
+  /** Accept a live invitation exactly once, atomically with its membership.
+   * Existing active membership keeps its role; suspended membership is refused. */
   async acceptInvite(user: User, token: string): Promise<MyWorkspace> {
     const t = (token ?? '').trim();
     if (!t) throw new BadRequestException('An invitation token is required.');
 
-    const invite = await this.prisma.invitation.findUnique({ where: { token: t } });
-    if (!invite) throw new NotFoundException('That invitation could not be found.');
-    if (invite.status !== InvitationStatus.PENDING) {
-      throw new BadRequestException('That invitation is no longer valid.');
-    }
-    if (invite.expiresAt && invite.expiresAt.getTime() <= Date.now()) {
-      await this.prisma.invitation.update({
+    return this.prisma.$transaction(async (tx) => {
+      // Serialize accept/revoke/reissue on the same invitation. Re-read after
+      // the lock; a consumed/rotated capability must not authorize a retry.
+      await tx.$queryRaw`SELECT id FROM invitations WHERE token = ${t} FOR UPDATE`;
+      const invite = await tx.invitation.findUnique({ where: { token: t } });
+      if (!invite) throw new NotFoundException('That invitation could not be found.');
+      if (invite.status !== InvitationStatus.PENDING) {
+        throw new BadRequestException('That invitation is no longer valid.');
+      }
+      if (invite.expiresAt && invite.expiresAt.getTime() <= Date.now()) {
+        throw new BadRequestException('That invitation has expired.');
+      }
+      if (invite.email.trim().toLowerCase() !== (user.email ?? '').trim().toLowerCase()) {
+        throw new ForbiddenException('This invitation was issued to a different email address.');
+      }
+      // Serialize against workspace suspension/deletion before granting access.
+      await tx.$queryRaw`SELECT id FROM workspaces WHERE id = ${invite.workspaceId} FOR SHARE`;
+      const ws = await tx.workspace.findUniqueOrThrow({ where: { id: invite.workspaceId } });
+      if (ws.status !== 'active') {
+        throw new ForbiddenException('This organization is not active.');
+      }
+      const userKey = MembershipService.membershipKey(user);
+      const existing = await tx.membership.findFirst({
+        where: { workspaceId: invite.workspaceId, userKey: { in: this.callerKeys(user) } },
+      });
+      // An outstanding invite is never a suspension/revocation override.
+      if (existing && existing.status !== MembershipStatus.ACTIVE) {
+        throw new ForbiddenException('Membership is suspended or revoked; contact the organization owner.');
+      }
+      const prior = await tx.membership.count({
+        where: { userKey: { in: this.callerKeys(user) }, status: MembershipStatus.ACTIVE },
+      });
+      const mine = existing ?? await tx.membership.create({
+        data: { userKey, workspaceId: invite.workspaceId, role: invite.role,
+          status: MembershipStatus.ACTIVE, isDefault: prior === 0 },
+      });
+      await tx.invitation.update({
         where: { id: invite.id },
-        data: { status: InvitationStatus.EXPIRED },
+        data: { status: InvitationStatus.ACCEPTED, acceptedByKey: userKey, acceptedAt: new Date() },
       });
-      throw new BadRequestException('That invitation has expired.');
-    }
-    // Bind acceptance to the invited identity — a forwarded/leaked invite link
-    // cannot be redeemed by a different account (critical for admin/owner-rank
-    // invites). The /invites/mine surface already filters by email, so this only
-    // tightens the token-accept path.
-    if (invite.email.trim().toLowerCase() !== (user.email ?? '').trim().toLowerCase()) {
-      throw new ForbiddenException('This invitation was issued to a different email address.');
-    }
-
-    const userKey = MembershipService.membershipKey(user);
-    const existing = await this.prisma.membership.findFirst({
-      where: { workspaceId: invite.workspaceId, userKey: { in: this.callerKeys(user) } },
+      return {
+        workspace_id: invite.workspaceId, slug: ws.slug, display_name: ws.displayName,
+        role: roleToWire(mine.role), is_default: mine.isDefault,
+      };
     });
-    if (!existing) {
-      const priorMemberships = await this.membership.listActiveMemberships(user);
-      await this.prisma.membership.create({
-        data: {
-          userKey,
-          workspaceId: invite.workspaceId,
-          role: invite.role,
-          status: MembershipStatus.ACTIVE,
-          isDefault: priorMemberships.length === 0,
-        },
-      });
-    } else if (existing.status !== MembershipStatus.ACTIVE) {
-      await this.prisma.membership.update({
-        where: { userKey_workspaceId: { userKey: existing.userKey, workspaceId: invite.workspaceId } },
-        data: { status: MembershipStatus.ACTIVE },
-      });
-    }
-
-    await this.prisma.invitation.update({
-      where: { id: invite.id },
-      data: { status: InvitationStatus.ACCEPTED, acceptedByKey: userKey, acceptedAt: new Date() },
-    });
-
-    const ws = await this.prisma.workspace.findUnique({ where: { id: invite.workspaceId } });
-    const mine = await this.callerMembership(invite.workspaceId, user);
-    return {
-      workspace_id: invite.workspaceId,
-      slug: ws?.slug ?? invite.workspaceId,
-      display_name: ws?.displayName ?? ws?.slug ?? invite.workspaceId,
-      role: roleToWire(mine?.role ?? invite.role),
-      is_default: mine?.isDefault ?? false,
-    };
   }
 
   // ── RBAC + identity helpers ──────────────────────────────────────────────

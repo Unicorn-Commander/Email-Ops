@@ -19,6 +19,7 @@
 const INTEGRATION_SPECS = [
   'sms/sms.service.spec.ts',
   'auth/auth.service.identity.spec.ts',
+  'auth/auth.invitation.integration.spec.ts',
   'spaces/spaces.cross-tenant.spec.ts',
   'agents/agents.bindings.spec.ts',
   'workspaces/workspaces.cross-tenant.spec.ts',

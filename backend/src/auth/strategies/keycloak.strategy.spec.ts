@@ -29,7 +29,7 @@ describe('KeycloakStrategy.validate', () => {
   it('stores the refresh token after the user is resolved', async () => {
     (global.fetch as jest.Mock).mockResolvedValue({
       ok: true,
-      json: async () => ({ sub: 'kc-sub', email: 'user@example.test' }),
+      json: async () => ({ sub: 'kc-sub', email: 'user@example.test', email_verified: true }),
     });
     (authService.validateKeycloakUser as jest.Mock).mockResolvedValue({ id: 'u1' });
 
@@ -41,6 +41,7 @@ describe('KeycloakStrategy.validate', () => {
     expect(authService.validateKeycloakUser).toHaveBeenCalledWith('kc-sub', {
       sub: 'kc-sub',
       email: 'user@example.test',
+      email_verified: true,
     });
     expect(authService.storeKcRefreshToken).toHaveBeenCalledWith({ id: 'u1' }, 'refresh-token');
   });

@@ -1,7 +1,7 @@
 import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
-import { User } from '@prisma/client';
+import { User, InvitationStatus } from '@prisma/client';
 import { resolveUserAccess, describeAccessList } from './access-list';
 import { encrypt, isEncryptionConfigured } from '../connected-accounts/crypto';
 
@@ -100,10 +100,22 @@ export class AuthService {
       }
     }
 
-    // 3. JIT-provision, access-list gated.
+    // 3. An exact verified Keycloak email with a live invitation may establish
+    // an identity only. Membership still requires explicit token acceptance;
+    // this does not add an access-list rule or seed the bootstrap workspace.
     if (!user) {
       const access = resolveUserAccess(email);
-      if (!access.allowed) {
+      const invited = !access.allowed && profile?.email_verified === true &&
+        typeof email === 'string' && !!email.trim() &&
+        !!(await this.prisma.invitation.findFirst({
+          where: {
+            email: email.trim().toLowerCase(), status: InvitationStatus.PENDING,
+            workspace: { status: 'active' },
+            expiresAt: { gt: new Date() },
+          },
+          select: { id: true },
+        }));
+      if (!access.allowed && !invited) {
         this.logger.warn(`Rejected SSO JIT for ${email || '(no email)'} — ${access.reason}`);
         throw new UnauthorizedException(
           'You are not authorized for Email-Ops. Contact your administrator.',
@@ -231,6 +243,11 @@ export class AuthService {
 
       const profile = {
         email: payload.email ?? (subLooksLikeEmail ? payload.sub : undefined),
+        // Only the verified human realm claim can unlock invitation JIT.
+        // Federation/service callers retain their existing allow-list behavior.
+        email_verified: isKeycloakRealmToken && !payload.act &&
+          !payload.client_id && !payload.clientId &&
+          payload.email_verified === true,
         preferred_username: payload.preferred_username,
         given_name: payload.given_name,
         family_name: payload.family_name,
