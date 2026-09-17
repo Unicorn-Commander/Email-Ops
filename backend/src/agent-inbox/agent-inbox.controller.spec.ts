@@ -1,5 +1,6 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { AgentInboxKind, AgentInboxState, User } from '@prisma/client';
+import { MembershipService } from '../common/workspace/membership.service';
 import { EmailService } from '../email/email.service';
 import { WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { AgentInboxController } from './agent-inbox.controller';
@@ -43,7 +44,7 @@ describe('AgentInboxController (delegation)', () => {
 
   // Build a controller over a mocked EmailService.
   function make(mock: Partial<jest.Mocked<EmailService>>) {
-    return new AgentInboxController(mock as unknown as EmailService);
+    return new AgentInboxController(mock as unknown as EmailService, { assertCanReviewInbox: jest.fn().mockResolvedValue(WS) } as unknown as MembershipService);
   }
 
   // Force enforce-mode so the entitlement gate is real (not open-bootstrap).

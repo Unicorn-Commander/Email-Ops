@@ -35,6 +35,7 @@ import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagg
 import { IsBoolean, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import { AgentInboxKind, AgentInboxState, User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { MembershipService } from '../common/workspace/membership.service';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decorator';
@@ -71,7 +72,7 @@ class InboxQueryDto {
 @Controller('workspaces/:workspaceId/agent-inbox')
 @UseGuards(JwtAuthGuard, WorkspaceMembershipGuard)
 export class AgentInboxController {
-  constructor(private readonly email: EmailService) {}
+  constructor(private readonly email: EmailService, private readonly membership: MembershipService) {}
 
   @Get()
   @ApiOperation({
@@ -158,6 +159,7 @@ export class AgentInboxController {
     @Param('id') id: string,
     @Body() body: ReviewBodyDto,
   ) {
+    await this.membership.assertCanReviewInbox(user, workspaceId);
     // Gate BY KIND (defense-in-depth, re-derived off the verified token; mirrors
     // the MCP approve tool). Peek first: a missing/foreign id 404s before any
     // entitlement verdict. A CLEANUP approval merely runs a cleaner batch →
@@ -204,6 +206,7 @@ export class AgentInboxController {
     @Param('id') id: string,
     @Body() body: ReviewBodyDto,
   ) {
+    await this.membership.assertCanReviewInbox(user, workspaceId);
     const res = await this.email.rejectAgentInboxItem(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),

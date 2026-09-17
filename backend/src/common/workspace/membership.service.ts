@@ -146,6 +146,21 @@ export class MembershipService {
     return { workspaceId, role: m?.role ?? WorkspaceRole.VIEWER };
   }
 
+  /** Fresh member-or-higher authority for a human inbox decision. */
+  async assertCanReviewInbox(user: User, requestedWorkspaceId?: string): Promise<string> {
+    const workspaceId = await this.resolveAndAuthorize(user, requestedWorkspaceId);
+    if (!this.enabled) return workspaceId;
+    const member = await this.prisma.membership.findUnique({
+      where: { userKey_workspaceId: { userKey: MembershipService.membershipKey(user), workspaceId } },
+      include: { workspace: { select: { status: true } } },
+    });
+    if (!member || member.status !== MembershipStatus.ACTIVE || member.workspace.status !== 'active' ||
+        ![WorkspaceRole.MEMBER, WorkspaceRole.MANAGER, WorkspaceRole.ADMIN, WorkspaceRole.OWNER].includes(member.role as any)) {
+      throw new ForbiddenException('An active MEMBER or higher workspace role is required to approve or reject drafts.');
+    }
+    return workspaceId;
+  }
+
   /**
    * If `user` is on the SSO allow-list but has no membership yet, seed one into
    * the bootstrap workspace at the role mapped from their access-list role.
