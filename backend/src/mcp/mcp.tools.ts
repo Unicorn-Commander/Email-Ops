@@ -757,7 +757,7 @@ export class EmailOpsTools {
     user: User,
     args: { workspace_id?: string; item_id: string; note?: string; trust_recipients?: boolean },
   ): Promise<unknown> {
-    const workspaceId = await this.resolve(user, args.workspace_id);
+    const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
     // Gate BY KIND (mirrors the REST approve): peek first so a missing/foreign
     // id reads as not-found before any entitlement verdict. Approving an EMAIL
     // draft is the human-in-the-loop SEND → the dual-SKU compose gate; approving
@@ -792,7 +792,7 @@ export class EmailOpsTools {
     user: User,
     args: { workspace_id?: string; item_id: string; note?: string },
   ): Promise<unknown> {
-    const workspaceId = await this.resolve(user, args.workspace_id);
+    const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
     const res = await this.email.rejectAgentInboxItem(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),

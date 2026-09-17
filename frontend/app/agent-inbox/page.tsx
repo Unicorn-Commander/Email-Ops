@@ -62,6 +62,7 @@ export default function AgentInboxPage() {
   const inbox = useAgentInbox();
   const agents = useAgents();
   const workspaceId = inbox.workspace?.workspace_id ?? null;
+  const canReview = ['MEMBER', 'MANAGER', 'ADMIN', 'OWNER'].includes((inbox.workspace?.role ?? '').toUpperCase());
   const autoSent = useAutoSent(workspaceId);
   const trusted = useTrustedCorrespondents(workspaceId);
 
@@ -131,6 +132,10 @@ export default function AgentInboxPage() {
         onOpenTrusted={() => setTrustedOpen(true)}
       />
 
+      {inbox.workspace && !canReview && (
+        <p role="status" className="text-sm text-muted">Your workspace role is read-only. You can inspect drafts; a member or owner must approve or reject them.</p>
+      )}
+
       {!inbox.workspace && inbox.load === 'ready' ? (
         <NoWorkspace />
       ) : (
@@ -161,6 +166,7 @@ export default function AgentInboxPage() {
                 <ReviewCard
                   key={item.id}
                   item={item}
+                  canReview={canReview}
                   onOpen={() => openReview({ kind: 'item', item })}
                   onApprove={(note) => inbox.approve(item.id, note)}
                   onReject={(note) => inbox.reject(item.id, note)}
@@ -183,7 +189,7 @@ export default function AgentInboxPage() {
         )}
         trusted={trusted}
         onApprove={
-          reviewPending
+          reviewPending && canReview
             ? (note, trustRecipients) =>
                 inbox.approve(
                   (reviewSubject as Extract<ReviewSubject, { kind: 'item' }>).item.id,
@@ -193,7 +199,7 @@ export default function AgentInboxPage() {
             : undefined
         }
         onReject={
-          reviewPending
+          reviewPending && canReview
             ? (note) =>
                 inbox.reject(
                   (reviewSubject as Extract<ReviewSubject, { kind: 'item' }>).item.id,
@@ -336,11 +342,13 @@ function kindMeta(kind?: string) {
 
 function ReviewCard({
   item,
+  canReview,
   onOpen,
   onApprove,
   onReject,
 }: {
   item: AgentInboxItemView;
+  canReview: boolean;
   /** Open the full-fidelity review panel for this item. */
   onOpen: () => void;
   onApprove: (note?: string) => Promise<{ ok: boolean; error?: string }>;
@@ -482,7 +490,7 @@ function ReviewCard({
           {cardError && <p className="mt-3 text-xs text-danger">{cardError}</p>}
         </button>
 
-        {pending && (
+        {pending && canReview && (
           <div className="flex shrink-0 flex-col items-stretch gap-2 sm:w-[160px]">
             <Button size="sm" disabled={acting !== null} onClick={() => void handleApprove()}>
               {acting === 'approve' ? 'Approving…' : meta.approveVerb}

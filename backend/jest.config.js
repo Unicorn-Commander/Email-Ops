@@ -17,6 +17,7 @@
 
 // Paths relative to <rootDir> (= src, set below).
 const INTEGRATION_SPECS = [
+  'agent-inbox/agent-inbox.authorization.integration.spec.ts',
   'sms/sms.service.spec.ts',
   'auth/auth.service.identity.spec.ts',
   'auth/auth.invitation.integration.spec.ts',
