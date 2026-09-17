@@ -27,7 +27,7 @@
  * RLS transaction.
  */
 
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import {
   AgentInboxKind,
   AgentInboxState,
@@ -305,14 +305,16 @@ export class EmailOpsTools {
 
   async listThreadMessages(
     user: User,
-    args: { workspace_id?: string; thread_id: string },
+    args: { workspace_id?: string; thread_id: string; mailbox_id?: string },
   ): Promise<{ messages: unknown[] }> {
     const workspaceId = await this.resolve(user, args.workspace_id);
     const messages = await this.email.listThreadMessages(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
       args.thread_id,
+      args.mailbox_id,
     );
+    this.assertThreadMailbox(args.mailbox_id, messages);
     return { messages };
   }
 
@@ -430,6 +432,14 @@ export class EmailOpsTools {
     return { threads, count: threads.length, folder };
   }
 
+  private assertThreadMailbox(mailboxId: string | undefined, messages: unknown[]) {
+    if (!mailboxId && messages.length === 0) {
+      throw new BadRequestException(
+        'Thread not found in the default mailbox. Pass mailbox_id from search_mail or list_threads; external Gmail/Microsoft threads require their source mailbox.',
+      );
+    }
+  }
+
   /** Full thread messages WITH bodies (name a mailbox → live engine detail / external provider). */
   async getThread(
     user: User,
@@ -442,6 +452,7 @@ export class EmailOpsTools {
       args.thread_id,
       args.mailbox_id,
     );
+    this.assertThreadMailbox(args.mailbox_id, messages);
     return { messages, count: messages.length };
   }
 
