@@ -1175,6 +1175,25 @@
       "read_only": false
     },
     {
+      "name": "approve_send_kit",
+      "description": "Human-only approval of a hashed agent send kit template; agents cannot grant themselves this exception.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "kit_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "template_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
+          "expires_at": { "type": "string" }
+        },
+        "required": ["kit_id", "template_sha256", "expires_at"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["write:agent_inbox"],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
       "name": "list_trusted_correspondents",
       "description": "List the workspace’s trusted correspondents — the OUTBOUND addresses an L2 agent may auto-send to (learned when a human approves a staged draft, or added manually). Read-only / member-level. Returns { items, count }.",
       "input_schema": {

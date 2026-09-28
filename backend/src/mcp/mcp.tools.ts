@@ -333,6 +333,9 @@ export class EmailOpsTools {
       external_source: string;
       external_ref: string;
       from_address?: string;
+      send_at?: string;
+      kit_id?: string;
+      attachments?: { filename: string; content_type: string; content_base64: string }[];
     },
   ): Promise<unknown> {
     const workspaceId = await this.resolve(user, args.workspace_id);
@@ -387,6 +390,15 @@ export class EmailOpsTools {
       // by its owner, SHARED by any member, an AGENT mailbox never. An address the
       // workspace does not serve is REFUSED, not silently swapped for the default.
       fromAddress: args.from_address ?? null,
+      sendAt: args.send_at ? new Date(args.send_at) : null,
+      kitId: args.kit_id ?? null,
+      attachments: args.attachments?.map((a) => ({
+        filename: a.filename,
+        name: a.filename,
+        type: a.content_type,
+        content_type: a.content_type,
+        content_base64: a.content_base64,
+      })),
     });
   }
 
@@ -783,6 +795,7 @@ export class EmailOpsTools {
       // Wave 7 learning: default TRUE; trust_recipients:false approves without
       // trusting the external recipients.
       args.trust_recipients,
+      !!(user as any).__isFederationActor || !!(user as any).__patAuth,
     );
     if (!res) return { ok: false, reason: 'agent-inbox item not found in this workspace' };
     return { ok: true, ...res };
@@ -801,6 +814,21 @@ export class EmailOpsTools {
     );
     if (!res) return { ok: false, reason: 'agent-inbox item not found in this workspace' };
     return { ok: true, ...res };
+  }
+
+  async approveSendKit(
+    user: User,
+    args: { workspace_id?: string; kit_id: string; template_sha256: string; expires_at: string },
+  ): Promise<unknown> {
+    if ((user as any).__patAuth || (user as any).__isFederationActor) {
+      throw new ForbiddenException('Only a signed-in human may approve a send kit.');
+    }
+    const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    return this.email.approveSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
+      kitId: args.kit_id,
+      templateSha256: args.template_sha256,
+      expiresAt: new Date(args.expires_at),
+    });
   }
 
 

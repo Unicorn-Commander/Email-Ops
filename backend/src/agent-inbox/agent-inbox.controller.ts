@@ -32,7 +32,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
-import { IsBoolean, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsIn, IsISO8601, IsOptional, IsString, MaxLength } from 'class-validator';
 import { AgentInboxKind, AgentInboxState, User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { MembershipService } from '../common/workspace/membership.service';
@@ -67,12 +67,36 @@ class InboxQueryDto {
   state?: 'pending' | 'approved' | 'rejected';
 }
 
+class ApproveSendKitDto {
+  @IsString() @MaxLength(200) kit_id!: string;
+  @IsString() @MaxLength(64) template_sha256!: string;
+  @IsISO8601() expires_at!: string;
+}
+
 @ApiTags('agent-inbox')
 @ApiBearerAuth()
 @Controller('workspaces/:workspaceId/agent-inbox')
 @UseGuards(JwtAuthGuard, WorkspaceMembershipGuard)
 export class AgentInboxController {
   constructor(private readonly email: EmailService, private readonly membership: MembershipService) {}
+
+  @Post('send-kits/approve')
+  @ApiOperation({ summary: 'Human-only approval of an agent send kit template.' })
+  async approveSendKit(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Body() body: ApproveSendKitDto,
+  ) {
+    if ((user as any).__patAuth || (user as any).__isFederationActor) {
+      throw new ForbiddenException('Only a signed-in human may approve a send kit.');
+    }
+    await this.membership.assertCanReviewInbox(user, workspaceId);
+    return this.email.approveSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
+      kitId: body.kit_id,
+      templateSha256: body.template_sha256,
+      expiresAt: new Date(body.expires_at),
+    });
+  }
 
   @Get()
   @ApiOperation({

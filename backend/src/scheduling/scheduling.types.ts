@@ -36,7 +36,7 @@ export interface ScheduledSendPayload {
   bodyHtml?: string | null;
   cc?: string[];
   bcc?: string[];
-  attachments?: { blob_id: string; name: string; type: string }[];
+  attachments?: { blob_id?: string; name?: string; type?: string; filename?: string; content_type?: string; content_base64?: string }[];
   inReplyToThreadId?: string | null;
   inReplyToMessageId?: string | null;
   references?: string[];

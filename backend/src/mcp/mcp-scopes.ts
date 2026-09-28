@@ -55,6 +55,7 @@ export const MCP_TOOL_SCOPES = {
   list_agent_inbox: 'agent-inbox:read',
   approve_agent_inbox_item: 'agent-inbox:approve',
   reject_agent_inbox_item: 'agent-inbox:approve',
+  approve_send_kit: 'agent-inbox:approve',
   list_trusted_correspondents: 'mail:read',
   trust_correspondent: 'mail:write',
   untrust_correspondent: 'mail:write',

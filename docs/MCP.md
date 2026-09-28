@@ -120,7 +120,7 @@ gate re-derived server-side from the verified token).
 | :--- | :--- | :--- | :--- |
 | `list_threads_with_contact` | List threads with a contact | `workspace_id?`, `contact_id` | Yes |
 | `list_thread_messages` | List thread messages (previews) | `workspace_id?`, `thread_id` | Yes |
-| `compose_email` | Compose outbound email | `workspace_id?`, `contact_id?`, `to_address?`, `to_addresses?`, `cc?`, `bcc?`, `reply_all?`, `subject`, `body`, `mode?`, `in_reply_to_thread_id?`, `from_address?`, `external_source`, `external_ref` | No |
+| `compose_email` | Compose outbound email | previous fields plus `attachments?` (`filename`, `content_type`, `content_base64`, max 5 / 10 MB), `send_at?` (drafts, +5m to 14d), `kit_id?` | No |
 
 ### Agent Inbox (Human-in-the-Loop)
 
@@ -129,6 +129,7 @@ gate re-derived server-side from the verified token).
 | `list_agent_inbox` | List agent-inbox queue | `workspace_id?`, `state?` | Yes |
 | `approve_agent_inbox_item` | Approve draft (sends it) | `workspace_id?`, `item_id`, `note?` | No |
 | `reject_agent_inbox_item` | Reject draft (never sends) | `workspace_id?`, `item_id`, `note?` | No |
+| `approve_send_kit` | Human-approve a send kit | `workspace_id?`, `kit_id`, `template_sha256`, `expires_at` | No |
 
 ### Triage & Sender Policy
 

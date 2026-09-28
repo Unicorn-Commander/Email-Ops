@@ -362,6 +362,9 @@ export class McpService {
           'Microsoft Graph, Gmail through the Gmail API, sovereign domains through Apache ' +
           'James (Postmark for the transactional high-rep lane). Omit from_address to use ' +
           'the agent’s own mailbox or the workspace default, as before. ' +
+          'ATTACHMENTS: optional attachments (maximum 5 files / 10 MB total) use ' +
+          '{filename, content_type, content_base64}; they are retained through Graph, Gmail, and James/JMAP. ' +
+          'For mode=draft, send_at may defer delivery from 5 minutes to 14 days; rejection before that time skips it. ' +
           'RECIPIENTS: to_address is the back-compat single To; to_addresses (1-50) is the ' +
           'full To list — if both are set, to_address MUST equal the first entry. cc and ' +
           'bcc are 0-50 addresses each; an address may not appear in both To/Cc and Bcc. ' +
@@ -393,6 +396,9 @@ export class McpService {
           // mailbox picker (own HUMAN box or a SHARED box; never an agent's), and
           // REFUSED outright when the workspace has no mailbox for that address.
           from_address: z.string().min(3).max(320).optional(),
+          attachments: z.array(z.object({ filename: z.string().min(1), content_type: z.string().min(1), content_base64: z.string().min(1) })).max(5).optional(),
+          send_at: z.string().optional(),
+          kit_id: z.string().max(200).optional(),
         },
       },
       async (args: any) => wrap(await tools.composeEmail(user, args)),
@@ -794,10 +800,9 @@ export class McpService {
         description:
           'Approve a PENDING agent-inbox draft: hand it to the send lane and advance the ' +
           'message to queued/sent. This is the human-in-the-loop SEND, so it requires the ' +
-          'email-ops entitlement. By default the approval also ' +
-          'TRUSTS the external recipients (Wave 7 learning) so future in-thread agent ' +
-          'replies to them can send autonomously; pass trust_recipients:false to approve ' +
-          'without learning. Returns the updated inbox item + message.',
+          'email-ops entitlement. trust_recipients defaults to false for external recipients; ' +
+          'only explicit true learns them for future autonomous replies. Agents cannot approve ' +
+          'their own external drafts without a human-approved send kit. Returns the updated inbox item + message.',
         inputSchema: {
           workspace_id: z.string().optional(),
           item_id: z.string(),
@@ -824,6 +829,21 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await tools.rejectAgentInboxItem(user, args)),
+    );
+
+    registerTool(
+      'approve_send_kit',
+      {
+        title: 'Approve an agent send kit',
+        description: 'Human-only approval of a hashed send template. Agents cannot grant themselves this exception.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          kit_id: z.string().min(1).max(200),
+          template_sha256: z.string().length(64),
+          expires_at: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await tools.approveSendKit(user, args)),
     );
 
     // ── Trusted-correspondent tools (Wave 7: the outbound trust allowlist) ──

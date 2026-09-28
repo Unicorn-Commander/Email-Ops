@@ -33,6 +33,7 @@
  */
 
 import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { createHash } from 'crypto';
 import {
   AgentActionKind,
   AgentInboxKind,
@@ -124,7 +125,7 @@ interface SendReq {
   // webmail wave: compose extension (all optional, back-compat).
   cc?: string[];
   bcc?: string[];
-  attachments?: { blobId: string; name: string; type: string }[];
+  attachments?: { blobId?: string; name: string; type: string; contentBase64?: string }[];
   /** The resolved Message-ID header of the message being replied to. */
   inReplyTo?: string | null;
   references?: string[];
@@ -1378,9 +1379,9 @@ export class EmailService {
    */
   private parseStoredAttachments(
     raw: Prisma.JsonValue | null | undefined,
-  ): { blobId: string; name: string; type: string }[] | undefined {
+  ): { blobId?: string; name: string; type: string; contentBase64?: string }[] | undefined {
     if (!Array.isArray(raw)) return undefined;
-    const out: { blobId: string; name: string; type: string }[] = [];
+    const out: { blobId?: string; name: string; type: string; contentBase64?: string }[] = [];
     for (const item of raw) {
       if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
       const a = item as Record<string, unknown>;
@@ -1388,11 +1389,15 @@ export class EmailService {
       // wire-style); older rows carried camelCase. Accept EITHER so no staged
       // draft ever re-sends without the attachments the approver reviewed.
       const blobId = String(a.blobId ?? a.blob_id ?? '');
-      if (!blobId) continue;
+      const contentBase64 = typeof a.contentBase64 === 'string'
+        ? a.contentBase64
+        : typeof a.content_base64 === 'string' ? a.content_base64 : '';
+      if (!blobId && !contentBase64) continue;
       out.push({
-        blobId,
-        name: String(a.name ?? ''),
-        type: String(a.type ?? 'application/octet-stream'),
+        ...(blobId ? { blobId } : {}),
+        name: String(a.name ?? a.filename ?? 'attachment'),
+        type: String(a.type ?? a.content_type ?? 'application/octet-stream'),
+        ...(contentBase64 ? { contentBase64 } : {}),
       });
     }
     return out.length ? out : undefined;
@@ -1597,6 +1602,17 @@ export class EmailService {
     ucUid: string | null,
     input: ComposeInput,
   ): Promise<MessageComposeView> {
+    this.validateComposeAttachments(input.attachments);
+    if (input.sendAt) {
+      const now = Date.now();
+      const at = input.sendAt.getTime();
+      if (!Number.isFinite(at) || at < now + 5 * 60_000 || at > now + 14 * 24 * 60 * 60_000) {
+        throw new BadRequestException('send_at must be between 5 minutes and 14 days from now.');
+      }
+      if (input.mode !== 'draft') {
+        throw new BadRequestException('send_at is supported only for mode=draft.');
+      }
+    }
     // Resolve To/Cc/Bcc (and reply_all) BEFORE the write tx. reply_all reads
     // the live thread (an external provider call) and must not sit inside the
     // interactive transaction — same §3 lesson as the send itself.
@@ -1778,6 +1794,8 @@ export class EmailService {
               attachments: input.attachments?.length
                 ? (input.attachments as unknown as Prisma.InputJsonValue)
                 : Prisma.DbNull,
+              sendAt: input.sendAt ?? null,
+              kitId: input.kitId ?? null,
               actorUcUid: ucUid,
             },
           });
@@ -1793,6 +1811,11 @@ export class EmailService {
               bcc: input.bcc,
             }) +
             (held ? ` — held: ${policyReasons[0].code}` : '');
+          const inboxPayload = {
+            ...(held ? { policy: { decision: 'hold', reasons: policyReasons } } : {}),
+            ...(input.sendAt ? { sends_at: input.sendAt.toISOString() } : {}),
+            ...(input.kitId ? { kit_id: input.kitId } : {}),
+          };
           const inboxItem = await tx.agentInboxItem.create({
             data: {
               workspaceId,
@@ -1800,12 +1823,8 @@ export class EmailService {
               state: AgentInboxState.PENDING,
               draftedBy: input.draftedBy ?? input.externalSource,
               summary: itemSummary,
-              ...(held
-                ? {
-                    payload: {
-                      policy: { decision: 'hold', reasons: policyReasons },
-                    } as unknown as Prisma.InputJsonValue,
-                  }
+              ...(Object.keys(inboxPayload).length
+                ? { payload: inboxPayload as unknown as Prisma.InputJsonValue }
                 : {}),
             },
           });
@@ -1862,6 +1881,11 @@ export class EmailService {
                     bodyHtml: input.bodyHtml ?? null,
                     cc: input.cc,
                     bcc: input.bcc,
+                    attachments: input.attachments?.map((a) => ({
+                      filename: a.filename ?? a.name,
+                      mimeType: a.content_type ?? a.type,
+                      contentBase64: a.content_base64 ?? '',
+                    })),
                     inReplyToThreadId: input.inReplyToThreadId ?? null,
                   },
                 }
@@ -1938,7 +1962,12 @@ export class EmailService {
               cc: input.cc?.length ? input.cc : undefined,
               bcc: input.bcc?.length ? input.bcc : undefined,
               attachments: input.attachments?.length
-                ? input.attachments.map((a) => ({ blobId: a.blob_id, name: a.name, type: a.type }))
+                ? input.attachments.map((a) => ({
+                    ...(a.blob_id ? { blobId: a.blob_id } : {}),
+                    name: a.name ?? a.filename ?? 'attachment',
+                    type: a.type ?? a.content_type ?? 'application/octet-stream',
+                    ...(a.content_base64 ? { contentBase64: a.content_base64 } : {}),
+                  }))
                 : undefined,
               references: input.references?.length ? input.references : undefined,
               // Wave 7 loop protection: runtime auto-replies are stamped so a
@@ -2298,6 +2327,7 @@ export class EmailService {
     itemId: string,
     note?: string | null,
     trustRecipients?: boolean,
+    agentPrincipal = false,
   ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
     // PHASE 1 — validate + authorize (a short tx). A CLEANUP item executes wholly
     // in-tx as before; an EMAIL item resolves its mailbox + returns the send plan,
@@ -2326,6 +2356,39 @@ export class EmailService {
                   : null,
             },
           };
+        }
+
+        if (item.message?.sendAt && item.message.sendAt.getTime() > Date.now()) {
+          return {
+            kind: 'result',
+            value: {
+              inbox: this.inboxView(item, item.message),
+              message: item.message ? this.composeView(item.message) : null,
+            },
+          };
+        }
+
+        if (agentPrincipal && item.kind === AgentInboxKind.EMAIL && item.message && item.draftedBy) {
+          const recipients = [
+            ...(item.message.toAddresses?.length ? item.message.toAddresses : [item.message.toAddress ?? '']),
+            ...(item.message.ccAddresses ?? []),
+            ...(item.message.bccAddresses ?? []),
+          ].map((r) => normalizeAddress(r)).filter(Boolean);
+          const domains = new Set((await tx.mailDomain.findMany({ where: { workspaceId, verified: true }, select: { domain: true } })).map((d) => d.domain.toLowerCase()));
+          const trusted = await tx.trustedCorrespondent.findMany({ where: { workspaceId }, select: { address: true, scope: true } });
+          const external = recipients.filter((r) => {
+            const domain = r.split('@')[1] ?? '';
+            return !domains.has(domain) && !trusted.some((t) => t.scope === TrustedCorrespondentScope.ADDRESS ? t.address === r : t.address === domain);
+          });
+          if (external.length) {
+            const kit = item.message.kitId
+              ? await tx.agentSendKit.findFirst({ where: { kitId: item.message.kitId, workspaceId, expiresAt: { gt: new Date() } } })
+              : null;
+            const template = this.kitTemplateHash(item.message);
+            if (!kit || kit.templateSha256 !== template) {
+              throw new ForbiddenException('Agent approval is blocked for external recipients until a human approves this send kit.');
+            }
+          }
         }
 
         if (item.kind === AgentInboxKind.CLEANUP) {
@@ -2467,7 +2530,9 @@ export class EmailService {
     // Wave 7 learning (default ON): the approval vouches for the external
     // recipients. Runs in its OWN fenced call, degrade-clean, so a learning
     // hiccup can never fail an approval whose mail already left.
-    if (trustRecipients !== false) {
+    // Trust is an explicit human choice. In particular, an omitted flag must
+    // never learn an external correspondent from an agent-facing approval.
+    if (trustRecipients === true) {
       await this.learnTrustedCorrespondents(workspaceId, ucUid, prep.draftedBy, [
         ...(prep.req.toAddresses?.length ? prep.req.toAddresses : [prep.req.toAddress]),
         ...(prep.req.cc ?? []),
@@ -2595,6 +2660,27 @@ export class EmailService {
       });
       return { inbox: this.inboxView(updated, msg), message: this.composeView(msg) };
     });
+  }
+
+  /** Human-only registration of a bounded template exception for the guard. */
+  async approveSendKit(
+    workspaceId: string,
+    approvedBy: string,
+    input: { kitId: string; templateSha256: string; expiresAt: Date },
+  ) {
+    if (!approvedBy) throw new ForbiddenException('A human identity is required to approve a send kit.');
+    if (!Number.isFinite(input.expiresAt.getTime()) || input.expiresAt <= new Date()) {
+      throw new BadRequestException('expires_at must be in the future.');
+    }
+    return this.prisma.withWorkspace(workspaceId, approvedBy, (tx) => tx.agentSendKit.upsert({
+      where: { kitId: input.kitId },
+      create: { kitId: input.kitId, workspaceId, approvedBy, approvedAt: new Date(), templateSha256: input.templateSha256, expiresAt: input.expiresAt },
+      update: { approvedBy, approvedAt: new Date(), templateSha256: input.templateSha256, expiresAt: input.expiresAt },
+    }));
+  }
+
+  private kitTemplateHash(message: { subject: string | null; body: string | null; toAddresses: string[]; ccAddresses: string[]; bccAddresses: string[]; attachments: unknown }): string {
+    return createHash('sha256').update(JSON.stringify({ subject: message.subject ?? '', body: message.body ?? '', to: message.toAddresses, cc: message.ccAddresses, bcc: message.bccAddresses, attachments: message.attachments ?? [] })).digest('hex');
   }
 
   // ── Wave 7: the agent-send autonomy matrix support surface ─────────────
@@ -3375,6 +3461,25 @@ export class EmailService {
 
   // ── helpers ────────────────────────────────────────────────────────────
 
+  private validateComposeAttachments(attachments?: ComposeInput['attachments']): void {
+    if (!attachments?.length) return;
+    if (attachments.length > 5) throw new BadRequestException('At most 5 attachments are allowed.');
+    let total = 0;
+    for (const a of attachments) {
+      const name = a.filename ?? a.name;
+      const type = a.content_type ?? a.type;
+      if (!name?.trim() || !type?.trim()) throw new BadRequestException('Each attachment needs a filename and content_type.');
+      if (a.content_base64) {
+        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(a.content_base64) || a.content_base64.length % 4 !== 0) {
+          throw new BadRequestException(`Attachment ${name} has invalid base64 content.`);
+        }
+        const bytes = Buffer.from(a.content_base64, 'base64').length;
+        total += bytes;
+      }
+    }
+    if (total > 10 * 1024 * 1024) throw new BadRequestException('Attachments exceed the 10 MB total limit.');
+  }
+
   /**
    * Call the mail engine / external provider to actually send. This is PURE
    * external work (NO database access) so it runs OUTSIDE the withWorkspace
@@ -3422,10 +3527,20 @@ export class EmailService {
       // inline to the provider, which folds them into the Gmail MIME / Graph
       // attachments array. A stale/foreign blob id simply resolves to nothing
       // rather than failing the send.
-      const attachments = await this.resolveOutboundAttachments(
+      const staged = await this.resolveOutboundAttachments(
         mailbox,
-        (req.attachments ?? []).map((a) => a.blobId),
+        (req.attachments ?? []).map((a) => a.blobId).filter((id): id is string => !!id),
       );
+      const attachments = [
+        ...staged,
+        ...(req.attachments ?? [])
+          .filter((a) => !!a.contentBase64)
+          .map((a) => ({
+            filename: a.name,
+            mimeType: a.type,
+            contentBase64: a.contentBase64!,
+          })),
+      ];
       const toList = req.toAddresses?.length ? req.toAddresses : [req.toAddress];
       const r = await this.mailProvider.send(mailbox, {
         from: req.fromAddress,
@@ -3452,6 +3567,23 @@ export class EmailService {
         reason: r.reason,
       };
     }
+    const jamesAttachments = [] as { blobId: string; name: string; type: string }[];
+    for (const attachment of req.attachments ?? []) {
+      if (attachment.blobId) {
+        jamesAttachments.push({ blobId: attachment.blobId, name: attachment.name, type: attachment.type });
+      } else if (attachment.contentBase64) {
+        const uploaded = await this.stalwart.uploadBlob(
+          req.fromAddress,
+          Buffer.from(attachment.contentBase64, 'base64'),
+          attachment.type,
+          attachment.name,
+        );
+        if (!uploaded) {
+          return { accepted: false, providerMessageId: null, threadId: req.inReplyToThreadId, lane: null, reason: 'attachment_upload_failed' };
+        }
+        jamesAttachments.push({ blobId: uploaded.blobId, name: attachment.name, type: attachment.type });
+      }
+    }
     const r = await this.stalwart.send(
       req.fromAddress,
       {
@@ -3465,7 +3597,7 @@ export class EmailService {
         inReplyToThreadId: req.inReplyToThreadId,
         cc: req.cc,
         bcc: req.bcc,
-        attachments: req.attachments,
+        attachments: jamesAttachments,
         inReplyTo: req.inReplyTo,
         references: req.references,
         headers: req.headers,
@@ -3706,6 +3838,7 @@ export class EmailService {
       subject: string | null;
       body?: string | null;
       preview?: string | null;
+      attachments?: unknown;
     } | null,
   ): AgentInboxView {
     const payload = this.cleanupPayload(it.payload);
@@ -3734,7 +3867,9 @@ export class EmailService {
         ? this.cleanupBodyPreview(payload)
         : msg
           ? msg.preview ?? this.snippet(msg.body)
-          : null,
+        : null,
+      attachments: isCleanup ? [] : this.attachmentsMeta(msg?.attachments).map((a) => ({ name: a.name ?? 'attachment', size: a.size ?? null })),
+      sends_at: this.readSendAt(it.payload),
       reviewed_by_uc_uid: it.reviewedByUcUid ?? null,
       reviewed_at: it.reviewedAt ? it.reviewedAt.toISOString() : null,
       review_note: it.reviewNote ?? null,
@@ -3744,6 +3879,12 @@ export class EmailService {
       // in the DB, so they keep rendering null here.
       payload: isCleanup || (it.payload && typeof it.payload === 'object') ? payload : null,
     };
+  }
+
+  private readSendAt(payload: unknown): string | null {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    const value = (payload as Record<string, unknown>).sends_at;
+    return typeof value === 'string' ? value : null;
   }
 
   private snippet(body: string | null | undefined): string | null {

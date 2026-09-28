@@ -28,8 +28,10 @@ export class SchedulingWorker implements OnModuleInit, OnModuleDestroy {
       const now = new Date();
       const snoozes = await this.scheduling.surfaceDueSnoozes(now);
       const scheduledSends = await this.scheduling.fireDueScheduledSends(now);
-      if (snoozes || scheduledSends) {
-        this.logger.log(`scheduling sweep: surfaced=${snoozes} sent=${scheduledSends}`);
+      const deferredAgentSends = typeof (this.scheduling as any).fireDueAgentInboxSends === 'function'
+        ? await this.scheduling.fireDueAgentInboxSends(now) : 0;
+      if (snoozes || scheduledSends || deferredAgentSends) {
+        this.logger.log(`scheduling sweep: surfaced=${snoozes} sent=${scheduledSends} deferred=${deferredAgentSends}`);
       }
       return { snoozes, scheduledSends };
     } catch (err) {
