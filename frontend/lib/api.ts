@@ -378,6 +378,8 @@ export interface AgentInboxItemView {
   from_address?: string | null;
   subject: string | null;
   body_preview: string | null;
+  attachments?: { name: string; size: number | null }[];
+  sends_at?: string | null;
   reviewed_by_uc_uid: string | null;
   reviewed_at: string | null;
   review_note: string | null;
@@ -437,8 +439,7 @@ export async function listAgentInbox(
 export interface ApproveOptions {
   /**
    * Whether approving should also TRUST the external recipient(s) so future
-   * agent replies to them can auto-send under policy. The server defaults to
-   * true; the UI sends an explicit value only when it surfaced the choice.
+   * agent replies to them can auto-send under policy. Omitted means false.
    */
   trustRecipients?: boolean;
 }

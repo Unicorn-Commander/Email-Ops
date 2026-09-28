@@ -505,14 +505,14 @@ export function ReviewPanel({
 
   // ── Per-subject review state ──────────────────────────────────────────────
   const [note, setNote] = useState('');
-  const [trustChoice, setTrustChoice] = useState(true);
+  const [trustChoice, setTrustChoice] = useState(false);
   const [acting, setActing] = useState<null | 'approve' | 'reject'>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [revokeBusy, setRevokeBusy] = useState<string | null>(null);
   const [revokeNote, setRevokeNote] = useState<string | null>(null);
   useEffect(() => {
     setNote('');
-    setTrustChoice(true);
+    setTrustChoice(false);
     setActing(null);
     setActionError(null);
     setRevokeBusy(null);
@@ -584,6 +584,8 @@ export function ReviewPanel({
 
   // ── Approve / Reject (pending only; success is API-confirmed, never assumed) ─
   const approveVerb = isCleanup ? 'Run cleanup' : 'Approve & send';
+  const sendsAt = queueItem?.sends_at ? Date.parse(queueItem.sends_at) : NaN;
+  const deferred = Number.isFinite(sendsAt) && sendsAt > Date.now();
   async function handleApprove() {
     if (!onApprove || !queueItem) return;
     const targets = isCleanup ? deriveCleanupTargets(queueItem.payload) : null;
@@ -749,6 +751,11 @@ export function ReviewPanel({
           <div className="space-y-3.5">
             <h2 className="text-lg font-semibold leading-snug tracking-[-0.01em] text-primary">
               {displaySubject}
+              {deferred && (
+                <Badge variant="info" className="ml-2 align-middle text-[10px]">
+                  sends at {formatWhen(queueItem?.sends_at ?? '')}
+                </Badge>
+              )}
             </h2>
 
             {auto && auto.detail && (
@@ -946,7 +953,7 @@ export function ReviewPanel({
                   disabled={acting !== null}
                   onClick={() => void handleReject()}
                 >
-                  {acting === 'reject' ? 'Rejecting…' : 'Reject'}
+                  {acting === 'reject' ? (deferred ? 'Skipping…' : 'Rejecting…') : deferred ? 'Skip' : 'Reject'}
                 </Button>
               )}
               {actionError && <span className="text-xs text-danger">{actionError}</span>}
