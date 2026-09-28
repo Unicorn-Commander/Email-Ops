@@ -1603,6 +1603,13 @@ export class EmailService {
     input: ComposeInput,
   ): Promise<MessageComposeView> {
     this.validateComposeAttachments(input.attachments);
+    input = {
+      ...input,
+      attachments: input.attachments?.map((a) => ({
+        ...a,
+        ...(a.content_base64 ? { size: Buffer.from(a.content_base64, 'base64').length } : {}),
+      })),
+    };
     if (input.sendAt) {
       const now = Date.now();
       const at = input.sendAt.getTime();

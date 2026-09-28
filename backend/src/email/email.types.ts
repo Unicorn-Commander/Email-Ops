@@ -126,6 +126,7 @@ export interface ComposeAttachmentInput {
   filename?: string;
   content_type?: string;
   content_base64?: string;
+  size?: number;
 }
 
 /** Internal: the parsed compose request the service acts on. */
