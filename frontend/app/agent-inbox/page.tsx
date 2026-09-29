@@ -27,6 +27,7 @@ import { Tooltip } from '@/components/Tooltip';
 import { useAgentInbox } from '@/components/useAgentInbox';
 import { useAgents } from '@/components/useAgents';
 import { useAutoSent } from '@/components/agent-inbox/useAutoSent';
+import { useSendKits, type UseSendKits } from '@/components/agent-inbox/useSendKits';
 import {
   TrustedCorrespondentsDialog,
   useTrustedCorrespondents,
@@ -36,7 +37,14 @@ import { CleanupTargetsList, cleanupTargetsSentence } from '@/components/mail/Cl
 import { RobotIcon } from '@/components/mail/icons';
 import { agentLabel } from '@/lib/agents';
 import { cleanupReason, deriveCleanupTargets } from '@/lib/cleanupTargets';
-import { agentInboxRecipientLine, holdPolicyOf, type AgentInboxItemView, type AgentView, type AutoSentItemView } from '@/lib/api';
+import {
+  agentInboxRecipientLine,
+  holdPolicyOf,
+  type AgentInboxItemView,
+  type AgentSendKitView,
+  type AgentView,
+  type AutoSentItemView,
+} from '@/lib/api';
 
 type QueueTab = 'pending' | 'auto-sent' | 'history';
 
@@ -61,6 +69,7 @@ const TABS: Array<{ value: QueueTab; label: string; hint: string }> = [
 export default function AgentInboxPage() {
   const inbox = useAgentInbox();
   const agents = useAgents();
+  const sendKits = useSendKits();
   const workspaceId = inbox.workspace?.workspace_id ?? null;
   const canReview = ['MEMBER', 'MANAGER', 'ADMIN', 'OWNER'].includes((inbox.workspace?.role ?? '').toUpperCase());
   const autoSent = useAutoSent(workspaceId);
@@ -140,6 +149,7 @@ export default function AgentInboxPage() {
         <NoWorkspace />
       ) : (
         <>
+          <SendKitsSection kits={sendKits} canReview={canReview} />
           <div className="flex flex-wrap items-center justify-between gap-3">
             <Tabs tab={tab} counts={tabCount} onChange={changeTab} />
             {tab !== 'auto-sent' && inbox.load === 'ready' && inbox.items.length > 0 && (
@@ -216,6 +226,247 @@ export default function AgentInboxPage() {
       />
     </div>
   );
+}
+
+function SendKitsSection({ kits, canReview }: { kits: UseSendKits; canReview: boolean }) {
+  const canApprove = canReview && kits.humanSession;
+  return (
+    <section aria-labelledby="send-kits-heading" className="space-y-3">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 id="send-kits-heading" className="text-lg font-semibold text-primary">Send kits</h2>
+            {kits.proposed.length > 0 && <Badge variant="review">{kits.proposed.length} proposed</Badge>}
+          </div>
+          <p className="mt-1 max-w-2xl text-sm leading-5 text-tertiary">
+            An agent proposes the wave here. You approve the exact kit once; the send guard still checks every message.
+          </p>
+        </div>
+        <Button variant="secondary" size="sm" onClick={() => void kits.refresh()} disabled={kits.load === 'loading'}>
+          {kits.load === 'loading' ? 'Refreshing…' : 'Refresh kits'}
+        </Button>
+      </div>
+
+      {kits.load === 'loading' ? (
+        <Card padded><SkeletonText lines={3} /></Card>
+      ) : kits.load === 'error' ? (
+        <Card padded className="border-danger/30 ring-1 ring-danger/15">
+          <p className="text-sm font-medium text-primary">Could not load send kits.</p>
+          <p className="mt-1 break-words text-xs text-danger">{kits.error ?? 'Unknown error.'}</p>
+        </Card>
+      ) : (
+        <>
+          {kits.proposed.length === 0 ? (
+            <Card padded><p className="text-sm text-tertiary">No proposed send kits are waiting for review.</p></Card>
+          ) : (
+            <div className="space-y-3">
+              {kits.proposed.map((kit) => (
+                <ProposedSendKitCard
+                  key={kit.kit_id}
+                  kit={kit}
+                  canApprove={canApprove}
+                  humanSession={kits.humanSession}
+                  onApprove={kits.approve}
+                  onReject={kits.reject}
+                />
+              ))}
+            </div>
+          )}
+
+          {kits.approved.length > 0 && (
+            <details className="rounded-token border border-subtle bg-surface-raised">
+              <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">
+                Approved kits ({kits.approved.length})
+              </summary>
+              <div className="space-y-2 border-t border-subtle p-3">
+                {kits.approved.map((kit) => <ApprovedSendKitRow key={kit.kit_id} kit={kit} />)}
+              </div>
+            </details>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function ProposedSendKitCard({
+  kit,
+  canApprove,
+  humanSession,
+  onApprove,
+  onReject,
+}: {
+  kit: AgentSendKitView;
+  canApprove: boolean;
+  humanSession: boolean;
+  onApprove: (kit: AgentSendKitView) => Promise<{ ok: boolean; error?: string }>;
+  onReject: (kit: AgentSendKitView, note?: string) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const confirm = useConfirm();
+  const [rejectOpen, setRejectOpen] = useState(false);
+  const [note, setNote] = useState('');
+  const [acting, setActing] = useState<null | 'approve' | 'reject'>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function approve() {
+    const ok = await confirm({
+      title: 'Approve this send kit?',
+      description: `The agent may send up to ${kit.cap_per_day} messages per UTC day before ${formatKitExpiry(kit.expires_at)}.`,
+      confirmLabel: 'Approve kit',
+      cancelLabel: 'Not yet',
+    });
+    if (!ok) return;
+    setActing('approve');
+    setError(null);
+    const result = await onApprove(kit);
+    if (!result.ok) {
+      setError(result.error ?? 'Could not approve this kit.');
+      setActing(null);
+    }
+  }
+
+  async function reject() {
+    setActing('reject');
+    setError(null);
+    const result = await onReject(kit, note.trim() || undefined);
+    if (!result.ok) {
+      setError(result.error ?? 'Could not reject this kit.');
+      setActing(null);
+    }
+  }
+
+  return (
+    <Card className="overflow-hidden border-accent/30 ring-1 ring-accent/10">
+      <div className="min-w-0 space-y-4 p-4 sm:p-5">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="review">PROPOSED</Badge>
+              <span className="break-all font-mono text-[11px] text-muted">{kit.kit_id}</span>
+            </div>
+            <h3 className="mt-2 break-words text-base font-semibold text-primary">{kit.title}</h3>
+          </div>
+          <div className="shrink-0 text-left text-xs text-tertiary sm:text-right">
+            <p>expires {formatKitExpiry(kit.expires_at)}</p>
+            <p className="mt-1 font-medium text-secondary">cap {kit.cap_per_day} / day</p>
+          </div>
+        </div>
+
+        <div className="grid min-w-0 gap-3 text-sm sm:grid-cols-2">
+          <div className="min-w-0">
+            <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Sender</p>
+            <p className="mt-1 break-all font-mono text-xs text-secondary">{kit.from_address}</p>
+          </div>
+          <div className="min-w-0">
+            <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Subjects</p>
+            <p className="mt-1 break-words text-xs text-secondary">{kit.subjects.join(' · ')}</p>
+          </div>
+        </div>
+
+        <div className="min-w-0">
+          <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Body template</p>
+            <span className="text-[11px] text-warning">optional lines are marked below</span>
+          </div>
+          <TemplatePreview kit={kit} />
+        </div>
+
+        <div className="min-w-0 space-y-2">
+          <details>
+            <summary className="cursor-pointer text-sm font-medium text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">
+              {kit.recipient_count} recipient{kit.recipient_count === 1 ? '' : 's'}
+            </summary>
+            <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto rounded-token border border-subtle bg-surface-base p-2 font-mono text-xs text-tertiary">
+              {(kit.recipients ?? []).map((recipient) => <li key={recipient} className="break-all">{recipient}</li>)}
+            </ul>
+          </details>
+          {kit.note && (
+            <p className="break-words rounded-token bg-surface-base px-3 py-2 text-xs leading-5 text-tertiary">
+              <span className="font-medium text-secondary">Note:</span> {kit.note}
+            </p>
+          )}
+          <p className="break-all font-mono text-[11px] text-muted">template hash {kit.template_sha256.slice(0, 12)}…</p>
+        </div>
+
+        {canApprove ? (
+          <div className="flex flex-col gap-2 border-t border-subtle pt-3 sm:flex-row sm:items-start">
+            <Button size="sm" disabled={acting !== null} onClick={() => void approve()}>
+              {acting === 'approve' ? 'Approving…' : 'Approve'}
+            </Button>
+            <Button variant="danger" size="sm" disabled={acting !== null} onClick={() => setRejectOpen((open) => !open)}>
+              {acting === 'reject' ? 'Rejecting…' : 'Reject'}
+            </Button>
+            {rejectOpen && (
+              <div className="min-w-0 flex-1 sm:max-w-md">
+                <label htmlFor={`kit-reject-${kit.kit_id}`} className="sr-only">Rejection note</label>
+                <textarea
+                  id={`kit-reject-${kit.kit_id}`}
+                  value={note}
+                  onChange={(event) => setNote(event.target.value)}
+                  rows={2}
+                  maxLength={2000}
+                  placeholder="Why reject this kit?"
+                  className="w-full resize-y rounded-token border border-subtle bg-surface-base px-3 py-2 text-sm text-primary placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                />
+                <div className="mt-1.5 flex flex-wrap gap-2">
+                  <Button variant="danger" size="sm" disabled={acting !== null} onClick={() => void reject()}>Confirm rejection</Button>
+                  <button type="button" className="px-2 text-xs text-tertiary hover:text-primary" onClick={() => setRejectOpen(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="border-t border-subtle pt-3 text-sm text-warning">
+            {humanSession ? 'A member or owner must approve or reject this kit.' : 'Sign in as a person to approve.'}
+          </p>
+        )}
+        {error && <p className="break-words text-xs text-danger">{error}</p>}
+      </div>
+    </Card>
+  );
+}
+
+function ApprovedSendKitRow({ kit }: { kit: AgentSendKitView }) {
+  return (
+    <div className="min-w-0 rounded-token border border-subtle bg-surface-base px-3 py-3">
+      <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <p className="break-words text-sm font-medium text-primary">{kit.title}</p>
+        <p className="shrink-0 text-xs text-tertiary">{kit.sent_today} / {kit.cap_per_day} sent today · expires {formatKitExpiry(kit.expires_at)}</p>
+      </div>
+      <p className="mt-1 break-all font-mono text-[11px] text-muted">{kit.kit_id}</p>
+    </div>
+  );
+}
+
+function TemplatePreview({ kit }: { kit: AgentSendKitView }) {
+  const lines = (kit.body_template ?? '').split('\n');
+  const optional = new Set(kit.optional_lines ?? []);
+  return (
+    <div className="min-w-0 rounded-token border border-subtle bg-surface-base p-3 font-mono text-xs leading-6 text-secondary">
+      {lines.map((line, index) => (
+        <div key={`${index}-${line}`} className="min-w-0 break-words">
+          <span>{renderTemplateLine(line)}</span>
+          {optional.has(index) && <span className="ml-2 inline-block rounded-full bg-warning/10 px-1.5 py-0.5 font-sans text-[10px] leading-4 text-warning">may be omitted</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function renderTemplateLine(line: string) {
+  const parts = line.split(/(\{[A-Za-z_][A-Za-z0-9_]*\})/g);
+  return parts.map((part, index) =>
+    /^\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(part) ? (
+      <span key={`${part}-${index}`} className="mx-0.5 inline-block rounded bg-accent/15 px-1.5 text-accent">{part}</span>
+    ) : (
+      <span key={`${part}-${index}`}>{part || '\u00a0'}</span>
+    ),
+  );
+}
+
+function formatKitExpiry(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
 
 function Hero({

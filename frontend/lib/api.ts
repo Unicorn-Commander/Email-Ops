@@ -479,6 +479,89 @@ export async function rejectAgentInboxItem(
   );
 }
 
+// ── Personalised send kits ─────────────────────────────────────────────────
+
+export type AgentSendKitState = 'PROPOSED' | 'APPROVED' | 'REJECTED';
+
+export interface AgentSendKitView {
+  id: string;
+  kit_id: string;
+  title: string;
+  state: AgentSendKitState;
+  from: string;
+  from_address: string;
+  cap_per_day: number;
+  expires_at: string;
+  subjects: string[];
+  recipient_count: number;
+  template_sha256: string;
+  proposed_by: string | null;
+  proposed_at: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  rejected_by: string | null;
+  rejected_at: string | null;
+  note: string | null;
+  sent_today: number;
+  body_template?: string;
+  placeholder_rules?: Record<string, string>;
+  optional_lines?: number[];
+  recipients?: string[];
+  recipient_hashes?: string[];
+}
+
+export interface AgentSendKitListResponse {
+  items: AgentSendKitView[];
+  count: number;
+  /** False for PAT/federation identities; the API remains the authority. */
+  human_session?: boolean;
+}
+
+const sendKitsBase = (workspaceId: string) => `${inboxBase(workspaceId)}/send-kits`;
+
+export async function listSendKits(
+  workspaceId: string,
+  state?: AgentSendKitState,
+  token?: string,
+): Promise<AgentSendKitListResponse> {
+  const qs = state ? `?state=${encodeURIComponent(state)}` : '';
+  return apiGet<AgentSendKitListResponse>(`${sendKitsBase(workspaceId)}${qs}`, token);
+}
+
+export async function getSendKit(
+  workspaceId: string,
+  kitId: string,
+  token?: string,
+): Promise<AgentSendKitView> {
+  return apiGet<AgentSendKitView>(`${sendKitsBase(workspaceId)}/${encodeURIComponent(kitId)}`, token);
+}
+
+export async function approveSendKit(
+  workspaceId: string,
+  kitId: string,
+  templateSha256: string,
+  token?: string,
+): Promise<AgentSendKitView> {
+  return apiPost<AgentSendKitView>(
+    `${sendKitsBase(workspaceId)}/${encodeURIComponent(kitId)}/approve`,
+    { template_sha256: templateSha256 },
+    token,
+  );
+}
+
+export async function rejectSendKit(
+  workspaceId: string,
+  kitId: string,
+  note?: string,
+  token?: string,
+): Promise<AgentSendKitView> {
+  return apiPost<AgentSendKitView>(
+    `${sendKitsBase(workspaceId)}/${encodeURIComponent(kitId)}/reject`,
+    note ? { note } : {},
+    token,
+  );
+}
+
 // ── Agent-inbox full-fidelity review (Wave 7) ─────────────────────────────
 //
 // The approval queue's review panel shows THE FULL staged email — rendered
