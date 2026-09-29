@@ -77,8 +77,10 @@ jobs:
       - name: Typecheck (tsc --noEmit)
         run: npx tsc --noEmit -p tsconfig.json
 
+      # Node inside a job sees every host core (40 on legacy1), so Jest's default
+      # starts ~23-39 workers at ~700 MB each and the 8 GB per-job cap OOM-kills them.
       - name: Unit tests (hermetic — NO database)
-        run: npm run test:unit
+        run: npm run test:unit -- --maxWorkers=4
 
       - name: Apply schema to the CI Postgres (prisma migrate deploy)
         run: npx prisma migrate deploy
@@ -86,7 +88,7 @@ jobs:
           DATABASE_URL: postgresql://postgres:REMOVED@postgres:5432/emailops?schema=public
 
       - name: Integration tests (against the Postgres service)
-        run: npm run test:integration
+        run: npm run test:integration -- --maxWorkers=2
 
   engine:
     name: Cleaner Engine (pytest)
