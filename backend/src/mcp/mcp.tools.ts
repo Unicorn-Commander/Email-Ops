@@ -818,7 +818,19 @@ export class EmailOpsTools {
 
   async approveSendKit(
     user: User,
-    args: { workspace_id?: string; kit_id: string; template_sha256: string; expires_at: string },
+    args: {
+      workspace_id?: string;
+      kit_id: string;
+      body_template: string;
+      placeholder_rules?: Record<string, string>;
+      optional_lines?: number[];
+      subjects: string[];
+      recipients: string[];
+      from_address: string;
+      cap_per_day: number;
+      template_sha256: string;
+      expires_at: string;
+    },
   ): Promise<unknown> {
     if ((user as any).__patAuth || (user as any).__isFederationActor) {
       throw new ForbiddenException('Only a signed-in human may approve a send kit.');
@@ -826,6 +838,13 @@ export class EmailOpsTools {
     const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
     return this.email.approveSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
       kitId: args.kit_id,
+      bodyTemplate: args.body_template,
+      placeholderRules: args.placeholder_rules,
+      optionalLines: args.optional_lines,
+      subjects: args.subjects,
+      recipients: args.recipients,
+      fromAddress: args.from_address,
+      capPerDay: args.cap_per_day,
       templateSha256: args.template_sha256,
       expiresAt: new Date(args.expires_at),
     });

@@ -33,7 +33,6 @@
  */
 
 import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
-import { createHash } from 'crypto';
 import {
   AgentActionKind,
   AgentInboxKind,
@@ -72,6 +71,14 @@ import {
   ParticipantView,
   ThreadView,
 } from './email.types';
+import {
+  agentSendKitRefusalReason,
+  agentSendKitTemplateSha256,
+  buildAgentSendKitDefinition,
+  plainTextBodySha256,
+  type AgentSendKitDefinition,
+  type AgentSendKitRecord,
+} from './agent-send-kit';
 import { shouldAdvanceStatus } from './message-status';
 import { DispositionView } from '../mail-triage/mail-triage.types';
 import {
@@ -106,6 +113,18 @@ import {
  */
 const MAILBOX_FANOUT_CONCURRENCY = 5;
 const MAILBOX_FANOUT_TIMEOUT_MS = 8000;
+
+const AGENT_SEND_KIT_REASON_MESSAGES: Record<string, string> = {
+  kit_missing: 'The message has no matching human-approved send kit.',
+  kit_expired: 'The human-approved send kit has expired.',
+  from_mismatch: 'The staged sender does not match the approved send kit.',
+  extra_recipients: 'A send kit permits exactly one To recipient and no Cc or Bcc recipients.',
+  attachments_not_allowed: 'Attachments are not allowed by a send kit.',
+  recipient_not_in_kit: 'The recipient is not in the human-approved send kit.',
+  subject_not_in_kit: 'The subject is not in the human-approved send kit.',
+  body_mismatch: 'The plain-text body does not match the human-approved send-kit template.',
+  cap_reached: 'The send kit daily cap has been reached.',
+};
 
 /**
  * The external send request shape shared by the compose + approve send lanes
@@ -2388,12 +2407,41 @@ export class EmailService {
             return !domains.has(domain) && !trusted.some((t) => t.scope === TrustedCorrespondentScope.ADDRESS ? t.address === r : t.address === domain);
           });
           if (external.length) {
+            const now = new Date();
             const kit = item.message.kitId
-              ? await tx.agentSendKit.findFirst({ where: { kitId: item.message.kitId, workspaceId, expiresAt: { gt: new Date() } } })
+              ? await tx.agentSendKit.findFirst({ where: { kitId: item.message.kitId, workspaceId } })
               : null;
-            const template = this.kitTemplateHash(item.message);
-            if (!kit || kit.templateSha256 !== template) {
-              throw new ForbiddenException('Agent approval is blocked for external recipients until a human approves this send kit.');
+            const utcStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+            const utcEnd = new Date(utcStart.getTime() + 24 * 60 * 60 * 1000);
+            const sentToday = kit
+              ? await tx.emailMessage.count({
+                  where: {
+                    workspaceId,
+                    kitId: item.message.kitId,
+                    sentAt: { gte: utcStart, lt: utcEnd },
+                  },
+                })
+              : 0;
+            const reason = agentSendKitRefusalReason({
+              message: {
+                fromAddress: item.message.fromAddress,
+                toAddress: item.message.toAddress,
+                toAddresses: item.message.toAddresses ?? [],
+                ccAddresses: item.message.ccAddresses ?? [],
+                bccAddresses: item.message.bccAddresses ?? [],
+                subject: item.message.subject,
+                body: item.message.body,
+                attachments: item.message.attachments,
+              },
+              kit: kit as AgentSendKitRecord | null,
+              sentToday,
+              now,
+            });
+            if (reason) {
+              throw new ForbiddenException({
+                reason,
+                message: AGENT_SEND_KIT_REASON_MESSAGES[reason],
+              });
             }
           }
         }
@@ -2673,21 +2721,65 @@ export class EmailService {
   async approveSendKit(
     workspaceId: string,
     approvedBy: string,
-    input: { kitId: string; templateSha256: string; expiresAt: Date },
+    input: {
+      kitId: string;
+      bodyTemplate: string;
+      placeholderRules?: Record<string, string>;
+      optionalLines?: number[];
+      subjects: string[];
+      recipients: string[];
+      fromAddress: string;
+      capPerDay: number;
+      templateSha256: string;
+      expiresAt: Date;
+    },
   ) {
     if (!approvedBy) throw new ForbiddenException('A human identity is required to approve a send kit.');
     if (!Number.isFinite(input.expiresAt.getTime()) || input.expiresAt <= new Date()) {
       throw new BadRequestException('expires_at must be in the future.');
     }
-    return this.prisma.withWorkspace(workspaceId, approvedBy, (tx) => tx.agentSendKit.upsert({
-      where: { kitId: input.kitId },
-      create: { kitId: input.kitId, workspaceId, approvedBy, approvedAt: new Date(), templateSha256: input.templateSha256, expiresAt: input.expiresAt },
-      update: { approvedBy, approvedAt: new Date(), templateSha256: input.templateSha256, expiresAt: input.expiresAt },
-    }));
-  }
-
-  private kitTemplateHash(message: { subject: string | null; body: string | null; toAddresses: string[]; ccAddresses: string[]; bccAddresses: string[]; attachments: unknown }): string {
-    return createHash('sha256').update(JSON.stringify({ subject: message.subject ?? '', body: message.body ?? '', to: message.toAddresses, cc: message.ccAddresses, bcc: message.bccAddresses, attachments: message.attachments ?? [] })).digest('hex');
+    let definition: AgentSendKitDefinition;
+    try {
+      definition = buildAgentSendKitDefinition({
+        bodyTemplate: input.bodyTemplate,
+        placeholderRules: input.placeholderRules,
+        optionalLines: input.optionalLines,
+        subjects: input.subjects,
+        recipients: input.recipients,
+        fromAddress: input.fromAddress,
+        capPerDay: input.capPerDay,
+      });
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid send-kit definition.');
+    }
+    const computedHash = agentSendKitTemplateSha256(definition);
+    if (input.templateSha256 !== computedHash) {
+      throw new BadRequestException({
+        reason: 'template_hash_mismatch',
+        message: 'template_sha256 does not match the supplied send-kit definition.',
+      });
+    }
+    return this.prisma.withWorkspace(workspaceId, approvedBy, async (tx) => {
+      const approvedAt = new Date();
+      const data = {
+        workspaceId,
+        approvedBy,
+        approvedAt,
+        templateSha256: computedHash,
+        bodyTemplate: definition.bodyTemplate,
+        placeholderRules: definition.placeholderRules as Prisma.InputJsonValue,
+        optionalLines: definition.optionalLines as unknown as Prisma.InputJsonValue,
+        subjects: definition.subjects,
+        recipientHashes: definition.recipientHashes,
+        fromAddress: definition.fromAddress,
+        capPerDay: definition.capPerDay,
+        expiresAt: input.expiresAt,
+      };
+      const existing = await tx.agentSendKit.findFirst({ where: { kitId: input.kitId, workspaceId } });
+      return existing
+        ? tx.agentSendKit.update({ where: { kitId: input.kitId }, data })
+        : tx.agentSendKit.create({ data: { kitId: input.kitId, ...data } });
+    });
   }
 
   // ── Wave 7: the agent-send autonomy matrix support surface ─────────────
@@ -3846,6 +3938,8 @@ export class EmailService {
       body?: string | null;
       preview?: string | null;
       attachments?: unknown;
+      inReplyToThreadId?: string | null;
+      kitId?: string | null;
     } | null,
   ): AgentInboxView {
     const payload = this.cleanupPayload(it.payload);
@@ -3875,6 +3969,9 @@ export class EmailService {
         : msg
           ? msg.preview ?? this.snippet(msg.body)
         : null,
+      body_sha256: isCleanup || msg?.body == null ? null : plainTextBodySha256(msg.body),
+      thread_id: isCleanup ? null : msg?.inReplyToThreadId ?? null,
+      kit_id: isCleanup ? null : msg?.kitId ?? null,
       attachments: isCleanup ? [] : this.attachmentsMeta(msg?.attachments).map((a) => ({ name: a.name ?? 'attachment', size: a.size ?? null })),
       sends_at: this.readSendAt(it.payload),
       reviewed_by_uc_uid: it.reviewedByUcUid ?? null,

@@ -32,7 +32,21 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
-import { IsBoolean, IsIn, IsISO8601, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsArray,
+  IsBoolean,
+  IsIn,
+  IsInt,
+  IsISO8601,
+  IsObject,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import { AgentInboxKind, AgentInboxState, User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { MembershipService } from '../common/workspace/membership.service';
@@ -69,7 +83,14 @@ class InboxQueryDto {
 
 class ApproveSendKitDto {
   @IsString() @MaxLength(200) kit_id!: string;
-  @IsString() @MaxLength(64) template_sha256!: string;
+  @IsString() @Matches(/^[0-9a-f]{64}$/i) template_sha256!: string;
+  @IsString() @MaxLength(100000) body_template!: string;
+  @IsOptional() @IsObject() placeholder_rules?: Record<string, string>;
+  @IsOptional() @IsArray() @IsInt({ each: true }) @Min(0, { each: true }) @ArrayMaxSize(100) optional_lines?: number[];
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(100) @IsString({ each: true }) @MaxLength(500, { each: true }) subjects!: string[];
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(1000) @IsString({ each: true }) @MaxLength(320, { each: true }) recipients!: string[];
+  @IsString() @MaxLength(320) from_address!: string;
+  @IsInt() @Min(0) cap_per_day!: number;
   @IsISO8601() expires_at!: string;
 }
 
@@ -93,6 +114,13 @@ export class AgentInboxController {
     await this.membership.assertCanReviewInbox(user, workspaceId);
     return this.email.approveSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
       kitId: body.kit_id,
+      bodyTemplate: body.body_template,
+      placeholderRules: body.placeholder_rules,
+      optionalLines: body.optional_lines,
+      subjects: body.subjects,
+      recipients: body.recipients,
+      fromAddress: body.from_address,
+      capPerDay: body.cap_per_day,
       templateSha256: body.template_sha256,
       expiresAt: new Date(body.expires_at),
     });

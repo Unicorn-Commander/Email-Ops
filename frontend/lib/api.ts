@@ -378,6 +378,9 @@ export interface AgentInboxItemView {
   from_address?: string | null;
   subject: string | null;
   body_preview: string | null;
+  body_sha256: string | null;
+  thread_id: string | null;
+  kit_id: string | null;
   attachments?: { name: string; size: number | null }[];
   sends_at?: string | null;
   reviewed_by_uc_uid: string | null;

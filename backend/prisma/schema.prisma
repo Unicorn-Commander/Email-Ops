@@ -944,12 +944,19 @@ model OutboundAttachment {
 // A human-approved send kit is a narrow exception to the external-recipient
 // self-approval guard. The template hash binds approval to the exact kit.
 model AgentSendKit {
-  kitId         String   @id
-  workspaceId   String
-  approvedBy    String
-  approvedAt    DateTime
-  templateSha256 String
-  expiresAt     DateTime
+  kitId            String   @id
+  workspaceId      String
+  approvedBy       String
+  approvedAt       DateTime
+  templateSha256   String
+  bodyTemplate     String   @db.Text
+  placeholderRules Json
+  optionalLines    Json
+  subjects         String[]
+  recipientHashes  String[]
+  fromAddress      String
+  capPerDay        Int
+  expiresAt        DateTime
   workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, expiresAt])

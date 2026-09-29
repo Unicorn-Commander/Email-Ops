@@ -1176,16 +1176,23 @@
     },
     {
       "name": "approve_send_kit",
-      "description": "Human-only approval of a hashed agent send kit template; agents cannot grant themselves this exception.",
+      "description": "Human-only approval of a personalised agent send kit. The body template, placeholder rules, optional greeting lines, allowed subjects, recipient hashes, sender, and daily cap are bound to template_sha256; agents cannot create or renew this exception.",
       "input_schema": {
         "type": "object",
         "properties": {
           "workspace_id": { "type": "string" },
           "kit_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "body_template": { "type": "string", "maxLength": 100000 },
+          "placeholder_rules": { "type": "object", "additionalProperties": { "type": "string" } },
+          "optional_lines": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "maxItems": 100 },
+          "subjects": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 500 }, "minItems": 1, "maxItems": 100 },
+          "recipients": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 320 }, "minItems": 1, "maxItems": 1000 },
+          "from_address": { "type": "string", "minLength": 1, "maxLength": 320 },
+          "cap_per_day": { "type": "integer", "minimum": 0 },
           "template_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
           "expires_at": { "type": "string" }
         },
-        "required": ["kit_id", "template_sha256", "expires_at"],
+        "required": ["kit_id", "body_template", "subjects", "recipients", "from_address", "cap_per_day", "template_sha256", "expires_at"],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },

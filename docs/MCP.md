@@ -129,7 +129,7 @@ gate re-derived server-side from the verified token).
 | `list_agent_inbox` | List agent-inbox queue | `workspace_id?`, `state?` | Yes |
 | `approve_agent_inbox_item` | Approve draft (sends it) | `workspace_id?`, `item_id`, `note?` | No |
 | `reject_agent_inbox_item` | Reject draft (never sends) | `workspace_id?`, `item_id`, `note?` | No |
-| `approve_send_kit` | Human-approve a send kit | `workspace_id?`, `kit_id`, `template_sha256`, `expires_at` | No |
+| `approve_send_kit` | Human-approve a personalised send kit; recipients are hashed on receipt and the exact definition is bound to `template_sha256` | `workspace_id?`, `kit_id`, `body_template`, `placeholder_rules?`, `optional_lines?`, `subjects`, `recipients`, `from_address`, `cap_per_day`, `template_sha256`, `expires_at` | No |
 
 ### Triage & Sender Policy
 

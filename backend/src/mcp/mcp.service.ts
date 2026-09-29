@@ -835,10 +835,21 @@ export class McpService {
       'approve_send_kit',
       {
         title: 'Approve an agent send kit',
-        description: 'Human-only approval of a hashed send template. Agents cannot grant themselves this exception.',
+        description:
+          'Human-only approval of a personalised agent send kit. The body template, ' +
+          'placeholder rules, optional greeting lines, allowed subjects, recipient ' +
+          'hashes, sender, and daily cap are bound to template_sha256. Agents cannot ' +
+          'create or renew this exception.',
         inputSchema: {
           workspace_id: z.string().optional(),
           kit_id: z.string().min(1).max(200),
+          body_template: z.string().max(100000),
+          placeholder_rules: z.record(z.string()).optional(),
+          optional_lines: z.array(z.number().int().nonnegative()).max(100).optional(),
+          subjects: z.array(z.string().min(1).max(500)).min(1).max(100),
+          recipients: z.array(z.string().min(1).max(320)).min(1).max(1000),
+          from_address: z.string().min(1).max(320),
+          cap_per_day: z.number().int().nonnegative(),
           template_sha256: z.string().length(64),
           expires_at: z.string().min(1),
         },

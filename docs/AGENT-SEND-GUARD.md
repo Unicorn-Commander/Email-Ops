@@ -6,17 +6,66 @@ retry remains idempotent on `(workspace_id, external_source, external_ref)`.
 ## Approval authority
 
 Agent-inbox approval is a member review action. Viewer accounts cannot approve or
-reject. A human may approve any pending email that the mailbox fence permits. An
-agent principal (federation actor or PAT caller) cannot approve an agent-drafted
-message to an external domain when that domain is neither a verified workspace
-domain nor a trusted correspondent. The refusal is HTTP/MCP 403 and leaves the
-item pending. A human is never blocked by this guard.
+reject. A human may approve any pending email that the mailbox fence permits. A
+human principal is never blocked by the agent send-kit guard. An agent principal
+(federation actor or PAT caller) cannot approve an agent-drafted message to an
+external domain when that domain is neither a verified workspace domain nor a
+trusted correspondent. The refusal is HTTP/MCP 403, carries a machine-readable
+`reason`, and leaves the item pending.
 
-The exception is a `kit_id` attached at compose time. A human approves a kit with
-`approve_send_kit`; the approval stores the workspace, human UC uid, template
-SHA-256, and expiry. Approval only bypasses the guard when the current staged
-message hashes to that exact, unexpired template. Agents cannot create or renew
-kits.
+The exception is a `kit_id` attached at compose time. A human approves the full
+send-kit definition with `approve_send_kit`; agents cannot create or renew kits.
+The request contains `body_template`, optional `placeholder_rules`,
+`optional_lines`, `subjects`, `recipients`, `from_address`, `cap_per_day`,
+`expires_at`, and `template_sha256`. The server hashes each lower-cased recipient
+address and stores only those hashes. It computes `template_sha256` over this
+canonical JSON object, in this property order, with `recipientHashes` sorted:
+
+```json
+{
+  "bodyTemplate": "...",
+  "placeholderRules": { "first_name": "...", "token": "..." },
+  "optionalLines": [],
+  "subjects": ["..."],
+  "recipientHashes": ["..."],
+  "fromAddress": "...",
+  "capPerDay": 25
+}
+```
+
+Approval is refused if the supplied hash does not match that server-computed
+definition. By default `{first_name}` accepts a Unicode name up to 40 characters
+and `{token}` accepts exactly 16 lower-case hexadecimal characters. The body is
+matched as one anchored regular expression after CRLF-to-LF normalization; the
+guard escapes literal text and substitutes each placeholder rule. A kit also
+requires the staged sender, one To recipient, no Cc/Bcc, no attachments, an
+allowed subject, a recipient hash in the kit, and fewer than `cap_per_day`
+messages sent during the current UTC day.
+
+### Worked personalised wave
+
+This is a three-line template (line numbers are zero-based) for two recipients:
+
+```json
+{
+  "kit_id": "welcome-wave-2026-09",
+  "body_template": "{first_name},\n\nYour secure link: {token}",
+  "optional_lines": [0],
+  "subjects": ["Your secure link"],
+  "recipients": ["alice@example.com", "bob@example.com"],
+  "from_address": "outreach@example.org",
+  "cap_per_day": 25,
+  "expires_at": "2026-10-01T00:00:00Z",
+  "template_sha256": "<sha256 of the canonical definition>"
+}
+```
+
+For Alice, the staged body may be `Ana,\n\nYour secure link: 0123456789abcdef`.
+When no name is known, line 0 and its following blank line are omitted, so the
+body is `Your secure link: 0123456789abcdef`. Alice and Bob are approved as
+recipient hashes; their raw addresses are not stored on the kit. Each message
+must still use the approved sender and subject and consumes one of the 25 daily
+sends.
 
 Trust learning is opt-in. `trust_recipients` defaults to false; only an explicit
 true learns recipients for future autonomous replies. Rejection never learns.
