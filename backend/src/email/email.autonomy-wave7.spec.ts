@@ -490,13 +490,13 @@ describe('EmailService — Wave 7 autonomy matrix (verify DB; engine MOCKED)', (
   });
 
   describe('approve-path learning', () => {
-    it('approving an EMAIL draft LEARNS its external recipients (default on; count increments)', async () => {
+    it('approving an EMAIL draft with trustRecipients:true LEARNS its external recipients (count increments)', async () => {
       const stage = await compose(L1_KEY, {
         toAddress: 'learn-me@ext.test',
         cc: ['also-learn@ext.test', `internal@${INTERNAL_DOMAIN}`],
       });
       const { item } = await policyOf(stage.id);
-      await service.approveAgentInboxItem(WS, 'uc-approver', item!.id, 'lgtm');
+      await service.approveAgentInboxItem(WS, 'uc-approver', item!.id, 'lgtm', true);
 
       const rows = await prisma.trustedCorrespondent.findMany({
         where: { workspaceId: WS },
@@ -510,7 +510,7 @@ describe('EmailService — Wave 7 autonomy matrix (verify DB; engine MOCKED)', (
       // A second approval to the same address INCREMENTS, never duplicates.
       const again = await compose(L1_KEY, { toAddress: 'learn-me@ext.test' });
       const { item: item2 } = await policyOf(again.id);
-      await service.approveAgentInboxItem(WS, 'uc-approver', item2!.id, null);
+      await service.approveAgentInboxItem(WS, 'uc-approver', item2!.id, null, true);
       const row = await prisma.trustedCorrespondent.findUnique({
         where: {
           workspaceId_scope_address: {
@@ -527,6 +527,15 @@ describe('EmailService — Wave 7 autonomy matrix (verify DB; engine MOCKED)', (
       const stage = await compose(L1_KEY, { toAddress: 'never-learn@ext.test' });
       const { item } = await policyOf(stage.id);
       const res = await service.approveAgentInboxItem(WS, 'uc-approver', item!.id, null, false);
+      expect(res?.message?.status).toBe('sent');
+      const rows = await prisma.trustedCorrespondent.findMany({ where: { workspaceId: WS } });
+      expect(rows).toHaveLength(0);
+    });
+
+    it('an OMITTED trust flag approves + sends WITHOUT learning (trust is an explicit choice)', async () => {
+      const stage = await compose(L1_KEY, { toAddress: 'omitted-flag@ext.test' });
+      const { item } = await policyOf(stage.id);
+      const res = await service.approveAgentInboxItem(WS, 'uc-approver', item!.id, null);
       expect(res?.message?.status).toBe('sent');
       const rows = await prisma.trustedCorrespondent.findMany({ where: { workspaceId: WS } });
       expect(rows).toHaveLength(0);
@@ -549,9 +558,9 @@ describe('EmailService — Wave 7 autonomy matrix (verify DB; engine MOCKED)', (
         inboundReplyAttestation: { fromAddress: 'loop@ext.test' },
       });
       expect(first.status).toBe('pending_approval');
-      // A human approves once (learning on).
+      // A human approves once and explicitly chooses to trust the recipient.
       const { item } = await policyOf(first.id);
-      await service.approveAgentInboxItem(WS, 'uc-approver', item!.id, null);
+      await service.approveAgentInboxItem(WS, 'uc-approver', item!.id, null, true);
       // The NEXT in-thread reply flows autonomously.
       const second = await compose(L2_KEY, {
         toAddress: 'loop@ext.test',
