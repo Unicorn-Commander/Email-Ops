@@ -151,6 +151,38 @@ describe('approve_send_kit and agent-inbox projections', () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it('stores hashed recipients and the canonical definition on human approval', async () => {
+    const create = jest.fn().mockResolvedValue({ kitId: 'kit-1' });
+    const tx = {
+      agentSendKit: { findFirst: jest.fn().mockResolvedValue(null), create, update: jest.fn() },
+    };
+    const service = serviceWithTx(tx);
+    const templateSha256 = agentSendKitTemplateSha256(definition);
+    await service.approveSendKit('workspace-1', 'human-1', {
+      kitId: 'kit-1',
+      bodyTemplate: TEMPLATE,
+      optionalLines: [0],
+      subjects: ['Your secure link'],
+      recipients: ['alice@example.com', 'bob@example.com'],
+      fromAddress: 'outreach@example.org',
+      capPerDay: 2,
+      templateSha256,
+      expiresAt: new Date('2026-10-01T00:00:00.000Z'),
+    });
+    expect(create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        templateSha256,
+        bodyTemplate: TEMPLATE,
+        placeholderRules: definition.placeholderRules,
+        optionalLines: [0],
+        subjects: ['Your secure link'],
+        recipientHashes: definition.recipientHashes,
+        fromAddress: 'outreach@example.org',
+        capPerDay: 2,
+      }),
+    });
+  });
+
   it('includes body_sha256, reply thread_id, and kit_id in list and single-item views', async () => {
     const body = 'Ana,\n\nYour secure link: 0123456789abcdef';
     const item = {

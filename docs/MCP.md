@@ -131,6 +131,11 @@ gate re-derived server-side from the verified token).
 | `reject_agent_inbox_item` | Reject draft (never sends) | `workspace_id?`, `item_id`, `note?` | No |
 | `approve_send_kit` | Human-approve a personalised send kit; recipients are hashed on receipt and the exact definition is bound to `template_sha256` | `workspace_id?`, `kit_id`, `body_template`, `placeholder_rules?`, `optional_lines?`, `subjects`, `recipients`, `from_address`, `cap_per_day`, `template_sha256`, `expires_at` | No |
 
+Inbox list items and the single `inbox` result returned by approve/reject include
+`body_sha256` (the exact stored plain-text body), `thread_id` (the reply thread
+recorded at compose), and `kit_id`. `body_preview` remains a short display
+preview; the REST detail route returns the full staged message for review.
+
 ### Triage & Sender Policy
 
 | Tool Name | Purpose | Key Parameters | Read-Only |
