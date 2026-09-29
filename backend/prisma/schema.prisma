@@ -193,6 +193,12 @@ enum AgentInboxKind {
   CLEANUP
 }
 
+enum AgentSendKitState {
+  PROPOSED
+  APPROVED
+  REJECTED
+}
+
 // ── Agent autonomy dial (Email-Ops OWNS this) ──
 //
 // The per-agent send-autonomy level the registry carries (the "autonomy dial"):
@@ -941,24 +947,34 @@ model OutboundAttachment {
   @@map("outbound_attachments")
 }
 
-// A human-approved send kit is a narrow exception to the external-recipient
-// self-approval guard. The template hash binds approval to the exact kit.
+// A proposed or human-approved send kit is a narrow exception to the
+// external-recipient self-approval guard. The template hash binds approval to
+// the exact kit; recipients are retained so a human can inspect the proposal.
 model AgentSendKit {
   kitId            String   @id
   workspaceId      String
-  approvedBy       String
-  approvedAt       DateTime
+  state            AgentSendKitState @default(APPROVED)
+  title            String
+  proposedBy       String?
+  proposedAt       DateTime?
+  approvedBy       String?
+  approvedAt       DateTime?
+  rejectedBy       String?
+  rejectedAt       DateTime?
+  note             String?  @db.Text
   templateSha256   String
   bodyTemplate     String   @db.Text
   placeholderRules Json
   optionalLines    Json
   subjects         String[]
+  recipients       String[]
   recipientHashes  String[]
   fromAddress      String
   capPerDay        Int
   expiresAt        DateTime
   workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
+  @@index([workspaceId, state])
   @@index([workspaceId, expiresAt])
   @@map("agent_send_kits")
 }

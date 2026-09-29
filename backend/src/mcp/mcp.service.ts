@@ -48,6 +48,7 @@ import { enforceMcpToolScope, McpToolName, PatTaggedIdentity } from './mcp-scope
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
+const SEND_KIT_STATE = z.enum(['PROPOSED', 'APPROVED', 'REJECTED']);
 const MAIL_FOLDER = z.enum(['inbox', 'archive', 'spam', 'trash', 'sent', 'drafts']);
 const DISPOSITION = z.enum(['INBOX', 'ARCHIVE', 'TRASH', 'SPAM']);
 
@@ -832,17 +833,17 @@ export class McpService {
     );
 
     registerTool(
-      'approve_send_kit',
+      'propose_send_kit',
       {
-        title: 'Approve an agent send kit',
+        title: 'Propose an agent send kit',
         description:
-          'Human-only approval of a personalised agent send kit. The body template, ' +
-          'placeholder rules, optional greeting lines, allowed subjects, recipient ' +
-          'hashes, sender, and daily cap are bound to template_sha256. Agents cannot ' +
-          'create or renew this exception.',
+          'Propose a personalised send kit for a human to inspect in the agent inbox. ' +
+          'The caller must be a workspace member or agent principal with the compose entitlement. ' +
+          'The proposal is stored PROPOSED and does not authorize a send until a human approves it.',
         inputSchema: {
           workspace_id: z.string().optional(),
           kit_id: z.string().min(1).max(200),
+          title: z.string().min(1).max(200),
           body_template: z.string().max(100000),
           placeholder_rules: z.record(z.string()).optional(),
           optional_lines: z.array(z.number().int().nonnegative()).max(100).optional(),
@@ -850,11 +851,76 @@ export class McpService {
           recipients: z.array(z.string().min(1).max(320)).min(1).max(1000),
           from_address: z.string().min(1).max(320),
           cap_per_day: z.number().int().nonnegative(),
-          template_sha256: z.string().length(64),
           expires_at: z.string().min(1),
+          note: z.string().max(2000).optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.proposeSendKit(user, args)),
+    );
+
+    registerTool(
+      'list_send_kits',
+      {
+        title: 'List agent send kits',
+        description: 'List send-kit proposals and approvals, optionally filtered by PROPOSED, APPROVED, or REJECTED.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          state: SEND_KIT_STATE.optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.listSendKits(user, args ?? {})),
+    );
+
+    registerTool(
+      'get_send_kit',
+      {
+        title: 'Get an agent send kit',
+        description: 'Get the full send-kit definition, including retained recipients and body template.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          kit_id: z.string().min(1).max(200),
+        },
+      },
+      async (args: any) => wrap(await tools.getSendKit(user, args)),
+    );
+
+    registerTool(
+      'approve_send_kit',
+      {
+        title: 'Approve an agent send kit',
+        description:
+          'Human-only approval of a PROPOSED personalised agent send kit by the exact ' +
+          'template_sha256 shown to the human. The L1b full-definition form remains ' +
+          'accepted for backward compatibility; agents cannot approve or renew this exception.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          kit_id: z.string().min(1).max(200),
+          template_sha256: z.string().length(64),
+          body_template: z.string().max(100000).optional(),
+          placeholder_rules: z.record(z.string()).optional(),
+          optional_lines: z.array(z.number().int().nonnegative()).max(100).optional(),
+          subjects: z.array(z.string().min(1).max(500)).min(1).max(100).optional(),
+          recipients: z.array(z.string().min(1).max(320)).min(1).max(1000).optional(),
+          from_address: z.string().min(1).max(320).optional(),
+          cap_per_day: z.number().int().nonnegative().optional(),
+          expires_at: z.string().min(1).optional(),
         },
       },
       async (args: any) => wrap(await tools.approveSendKit(user, args)),
+    );
+
+    registerTool(
+      'reject_send_kit',
+      {
+        title: 'Reject an agent send kit',
+        description: 'Human-only rejection of a PROPOSED send kit; an optional note is retained for audit.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          kit_id: z.string().min(1).max(200),
+          note: z.string().max(2000).optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.rejectSendKit(user, args)),
     );
 
     // ── Trusted-correspondent tools (Wave 7: the outbound trust allowlist) ──

@@ -8,7 +8,7 @@
  */
 
 import { Injectable, Logger } from '@nestjs/common';
-import { AgentActionKind, AgentInboxState } from '@prisma/client';
+import { AgentActionKind, AgentInboxState, AgentSendKitState } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AgentActivityView, AgentControlsView, AgentMetricsView } from './agent-controls.types';
 
@@ -138,7 +138,7 @@ export class AgentControlsService {
     const since = new Date(Date.now() - window * 24 * 60 * 60 * 1000);
     try {
       return await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-        const [triaged, sent, awaiting] = await Promise.all([
+        const [triaged, sent, awaiting, proposedKits] = await Promise.all([
           tx.threadDisposition.count({
             where: {
               workspaceId,
@@ -156,8 +156,11 @@ export class AgentControlsService {
           tx.agentInboxItem.count({
             where: { workspaceId, state: AgentInboxState.PENDING },
           }),
+          tx.agentSendKit?.count
+            ? tx.agentSendKit.count({ where: { workspaceId, state: AgentSendKitState.PROPOSED } })
+            : Promise.resolve(0),
         ]);
-        return { triaged, sent, awaiting, window_days: window };
+        return { triaged, sent, awaiting: awaiting + proposedKits, window_days: window };
       });
     } catch (err) {
       // Never surface a 500 for a metrics widget — degrade to zeros, log for ops.

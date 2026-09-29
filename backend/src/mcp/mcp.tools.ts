@@ -762,7 +762,13 @@ export class EmailOpsTools {
       ucUidOf(user as WithWorkspaceClaim),
       state,
     );
-    return { items, count: items.length };
+    const count =
+      !args.state || args.state === 'pending'
+        ? await (typeof (this.email as any).countAgentInboxPending === 'function'
+            ? this.email.countAgentInboxPending(workspaceId, ucUidOf(user as WithWorkspaceClaim))
+            : Promise.resolve(items.length))
+        : items.length;
+    return { items, count };
   }
 
   async approveAgentInboxItem(
@@ -816,11 +822,12 @@ export class EmailOpsTools {
     return { ok: true, ...res };
   }
 
-  async approveSendKit(
+  async proposeSendKit(
     user: User,
     args: {
       workspace_id?: string;
       kit_id: string;
+      title: string;
       body_template: string;
       placeholder_rules?: Record<string, string>;
       optional_lines?: number[];
@@ -828,8 +835,65 @@ export class EmailOpsTools {
       recipients: string[];
       from_address: string;
       cap_per_day: number;
-      template_sha256: string;
       expires_at: string;
+      note?: string;
+    },
+  ): Promise<unknown> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const gate = checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    if (!gate.allowed) throw new ForbiddenException(gate.reason);
+    return this.email.proposeSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
+      kitId: args.kit_id,
+      title: args.title,
+      bodyTemplate: args.body_template,
+      placeholderRules: args.placeholder_rules,
+      optionalLines: args.optional_lines,
+      subjects: args.subjects,
+      recipients: args.recipients,
+      fromAddress: args.from_address,
+      capPerDay: args.cap_per_day,
+      expiresAt: new Date(args.expires_at),
+      note: args.note,
+    });
+  }
+
+  async listSendKits(
+    user: User,
+    args: { workspace_id?: string; state?: 'PROPOSED' | 'APPROVED' | 'REJECTED' },
+  ): Promise<{ items: unknown[]; count: number }> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const items = await this.email.listSendKits(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.state as import('@prisma/client').AgentSendKitState | undefined,
+    );
+    return { items, count: items.length };
+  }
+
+  async getSendKit(
+    user: User,
+    args: { workspace_id?: string; kit_id: string },
+  ): Promise<unknown> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    const kit = await this.email.getSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), args.kit_id);
+    if (!kit) return { ok: false, reason: 'send kit not found in this workspace' };
+    return kit;
+  }
+
+  async approveSendKit(
+    user: User,
+    args: {
+      workspace_id?: string;
+      kit_id: string;
+      template_sha256: string;
+      body_template?: string;
+      placeholder_rules?: Record<string, string>;
+      optional_lines?: number[];
+      subjects?: string[];
+      recipients?: string[];
+      from_address?: string;
+      cap_per_day?: number;
+      expires_at?: string;
     },
   ): Promise<unknown> {
     if ((user as any).__patAuth || (user as any).__isFederationActor) {
@@ -846,8 +910,24 @@ export class EmailOpsTools {
       fromAddress: args.from_address,
       capPerDay: args.cap_per_day,
       templateSha256: args.template_sha256,
-      expiresAt: new Date(args.expires_at),
+      expiresAt: args.expires_at ? new Date(args.expires_at) : undefined,
     });
+  }
+
+  async rejectSendKit(
+    user: User,
+    args: { workspace_id?: string; kit_id: string; note?: string },
+  ): Promise<unknown> {
+    if ((user as any).__patAuth || (user as any).__isFederationActor) {
+      throw new ForbiddenException('Only a signed-in human may reject a send kit.');
+    }
+    const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    return this.email.rejectSendKit(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.kit_id,
+      args.note ?? null,
+    );
   }
 
 

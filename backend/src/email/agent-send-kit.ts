@@ -8,6 +8,8 @@ export const DEFAULT_PLACEHOLDER_RULES = {
 
 export const AGENT_SEND_KIT_REFUSAL_REASONS = [
   'kit_missing',
+  'kit_not_approved',
+  'kit_rejected',
   'kit_expired',
   'from_mismatch',
   'extra_recipients',
@@ -35,12 +37,16 @@ export interface AgentSendKitDefinition {
   placeholderRules: Record<string, string>;
   optionalLines: number[];
   subjects: string[];
+  recipients: string[];
   recipientHashes: string[];
   fromAddress: string;
   capPerDay: number;
 }
 
+export type AgentSendKitStateValue = 'PROPOSED' | 'APPROVED' | 'REJECTED';
+
 export interface AgentSendKitRecord extends AgentSendKitDefinition {
+  state?: AgentSendKitStateValue;
   expiresAt: Date;
 }
 
@@ -137,14 +143,15 @@ export function buildAgentSendKitDefinition(input: AgentSendKitDefinitionInput):
     if (typeof address !== 'string' || !normalizeAddress(address)) {
       throw new Error('recipients must contain non-empty addresses.');
     }
-    return recipientHash(address);
+    return normalizeAddress(address);
   });
   return {
     bodyTemplate: input.bodyTemplate,
     placeholderRules,
     optionalLines,
     subjects: [...input.subjects],
-    recipientHashes: recipients.sort(),
+    recipients,
+    recipientHashes: recipients.map(recipientHash).sort(),
     fromAddress: input.fromAddress.trim(),
     capPerDay: input.capPerDay,
   };
@@ -232,6 +239,8 @@ export interface AgentSendKitCheckInput {
 export function agentSendKitRefusalReason(input: AgentSendKitCheckInput): AgentSendKitRefusalReason | null {
   const { message, kit } = input;
   if (!kit) return 'kit_missing';
+  if (kit.state === 'REJECTED') return 'kit_rejected';
+  if (kit.state !== undefined && kit.state !== 'APPROVED') return 'kit_not_approved';
   const now = input.now ?? new Date();
   if (!Number.isFinite(kit.expiresAt.getTime()) || kit.expiresAt <= now) return 'kit_expired';
   if (normalizeAddress(message.fromAddress ?? '') !== normalizeAddress(kit.fromAddress)) {
@@ -254,6 +263,7 @@ export function agentSendKitRefusalReason(input: AgentSendKitCheckInput): AgentS
     placeholderRules: kit.placeholderRules,
     optionalLines: kit.optionalLines,
     subjects: kit.subjects,
+    recipients: kit.recipients,
     recipientHashes: kit.recipientHashes,
     fromAddress: kit.fromAddress,
     capPerDay: kit.capPerDay,

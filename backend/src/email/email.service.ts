@@ -32,9 +32,18 @@
  *     and never leaves.
  */
 
-import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   AgentActionKind,
+  AgentSendKit,
+  AgentSendKitState,
   AgentInboxKind,
   AgentInboxState,
   EmailDirection,
@@ -77,6 +86,7 @@ import {
   buildAgentSendKitDefinition,
   plainTextBodySha256,
   type AgentSendKitDefinition,
+  type AgentSendKitDefinitionInput,
   type AgentSendKitRecord,
 } from './agent-send-kit';
 import { shouldAdvanceStatus } from './message-status';
@@ -116,6 +126,8 @@ const MAILBOX_FANOUT_TIMEOUT_MS = 8000;
 
 const AGENT_SEND_KIT_REASON_MESSAGES: Record<string, string> = {
   kit_missing: 'The message has no matching human-approved send kit.',
+  kit_not_approved: 'The send kit is still awaiting human approval.',
+  kit_rejected: 'The send kit was rejected by a human and cannot authorize sends.',
   kit_expired: 'The human-approved send kit has expired.',
   from_mismatch: 'The staged sender does not match the approved send kit.',
   extra_recipients: 'A send kit permits exactly one To recipient and no Cc or Bcc recipients.',
@@ -234,6 +246,61 @@ type ApprovePrep =
       mailbox: MailboxAccount | null;
       req: SendReq;
     };
+
+export interface AgentSendKitProposalInput extends AgentSendKitDefinitionInput {
+  kitId: string;
+  title: string;
+  expiresAt: Date;
+  note?: string | null;
+}
+
+export interface AgentSendKitApprovalInput {
+  kitId: string;
+  templateSha256: string;
+  /** L1b full-definition compatibility fields. */
+  bodyTemplate?: string;
+  placeholderRules?: Record<string, string>;
+  optionalLines?: number[];
+  subjects?: string[];
+  recipients?: string[];
+  fromAddress?: string;
+  capPerDay?: number;
+  expiresAt?: Date;
+}
+
+export type AgentSendKitListState = AgentSendKitState;
+
+export interface AgentSendKitListView {
+  id: string;
+  kit_id: string;
+  title: string;
+  state: AgentSendKitState;
+  from: string;
+  from_address: string;
+  cap_per_day: number;
+  expires_at: string;
+  subjects: string[];
+  recipient_count: number;
+  template_sha256: string;
+  proposed_by: string | null;
+  proposed_at: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  rejected_by: string | null;
+  rejected_at: string | null;
+  note: string | null;
+  sent_today: number;
+  body_template?: string;
+  placeholder_rules?: Record<string, string>;
+  optional_lines?: number[];
+  recipients?: string[];
+  recipient_hashes?: string[];
+  replaced?: boolean;
+}
+
+function sameInstant(a: Date, b: Date): boolean {
+  return Number.isFinite(a.getTime()) && Number.isFinite(b.getTime()) && a.getTime() === b.getTime();
+}
 
 @Injectable()
 export class EmailService {
@@ -2099,6 +2166,180 @@ export class EmailService {
     return items.map((it) => this.inboxView(it, it.message));
   }
 
+  /** Pending inbox rows plus one pending item for every proposed send kit. */
+  async countAgentInboxPending(workspaceId: string, ucUid: string | null): Promise<number> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const [drafts, kits] = await Promise.all([
+        tx.agentInboxItem.count({ where: { workspaceId, state: AgentInboxState.PENDING } }),
+        tx.agentSendKit.count({ where: { workspaceId, state: AgentSendKitState.PROPOSED } }),
+      ]);
+      return drafts + kits;
+    });
+  }
+
+  async listSendKits(
+    workspaceId: string,
+    ucUid: string | null,
+    state?: AgentSendKitListState,
+  ): Promise<AgentSendKitListView[]> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const rows = await tx.agentSendKit.findMany({
+        where: { workspaceId, ...(state ? { state } : {}) },
+        orderBy: [{ state: 'asc' }, { proposedAt: 'desc' }, { expiresAt: 'desc' }],
+        take: 200,
+      });
+      return Promise.all(rows.map((row) => this.sendKitView(tx, row, false)));
+    });
+  }
+
+  async getSendKit(
+    workspaceId: string,
+    ucUid: string | null,
+    kitId: string,
+  ): Promise<AgentSendKitListView | null> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const row = await tx.agentSendKit.findFirst({ where: { kitId, workspaceId } });
+      return row ? this.sendKitView(tx, row, true) : null;
+    });
+  }
+
+  async proposeSendKit(
+    workspaceId: string,
+    proposedBy: string,
+    input: AgentSendKitProposalInput,
+  ): Promise<AgentSendKitListView> {
+    if (!proposedBy) throw new ForbiddenException('A proposer identity is required for a send kit.');
+    const title = input.title.trim();
+    if (!title) throw new BadRequestException('title is required.');
+    if (title.length > 200) throw new BadRequestException('title must be at most 200 characters.');
+    if (!Number.isFinite(input.expiresAt.getTime()) || input.expiresAt <= new Date()) {
+      throw new BadRequestException('expires_at must be in the future.');
+    }
+
+    const definition = this.buildSendKitDefinition(input);
+    const templateSha256 = agentSendKitTemplateSha256(definition);
+    const proposedAt = new Date();
+
+    return this.prisma.withWorkspace(workspaceId, proposedBy, async (tx) => {
+      const existing = await tx.agentSendKit.findFirst({ where: { kitId: input.kitId, workspaceId } });
+      if (existing) {
+        const state = existing.state ?? AgentSendKitState.APPROVED;
+        const identical =
+          existing.templateSha256 === templateSha256 &&
+          sameInstant(existing.expiresAt, input.expiresAt) &&
+          existing.title === title;
+        if (identical) return { ...(await this.sendKitView(tx, existing, true)), replaced: false };
+        if (state !== AgentSendKitState.PROPOSED) {
+          throw new ConflictException({
+            reason: 'kit_immutable',
+            message: 'An approved or rejected send kit cannot be changed.',
+          });
+        }
+        const replaced = await tx.agentSendKit.update({
+          where: { kitId: input.kitId },
+          data: this.sendKitProposalData(workspaceId, proposedBy, title, input, definition, templateSha256, proposedAt),
+        });
+        return { ...(await this.sendKitView(tx, replaced, true)), replaced: true };
+      }
+
+      const created = await tx.agentSendKit.create({
+        data: {
+          kitId: input.kitId,
+          ...this.sendKitProposalData(workspaceId, proposedBy, title, input, definition, templateSha256, proposedAt),
+        },
+      });
+      return { ...(await this.sendKitView(tx, created, true)), replaced: false };
+    });
+  }
+
+  private buildSendKitDefinition(input: AgentSendKitDefinitionInput): AgentSendKitDefinition {
+    try {
+      return buildAgentSendKitDefinition(input);
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid send-kit definition.');
+    }
+  }
+
+  private sendKitProposalData(
+    workspaceId: string,
+    proposedBy: string,
+    title: string,
+    input: AgentSendKitProposalInput,
+    definition: AgentSendKitDefinition,
+    templateSha256: string,
+    proposedAt: Date,
+  ) {
+    return {
+      workspaceId,
+      state: AgentSendKitState.PROPOSED,
+      title,
+      proposedBy,
+      proposedAt,
+      approvedBy: null,
+      approvedAt: null,
+      rejectedBy: null,
+      rejectedAt: null,
+      note: input.note?.trim().slice(0, 2000) || null,
+      templateSha256,
+      bodyTemplate: definition.bodyTemplate,
+      placeholderRules: definition.placeholderRules as Prisma.InputJsonValue,
+      optionalLines: definition.optionalLines as unknown as Prisma.InputJsonValue,
+      subjects: definition.subjects,
+      recipients: definition.recipients,
+      recipientHashes: definition.recipientHashes,
+      fromAddress: definition.fromAddress,
+      capPerDay: definition.capPerDay,
+      expiresAt: input.expiresAt,
+    };
+  }
+
+  private async sendKitView(
+    tx: WorkspaceTxClient,
+    row: AgentSendKit,
+    full: boolean,
+  ): Promise<AgentSendKitListView> {
+    const now = new Date();
+    const utcStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const utcEnd = new Date(utcStart.getTime() + 24 * 60 * 60 * 1000);
+    const sentToday = tx.emailMessage?.count
+      ? await tx.emailMessage.count({
+          where: { workspaceId: row.workspaceId, kitId: row.kitId, sentAt: { gte: utcStart, lt: utcEnd } },
+        })
+      : 0;
+    const view: AgentSendKitListView = {
+      id: row.kitId,
+      kit_id: row.kitId,
+      title: row.title ?? row.kitId,
+      state: row.state ?? AgentSendKitState.APPROVED,
+      from: row.fromAddress ?? '',
+      from_address: row.fromAddress ?? '',
+      cap_per_day: row.capPerDay ?? 0,
+      expires_at: row.expiresAt?.toISOString?.() ?? '',
+      subjects: row.subjects ?? [],
+      recipient_count:
+        row.recipients && row.recipients.length > 0 ? row.recipients.length : row.recipientHashes?.length ?? 0,
+      template_sha256: row.templateSha256,
+      proposed_by: row.proposedBy,
+      proposed_at: row.proposedAt?.toISOString() ?? null,
+      approved_by: row.approvedBy,
+      approved_at: row.approvedAt?.toISOString() ?? null,
+      rejected_by: row.rejectedBy,
+      rejected_at: row.rejectedAt?.toISOString() ?? null,
+      note: row.note,
+      sent_today: sentToday,
+    };
+    if (full) {
+      view.body_template = row.bodyTemplate ?? '';
+      view.placeholder_rules = row.placeholderRules as Record<string, string>;
+      view.optional_lines = Array.isArray(row.optionalLines)
+        ? row.optionalLines.filter((line): line is number => typeof line === 'number')
+        : [];
+      view.recipients = row.recipients ?? [];
+      view.recipient_hashes = row.recipientHashes ?? [];
+    }
+    return view;
+  }
+
   /**
    * Resolve + persist the `targets` preview for up to 3 PENDING native CLEANUP
    * items whose payload predates target-capture (bare thread_ids only). Persists
@@ -2721,64 +2962,169 @@ export class EmailService {
   async approveSendKit(
     workspaceId: string,
     approvedBy: string,
-    input: {
-      kitId: string;
-      bodyTemplate: string;
-      placeholderRules?: Record<string, string>;
-      optionalLines?: number[];
-      subjects: string[];
-      recipients: string[];
-      fromAddress: string;
-      capPerDay: number;
-      templateSha256: string;
-      expiresAt: Date;
-    },
-  ) {
+    input: AgentSendKitApprovalInput,
+  ): Promise<AgentSendKitListView> {
     if (!approvedBy) throw new ForbiddenException('A human identity is required to approve a send kit.');
-    if (!Number.isFinite(input.expiresAt.getTime()) || input.expiresAt <= new Date()) {
-      throw new BadRequestException('expires_at must be in the future.');
+
+    const legacyFields = [
+      input.bodyTemplate,
+      input.placeholderRules,
+      input.optionalLines,
+      input.subjects,
+      input.recipients,
+      input.fromAddress,
+      input.capPerDay,
+      input.expiresAt,
+    ];
+    const hasLegacyDefinition = legacyFields.some((value) => value !== undefined);
+    const hasCompleteLegacyDefinition =
+      input.bodyTemplate !== undefined &&
+      input.subjects !== undefined &&
+      input.recipients !== undefined &&
+      input.fromAddress !== undefined &&
+      input.capPerDay !== undefined &&
+      input.expiresAt !== undefined;
+    if (hasLegacyDefinition && !hasCompleteLegacyDefinition) {
+      throw new BadRequestException('The legacy approval form must include the complete kit definition.');
     }
-    let definition: AgentSendKitDefinition;
-    try {
-      definition = buildAgentSendKitDefinition({
-        bodyTemplate: input.bodyTemplate,
+
+    let definition: AgentSendKitDefinition | null = null;
+    if (hasCompleteLegacyDefinition) {
+      if (!Number.isFinite(input.expiresAt!.getTime()) || input.expiresAt! <= new Date()) {
+        throw new BadRequestException('expires_at must be in the future.');
+      }
+      definition = this.buildSendKitDefinition({
+        bodyTemplate: input.bodyTemplate!,
         placeholderRules: input.placeholderRules,
         optionalLines: input.optionalLines,
-        subjects: input.subjects,
-        recipients: input.recipients,
-        fromAddress: input.fromAddress,
-        capPerDay: input.capPerDay,
+        subjects: input.subjects!,
+        recipients: input.recipients!,
+        fromAddress: input.fromAddress!,
+        capPerDay: input.capPerDay!,
       });
-    } catch (error) {
-      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid send-kit definition.');
+      const computedHash = agentSendKitTemplateSha256(definition);
+      if (input.templateSha256 !== computedHash) {
+        throw new BadRequestException({
+          reason: 'template_hash_mismatch',
+          message: 'template_sha256 does not match the supplied send-kit definition.',
+        });
+      }
     }
-    const computedHash = agentSendKitTemplateSha256(definition);
-    if (input.templateSha256 !== computedHash) {
-      throw new BadRequestException({
-        reason: 'template_hash_mismatch',
-        message: 'template_sha256 does not match the supplied send-kit definition.',
-      });
-    }
+
     return this.prisma.withWorkspace(workspaceId, approvedBy, async (tx) => {
-      const approvedAt = new Date();
-      const data = {
-        workspaceId,
-        approvedBy,
-        approvedAt,
-        templateSha256: computedHash,
-        bodyTemplate: definition.bodyTemplate,
-        placeholderRules: definition.placeholderRules as Prisma.InputJsonValue,
-        optionalLines: definition.optionalLines as unknown as Prisma.InputJsonValue,
-        subjects: definition.subjects,
-        recipientHashes: definition.recipientHashes,
-        fromAddress: definition.fromAddress,
-        capPerDay: definition.capPerDay,
-        expiresAt: input.expiresAt,
-      };
       const existing = await tx.agentSendKit.findFirst({ where: { kitId: input.kitId, workspaceId } });
-      return existing
-        ? tx.agentSendKit.update({ where: { kitId: input.kitId }, data })
-        : tx.agentSendKit.create({ data: { kitId: input.kitId, ...data } });
+      if (!existing) {
+        if (!definition || !input.expiresAt) {
+          throw new NotFoundException('The proposed send kit was not found in this workspace.');
+        }
+        const approvedAt = new Date();
+        const created = await tx.agentSendKit.create({
+          data: {
+            kitId: input.kitId,
+            workspaceId,
+            state: AgentSendKitState.APPROVED,
+            title: input.kitId,
+            proposedBy: null,
+            proposedAt: null,
+            approvedBy,
+            approvedAt,
+            rejectedBy: null,
+            rejectedAt: null,
+            note: null,
+            templateSha256: input.templateSha256,
+            bodyTemplate: definition.bodyTemplate,
+            placeholderRules: definition.placeholderRules as Prisma.InputJsonValue,
+            optionalLines: definition.optionalLines as unknown as Prisma.InputJsonValue,
+            subjects: definition.subjects,
+            recipients: definition.recipients,
+            recipientHashes: definition.recipientHashes,
+            fromAddress: definition.fromAddress,
+            capPerDay: definition.capPerDay,
+            expiresAt: input.expiresAt,
+          },
+        });
+        return this.sendKitView(tx, created, true);
+      }
+
+      const storedState = existing.state ?? AgentSendKitState.APPROVED;
+      if (existing.templateSha256 !== input.templateSha256) {
+        throw new BadRequestException({
+          reason: 'template_hash_mismatch',
+          message: 'template_sha256 does not match the stored send-kit proposal.',
+        });
+      }
+      if (storedState === AgentSendKitState.REJECTED) {
+        throw new BadRequestException({
+          reason: 'kit_rejected',
+          message: 'A rejected send kit cannot be approved.',
+        });
+      }
+      if (storedState === AgentSendKitState.APPROVED) {
+        throw new BadRequestException({
+          reason: 'kit_not_proposed',
+          message: 'Only a proposed send kit can be approved.',
+        });
+      }
+      if (storedState !== AgentSendKitState.PROPOSED) {
+        throw new BadRequestException({
+          reason: 'kit_not_proposed',
+          message: 'Only a proposed send kit can be approved.',
+        });
+      }
+      if (!Number.isFinite(existing.expiresAt.getTime()) || existing.expiresAt <= new Date()) {
+        throw new BadRequestException({
+          reason: 'kit_expired',
+          message: 'The send-kit proposal has expired.',
+        });
+      }
+      if (definition && !sameInstant(existing.expiresAt, input.expiresAt!)) {
+        throw new BadRequestException({
+          reason: 'kit_definition_mismatch',
+          message: 'The legacy definition does not match the stored proposal expiry.',
+        });
+      }
+      const updated = await tx.agentSendKit.update({
+        where: { kitId: input.kitId },
+        data: {
+          state: AgentSendKitState.APPROVED,
+          approvedBy,
+          approvedAt: new Date(),
+          rejectedBy: null,
+          rejectedAt: null,
+        },
+      });
+      return this.sendKitView(tx, updated, true);
+    });
+  }
+
+  async rejectSendKit(
+    workspaceId: string,
+    rejectedBy: string,
+    kitId: string,
+    note?: string | null,
+  ): Promise<AgentSendKitListView> {
+    if (!rejectedBy) throw new ForbiddenException('A human identity is required to reject a send kit.');
+    return this.prisma.withWorkspace(workspaceId, rejectedBy, async (tx) => {
+      const existing = await tx.agentSendKit.findFirst({ where: { kitId, workspaceId } });
+      if (!existing) throw new NotFoundException('The send kit was not found in this workspace.');
+      const state = existing.state ?? AgentSendKitState.APPROVED;
+      if (state === AgentSendKitState.APPROVED) {
+        throw new BadRequestException({
+          reason: 'kit_immutable',
+          message: 'An approved send kit cannot be rejected.',
+        });
+      }
+      if (state === AgentSendKitState.REJECTED) return this.sendKitView(tx, existing, true);
+      const updated = await tx.agentSendKit.update({
+        where: { kitId },
+        data: {
+          state: AgentSendKitState.REJECTED,
+          rejectedBy,
+          rejectedAt: new Date(),
+          note: note?.trim().slice(0, 2000) || existing.note || null,
+        },
+      });
+      return this.sendKitView(tx, updated, true);
     });
   }
 
