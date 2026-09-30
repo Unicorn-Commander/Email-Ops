@@ -49,6 +49,43 @@ describe('EmailOpsTools', () => {
     );
   });
 
+  describe('thread source mailbox', () => {
+    function threadTools(messages: unknown[] = []) {
+      const email = { listThreadMessages: jest.fn().mockResolvedValue(messages) };
+      const membership = { resolveAndAuthorize: jest.fn().mockResolvedValue('ws-1') };
+      const t = new EmailOpsTools(membership as any, email as any,
+        {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any);
+      return { t, email, membership };
+    }
+    it.each(['getThread', 'listThreadMessages'] as const)(
+      '%s errors for an empty implicit-default lookup', async (method) => {
+        const { t } = threadTools();
+        await expect(t[method]({} as any, { thread_id: 'external-thread' }))
+          .rejects.toThrow('Pass mailbox_id from search_mail or list_threads');
+      },
+    );
+    it.each(['getThread', 'listThreadMessages'] as const)(
+      '%s passes explicit source and preserves empty scoped responses', async (method) => {
+        const { t, email } = threadTools();
+        const result = await t[method]({} as any, { thread_id: 'external', mailbox_id: 'mb-1' });
+        expect(result.messages).toEqual([]);
+        expect(email.listThreadMessages).toHaveBeenCalledWith('ws-1', '', 'external', 'mb-1');
+      },
+    );
+    it('keeps existing successful default-mailbox reads', async () => {
+      const { t } = threadTools([{ id: 'message' }]);
+      expect(await t.getThread({} as any, { thread_id: 'local' }))
+        .toEqual({ messages: [{ id: 'message' }], count: 1 });
+    });
+    it('rejects workspace resolution before mail access', async () => {
+      const { t, email, membership } = threadTools();
+      membership.resolveAndAuthorize.mockRejectedValue(new ForbiddenException());
+      await expect(t.getThread({} as any, { thread_id: 'external', mailbox_id: 'other' }))
+        .rejects.toThrow(ForbiddenException);
+      expect(email.listThreadMessages).not.toHaveBeenCalled();
+    });
+  });
+
   describe('ensureMailDomain', () => {
     it('throws ForbiddenException for non-OWNER role', async () => {
       (membership.resolveWithRole as jest.Mock).mockResolvedValue({

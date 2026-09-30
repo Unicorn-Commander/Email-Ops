@@ -332,11 +332,11 @@ export class McpService {
       {
         title: 'List thread messages',
         description:
-          'List the MESSAGES in one thread, bodies as PREVIEWS only (the full message ' +
-          'lives in Apache James). Read-only / viewer-level. Returns { messages: [...] }.',
+          'List messages in a thread. Pass mailbox_id from search_mail/list_threads for Gmail/Microsoft or a non-default mailbox. An empty lookup without mailbox_id returns an explicit error. Read-only / viewer-level.',
         inputSchema: {
           workspace_id: z.string().optional(),
           thread_id: z.string(),
+          mailbox_id: z.string().min(1).optional(),
         },
       },
       async (args: any) => wrap(await tools.listThreadMessages(user, args)),
@@ -437,7 +437,7 @@ export class McpService {
           'threading headers, read/flag state, and attachments when the engine serves ' +
           'them. Pass mailbox_id to read an external (Gmail/Microsoft) thread through its ' +
           'provider or to force the live engine detail; omit it to read the workspace ' +
-          'default mailbox. Read-only / member-level. Returns { messages, count }.',
+          'default mailbox. An empty lookup without mailbox_id returns an explicit error requesting its source mailbox. Read-only / member-level. Returns { messages, count }.',
         inputSchema: {
           workspace_id: z.string().optional(),
           thread_id: z.string().min(1),

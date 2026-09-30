@@ -300,13 +300,14 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "list_thread_messages",
-      "description": "List the MESSAGES in one thread, bodies as PREVIEWS only (the full message lives in Apache James). Read-only / viewer-level. Returns { messages: [...] }.",
+      "description": "List messages in a thread. Pass mailbox_id from search_mail/list_threads for Gmail/Microsoft or a non-default mailbox. An empty lookup without mailbox_id returns an explicit error. Read-only / viewer-level.",
       "input_schema": {
         "type": "object",
         "properties": {
           "workspace_id": {
             "type": "string"
           },
+          "mailbox_id": { "type": "string", "minLength": 1 },
           "thread_id": {
             "type": "string"
           }
@@ -471,7 +472,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "get_thread",
-      "description": "Return the full MESSAGES in one thread WITH bodies (text + HTML), cc/bcc, threading headers, read/flag state, and attachments when the engine serves them. Pass mailbox_id to read an external (Gmail/Microsoft) thread through its provider or to force the live engine detail; omit it to read the workspace default mailbox. Read-only / member-level. Returns { messages, count }.",
+      "description": "Return the full MESSAGES in one thread WITH bodies (text + HTML), cc/bcc, threading headers, read/flag state, and attachments when the engine serves them. Pass mailbox_id to read an external (Gmail/Microsoft) thread through its provider or to force the live engine detail; omit it to read the workspace default mailbox. An empty lookup without mailbox_id returns an explicit error requesting its source mailbox. Read-only / member-level. Returns { messages, count }.",
       "input_schema": {
         "type": "object",
         "properties": {
