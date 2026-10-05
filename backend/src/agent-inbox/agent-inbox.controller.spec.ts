@@ -212,4 +212,56 @@ describe('AgentInboxController (delegation)', () => {
       NotFoundException,
     );
   });
+
+  it('POST send-kit proposal delegates the full proposal after the compose entitlement check', async () => {
+    const proposeSendKit = jest.fn().mockResolvedValue({ kit_id: 'kit-1', state: 'PROPOSED' });
+    const ctrl = make({ proposeSendKit });
+    const out = await ctrl.proposeSendKit(WS, userWith(['email-ops']), {
+      kit_id: 'kit-1',
+      title: 'Secure links',
+      body_template: '{first_name},\n\nLink: {token}',
+      subjects: ['Your link'],
+      recipients: ['ALICE@example.com'],
+      from_address: 'outreach@example.org',
+      cap_per_day: 2,
+      expires_at: '2026-10-01T00:00:00.000Z',
+    });
+
+    expect(proposeSendKit).toHaveBeenCalledWith(
+      WS,
+      'kc-sub-aaron',
+      expect.objectContaining({
+        kitId: 'kit-1',
+        title: 'Secure links',
+        expiresAt: expect.any(Date),
+      }),
+    );
+    expect(out).toMatchObject({ state: 'PROPOSED' });
+  });
+
+  it('PAT and federation identities cannot approve or reject send kits', async () => {
+    const pat = userWith(bothSkus) as any;
+    pat.__patAuth = { id: 'pat-1' };
+    const ctrl = make({ approveSendKit: jest.fn(), rejectSendKit: jest.fn() });
+
+    await expect(
+      ctrl.approveSendKitProposal(WS, pat, 'kit-1', { template_sha256: 'a'.repeat(64) }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(ctrl.rejectSendKit(WS, pat, 'kit-1', { note: 'no' })).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+  });
+
+  it('GET send-kits returns the list and human-session signal', async () => {
+    const listSendKits = jest.fn().mockResolvedValue([{ kit_id: 'kit-1', state: 'PROPOSED' }]);
+    const ctrl = make({ listSendKits });
+    const out = await ctrl.listSendKits(WS, userWith(bothSkus), {});
+
+    expect(listSendKits).toHaveBeenCalledWith(WS, 'kc-sub-aaron', undefined);
+    expect(out).toEqual({
+      items: [{ kit_id: 'kit-1', state: 'PROPOSED' }],
+      count: 1,
+      human_session: true,
+    });
+  });
 });

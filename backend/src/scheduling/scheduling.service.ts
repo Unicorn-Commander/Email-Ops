@@ -154,6 +154,8 @@ export class SchedulingService {
 
     const payload = this.normalizePayload(input.payload);
     if (!payload) return { scheduled: false, item: null };
+    const attachmentBytes = (payload.attachments ?? []).reduce((sum, a) => sum + (a.content_base64 ? Buffer.from(a.content_base64, 'base64').length : 0), 0);
+    if ((payload.attachments?.length ?? 0) > 5 || attachmentBytes > 10 * 1024 * 1024) return { scheduled: false, item: null };
 
     const row = await this.prisma.withWorkspace(input.workspaceId, ucUid, (tx) =>
       tx.scheduledSend.create({
@@ -324,6 +326,30 @@ export class SchedulingService {
     return sent;
   }
 
+  /** Auto-approve deferred agent drafts at sends_at; rejection removes them from this set. */
+  async fireDueAgentInboxSends(now = new Date(), take = 50): Promise<number> {
+    const rows = await this.prisma.systemClient.agentInboxItem.findMany({
+      where: { state: 'PENDING' },
+      take: take * 3,
+      orderBy: { createdAt: 'asc' },
+    });
+    let sent = 0;
+    for (const row of rows) {
+      const payload = row.payload;
+      const raw = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>).sends_at : undefined;
+      if (typeof raw !== 'string' || !Number.isFinite(new Date(raw).getTime()) || new Date(raw) > now) continue;
+      try {
+        const result = await this.email.approveAgentInboxItem(row.workspaceId, null, row.id, 'scheduled send', false, true);
+        if (result) sent += 1;
+      } catch (err) {
+        this.logger.warn(`deferred agent send failed row=${row.id}: ${(err as Error).message}`);
+      }
+      if (sent >= take) break;
+    }
+    return sent;
+  }
+
   private async markScheduledSend(
     row: Pick<ScheduledSend, 'id'>,
     state: ScheduledSendState,
@@ -351,7 +377,14 @@ export class SchedulingService {
       fromMailboxAccountId: row.mailboxId,
       cc: payload.cc,
       bcc: payload.bcc,
-      attachments: payload.attachments,
+      attachments: payload.attachments?.map((a) => ({
+        blob_id: a.blob_id,
+        name: a.name ?? a.filename ?? 'attachment',
+        type: a.type ?? a.content_type ?? 'application/octet-stream',
+        filename: a.filename,
+        content_type: a.content_type,
+        content_base64: a.content_base64,
+      })),
       inReplyToMessageId: payload.inReplyToMessageId ?? null,
       references: payload.references,
       draftId: payload.draftId ?? null,
@@ -410,16 +443,19 @@ export class SchedulingService {
     return out.length ? out : undefined;
   }
 
-  private attachments(raw: unknown): { blob_id: string; name: string; type: string }[] | undefined {
+  private attachments(raw: unknown): ScheduledSendPayload['attachments'] {
     if (!Array.isArray(raw)) return undefined;
     const out = raw
       .filter((v): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v))
       .map((a) => ({
-        blob_id: typeof a.blob_id === 'string' ? a.blob_id : '',
-        name: typeof a.name === 'string' && a.name.trim() ? a.name : 'attachment',
-        type: typeof a.type === 'string' && a.type.trim() ? a.type : 'application/octet-stream',
+        ...(typeof a.blob_id === 'string' && a.blob_id ? { blob_id: a.blob_id } : {}),
+        name: typeof a.name === 'string' && a.name.trim() ? a.name : (typeof a.filename === 'string' ? a.filename : 'attachment'),
+        type: typeof a.type === 'string' && a.type.trim() ? a.type : (typeof a.content_type === 'string' ? a.content_type : 'application/octet-stream'),
+        ...(typeof a.filename === 'string' ? { filename: a.filename } : {}),
+        ...(typeof a.content_type === 'string' ? { content_type: a.content_type } : {}),
+        ...(typeof a.content_base64 === 'string' ? { content_base64: a.content_base64 } : {}),
       }))
-      .filter((a) => a.blob_id);
+      .filter((a) => !!a.blob_id || !!a.content_base64);
     return out.length ? out : undefined;
   }
 

@@ -110,8 +110,8 @@ class ComposeMailDto {
   // webmail wave — all optional (back-compat).
   @IsOptional() @IsArray() @ArrayMaxSize(50) @IsEmail({}, { each: true }) cc?: string[];
   @IsOptional() @IsArray() @ArrayMaxSize(50) @IsEmail({}, { each: true }) bcc?: string[];
-  /** Uploaded attachment refs: [{blob_id, name, type}] (validated shape-wise below). */
-  @IsOptional() @IsArray() @ArrayMaxSize(20) attachments?: { blob_id: string; name: string; type: string }[];
+  /** Either uploaded refs or direct compose files: [{filename, content_type, content_base64}]. */
+  @IsOptional() @IsArray() @ArrayMaxSize(20) attachments?: { blob_id?: string; name?: string; type?: string; filename?: string; content_type?: string; content_base64?: string }[];
   /** The INTERNAL message id being replied to (from the thread detail) — the server resolves the real Message-ID/References. */
   @IsOptional() @IsString() @MaxLength(500) in_reply_to?: string;
   @IsOptional() @IsArray() @ArrayMaxSize(100) @IsString({ each: true }) references?: string[];
@@ -159,13 +159,16 @@ function parseComposePayload(body: ComposeMailDto) {
     throw new BadRequestException('to_address must be one or more comma-separated email addresses.');
   }
   const attachments = (body.attachments ?? []).map((a) => {
-    if (!a || typeof a.blob_id !== 'string' || !a.blob_id.trim()) {
-      throw new BadRequestException('each attachment needs a blob_id (from POST .../attachments).');
+    if (!a || (typeof a.blob_id !== 'string' && typeof a.content_base64 !== 'string')) {
+      throw new BadRequestException('each attachment needs blob_id or content_base64.');
     }
     return {
-      blob_id: a.blob_id,
-      name: typeof a.name === 'string' && a.name.trim() ? a.name : 'attachment',
-      type: typeof a.type === 'string' && a.type.trim() ? a.type : 'application/octet-stream',
+      ...(a.blob_id ? { blob_id: a.blob_id } : {}),
+      name: typeof a.name === 'string' && a.name.trim() ? a.name : (a.filename ?? 'attachment'),
+      type: typeof a.type === 'string' && a.type.trim() ? a.type : (a.content_type ?? 'application/octet-stream'),
+      ...(a.filename ? { filename: a.filename } : {}),
+      ...(a.content_type ? { content_type: a.content_type } : {}),
+      ...(a.content_base64 ? { content_base64: a.content_base64 } : {}),
     };
   });
   return { toAddresses, attachments };
@@ -586,7 +589,7 @@ export class MailController {
       cc: body.cc?.length ? body.cc : undefined,
       bcc: body.bcc?.length ? body.bcc : undefined,
       attachments: attachments.length
-        ? attachments.map((a) => ({ blobId: a.blob_id, name: a.name, type: a.type }))
+        ? attachments.filter((a) => a.blob_id).map((a) => ({ blobId: a.blob_id!, name: a.name, type: a.type }))
         : undefined,
       inReplyToMessageId: body.in_reply_to ?? null,
     });
@@ -611,7 +614,7 @@ export class MailController {
       cc: body.cc?.length ? body.cc : undefined,
       bcc: body.bcc?.length ? body.bcc : undefined,
       attachments: attachments.length
-        ? attachments.map((a) => ({ blobId: a.blob_id, name: a.name, type: a.type }))
+        ? attachments.filter((a) => a.blob_id).map((a) => ({ blobId: a.blob_id!, name: a.name, type: a.type }))
         : undefined,
       inReplyToMessageId: body.in_reply_to ?? null,
     });

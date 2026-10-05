@@ -561,5 +561,27 @@ describe('EmailOpsTools', () => {
         }),
       );
     });
+
+    it('forwards direct attachments, deferred send_at, and kit_id', async () => {
+      const composeEmail = jest.fn().mockResolvedValue({ id: 'm1' });
+      const t = toolsWith({ composeEmail } as any);
+      const sendAt = new Date(Date.now() + 10 * 60_000).toISOString();
+      await t.composeEmail(user, {
+        ...base,
+        to_address: 'a@acme.test',
+        send_at: sendAt,
+        kit_id: 'kit-1',
+        attachments: [{ filename: 'brief.txt', content_type: 'text/plain', content_base64: 'SGk=' }],
+      });
+      expect(composeEmail).toHaveBeenCalledWith(
+        'ws-1',
+        expect.anything(),
+        expect.objectContaining({
+          sendAt: new Date(sendAt),
+          kitId: 'kit-1',
+          attachments: [expect.objectContaining({ filename: 'brief.txt', content_base64: 'SGk=' })],
+        }),
+      );
+    });
   });
 });

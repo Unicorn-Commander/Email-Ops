@@ -119,9 +119,14 @@ export interface MessageComposeView {
 
 /** One uploaded compose attachment reference (webmail wave: compose extension). */
 export interface ComposeAttachmentInput {
-  blob_id: string;
+  blob_id?: string;
   name: string;
   type: string;
+  /** Direct MCP/REST compose form. Bytes are validated and staged server-side. */
+  filename?: string;
+  content_type?: string;
+  content_base64?: string;
+  size?: number;
 }
 
 /** Internal: the parsed compose request the service acts on. */
@@ -173,6 +178,9 @@ export interface ComposeInput {
   cc?: string[];
   bcc?: string[];
   attachments?: ComposeAttachmentInput[];
+  /** Deferred delivery for draft mode only; validated to +5m and <=14d. */
+  sendAt?: Date | null;
+  kitId?: string | null;
   /** The Message-ID header of the message being replied to (for In-Reply-To threading). */
   inReplyToMessageId?: string | null;
   /** The References header chain (oldest first). */
@@ -230,6 +238,14 @@ export interface AgentInboxView {
   // actually wrote without opening the full message (Email-Ops' own agent-inbox
   // surface — NOT the federation contract, which is the 3 EmailOpsPort tools).
   body_preview: string | null;
+  /** SHA-256 of the exact stored plain-text body, for approval-time verification. */
+  body_sha256: string | null;
+  /** The reply thread supplied at compose time; null for a new conversation. */
+  thread_id: string | null;
+  /** The human-approved send kit attached to this staged message, if any. */
+  kit_id: string | null;
+  attachments?: { name: string; size: number | null }[];
+  sends_at?: string | null;
   reviewed_by_uc_uid: string | null;
   reviewed_at: string | null;
   review_note: string | null;

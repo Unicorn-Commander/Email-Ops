@@ -193,6 +193,12 @@ enum AgentInboxKind {
   CLEANUP
 }
 
+enum AgentSendKitState {
+  PROPOSED
+  APPROVED
+  REJECTED
+}
+
 // ── Agent autonomy dial (Email-Ops OWNS this) ──
 //
 // The per-agent send-autonomy level the registry carries (the "autonomy dial"):
@@ -413,6 +419,7 @@ model Workspace {
   snoozedThreads     SnoozedThread[]
   scheduledSends     ScheduledSend[]
   outboundAttachments OutboundAttachment[]
+  agentSendKits     AgentSendKit[]
   mailRules          MailRule[]
   trustedCorrespondents TrustedCorrespondent[]
   spaces             Space[]
@@ -758,6 +765,10 @@ model EmailMessage {
   bccAddresses      String[]
   bodyHtml          String?
   attachments       Json?
+  // Optional deferred delivery time for agent drafts. The inbox remains
+  // cancellable until this instant; the scheduler sends it unless rejected.
+  sendAt             DateTime?
+  kitId              String?
   // Inbound spam classification stamped by the SpamPort once the mail engine
   // produces a verdict (e.g. an rspamd/SpamAssassin score + a normalized verdict
   // 'clean'|'spam'|'unsure'). NULL until the engine is live (honest — no fiction
@@ -794,6 +805,7 @@ model EmailMessage {
   @@index([workspaceId, contactId, createdAt])
   @@index([workspaceId, threadId])
   @@index([workspaceId, status])
+  @@index([workspaceId, status, sendAt])
   @@map("email_messages")
 }
 
@@ -933,6 +945,38 @@ model OutboundAttachment {
   @@index([workspaceId, mailboxId])
   @@index([createdAt])
   @@map("outbound_attachments")
+}
+
+// A proposed or human-approved send kit is a narrow exception to the
+// external-recipient self-approval guard. The template hash binds approval to
+// the exact kit; recipients are retained so a human can inspect the proposal.
+model AgentSendKit {
+  kitId            String   @id
+  workspaceId      String
+  state            AgentSendKitState @default(APPROVED)
+  title            String
+  proposedBy       String?
+  proposedAt       DateTime?
+  approvedBy       String?
+  approvedAt       DateTime?
+  rejectedBy       String?
+  rejectedAt       DateTime?
+  note             String?  @db.Text
+  templateSha256   String
+  bodyTemplate     String   @db.Text
+  placeholderRules Json
+  optionalLines    Json
+  subjects         String[]
+  recipients       String[]
+  recipientHashes  String[]
+  fromAddress      String
+  capPerDay        Int
+  expiresAt        DateTime
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, state])
+  @@index([workspaceId, expiresAt])
+  @@map("agent_send_kits")
 }
 
 // A per-mailbox inbound mail rule. `match` / `actions` hold the rule-engine

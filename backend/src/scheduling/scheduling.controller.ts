@@ -25,7 +25,7 @@ class ScheduleSendDto {
   @IsOptional() @IsArray() @ArrayMaxSize(50) @IsString({ each: true }) to_addresses?: string[];
   @IsOptional() @IsArray() @ArrayMaxSize(50) @IsString({ each: true }) cc?: string[];
   @IsOptional() @IsArray() @ArrayMaxSize(50) @IsString({ each: true }) bcc?: string[];
-  @IsOptional() @IsArray() @ArrayMaxSize(20) attachments?: { blob_id: string; name: string; type: string }[];
+  @IsOptional() @IsArray() @ArrayMaxSize(5) attachments?: { blob_id?: string; name?: string; type?: string; filename?: string; content_type?: string; content_base64?: string }[];
   @IsOptional() @IsString() @MaxLength(500) in_reply_to_thread_id?: string;
   @IsOptional() @IsString() @MaxLength(500) in_reply_to?: string;
   @IsOptional() @IsArray() @ArrayMaxSize(100) @IsString({ each: true }) references?: string[];

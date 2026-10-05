@@ -32,7 +32,21 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
-import { IsBoolean, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsArray,
+  IsBoolean,
+  IsIn,
+  IsInt,
+  IsISO8601,
+  IsObject,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import { AgentInboxKind, AgentInboxState, User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { MembershipService } from '../common/workspace/membership.service';
@@ -67,12 +81,163 @@ class InboxQueryDto {
   state?: 'pending' | 'approved' | 'rejected';
 }
 
+class ApproveSendKitDto {
+  @IsString() @MaxLength(200) kit_id!: string;
+  @IsString() @Matches(/^[0-9a-f]{64}$/i) template_sha256!: string;
+  @IsOptional() @IsString() @MaxLength(100000) body_template?: string;
+  @IsOptional() @IsObject() placeholder_rules?: Record<string, string>;
+  @IsOptional() @IsArray() @IsInt({ each: true }) @Min(0, { each: true }) @ArrayMaxSize(100) optional_lines?: number[];
+  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(100) @IsString({ each: true }) @MaxLength(500, { each: true }) subjects?: string[];
+  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(1000) @IsString({ each: true }) @MaxLength(320, { each: true }) recipients?: string[];
+  @IsOptional() @IsString() @MaxLength(320) from_address?: string;
+  @IsOptional() @IsInt() @Min(0) cap_per_day?: number;
+  @IsOptional() @IsISO8601() expires_at?: string;
+}
+
+class ProposeSendKitDto {
+  @IsString() @MaxLength(200) kit_id!: string;
+  @IsString() @MaxLength(200) title!: string;
+  @IsString() @MaxLength(100000) body_template!: string;
+  @IsOptional() @IsObject() placeholder_rules?: Record<string, string>;
+  @IsOptional() @IsArray() @IsInt({ each: true }) @Min(0, { each: true }) @ArrayMaxSize(100) optional_lines?: number[];
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(100) @IsString({ each: true }) @MaxLength(500, { each: true }) subjects!: string[];
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(1000) @IsString({ each: true }) @MaxLength(320, { each: true }) recipients!: string[];
+  @IsString() @MaxLength(320) from_address!: string;
+  @IsInt() @Min(0) cap_per_day!: number;
+  @IsISO8601() expires_at!: string;
+  @IsOptional() @IsString() @MaxLength(2000) note?: string;
+}
+
+class SendKitQueryDto {
+  @IsOptional()
+  @IsIn(['PROPOSED', 'APPROVED', 'REJECTED'])
+  state?: 'PROPOSED' | 'APPROVED' | 'REJECTED';
+}
+
+class ApproveSendKitHashDto {
+  @IsString() @Matches(/^[0-9a-f]{64}$/i) template_sha256!: string;
+}
+
+class RejectSendKitDto {
+  @IsOptional() @IsString() @MaxLength(2000) note?: string;
+}
+
 @ApiTags('agent-inbox')
 @ApiBearerAuth()
 @Controller('workspaces/:workspaceId/agent-inbox')
 @UseGuards(JwtAuthGuard, WorkspaceMembershipGuard)
 export class AgentInboxController {
   constructor(private readonly email: EmailService, private readonly membership: MembershipService) {}
+
+  @Post('send-kits/approve')
+  @ApiOperation({ summary: 'Human-only approval of an agent send kit template.' })
+  async approveSendKit(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Body() body: ApproveSendKitDto,
+  ) {
+    if ((user as any).__patAuth || (user as any).__isFederationActor) {
+      throw new ForbiddenException('Only a signed-in human may approve a send kit.');
+    }
+    await this.membership.assertCanReviewInbox(user, workspaceId);
+    return this.email.approveSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
+      kitId: body.kit_id,
+      bodyTemplate: body.body_template,
+      placeholderRules: body.placeholder_rules,
+      optionalLines: body.optional_lines,
+      subjects: body.subjects,
+      recipients: body.recipients,
+      fromAddress: body.from_address,
+      capPerDay: body.cap_per_day,
+      templateSha256: body.template_sha256,
+      expiresAt: body.expires_at ? new Date(body.expires_at) : undefined,
+    });
+  }
+
+  @Post('send-kits')
+  @ApiOperation({ summary: 'Propose a personalised agent send kit for human review.' })
+  async proposeSendKit(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Body() body: ProposeSendKitDto,
+  ) {
+    const gate = checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    if (!gate.allowed) throw new ForbiddenException(gate.reason);
+    return this.email.proposeSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
+      kitId: body.kit_id,
+      title: body.title,
+      bodyTemplate: body.body_template,
+      placeholderRules: body.placeholder_rules,
+      optionalLines: body.optional_lines,
+      subjects: body.subjects,
+      recipients: body.recipients,
+      fromAddress: body.from_address,
+      capPerDay: body.cap_per_day,
+      expiresAt: new Date(body.expires_at),
+      note: body.note,
+    });
+  }
+
+  @Get('send-kits')
+  @ApiOperation({ summary: 'List personalised send-kit proposals and approvals.' })
+  async listSendKits(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Query() query: SendKitQueryDto,
+  ) {
+    const items = await this.email.listSendKits(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      query.state ? (query.state as import('@prisma/client').AgentSendKitState) : undefined,
+    );
+    const humanSession = !(user as any).__patAuth && !(user as any).__isFederationActor;
+    return { items, count: items.length, human_session: humanSession };
+  }
+
+  @Get('send-kits/:kitId')
+  @ApiOperation({ summary: 'Get the full definition of one send kit.' })
+  async getSendKit(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('kitId') kitId: string,
+  ) {
+    const kit = await this.email.getSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), kitId);
+    if (!kit) throw new NotFoundException('Send kit not found in this workspace.');
+    return kit;
+  }
+
+  @Post('send-kits/:kitId/approve')
+  @ApiOperation({ summary: 'Human-only approval of a proposed send kit by its displayed hash.' })
+  async approveSendKitProposal(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('kitId') kitId: string,
+    @Body() body: ApproveSendKitHashDto,
+  ) {
+    if ((user as any).__patAuth || (user as any).__isFederationActor) {
+      throw new ForbiddenException('Only a signed-in human may approve a send kit.');
+    }
+    await this.membership.assertCanReviewInbox(user, workspaceId);
+    return this.email.approveSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
+      kitId,
+      templateSha256: body.template_sha256,
+    });
+  }
+
+  @Post('send-kits/:kitId/reject')
+  @ApiOperation({ summary: 'Human-only rejection of a proposed send kit.' })
+  async rejectSendKit(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('kitId') kitId: string,
+    @Body() body: RejectSendKitDto,
+  ) {
+    if ((user as any).__patAuth || (user as any).__isFederationActor) {
+      throw new ForbiddenException('Only a signed-in human may reject a send kit.');
+    }
+    await this.membership.assertCanReviewInbox(user, workspaceId);
+    return this.email.rejectSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), kitId, body.note);
+  }
 
   @Get()
   @ApiOperation({
@@ -91,7 +256,13 @@ export class AgentInboxController {
       ucUidOf(user as WithWorkspaceClaim),
       this.inboxState(query.state),
     );
-    return { items, count: items.length };
+    const pendingCount =
+      !query.state || query.state === 'pending'
+        ? await (typeof (this.email as any).countAgentInboxPending === 'function'
+            ? this.email.countAgentInboxPending(workspaceId, ucUidOf(user as WithWorkspaceClaim))
+            : Promise.resolve(items.length))
+        : items.length;
+    return { items, count: pendingCount };
   }
 
   // NOTE: declared BEFORE @Get(':id') so 'auto-sent' never matches as an item id.

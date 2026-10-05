@@ -32,9 +32,18 @@
  *     and never leaves.
  */
 
-import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   AgentActionKind,
+  AgentSendKit,
+  AgentSendKitState,
   AgentInboxKind,
   AgentInboxState,
   EmailDirection,
@@ -71,6 +80,15 @@ import {
   ParticipantView,
   ThreadView,
 } from './email.types';
+import {
+  agentSendKitRefusalReason,
+  agentSendKitTemplateSha256,
+  buildAgentSendKitDefinition,
+  plainTextBodySha256,
+  type AgentSendKitDefinition,
+  type AgentSendKitDefinitionInput,
+  type AgentSendKitRecord,
+} from './agent-send-kit';
 import { shouldAdvanceStatus } from './message-status';
 import { DispositionView } from '../mail-triage/mail-triage.types';
 import {
@@ -106,6 +124,20 @@ import {
 const MAILBOX_FANOUT_CONCURRENCY = 5;
 const MAILBOX_FANOUT_TIMEOUT_MS = 8000;
 
+const AGENT_SEND_KIT_REASON_MESSAGES: Record<string, string> = {
+  kit_missing: 'The message has no matching human-approved send kit.',
+  kit_not_approved: 'The send kit is still awaiting human approval.',
+  kit_rejected: 'The send kit was rejected by a human and cannot authorize sends.',
+  kit_expired: 'The human-approved send kit has expired.',
+  from_mismatch: 'The staged sender does not match the approved send kit.',
+  extra_recipients: 'A send kit permits exactly one To recipient and no Cc or Bcc recipients.',
+  attachments_not_allowed: 'Attachments are not allowed by a send kit.',
+  recipient_not_in_kit: 'The recipient is not in the human-approved send kit.',
+  subject_not_in_kit: 'The subject is not in the human-approved send kit.',
+  body_mismatch: 'The plain-text body does not match the human-approved send-kit template.',
+  cap_reached: 'The send kit daily cap has been reached.',
+};
+
 /**
  * The external send request shape shared by the compose + approve send lanes
  * (engine-agnostic; callEngine dispatches Stalwart vs the external provider).
@@ -124,7 +156,7 @@ interface SendReq {
   // webmail wave: compose extension (all optional, back-compat).
   cc?: string[];
   bcc?: string[];
-  attachments?: { blobId: string; name: string; type: string }[];
+  attachments?: { blobId?: string; name: string; type: string; contentBase64?: string }[];
   /** The resolved Message-ID header of the message being replied to. */
   inReplyTo?: string | null;
   references?: string[];
@@ -214,6 +246,61 @@ type ApprovePrep =
       mailbox: MailboxAccount | null;
       req: SendReq;
     };
+
+export interface AgentSendKitProposalInput extends AgentSendKitDefinitionInput {
+  kitId: string;
+  title: string;
+  expiresAt: Date;
+  note?: string | null;
+}
+
+export interface AgentSendKitApprovalInput {
+  kitId: string;
+  templateSha256: string;
+  /** L1b full-definition compatibility fields. */
+  bodyTemplate?: string;
+  placeholderRules?: Record<string, string>;
+  optionalLines?: number[];
+  subjects?: string[];
+  recipients?: string[];
+  fromAddress?: string;
+  capPerDay?: number;
+  expiresAt?: Date;
+}
+
+export type AgentSendKitListState = AgentSendKitState;
+
+export interface AgentSendKitListView {
+  id: string;
+  kit_id: string;
+  title: string;
+  state: AgentSendKitState;
+  from: string;
+  from_address: string;
+  cap_per_day: number;
+  expires_at: string;
+  subjects: string[];
+  recipient_count: number;
+  template_sha256: string;
+  proposed_by: string | null;
+  proposed_at: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  rejected_by: string | null;
+  rejected_at: string | null;
+  note: string | null;
+  sent_today: number;
+  body_template?: string;
+  placeholder_rules?: Record<string, string>;
+  optional_lines?: number[];
+  recipients?: string[];
+  recipient_hashes?: string[];
+  replaced?: boolean;
+}
+
+function sameInstant(a: Date, b: Date): boolean {
+  return Number.isFinite(a.getTime()) && Number.isFinite(b.getTime()) && a.getTime() === b.getTime();
+}
 
 @Injectable()
 export class EmailService {
@@ -1378,9 +1465,9 @@ export class EmailService {
    */
   private parseStoredAttachments(
     raw: Prisma.JsonValue | null | undefined,
-  ): { blobId: string; name: string; type: string }[] | undefined {
+  ): { blobId?: string; name: string; type: string; contentBase64?: string }[] | undefined {
     if (!Array.isArray(raw)) return undefined;
-    const out: { blobId: string; name: string; type: string }[] = [];
+    const out: { blobId?: string; name: string; type: string; contentBase64?: string }[] = [];
     for (const item of raw) {
       if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
       const a = item as Record<string, unknown>;
@@ -1388,11 +1475,15 @@ export class EmailService {
       // wire-style); older rows carried camelCase. Accept EITHER so no staged
       // draft ever re-sends without the attachments the approver reviewed.
       const blobId = String(a.blobId ?? a.blob_id ?? '');
-      if (!blobId) continue;
+      const contentBase64 = typeof a.contentBase64 === 'string'
+        ? a.contentBase64
+        : typeof a.content_base64 === 'string' ? a.content_base64 : '';
+      if (!blobId && !contentBase64) continue;
       out.push({
-        blobId,
-        name: String(a.name ?? ''),
-        type: String(a.type ?? 'application/octet-stream'),
+        ...(blobId ? { blobId } : {}),
+        name: String(a.name ?? a.filename ?? 'attachment'),
+        type: String(a.type ?? a.content_type ?? 'application/octet-stream'),
+        ...(contentBase64 ? { contentBase64 } : {}),
       });
     }
     return out.length ? out : undefined;
@@ -1597,6 +1688,24 @@ export class EmailService {
     ucUid: string | null,
     input: ComposeInput,
   ): Promise<MessageComposeView> {
+    this.validateComposeAttachments(input.attachments);
+    input = {
+      ...input,
+      attachments: input.attachments?.map((a) => ({
+        ...a,
+        ...(a.content_base64 ? { size: Buffer.from(a.content_base64, 'base64').length } : {}),
+      })),
+    };
+    if (input.sendAt) {
+      const now = Date.now();
+      const at = input.sendAt.getTime();
+      if (!Number.isFinite(at) || at < now + 5 * 60_000 || at > now + 14 * 24 * 60 * 60_000) {
+        throw new BadRequestException('send_at must be between 5 minutes and 14 days from now.');
+      }
+      if (input.mode !== 'draft') {
+        throw new BadRequestException('send_at is supported only for mode=draft.');
+      }
+    }
     // Resolve To/Cc/Bcc (and reply_all) BEFORE the write tx. reply_all reads
     // the live thread (an external provider call) and must not sit inside the
     // interactive transaction — same §3 lesson as the send itself.
@@ -1778,6 +1887,8 @@ export class EmailService {
               attachments: input.attachments?.length
                 ? (input.attachments as unknown as Prisma.InputJsonValue)
                 : Prisma.DbNull,
+              sendAt: input.sendAt ?? null,
+              kitId: input.kitId ?? null,
               actorUcUid: ucUid,
             },
           });
@@ -1793,6 +1904,11 @@ export class EmailService {
               bcc: input.bcc,
             }) +
             (held ? ` — held: ${policyReasons[0].code}` : '');
+          const inboxPayload = {
+            ...(held ? { policy: { decision: 'hold', reasons: policyReasons } } : {}),
+            ...(input.sendAt ? { sends_at: input.sendAt.toISOString() } : {}),
+            ...(input.kitId ? { kit_id: input.kitId } : {}),
+          };
           const inboxItem = await tx.agentInboxItem.create({
             data: {
               workspaceId,
@@ -1800,12 +1916,8 @@ export class EmailService {
               state: AgentInboxState.PENDING,
               draftedBy: input.draftedBy ?? input.externalSource,
               summary: itemSummary,
-              ...(held
-                ? {
-                    payload: {
-                      policy: { decision: 'hold', reasons: policyReasons },
-                    } as unknown as Prisma.InputJsonValue,
-                  }
+              ...(Object.keys(inboxPayload).length
+                ? { payload: inboxPayload as unknown as Prisma.InputJsonValue }
                 : {}),
             },
           });
@@ -1862,6 +1974,11 @@ export class EmailService {
                     bodyHtml: input.bodyHtml ?? null,
                     cc: input.cc,
                     bcc: input.bcc,
+                    attachments: input.attachments?.map((a) => ({
+                      filename: a.filename ?? a.name,
+                      mimeType: a.content_type ?? a.type,
+                      contentBase64: a.content_base64 ?? '',
+                    })),
                     inReplyToThreadId: input.inReplyToThreadId ?? null,
                   },
                 }
@@ -1938,7 +2055,12 @@ export class EmailService {
               cc: input.cc?.length ? input.cc : undefined,
               bcc: input.bcc?.length ? input.bcc : undefined,
               attachments: input.attachments?.length
-                ? input.attachments.map((a) => ({ blobId: a.blob_id, name: a.name, type: a.type }))
+                ? input.attachments.map((a) => ({
+                    ...(a.blob_id ? { blobId: a.blob_id } : {}),
+                    name: a.name ?? a.filename ?? 'attachment',
+                    type: a.type ?? a.content_type ?? 'application/octet-stream',
+                    ...(a.content_base64 ? { contentBase64: a.content_base64 } : {}),
+                  }))
                 : undefined,
               references: input.references?.length ? input.references : undefined,
               // Wave 7 loop protection: runtime auto-replies are stamped so a
@@ -2042,6 +2164,180 @@ export class EmailService {
     // persist, so old pending batches become reviewable too. Degrade-clean.
     await this.backfillNativeCleanupTargets(workspaceId, ucUid, items);
     return items.map((it) => this.inboxView(it, it.message));
+  }
+
+  /** Pending inbox rows plus one pending item for every proposed send kit. */
+  async countAgentInboxPending(workspaceId: string, ucUid: string | null): Promise<number> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const [drafts, kits] = await Promise.all([
+        tx.agentInboxItem.count({ where: { workspaceId, state: AgentInboxState.PENDING } }),
+        tx.agentSendKit.count({ where: { workspaceId, state: AgentSendKitState.PROPOSED } }),
+      ]);
+      return drafts + kits;
+    });
+  }
+
+  async listSendKits(
+    workspaceId: string,
+    ucUid: string | null,
+    state?: AgentSendKitListState,
+  ): Promise<AgentSendKitListView[]> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const rows = await tx.agentSendKit.findMany({
+        where: { workspaceId, ...(state ? { state } : {}) },
+        orderBy: [{ state: 'asc' }, { proposedAt: 'desc' }, { expiresAt: 'desc' }],
+        take: 200,
+      });
+      return Promise.all(rows.map((row) => this.sendKitView(tx, row, false)));
+    });
+  }
+
+  async getSendKit(
+    workspaceId: string,
+    ucUid: string | null,
+    kitId: string,
+  ): Promise<AgentSendKitListView | null> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const row = await tx.agentSendKit.findFirst({ where: { kitId, workspaceId } });
+      return row ? this.sendKitView(tx, row, true) : null;
+    });
+  }
+
+  async proposeSendKit(
+    workspaceId: string,
+    proposedBy: string,
+    input: AgentSendKitProposalInput,
+  ): Promise<AgentSendKitListView> {
+    if (!proposedBy) throw new ForbiddenException('A proposer identity is required for a send kit.');
+    const title = input.title.trim();
+    if (!title) throw new BadRequestException('title is required.');
+    if (title.length > 200) throw new BadRequestException('title must be at most 200 characters.');
+    if (!Number.isFinite(input.expiresAt.getTime()) || input.expiresAt <= new Date()) {
+      throw new BadRequestException('expires_at must be in the future.');
+    }
+
+    const definition = this.buildSendKitDefinition(input);
+    const templateSha256 = agentSendKitTemplateSha256(definition);
+    const proposedAt = new Date();
+
+    return this.prisma.withWorkspace(workspaceId, proposedBy, async (tx) => {
+      const existing = await tx.agentSendKit.findFirst({ where: { kitId: input.kitId, workspaceId } });
+      if (existing) {
+        const state = existing.state ?? AgentSendKitState.APPROVED;
+        const identical =
+          existing.templateSha256 === templateSha256 &&
+          sameInstant(existing.expiresAt, input.expiresAt) &&
+          existing.title === title;
+        if (identical) return { ...(await this.sendKitView(tx, existing, true)), replaced: false };
+        if (state !== AgentSendKitState.PROPOSED) {
+          throw new ConflictException({
+            reason: 'kit_immutable',
+            message: 'An approved or rejected send kit cannot be changed.',
+          });
+        }
+        const replaced = await tx.agentSendKit.update({
+          where: { kitId: input.kitId },
+          data: this.sendKitProposalData(workspaceId, proposedBy, title, input, definition, templateSha256, proposedAt),
+        });
+        return { ...(await this.sendKitView(tx, replaced, true)), replaced: true };
+      }
+
+      const created = await tx.agentSendKit.create({
+        data: {
+          kitId: input.kitId,
+          ...this.sendKitProposalData(workspaceId, proposedBy, title, input, definition, templateSha256, proposedAt),
+        },
+      });
+      return { ...(await this.sendKitView(tx, created, true)), replaced: false };
+    });
+  }
+
+  private buildSendKitDefinition(input: AgentSendKitDefinitionInput): AgentSendKitDefinition {
+    try {
+      return buildAgentSendKitDefinition(input);
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid send-kit definition.');
+    }
+  }
+
+  private sendKitProposalData(
+    workspaceId: string,
+    proposedBy: string,
+    title: string,
+    input: AgentSendKitProposalInput,
+    definition: AgentSendKitDefinition,
+    templateSha256: string,
+    proposedAt: Date,
+  ) {
+    return {
+      workspaceId,
+      state: AgentSendKitState.PROPOSED,
+      title,
+      proposedBy,
+      proposedAt,
+      approvedBy: null,
+      approvedAt: null,
+      rejectedBy: null,
+      rejectedAt: null,
+      note: input.note?.trim().slice(0, 2000) || null,
+      templateSha256,
+      bodyTemplate: definition.bodyTemplate,
+      placeholderRules: definition.placeholderRules as Prisma.InputJsonValue,
+      optionalLines: definition.optionalLines as unknown as Prisma.InputJsonValue,
+      subjects: definition.subjects,
+      recipients: definition.recipients,
+      recipientHashes: definition.recipientHashes,
+      fromAddress: definition.fromAddress,
+      capPerDay: definition.capPerDay,
+      expiresAt: input.expiresAt,
+    };
+  }
+
+  private async sendKitView(
+    tx: WorkspaceTxClient,
+    row: AgentSendKit,
+    full: boolean,
+  ): Promise<AgentSendKitListView> {
+    const now = new Date();
+    const utcStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const utcEnd = new Date(utcStart.getTime() + 24 * 60 * 60 * 1000);
+    const sentToday = tx.emailMessage?.count
+      ? await tx.emailMessage.count({
+          where: { workspaceId: row.workspaceId, kitId: row.kitId, sentAt: { gte: utcStart, lt: utcEnd } },
+        })
+      : 0;
+    const view: AgentSendKitListView = {
+      id: row.kitId,
+      kit_id: row.kitId,
+      title: row.title ?? row.kitId,
+      state: row.state ?? AgentSendKitState.APPROVED,
+      from: row.fromAddress ?? '',
+      from_address: row.fromAddress ?? '',
+      cap_per_day: row.capPerDay ?? 0,
+      expires_at: row.expiresAt?.toISOString?.() ?? '',
+      subjects: row.subjects ?? [],
+      recipient_count:
+        row.recipients && row.recipients.length > 0 ? row.recipients.length : row.recipientHashes?.length ?? 0,
+      template_sha256: row.templateSha256,
+      proposed_by: row.proposedBy,
+      proposed_at: row.proposedAt?.toISOString() ?? null,
+      approved_by: row.approvedBy,
+      approved_at: row.approvedAt?.toISOString() ?? null,
+      rejected_by: row.rejectedBy,
+      rejected_at: row.rejectedAt?.toISOString() ?? null,
+      note: row.note,
+      sent_today: sentToday,
+    };
+    if (full) {
+      view.body_template = row.bodyTemplate ?? '';
+      view.placeholder_rules = row.placeholderRules as Record<string, string>;
+      view.optional_lines = Array.isArray(row.optionalLines)
+        ? row.optionalLines.filter((line): line is number => typeof line === 'number')
+        : [];
+      view.recipients = row.recipients ?? [];
+      view.recipient_hashes = row.recipientHashes ?? [];
+    }
+    return view;
   }
 
   /**
@@ -2298,6 +2594,7 @@ export class EmailService {
     itemId: string,
     note?: string | null,
     trustRecipients?: boolean,
+    agentPrincipal = false,
   ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
     // PHASE 1 — validate + authorize (a short tx). A CLEANUP item executes wholly
     // in-tx as before; an EMAIL item resolves its mailbox + returns the send plan,
@@ -2326,6 +2623,68 @@ export class EmailService {
                   : null,
             },
           };
+        }
+
+        if (item.message?.sendAt && item.message.sendAt.getTime() > Date.now()) {
+          return {
+            kind: 'result',
+            value: {
+              inbox: this.inboxView(item, item.message),
+              message: item.message ? this.composeView(item.message) : null,
+            },
+          };
+        }
+
+        if (agentPrincipal && item.kind === AgentInboxKind.EMAIL && item.message && item.draftedBy) {
+          const recipients = [
+            ...(item.message.toAddresses?.length ? item.message.toAddresses : [item.message.toAddress ?? '']),
+            ...(item.message.ccAddresses ?? []),
+            ...(item.message.bccAddresses ?? []),
+          ].map((r) => normalizeAddress(r)).filter(Boolean);
+          const domains = new Set((await tx.mailDomain.findMany({ where: { workspaceId, verified: true }, select: { domain: true } })).map((d) => d.domain.toLowerCase()));
+          const trusted = await tx.trustedCorrespondent.findMany({ where: { workspaceId }, select: { address: true, scope: true } });
+          const external = recipients.filter((r) => {
+            const domain = r.split('@')[1] ?? '';
+            return !domains.has(domain) && !trusted.some((t) => t.scope === TrustedCorrespondentScope.ADDRESS ? t.address === r : t.address === domain);
+          });
+          if (external.length) {
+            const now = new Date();
+            const kit = item.message.kitId
+              ? await tx.agentSendKit.findFirst({ where: { kitId: item.message.kitId, workspaceId } })
+              : null;
+            const utcStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+            const utcEnd = new Date(utcStart.getTime() + 24 * 60 * 60 * 1000);
+            const sentToday = kit
+              ? await tx.emailMessage.count({
+                  where: {
+                    workspaceId,
+                    kitId: item.message.kitId,
+                    sentAt: { gte: utcStart, lt: utcEnd },
+                  },
+                })
+              : 0;
+            const reason = agentSendKitRefusalReason({
+              message: {
+                fromAddress: item.message.fromAddress,
+                toAddress: item.message.toAddress,
+                toAddresses: item.message.toAddresses ?? [],
+                ccAddresses: item.message.ccAddresses ?? [],
+                bccAddresses: item.message.bccAddresses ?? [],
+                subject: item.message.subject,
+                body: item.message.body,
+                attachments: item.message.attachments,
+              },
+              kit: kit as AgentSendKitRecord | null,
+              sentToday,
+              now,
+            });
+            if (reason) {
+              throw new ForbiddenException({
+                reason,
+                message: AGENT_SEND_KIT_REASON_MESSAGES[reason],
+              });
+            }
+          }
         }
 
         if (item.kind === AgentInboxKind.CLEANUP) {
@@ -2467,7 +2826,9 @@ export class EmailService {
     // Wave 7 learning (default ON): the approval vouches for the external
     // recipients. Runs in its OWN fenced call, degrade-clean, so a learning
     // hiccup can never fail an approval whose mail already left.
-    if (trustRecipients !== false) {
+    // Trust is an explicit human choice. In particular, an omitted flag must
+    // never learn an external correspondent from an agent-facing approval.
+    if (trustRecipients === true) {
       await this.learnTrustedCorrespondents(workspaceId, ucUid, prep.draftedBy, [
         ...(prep.req.toAddresses?.length ? prep.req.toAddresses : [prep.req.toAddress]),
         ...(prep.req.cc ?? []),
@@ -2594,6 +2955,176 @@ export class EmailService {
         detail: item.message.subject ?? null,
       });
       return { inbox: this.inboxView(updated, msg), message: this.composeView(msg) };
+    });
+  }
+
+  /** Human-only registration of a bounded template exception for the guard. */
+  async approveSendKit(
+    workspaceId: string,
+    approvedBy: string,
+    input: AgentSendKitApprovalInput,
+  ): Promise<AgentSendKitListView> {
+    if (!approvedBy) throw new ForbiddenException('A human identity is required to approve a send kit.');
+
+    const legacyFields = [
+      input.bodyTemplate,
+      input.placeholderRules,
+      input.optionalLines,
+      input.subjects,
+      input.recipients,
+      input.fromAddress,
+      input.capPerDay,
+      input.expiresAt,
+    ];
+    const hasLegacyDefinition = legacyFields.some((value) => value !== undefined);
+    const hasCompleteLegacyDefinition =
+      input.bodyTemplate !== undefined &&
+      input.subjects !== undefined &&
+      input.recipients !== undefined &&
+      input.fromAddress !== undefined &&
+      input.capPerDay !== undefined &&
+      input.expiresAt !== undefined;
+    if (hasLegacyDefinition && !hasCompleteLegacyDefinition) {
+      throw new BadRequestException('The legacy approval form must include the complete kit definition.');
+    }
+
+    let definition: AgentSendKitDefinition | null = null;
+    if (hasCompleteLegacyDefinition) {
+      if (!Number.isFinite(input.expiresAt!.getTime()) || input.expiresAt! <= new Date()) {
+        throw new BadRequestException('expires_at must be in the future.');
+      }
+      definition = this.buildSendKitDefinition({
+        bodyTemplate: input.bodyTemplate!,
+        placeholderRules: input.placeholderRules,
+        optionalLines: input.optionalLines,
+        subjects: input.subjects!,
+        recipients: input.recipients!,
+        fromAddress: input.fromAddress!,
+        capPerDay: input.capPerDay!,
+      });
+      const computedHash = agentSendKitTemplateSha256(definition);
+      if (input.templateSha256 !== computedHash) {
+        throw new BadRequestException({
+          reason: 'template_hash_mismatch',
+          message: 'template_sha256 does not match the supplied send-kit definition.',
+        });
+      }
+    }
+
+    return this.prisma.withWorkspace(workspaceId, approvedBy, async (tx) => {
+      const existing = await tx.agentSendKit.findFirst({ where: { kitId: input.kitId, workspaceId } });
+      if (!existing) {
+        if (!definition || !input.expiresAt) {
+          throw new NotFoundException('The proposed send kit was not found in this workspace.');
+        }
+        const approvedAt = new Date();
+        const created = await tx.agentSendKit.create({
+          data: {
+            kitId: input.kitId,
+            workspaceId,
+            state: AgentSendKitState.APPROVED,
+            title: input.kitId,
+            proposedBy: null,
+            proposedAt: null,
+            approvedBy,
+            approvedAt,
+            rejectedBy: null,
+            rejectedAt: null,
+            note: null,
+            templateSha256: input.templateSha256,
+            bodyTemplate: definition.bodyTemplate,
+            placeholderRules: definition.placeholderRules as Prisma.InputJsonValue,
+            optionalLines: definition.optionalLines as unknown as Prisma.InputJsonValue,
+            subjects: definition.subjects,
+            recipients: definition.recipients,
+            recipientHashes: definition.recipientHashes,
+            fromAddress: definition.fromAddress,
+            capPerDay: definition.capPerDay,
+            expiresAt: input.expiresAt,
+          },
+        });
+        return this.sendKitView(tx, created, true);
+      }
+
+      const storedState = existing.state ?? AgentSendKitState.APPROVED;
+      if (existing.templateSha256 !== input.templateSha256) {
+        throw new BadRequestException({
+          reason: 'template_hash_mismatch',
+          message: 'template_sha256 does not match the stored send-kit proposal.',
+        });
+      }
+      if (storedState === AgentSendKitState.REJECTED) {
+        throw new BadRequestException({
+          reason: 'kit_rejected',
+          message: 'A rejected send kit cannot be approved.',
+        });
+      }
+      if (storedState === AgentSendKitState.APPROVED) {
+        throw new BadRequestException({
+          reason: 'kit_not_proposed',
+          message: 'Only a proposed send kit can be approved.',
+        });
+      }
+      if (storedState !== AgentSendKitState.PROPOSED) {
+        throw new BadRequestException({
+          reason: 'kit_not_proposed',
+          message: 'Only a proposed send kit can be approved.',
+        });
+      }
+      if (!Number.isFinite(existing.expiresAt.getTime()) || existing.expiresAt <= new Date()) {
+        throw new BadRequestException({
+          reason: 'kit_expired',
+          message: 'The send-kit proposal has expired.',
+        });
+      }
+      if (definition && !sameInstant(existing.expiresAt, input.expiresAt!)) {
+        throw new BadRequestException({
+          reason: 'kit_definition_mismatch',
+          message: 'The legacy definition does not match the stored proposal expiry.',
+        });
+      }
+      const updated = await tx.agentSendKit.update({
+        where: { kitId: input.kitId },
+        data: {
+          state: AgentSendKitState.APPROVED,
+          approvedBy,
+          approvedAt: new Date(),
+          rejectedBy: null,
+          rejectedAt: null,
+        },
+      });
+      return this.sendKitView(tx, updated, true);
+    });
+  }
+
+  async rejectSendKit(
+    workspaceId: string,
+    rejectedBy: string,
+    kitId: string,
+    note?: string | null,
+  ): Promise<AgentSendKitListView> {
+    if (!rejectedBy) throw new ForbiddenException('A human identity is required to reject a send kit.');
+    return this.prisma.withWorkspace(workspaceId, rejectedBy, async (tx) => {
+      const existing = await tx.agentSendKit.findFirst({ where: { kitId, workspaceId } });
+      if (!existing) throw new NotFoundException('The send kit was not found in this workspace.');
+      const state = existing.state ?? AgentSendKitState.APPROVED;
+      if (state === AgentSendKitState.APPROVED) {
+        throw new BadRequestException({
+          reason: 'kit_immutable',
+          message: 'An approved send kit cannot be rejected.',
+        });
+      }
+      if (state === AgentSendKitState.REJECTED) return this.sendKitView(tx, existing, true);
+      const updated = await tx.agentSendKit.update({
+        where: { kitId },
+        data: {
+          state: AgentSendKitState.REJECTED,
+          rejectedBy,
+          rejectedAt: new Date(),
+          note: note?.trim().slice(0, 2000) || existing.note || null,
+        },
+      });
+      return this.sendKitView(tx, updated, true);
     });
   }
 
@@ -3375,6 +3906,25 @@ export class EmailService {
 
   // ── helpers ────────────────────────────────────────────────────────────
 
+  private validateComposeAttachments(attachments?: ComposeInput['attachments']): void {
+    if (!attachments?.length) return;
+    if (attachments.length > 5) throw new BadRequestException('At most 5 attachments are allowed.');
+    let total = 0;
+    for (const a of attachments) {
+      const name = a.filename ?? a.name;
+      const type = a.content_type ?? a.type;
+      if (!name?.trim() || !type?.trim()) throw new BadRequestException('Each attachment needs a filename and content_type.');
+      if (a.content_base64) {
+        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(a.content_base64) || a.content_base64.length % 4 !== 0) {
+          throw new BadRequestException(`Attachment ${name} has invalid base64 content.`);
+        }
+        const bytes = Buffer.from(a.content_base64, 'base64').length;
+        total += bytes;
+      }
+    }
+    if (total > 10 * 1024 * 1024) throw new BadRequestException('Attachments exceed the 10 MB total limit.');
+  }
+
   /**
    * Call the mail engine / external provider to actually send. This is PURE
    * external work (NO database access) so it runs OUTSIDE the withWorkspace
@@ -3422,10 +3972,20 @@ export class EmailService {
       // inline to the provider, which folds them into the Gmail MIME / Graph
       // attachments array. A stale/foreign blob id simply resolves to nothing
       // rather than failing the send.
-      const attachments = await this.resolveOutboundAttachments(
+      const staged = await this.resolveOutboundAttachments(
         mailbox,
-        (req.attachments ?? []).map((a) => a.blobId),
+        (req.attachments ?? []).map((a) => a.blobId).filter((id): id is string => !!id),
       );
+      const attachments = [
+        ...staged,
+        ...(req.attachments ?? [])
+          .filter((a) => !!a.contentBase64)
+          .map((a) => ({
+            filename: a.name,
+            mimeType: a.type,
+            contentBase64: a.contentBase64!,
+          })),
+      ];
       const toList = req.toAddresses?.length ? req.toAddresses : [req.toAddress];
       const r = await this.mailProvider.send(mailbox, {
         from: req.fromAddress,
@@ -3452,6 +4012,23 @@ export class EmailService {
         reason: r.reason,
       };
     }
+    const jamesAttachments = [] as { blobId: string; name: string; type: string }[];
+    for (const attachment of req.attachments ?? []) {
+      if (attachment.blobId) {
+        jamesAttachments.push({ blobId: attachment.blobId, name: attachment.name, type: attachment.type });
+      } else if (attachment.contentBase64) {
+        const uploaded = await this.stalwart.uploadBlob(
+          req.fromAddress,
+          Buffer.from(attachment.contentBase64, 'base64'),
+          attachment.type,
+          attachment.name,
+        );
+        if (!uploaded) {
+          return { accepted: false, providerMessageId: null, threadId: req.inReplyToThreadId, lane: null, reason: 'attachment_upload_failed' };
+        }
+        jamesAttachments.push({ blobId: uploaded.blobId, name: attachment.name, type: attachment.type });
+      }
+    }
     const r = await this.stalwart.send(
       req.fromAddress,
       {
@@ -3465,7 +4042,7 @@ export class EmailService {
         inReplyToThreadId: req.inReplyToThreadId,
         cc: req.cc,
         bcc: req.bcc,
-        attachments: req.attachments,
+        attachments: jamesAttachments,
         inReplyTo: req.inReplyTo,
         references: req.references,
         headers: req.headers,
@@ -3706,6 +4283,9 @@ export class EmailService {
       subject: string | null;
       body?: string | null;
       preview?: string | null;
+      attachments?: unknown;
+      inReplyToThreadId?: string | null;
+      kitId?: string | null;
     } | null,
   ): AgentInboxView {
     const payload = this.cleanupPayload(it.payload);
@@ -3734,7 +4314,12 @@ export class EmailService {
         ? this.cleanupBodyPreview(payload)
         : msg
           ? msg.preview ?? this.snippet(msg.body)
-          : null,
+        : null,
+      body_sha256: isCleanup || msg?.body == null ? null : plainTextBodySha256(msg.body),
+      thread_id: isCleanup ? null : msg?.inReplyToThreadId ?? null,
+      kit_id: isCleanup ? null : msg?.kitId ?? null,
+      attachments: isCleanup ? [] : this.attachmentsMeta(msg?.attachments).map((a) => ({ name: a.name ?? 'attachment', size: a.size ?? null })),
+      sends_at: this.readSendAt(it.payload),
       reviewed_by_uc_uid: it.reviewedByUcUid ?? null,
       reviewed_at: it.reviewedAt ? it.reviewedAt.toISOString() : null,
       review_note: it.reviewNote ?? null,
@@ -3744,6 +4329,12 @@ export class EmailService {
       // in the DB, so they keep rendering null here.
       payload: isCleanup || (it.payload && typeof it.payload === 'object') ? payload : null,
     };
+  }
+
+  private readSendAt(payload: unknown): string | null {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    const value = (payload as Record<string, unknown>).sends_at;
+    return typeof value === 'string' ? value : null;
   }
 
   private snippet(body: string | null | undefined): string | null {

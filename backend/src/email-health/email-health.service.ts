@@ -9,7 +9,7 @@
  */
 
 import { Injectable } from '@nestjs/common';
-import { AgentAutonomyLevel, AgentInboxState, EmailMessageStatus } from '@prisma/client';
+import { AgentAutonomyLevel, AgentInboxState, AgentSendKitState, EmailMessageStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { FederationPrincipalCheck } from '../common/workspace/federation-principal.check';
@@ -97,11 +97,11 @@ export class EmailHealthService {
     const engineConfigured = this.stalwart.isConfigured();
     const since = new Date(Date.now() - SEVEN_DAYS_MS);
 
-    const { mailboxes, agents, pending, failed7d } = await this.prisma.withWorkspace(
+    const { mailboxes, agents, pending, proposedKits, failed7d } = await this.prisma.withWorkspace(
       workspaceId,
       ucUid,
       async (tx) => {
-        const [mailboxes, agents, pending, failed7d] = await Promise.all([
+        const [mailboxes, agents, pending, proposedKits, failed7d] = await Promise.all([
           tx.mailboxAccount.findMany({
             where: { workspaceId, active: true },
             select: { emailAddress: true, isDefault: true },
@@ -115,11 +115,17 @@ export class EmailHealthService {
             select: { createdAt: true },
             orderBy: { createdAt: 'asc' },
           }),
+          tx.agentSendKit?.findMany
+            ? tx.agentSendKit.findMany({
+                where: { workspaceId, state: AgentSendKitState.PROPOSED },
+                select: { proposedAt: true },
+              })
+            : Promise.resolve([]),
           tx.emailMessage.count({
             where: { workspaceId, status: EmailMessageStatus.FAILED, createdAt: { gte: since } },
           }),
         ]);
-        return { mailboxes, agents, pending, failed7d };
+        return { mailboxes, agents, pending, proposedKits, failed7d };
       },
     );
 
@@ -128,8 +134,13 @@ export class EmailHealthService {
       (a) => a.autonomyLevel === AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT,
     ).length;
     const agentsWithoutMailbox = agents.filter((a) => !a.mailboxAccountId).length;
-    const oldestPendingAgeHours = pending.length
-      ? Math.round(((Date.now() - pending[0].createdAt.getTime()) / 3_600_000) * 10) / 10
+    const pendingDates = [
+      ...pending.map((row) => row.createdAt),
+      ...proposedKits.map((row) => row.proposedAt).filter((date): date is Date => date instanceof Date),
+    ].sort((a, b) => a.getTime() - b.getTime());
+    const pendingApprovals = pending.length + proposedKits.length;
+    const oldestPendingAgeHours = pendingDates.length
+      ? Math.round(((Date.now() - pendingDates[0].getTime()) / 3_600_000) * 10) / 10
       : null;
 
     const checks: EmailHealthCheck[] = [];
@@ -163,7 +174,7 @@ export class EmailHealthService {
       });
     }
 
-    if (pending.length === 0) {
+    if (pendingApprovals === 0) {
       checks.push({
         key: 'pending_queue',
         label: 'Approval queue',
@@ -176,7 +187,7 @@ export class EmailHealthService {
         key: 'pending_queue',
         label: 'Approval queue',
         status: stale ? 'warn' : 'ok',
-        detail: `${pending.length} awaiting approval${
+        detail: `${pendingApprovals} awaiting approval${
           stale ? `, oldest ${formatAge(oldestPendingAgeHours)} old` : ''
         }.`,
       });
@@ -230,7 +241,7 @@ export class EmailHealthService {
         autonomous_agents: autonomousAgents,
       },
       queue: {
-        pending_approvals: pending.length,
+        pending_approvals: pendingApprovals,
         oldest_pending_age_hours: oldestPendingAgeHours,
         failed_sends_7d: failed7d,
       },

@@ -1176,6 +1176,110 @@
       "read_only": false
     },
     {
+      "name": "propose_send_kit",
+      "description": "Propose a personalised agent send kit for a human to inspect in the agent inbox. The proposal is PROPOSED and cannot authorize a send until a human approves it.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "kit_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "body_template": { "type": "string", "maxLength": 100000 },
+          "placeholder_rules": { "type": "object", "additionalProperties": { "type": "string" } },
+          "optional_lines": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "maxItems": 100 },
+          "subjects": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 500 }, "minItems": 1, "maxItems": 100 },
+          "recipients": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 320 }, "minItems": 1, "maxItems": 1000 },
+          "from_address": { "type": "string", "minLength": 1, "maxLength": 320 },
+          "cap_per_day": { "type": "integer", "minimum": 0 },
+          "expires_at": { "type": "string" },
+          "note": { "type": "string", "maxLength": 2000 }
+        },
+        "required": ["kit_id", "title", "body_template", "subjects", "recipients", "from_address", "cap_per_day", "expires_at"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["write:mail"],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "list_send_kits",
+      "description": "List personalised send-kit proposals and approvals, optionally filtered by state.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "state": { "type": "string", "enum": ["PROPOSED", "APPROVED", "REJECTED"] }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["read:agent_inbox"],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "get_send_kit",
+      "description": "Get the full send-kit definition, including retained recipients and body template.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "kit_id": { "type": "string", "minLength": 1, "maxLength": 200 }
+        },
+        "required": ["kit_id"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["read:agent_inbox"],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "approve_send_kit",
+      "description": "Human-only approval of a PROPOSED personalised agent send kit by the exact template_sha256 shown to the human. The L1b full-definition form remains accepted for backward compatibility.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "kit_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "template_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
+          "body_template": { "type": "string", "maxLength": 100000 },
+          "placeholder_rules": { "type": "object", "additionalProperties": { "type": "string" } },
+          "optional_lines": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "maxItems": 100 },
+          "subjects": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 500 }, "minItems": 1, "maxItems": 100 },
+          "recipients": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 320 }, "minItems": 1, "maxItems": 1000 },
+          "from_address": { "type": "string", "minLength": 1, "maxLength": 320 },
+          "cap_per_day": { "type": "integer", "minimum": 0 },
+          "expires_at": { "type": "string" }
+        },
+        "required": ["kit_id", "template_sha256"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["write:agent_inbox"],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "reject_send_kit",
+      "description": "Human-only rejection of a PROPOSED send kit; an optional note is retained for audit.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "kit_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "note": { "type": "string", "maxLength": 2000 }
+        },
+        "required": ["kit_id"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["write:agent_inbox"],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
       "name": "list_trusted_correspondents",
       "description": "List the workspace’s trusted correspondents — the OUTBOUND addresses an L2 agent may auto-send to (learned when a human approves a staged draft, or added manually). Read-only / member-level. Returns { items, count }.",
       "input_schema": {

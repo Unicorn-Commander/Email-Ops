@@ -120,7 +120,7 @@ gate re-derived server-side from the verified token).
 | :--- | :--- | :--- | :--- |
 | `list_threads_with_contact` | List threads with a contact | `workspace_id?`, `contact_id` | Yes |
 | `list_thread_messages` | List thread messages (previews) | `workspace_id?`, `thread_id` | Yes |
-| `compose_email` | Compose outbound email | `workspace_id?`, `contact_id?`, `to_address?`, `to_addresses?`, `cc?`, `bcc?`, `reply_all?`, `subject`, `body`, `mode?`, `in_reply_to_thread_id?`, `from_address?`, `external_source`, `external_ref` | No |
+| `compose_email` | Compose outbound email | previous fields plus `attachments?` (`filename`, `content_type`, `content_base64`, max 5 / 10 MB), `send_at?` (drafts, +5m to 14d), `kit_id?` | No |
 
 ### Agent Inbox (Human-in-the-Loop)
 
@@ -129,6 +129,16 @@ gate re-derived server-side from the verified token).
 | `list_agent_inbox` | List agent-inbox queue | `workspace_id?`, `state?` | Yes |
 | `approve_agent_inbox_item` | Approve draft (sends it) | `workspace_id?`, `item_id`, `note?` | No |
 | `reject_agent_inbox_item` | Reject draft (never sends) | `workspace_id?`, `item_id`, `note?` | No |
+| `propose_send_kit` | Propose a personalised kit for a human to see and approve; the proposal is not send-authorizing | `workspace_id?`, `kit_id`, `title`, `body_template`, `placeholder_rules?`, `optional_lines?`, `subjects`, `recipients`, `from_address`, `cap_per_day`, `expires_at`, `note?` | No |
+| `list_send_kits` | List send-kit proposals and approvals, optionally filtered by state | `workspace_id?`, `state?` | Yes |
+| `get_send_kit` | Get the full send-kit definition, including retained recipients and body template | `workspace_id?`, `kit_id` | Yes |
+| `approve_send_kit` | Human-approve a PROPOSED kit by the exact displayed `template_sha256`; the L1b full-definition form remains accepted | `workspace_id?`, `kit_id`, `template_sha256` plus legacy definition fields | No |
+| `reject_send_kit` | Human-reject a PROPOSED kit with an optional audit note | `workspace_id?`, `kit_id`, `note?` | No |
+
+Inbox list items and the single `inbox` result returned by approve/reject include
+`body_sha256` (the exact stored plain-text body), `thread_id` (the reply thread
+recorded at compose), and `kit_id`. `body_preview` remains a short display
+preview; the REST detail route returns the full staged message for review.
 
 ### Triage & Sender Policy
 
