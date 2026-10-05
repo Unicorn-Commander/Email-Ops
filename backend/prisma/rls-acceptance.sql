@@ -35,7 +35,9 @@ BEGIN
       ('space_mailboxes'), ('space_agents'), ('ui_commands'),
       ('mail_contacts'), ('mail_signatures'), ('mail_vacation_settings'),
       -- Wave 7: the agent-send trust allowlist.
-      ('trusted_correspondents')
+      ('trusted_correspondents'),
+      -- 2026-10-05: send kits (an un-granted table fails the no-GUC read below as permission denied).
+      ('agent_send_kits')
   )
   SELECT string_agg(f.relname, ', ' ORDER BY f.relname) INTO missing
   FROM fenced f
@@ -61,7 +63,8 @@ BEGIN
       'mailbox_provisioning_requests', 'cleanup_batches', 'spaces',
       'space_mailboxes', 'space_agents', 'ui_commands',
       'mail_contacts', 'mail_signatures', 'mail_vacation_settings',
-      'trusted_correspondents' -- Wave 7
+      'trusted_correspondents', -- Wave 7
+      'agent_send_kits' -- send kits, 2026-10-05
     ])
   LOOP
     EXECUTE format('SELECT count(*) FROM %I', tbl) INTO n;
