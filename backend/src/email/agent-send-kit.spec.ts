@@ -135,6 +135,18 @@ describe('personalised agent send-kit guard', () => {
 });
 
 describe('approve_send_kit and agent-inbox projections', () => {
+  // The service checks expiry against the real clock while the fixtures use fixed dates around NOW.
+  // Pin Date to NOW (only Date; timers and microtasks stay real) so the suite does not expire with the calendar.
+  beforeEach(() => {
+    jest.useFakeTimers({
+      now: NOW,
+      doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'performance', 'hrtime'],
+    });
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
   function serviceWithTx(tx: Record<string, unknown>): EmailService {
     const prisma = {
       withWorkspace: jest.fn((_workspace: string, _uid: string, fn: (value: unknown) => unknown) => fn(tx)),
