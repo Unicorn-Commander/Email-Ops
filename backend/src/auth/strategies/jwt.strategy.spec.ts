@@ -53,3 +53,46 @@ describe('JwtStrategy.readEntitlements', () => {
     expect(JwtStrategy.readEntitlements({})).toEqual([]);
   });
 });
+
+describe('JwtStrategy.validate ucUid resolution', () => {
+  function makeStrategy(user: any) {
+    const strategy = Object.create(JwtStrategy.prototype) as any;
+    strategy.authService = {
+      validateJwtPayload: jest.fn().mockResolvedValue(user),
+    };
+    strategy.brigadeTrustedIssuers = new Set<string>();
+    strategy.brigadeExpectedAudience = 'email-ops';
+    strategy.logger = { warn: jest.fn() };
+    return strategy as JwtStrategy;
+  }
+
+  it('uses uc_uid from a new local session token', async () => {
+    const user = { id: 'local-user-id', keycloakId: 'keycloak-user-id' };
+    const strategy = makeStrategy(user);
+
+    const validated = await strategy.validate({
+      sub: user.id,
+      uc_uid: user.keycloakId,
+    });
+
+    expect((validated as any).__ucUid).toBe(user.keycloakId);
+  });
+
+  it('resolves the stable subject for a pre-claim local session token', async () => {
+    const user = { id: 'local-user-id', keycloakId: 'keycloak-user-id' };
+    const strategy = makeStrategy(user);
+
+    const validated = await strategy.validate({ sub: user.id });
+
+    expect((validated as any).__ucUid).toBe(user.keycloakId);
+  });
+
+  it('falls back to the token subject when the user is not Keycloak-linked', async () => {
+    const user = { id: 'local-user-id', keycloakId: null };
+    const strategy = makeStrategy(user);
+
+    const validated = await strategy.validate({ sub: user.id });
+
+    expect((validated as any).__ucUid).toBe(user.id);
+  });
+});

@@ -55,3 +55,58 @@ describe('AuthService.storeKcRefreshToken', () => {
     expect(prisma.user.update).not.toHaveBeenCalled();
   });
 });
+
+describe('AuthService.generateTokenForUser', () => {
+  const prisma = {} as PrismaService;
+  const jwt = {
+    sign: jest.fn().mockReturnValue('signed-session'),
+  } as any;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('includes the stable Keycloak subject in local session tokens', async () => {
+    const svc = new AuthService(jwt, prisma);
+    const user = {
+      id: 'local-user-id',
+      keycloakId: 'keycloak-user-id',
+      email: 'user@example.test',
+      username: 'user',
+      firstName: 'Test',
+      lastName: 'User',
+    } as any;
+
+    const result = await svc.generateTokenForUser(user);
+
+    expect(jwt.sign).toHaveBeenCalledWith({
+      sub: 'local-user-id',
+      uc_uid: 'keycloak-user-id',
+      email: 'user@example.test',
+      role: 'MEMBER',
+      username: 'user',
+    });
+    expect(result.access_token).toBe('signed-session');
+  });
+
+  it('does not add an empty stable subject for an unlinked local user', async () => {
+    const svc = new AuthService(jwt, prisma);
+    const user = {
+      id: 'local-user-id',
+      keycloakId: null,
+      email: 'user@example.test',
+      username: 'user',
+      firstName: 'Test',
+      lastName: 'User',
+    } as any;
+
+    await svc.generateTokenForUser(user);
+
+    expect(jwt.sign).toHaveBeenCalledWith({
+      sub: 'local-user-id',
+      email: 'user@example.test',
+      role: 'MEMBER',
+      username: 'user',
+    });
+  });
+});

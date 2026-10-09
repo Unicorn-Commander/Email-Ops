@@ -7,6 +7,7 @@ import { encrypt, isEncryptionConfigured } from '../connected-accounts/crypto';
 
 export interface JwtPayload {
   sub: string;
+  uc_uid?: string;
   email: string;
   role: string;
   username: string;
@@ -154,6 +155,7 @@ export class AuthService {
   async generateTokenForUser(user: User) {
     const payload: JwtPayload = {
       sub: user.id,
+      ...(user.keycloakId ? { uc_uid: user.keycloakId } : {}),
       email: user.email,
       role: 'MEMBER',
       username: user.username,
