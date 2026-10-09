@@ -4,6 +4,7 @@ import { MembershipStatus, UiCommandKind, User, WorkspaceRole } from '@prisma/cl
 import { PrismaService } from '../prisma/prisma.service';
 import { TEST_DATABASE_URL } from '../../test/test-db';
 import { MembershipService } from '../common/workspace/membership.service';
+import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { UiCommandService } from './ui-commands.service';
 import { UiControlTools } from '../mcp/mcp.tools';
 
@@ -116,6 +117,31 @@ describe('UiCommandService + UiControlTools (integration)', () => {
     expect(drained[0].payload).toMatchObject({ path: '/agents' });
     expect(drained[1].payload).toMatchObject({ title: 'Archived 12 newsletters', tone: 'info' });
     expect(drained[2].payload).toMatchObject({ space_id: 'all' });
+  });
+
+  it('delivers an MCP-enqueued command to the matching local-session identity', async () => {
+    // MCP carries the stable Keycloak subject as __ucUid. A local session user
+    // has the local row id as id, but JwtStrategy now surfaces the same stable
+    // subject from the session's uc_uid claim.
+    const mcpUser = { ...user, __ucUid: KC } as WithWorkspaceClaim;
+    const localSessionUser = { ...user, id: user.id, keycloakId: KC, __ucUid: KC } as WithWorkspaceClaim;
+
+    expect(ucUidOf(mcpUser)).toBe(KC);
+    expect(ucUidOf(localSessionUser)).toBe(KC);
+
+    await tools.openThread(mcpUser, {
+      workspace_id: A,
+      mailbox_id: 'mailbox-1',
+      thread_id: 'thread-1',
+    });
+
+    const drained = await service.drain(A, ucUidOf(localSessionUser));
+    expect(drained).toHaveLength(1);
+    expect(drained[0]).toMatchObject({
+      kind: 'open_thread',
+      payload: { mailbox_id: 'mailbox-1', thread_id: 'thread-1' },
+    });
+    expect(await service.drain(A, ucUidOf(localSessionUser))).toHaveLength(0);
   });
 
   it('delete-on-read purges ALL the caller\'s rows (incl. stale), leaving none behind', async () => {
