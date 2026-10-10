@@ -18,7 +18,7 @@ export async function resolveMailboxScope(
   db: {
     membership?: { findUnique: (args: any) => Promise<any>; findFirst?: (args: any) => Promise<any> };
     user?: { findFirst: (args: any) => Promise<{ id: string; keycloakId: string | null } | null> };
-    mailboxAccount: { findMany?: (args: any) => Promise<Array<{ id: string }> | undefined> };
+    mailboxAccount?: { findMany?: (args: any) => Promise<Array<{ id: string }> | undefined> };
   },
   workspaceId: string,
   userKey: string | null,
@@ -49,7 +49,7 @@ export async function resolveMailboxScope(
   }
 
   const all = async () => {
-    const rows = (await db.mailboxAccount.findMany?.({
+    const rows = (await db.mailboxAccount?.findMany?.({
       where: { workspaceId },
       select: { id: true },
     })) ?? [];
@@ -76,7 +76,7 @@ export async function resolveMailboxScope(
   // AgentKey is an agent-to-agent org-chart link, not a membership/user link,
   // so OWNED intentionally returns HUMAN mailboxes only until such a relation
   // exists.
-  const owned = (await db.mailboxAccount.findMany?.({
+  const owned = (await db.mailboxAccount?.findMany?.({
     where: {
       workspaceId,
       ownerKind: 'HUMAN',
@@ -99,8 +99,9 @@ export async function visibleMailboxIds(
 /**
  * Guard an already-loaded mailbox for auxiliary mailbox surfaces (contacts,
  * signatures, vacation, rules, and management). Governed members get a 404
- * for an out-of-scope id; legacy direct callers retain the old HUMAN-owner
- * ForbiddenException behavior.
+ * for an out-of-scope id. Every caller, governed or not, still passes the
+ * HUMAN-owner fence (ForbiddenException), exactly as on main: scope narrows
+ * access and never widens it.
  */
 export async function assertMailboxVisible(
   db: MailboxScopeDb,
@@ -109,10 +110,7 @@ export async function assertMailboxVisible(
   mailbox: { id: string; ownerKind: string; ownerKey: string | null },
 ): Promise<void> {
   const scope = await resolveMailboxScope(db, workspaceId, userKey);
-  if (scope.governed) {
-    if (!scope.ids.includes(mailbox.id)) throw new NotFoundException('Mailbox not found.');
-    return;
-  }
+  if (scope.governed && !scope.ids.includes(mailbox.id)) throw new NotFoundException('Mailbox not found.');
   await assertMayActThroughMailbox(
     db as unknown as { user: { findFirst: (args: any) => Promise<any> } },
     mailbox,

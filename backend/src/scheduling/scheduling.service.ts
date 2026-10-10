@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
   MailboxAccount,
   Prisma,
@@ -403,8 +403,8 @@ export class SchedulingService {
         where: { id: mailboxId, workspaceId, active: true },
       });
       if (!found) return null;
-      if (!scope.ids.includes(found.id)) return null;
-      if (!scope.governed && !(await this.mayActThroughMailbox(tx, found, ucUid))) return null;
+      if (scope.governed && !scope.ids.includes(found.id)) throw new NotFoundException('Mailbox not found.');
+      if (!(await this.mayActThroughMailbox(tx, found, ucUid))) return null;
       return found;
     });
     if (!mailbox || this.mailProvider.handles(mailbox)) return null;

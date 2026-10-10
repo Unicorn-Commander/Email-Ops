@@ -15,7 +15,8 @@ import { EmailService } from './email.service';
 /**
  * HTTP-plane authorization contract exercised at the EmailService seam used by
  * both REST and MCP: an OWNED member gets only their human mailbox, while the
- * legacy ALL default and OWNER role remain workspace-wide.
+ * legacy ALL default and OWNER role keep main's behaviour: every shared/agent
+ * mailbox, and never another member's HUMAN mailbox (scope narrows, never widens).
  */
 describe('EmailService member mailbox scope (integration)', () => {
   const dbUrl = TEST_DATABASE_URL;
@@ -27,6 +28,7 @@ describe('EmailService member mailbox scope (integration)', () => {
   let service: EmailService;
   let ownedMailboxId: string;
   let otherMailboxId: string;
+  let sharedMailboxId: string;
 
   const provider = {
     handles: () => true,
@@ -125,8 +127,19 @@ describe('EmailService member mailbox scope (integration)', () => {
         ownerKey: 'another-member',
       },
     });
+    const shared = await prisma.mailboxAccount.create({
+      data: {
+        workspaceId,
+        emailAddress: 'shared-scope@example.test',
+        provider: 'gmail',
+        kind: 'gmail',
+        ownerKind: MailboxOwnerKind.SHARED,
+        ownerKey: null,
+      },
+    });
     ownedMailboxId = owned.id;
     otherMailboxId = other.id;
+    sharedMailboxId = shared.id;
   });
 
   beforeEach(() => {
@@ -185,20 +198,23 @@ describe('EmailService member mailbox scope (integration)', () => {
     expect(sent.from_address).toBe('owned-scope@example.test');
   });
 
-  it('aggregate/counts omit foreign mailboxes while ALL and OWNER remain workspace-wide', async () => {
+  it('aggregate/counts: OWNED sees only its mailbox; ALL and OWNER keep the per-user HUMAN fence', async () => {
     const ownedAggregate = await service.listAggregateInbox(workspaceId, ownedMember, 'inbox', 50);
     expect(ownedAggregate.map((thread) => thread.mailbox_id)).toEqual([ownedMailboxId]);
     const ownedCounts = await service.getWorkspaceMailCounts(workspaceId, ownedMember);
     expect(ownedCounts.map((count) => count.mailbox_id)).toEqual([ownedMailboxId]);
 
+    // ALL and OWNER see the shared mailbox, but both HUMAN mailboxes belong to
+    // other people and stay private, exactly as before member scopes existed.
     const allAggregate = await service.listAggregateInbox(workspaceId, allMember, 'inbox', 50);
-    expect(new Set(allAggregate.map((thread) => thread.mailbox_id))).toEqual(
-      new Set([ownedMailboxId, otherMailboxId]),
-    );
+    expect(new Set(allAggregate.map((thread) => thread.mailbox_id))).toEqual(new Set([sharedMailboxId]));
     const ownerCounts = await service.getWorkspaceMailCounts(workspaceId, owner);
-    expect(new Set(ownerCounts.map((count) => count.mailbox_id))).toEqual(
-      new Set([ownedMailboxId, otherMailboxId]),
-    );
+    expect(new Set(ownerCounts.map((count) => count.mailbox_id))).toEqual(new Set([sharedMailboxId]));
+
+    // A direct read of another member's HUMAN mailbox by an ALL member gets
+    // nothing (the fence), not that member's mail.
+    const foreign = await service.listMailboxInbox(workspaceId, allMember, otherMailboxId);
+    expect(foreign).toHaveLength(0);
   });
 
   it('hides agent-inbox drafts staged from another mailbox from OWNED list/approve/reject', async () => {
@@ -210,13 +226,16 @@ describe('EmailService member mailbox scope (integration)', () => {
       mode: 'draft',
       externalSource: 'scope-agent-test',
       externalRef: `draft-${randomUUID()}`,
-      fromMailboxAccountId: otherMailboxId,
+      fromMailboxAccountId: sharedMailboxId,
     });
     const item = await prisma.agentInboxItem.findFirstOrThrow({
       where: { workspaceId },
       orderBy: { createdAt: 'desc' },
     });
 
+    expect(
+      (await service.listAgentInbox(workspaceId, allMember)).some((entry) => entry.id === item.id),
+    ).toBe(true);
     expect(
       (await service.listAgentInbox(workspaceId, ownedMember)).some((entry) => entry.id === item.id),
     ).toBe(false);

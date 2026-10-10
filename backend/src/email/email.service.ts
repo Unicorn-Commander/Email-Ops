@@ -374,10 +374,10 @@ export class EmailService {
 
   /**
    * Resolve one mailbox through the member scope before touching its provider.
-   * A governed request gets a deliberately indistinguishable 404 for both a
-   * foreign mailbox and a mailbox id that does not exist. Direct legacy service
-   * callers without a membership row retain the old private-HUMAN fence so the
-   * pre-tenancy seams remain safe and backwards compatible.
+   * A governed request gets a deliberately indistinguishable 404 for a mailbox
+   * outside its scope. Every caller, governed or not, then passes main's
+   * private-HUMAN fence: scope narrows access and never widens it, so an ALL
+   * member or a workspace OWNER still cannot read another member's HUMAN mailbox.
    */
   private async mailboxForCallerInTx(
     tx: WorkspaceTxClient,
@@ -387,11 +387,9 @@ export class EmailService {
   ): Promise<MailboxAccount | null> {
     const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
     const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
-    if (!mailbox || !scope.ids.includes(mailbox.id)) {
-      if (scope.governed) throw new NotFoundException('Mailbox not found.');
-      return null;
-    }
-    if (!scope.governed && !(await this.mayActThroughMailbox(mailbox, ucUid))) return null;
+    if (!mailbox) return null;
+    if (scope.governed && !scope.ids.includes(mailbox.id)) throw new NotFoundException('Mailbox not found.');
+    if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return null;
     return mailbox;
   }
 
@@ -503,7 +501,7 @@ export class EmailService {
       // the most sensitive read in the service. The check previously sat inside
       // the external-provider branch only, leaving James-hosted mail readable
       // by any co-member of the workspace.
-      if (mailbox && !scope.governed && !(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
+      if (mailbox && !(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
 
       let live: MessageView[] = [];
       if (mailbox && this.mailProvider.handles(mailbox)) {
@@ -856,11 +854,11 @@ export class EmailService {
     });
     const out: MailboxAccount[] = [];
     for (const mb of all) {
-      if (!scope.ids.includes(mb.id)) continue;
-      // The membership resolver is authoritative for governed members. The
-      // legacy fallback retains the existing HUMAN-owner fence for direct
-      // service callers that predate memberships.
-      if (scope.governed || (await this.mayActThroughMailbox(mb, ucUid))) out.push(mb);
+      // Scope only ever narrows: a governed member must have the mailbox in
+      // scope, and the per-user HUMAN-mailbox fence applies to every caller
+      // (as on main). ALL scope never opens another member's private mailbox.
+      if (scope.governed && !scope.ids.includes(mb.id)) continue;
+      if (await this.mayActThroughMailbox(mb, ucUid)) out.push(mb);
     }
     return out;
   }
@@ -1827,7 +1825,7 @@ export class EmailService {
           : null;
         const explicitFrom = input.fromMailboxAccountId
           ? requestedMailbox
-          : await this.resolveFromAddress(tx, workspaceId, input.fromAddress);
+          : await this.resolveFromAddress(tx, workspaceId, input.fromAddress, mailboxScope);
         if (input.fromMailboxAccountId) {
           if (!requestedMailbox || !mailboxScope.ids.includes(requestedMailbox.id)) {
             // Governed members must not learn whether the id was foreign or
@@ -1866,6 +1864,9 @@ export class EmailService {
           }
         }
         const mailbox = explicitFrom ?? (await this.resolveSendMailbox(tx, workspaceId, agent, ucUid));
+        if (mailboxScope.governed && !mailbox) {
+          throw new NotFoundException('Mailbox not found.');
+        }
         const fromAddress = mailbox?.emailAddress ?? null;
 
         // Enforce the autonomy dial — gate send-vs-draft by the agent's level +
@@ -2205,12 +2206,46 @@ export class EmailService {
     scope: Awaited<ReturnType<typeof resolveMailboxScope>>,
   ): Prisma.AgentInboxItemWhereInput {
     if (!scope.governed) return {};
+    // Cleanup/SMS items have no email mailbox and remain visible to the normal
+    // workspace queue; only email drafts inherit the mailbox scope.
     return {
       OR: [
         { messageId: null },
         { message: { is: { mailboxAccountId: { in: scope.ids } } } },
       ],
     };
+  }
+
+  /**
+   * Agent send kits retain only the sender address, not a mailbox foreign key.
+   * Resolve that address through the same mailbox scope so a kit cannot become
+   * an indirect send-as or approval bypass for an OWNED member.
+   * `null` means the caller is an ungoverned legacy/agent principal.
+   */
+  private async visibleSendKitAddresses(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    ucUid: string | null,
+  ): Promise<string[] | null> {
+    const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+    if (!scope.governed) return null;
+    const mailboxes = await tx.mailboxAccount.findMany({
+      where: { workspaceId, id: { in: scope.ids } },
+      select: { emailAddress: true },
+    });
+    return mailboxes.map((mailbox) => mailbox.emailAddress);
+  }
+
+  private sendKitScopeWhere(addresses: string[] | null): Prisma.AgentSendKitWhereInput {
+    if (addresses === null) return {};
+    if (addresses.length === 0) return { fromAddress: { in: [] } };
+    return {
+      OR: addresses.map((address) => ({ fromAddress: { equals: address, mode: 'insensitive' as const } })),
+    };
+  }
+
+  private sendKitAddressVisible(address: string, addresses: string[] | null): boolean {
+    return addresses === null || addresses.some((visible) => normalizeAddress(visible) === normalizeAddress(address));
   }
 
   /** The agent-inbox queue (PENDING by default), newest-first. */
@@ -2248,11 +2283,18 @@ export class EmailService {
   async countAgentInboxPending(workspaceId: string, ucUid: string | null): Promise<number> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+      const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, ucUid);
       const [drafts, kits] = await Promise.all([
         tx.agentInboxItem.count({
           where: { workspaceId, ...this.agentInboxScopeWhere(scope), state: AgentInboxState.PENDING },
         }),
-        tx.agentSendKit.count({ where: { workspaceId, state: AgentSendKitState.PROPOSED } }),
+        tx.agentSendKit.count({
+          where: {
+            workspaceId,
+            state: AgentSendKitState.PROPOSED,
+            ...this.sendKitScopeWhere(sendKitAddresses),
+          },
+        }),
       ]);
       return drafts + kits;
     });
@@ -2264,8 +2306,13 @@ export class EmailService {
     state?: AgentSendKitListState,
   ): Promise<AgentSendKitListView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, ucUid);
       const rows = await tx.agentSendKit.findMany({
-        where: { workspaceId, ...(state ? { state } : {}) },
+        where: {
+          workspaceId,
+          ...(state ? { state } : {}),
+          ...this.sendKitScopeWhere(sendKitAddresses),
+        },
         orderBy: [{ state: 'asc' }, { proposedAt: 'desc' }, { expiresAt: 'desc' }],
         take: 200,
       });
@@ -2279,7 +2326,9 @@ export class EmailService {
     kitId: string,
   ): Promise<AgentSendKitListView | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, ucUid);
       const row = await tx.agentSendKit.findFirst({ where: { kitId, workspaceId } });
+      if (row && !this.sendKitAddressVisible(row.fromAddress, sendKitAddresses)) return null;
       return row ? this.sendKitView(tx, row, true) : null;
     });
   }
@@ -2302,6 +2351,10 @@ export class EmailService {
     const proposedAt = new Date();
 
     return this.prisma.withWorkspace(workspaceId, proposedBy, async (tx) => {
+      const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, proposedBy);
+      if (!this.sendKitAddressVisible(definition.fromAddress, sendKitAddresses)) {
+        throw new NotFoundException('Mailbox not found.');
+      }
       const existing = await tx.agentSendKit.findFirst({ where: { kitId: input.kitId, workspaceId } });
       if (existing) {
         const state = existing.state ?? AgentSendKitState.APPROVED;
@@ -2837,7 +2890,7 @@ export class EmailService {
         // approve a send from a HUMAN mailbox — an approver can't push mail out of a
         // co-member's personal Gmail/M365. SHARED/AGENT boxes stay approvable by any
         // reviewer (the workspace-resource model).
-        if (mailbox && !scope.governed && !(await this.mayActThroughMailbox(mailbox, ucUid))) {
+        if (mailbox && !(await this.mayActThroughMailbox(mailbox, ucUid))) {
           throw new ForbiddenException('Only the owner of that mailbox can approve a send from it.');
         }
 
@@ -3103,10 +3156,17 @@ export class EmailService {
     }
 
     return this.prisma.withWorkspace(workspaceId, approvedBy, async (tx) => {
+      const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, approvedBy);
       const existing = await tx.agentSendKit.findFirst({ where: { kitId: input.kitId, workspaceId } });
+      if (existing && !this.sendKitAddressVisible(existing.fromAddress, sendKitAddresses)) {
+        throw new NotFoundException('The send kit was not found in this workspace.');
+      }
       if (!existing) {
         if (!definition || !input.expiresAt) {
           throw new NotFoundException('The proposed send kit was not found in this workspace.');
+        }
+        if (!this.sendKitAddressVisible(definition.fromAddress, sendKitAddresses)) {
+          throw new NotFoundException('Mailbox not found.');
         }
         const approvedAt = new Date();
         const created = await tx.agentSendKit.create({
@@ -3196,8 +3256,12 @@ export class EmailService {
   ): Promise<AgentSendKitListView> {
     if (!rejectedBy) throw new ForbiddenException('A human identity is required to reject a send kit.');
     return this.prisma.withWorkspace(workspaceId, rejectedBy, async (tx) => {
+      const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, rejectedBy);
       const existing = await tx.agentSendKit.findFirst({ where: { kitId, workspaceId } });
       if (!existing) throw new NotFoundException('The send kit was not found in this workspace.');
+      if (!this.sendKitAddressVisible(existing.fromAddress, sendKitAddresses)) {
+        throw new NotFoundException('The send kit was not found in this workspace.');
+      }
       const state = existing.state ?? AgentSendKitState.APPROVED;
       if (state === AgentSendKitState.APPROVED) {
         throw new BadRequestException({
@@ -3463,9 +3527,7 @@ export class EmailService {
             where: {
               workspaceId,
               id: { in: ids },
-              ...(scope.governed
-                ? { OR: [{ mailboxAccountId: null }, { mailboxAccountId: { in: scope.ids } }] }
-                : {}),
+              ...(scope.governed ? { mailboxAccountId: { in: scope.ids } } : {}),
             },
           })
         : [];
@@ -3745,12 +3807,13 @@ export class EmailService {
     input: ComposeInput,
   ): Promise<MailboxAccount | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       if (input.fromMailboxAccountId) {
         return tx.mailboxAccount.findFirst({
           where: { id: input.fromMailboxAccountId, workspaceId },
         });
       }
-      const byAddress = await this.resolveFromAddress(tx, workspaceId, input.fromAddress);
+      const byAddress = await this.resolveFromAddress(tx, workspaceId, input.fromAddress, scope);
       if (byAddress) return byAddress;
       return this.defaultMailbox(tx, workspaceId, ucUid);
     });
@@ -3773,6 +3836,7 @@ export class EmailService {
     tx: WorkspaceTxClient,
     workspaceId: string,
     fromAddress: string | null | undefined,
+    scope?: { ids: string[]; governed: boolean },
   ) {
     // autonomy's normalizeAddress is the superset (it also unwraps
     // `Name <addr@host>`), so a display-name form routes correctly too.
@@ -3780,6 +3844,10 @@ export class EmailService {
     if (!wanted) return null;
 
     const mailboxes = await tx.mailboxAccount.findMany({ where: { workspaceId } });
+    const matching = mailboxes.find((m) => normalizeAddress(m.emailAddress) === wanted);
+    if (scope?.governed && matching && !scope.ids.includes(matching.id)) {
+      throw new NotFoundException('Mailbox not found.');
+    }
     const route = routeFromAddress(wanted, mailboxes);
     if (!route.ok) {
       const detail =
@@ -3795,7 +3863,11 @@ export class EmailService {
     this.logger.log(
       `compose_email from-address ${wanted} routed to lane '${route.lane}' (mailbox ${route.mailbox.id})`,
     );
-    return mailboxes.find((m) => m.id === route.mailbox.id) ?? null;
+    const mailbox = mailboxes.find((m) => m.id === route.mailbox.id) ?? null;
+    if (scope?.governed && mailbox && !scope.ids.includes(mailbox.id)) {
+      throw new NotFoundException('Mailbox not found.');
+    }
+    return mailbox;
   }
 
   private async resolveSendMailbox(
@@ -3810,11 +3882,8 @@ export class EmailService {
       });
       if (mb) {
         const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
-        if (scope.governed) {
-          if (scope.ids.includes(mb.id)) return mb;
-        } else if (await this.mayActThroughMailbox(mb, ucUid)) {
-          return mb;
-        }
+        const inScope = !scope.governed || scope.ids.includes(mb.id);
+        if (inScope && (await this.mayActThroughMailbox(mb, ucUid))) return mb;
       }
     }
     return this.defaultMailbox(tx, workspaceId, ucUid);
