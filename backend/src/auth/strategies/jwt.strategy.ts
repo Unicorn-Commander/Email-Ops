@@ -277,7 +277,16 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         __entitlements?: string[] | null;
       };
       augmented.__workspaceClaim = payload?.workspace_id ?? payload?.tenant_id ?? null;
-      augmented.__ucUid = typeof payload?.sub === 'string' ? payload.sub : null;
+      // Local session tokens use the local User.id as `sub`, while MCP and
+      // Keycloak identities use the stable Keycloak subject. New local tokens
+      // carry that subject explicitly; for older local tokens, the resolved
+      // user supplies the same key before falling back to the token subject.
+      augmented.__ucUid =
+        (typeof payload?.uc_uid === 'string' && payload.uc_uid.trim()
+          ? payload.uc_uid
+          : null) ??
+        user.keycloakId ??
+        (typeof payload?.sub === 'string' ? payload.sub : null);
       // The verified entitlement SKUs (the compose dual-SKU gate reads these).
       // Read from the flat `entitlements`/`products` claim (or nested
       // subscription.products) and normalized to a string[]; never an HTTP
