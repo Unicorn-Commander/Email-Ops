@@ -8,12 +8,14 @@
 
 import {
   InvitationStatus,
+  MailboxScope,
   MembershipStatus,
   WorkspaceRole,
 } from '@prisma/client';
 
 export type WorkspaceRoleWire = 'viewer' | 'member' | 'manager' | 'admin' | 'owner';
 export type MembershipStatusWire = 'active' | 'suspended' | 'revoked';
+export type MailboxScopeWire = 'all' | 'owned';
 export type InvitationStatusWire = 'pending' | 'accepted' | 'revoked' | 'expired';
 
 /** A member of a workspace (the per-org RBAC roster). */
@@ -25,6 +27,7 @@ export interface MemberView {
   display_name: string | null;
   role: WorkspaceRoleWire;
   status: MembershipStatusWire;
+  mailbox_scope: MailboxScopeWire;
   is_default: boolean;
   /** True when this row is the caller. */
   is_self: boolean;
@@ -70,6 +73,7 @@ export interface InviteInput {
 export interface UpdateMemberInput {
   role?: WorkspaceRole;
   status?: MembershipStatus;
+  mailboxScope?: MailboxScope;
 }
 
 // ── wire ⇄ enum mappers (the one place the casing crosses the boundary) ──────
@@ -105,6 +109,19 @@ export function statusFromWire(wire: MembershipStatusWire): MembershipStatus {
       return MembershipStatus.SUSPENDED;
     case 'revoked':
       return MembershipStatus.REVOKED;
+  }
+}
+
+export function mailboxScopeToWire(scope: MailboxScope): MailboxScopeWire {
+  return String(scope).toLowerCase() as MailboxScopeWire;
+}
+
+export function mailboxScopeFromWire(wire: MailboxScopeWire): MailboxScope {
+  switch (wire) {
+    case 'owned':
+      return MailboxScope.OWNED;
+    case 'all':
+      return MailboxScope.ALL;
   }
 }
 

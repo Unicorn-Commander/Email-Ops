@@ -14,6 +14,7 @@ import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { ucUidOf } from '../common/workspace/workspace.util';
 import { mayActThroughMailbox } from '../common/mailbox/mailbox-fence';
+import { resolveMailboxScope } from '../common/mailbox/mailbox-scope';
 import {
   ScheduledSendPayload,
   ScheduledSendView,
@@ -397,11 +398,13 @@ export class SchedulingService {
     mailboxId: string,
   ): Promise<MailboxAccount | null> {
     const mailbox = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       const found = await tx.mailboxAccount.findFirst({
         where: { id: mailboxId, workspaceId, active: true },
       });
       if (!found) return null;
-      if (!(await this.mayActThroughMailbox(tx, found, ucUid))) return null;
+      if (!scope.ids.includes(found.id)) return null;
+      if (!scope.governed && !(await this.mayActThroughMailbox(tx, found, ucUid))) return null;
       return found;
     });
     if (!mailbox || this.mailProvider.handles(mailbox)) return null;

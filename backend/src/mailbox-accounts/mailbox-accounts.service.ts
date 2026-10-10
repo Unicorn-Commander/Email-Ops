@@ -23,8 +23,11 @@ import {
   MailboxOwnerKind,
   MailboxProvisionState,
   Prisma,
+  WorkspaceRole,
 } from '@prisma/client';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
+import { roleAtLeast } from '../common/workspace/role-rank';
+import { assertMailboxVisible, resolveMailboxScope } from '../common/mailbox/mailbox-scope';
 import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
 import { DeviceConfigService, DeviceConnectionSettings, ManualClientSettings } from './device-config.service';
 import { CreateMailboxInput, MailboxView, UpdateMailboxInput } from './mailbox-accounts.types';
@@ -42,8 +45,9 @@ export class MailboxAccountsService {
   /** All mailboxes in the workspace (default first, then alphabetical). */
   async listMailboxes(workspaceId: string, ucUid: string | null): Promise<MailboxView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       const mailboxes = await tx.mailboxAccount.findMany({
-        where: { workspaceId },
+        where: { workspaceId, ...(scope.governed ? { id: { in: scope.ids } } : {}) },
         orderBy: [{ isDefault: 'desc' }, { emailAddress: 'asc' }],
       });
       return this.toViews(tx, workspaceId, mailboxes);
@@ -59,7 +63,9 @@ export class MailboxAccountsService {
 
   async getMailbox(workspaceId: string, ucUid: string | null, id: string): Promise<MailboxView | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       const mb = await tx.mailboxAccount.findFirst({ where: { id, workspaceId } });
+      if (scope.governed && (!mb || !scope.ids.includes(id))) return null;
       return mb ? this.toViewOne(tx, mb) : null;
     });
   }
@@ -72,6 +78,7 @@ export class MailboxAccountsService {
     const settings = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const mb = await tx.mailboxAccount.findFirst({ where: { id, workspaceId } });
       if (!mb) return null;
+      await assertMailboxVisible(tx, workspaceId, ucUid, mb);
       this.assertOwnHumanMailbox(mb, ucUid);
       return this.deviceConfig.buildConnectionSettings(mb);
     });
@@ -102,6 +109,7 @@ export class MailboxAccountsService {
     const email = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const mb = await tx.mailboxAccount.findFirst({ where: { id, workspaceId } });
       if (!mb) return null;
+      await assertMailboxVisible(tx, workspaceId, ucUid, mb);
       this.assertOwnHumanMailbox(mb, ucUid);
       return mb.emailAddress;
     });
@@ -273,8 +281,41 @@ export class MailboxAccountsService {
     patch: UpdateMailboxInput,
   ): Promise<MailboxView | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       const existing = await tx.mailboxAccount.findFirst({ where: { id, workspaceId } });
       if (!existing) return null;
+      if (scope.governed && !scope.ids.includes(existing.id)) return null;
+
+      // Changing ownership is an administrative action even when the caller is
+      // otherwise allowed to edit the mailbox through a policy path. Keep the
+      // check here as well as in the REST controller so approval replay and any
+      // future caller cannot turn owner_key into a member-level write.
+      if (patch.ownerKey !== undefined) {
+        const keys = new Set<string>(ucUid ? [ucUid] : []);
+        if (ucUid) {
+          const actor = await tx.user.findFirst({
+            where: { OR: [{ keycloakId: ucUid }, { id: ucUid }] },
+            select: { id: true, keycloakId: true },
+          });
+          if (actor?.id) keys.add(actor.id);
+          if (actor?.keycloakId) keys.add(actor.keycloakId);
+        }
+        let membership = ucUid
+          ? await tx.membership.findUnique({
+              where: { userKey_workspaceId: { userKey: ucUid, workspaceId } },
+              select: { role: true, status: true },
+            })
+          : null;
+        if (!membership && keys.size > 1) {
+          membership = await tx.membership.findFirst({
+            where: { workspaceId, userKey: { in: [...keys] } },
+            select: { role: true, status: true },
+          });
+        }
+        if (membership && !roleAtLeast(membership.role, WorkspaceRole.ADMIN)) {
+          throw new ForbiddenException('Only a workspace admin or owner may change mailbox ownership.');
+        }
+      }
 
       const data: Prisma.MailboxAccountUncheckedUpdateInput = {};
       if (patch.displayName !== undefined) data.displayName = patch.displayName;

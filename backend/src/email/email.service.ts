@@ -103,6 +103,7 @@ import {
 } from './autonomy';
 import { mapWithConcurrency, withTimeout } from '../common/async/concurrency';
 import { mayActThroughMailbox } from '../common/mailbox/mailbox-fence';
+import { resolveMailboxScope } from '../common/mailbox/mailbox-scope';
 import { ApprovalPendingNotice, StableNotifierService } from '../notify/stable-notifier.service';
 import {
   deriveReplyAll,
@@ -371,6 +372,29 @@ export class EmailService {
     return mayActThroughMailbox(this.prisma, mailbox, ucUid);
   }
 
+  /**
+   * Resolve one mailbox through the member scope before touching its provider.
+   * A governed request gets a deliberately indistinguishable 404 for both a
+   * foreign mailbox and a mailbox id that does not exist. Direct legacy service
+   * callers without a membership row retain the old private-HUMAN fence so the
+   * pre-tenancy seams remain safe and backwards compatible.
+   */
+  private async mailboxForCallerInTx(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+  ): Promise<MailboxAccount | null> {
+    const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+    const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
+    if (!mailbox || !scope.ids.includes(mailbox.id)) {
+      if (scope.governed) throw new NotFoundException('Mailbox not found.');
+      return null;
+    }
+    if (!scope.governed && !(await this.mayActThroughMailbox(mailbox, ucUid))) return null;
+    return mailbox;
+  }
+
   // ── 1. list_threads_with_contact ───────────────────────────────────────
 
   /**
@@ -384,9 +408,15 @@ export class EmailService {
     contactId: string,
   ): Promise<ThreadView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       // The deliverable address + default mailbox for the workspace (if any).
-      const mailbox = await this.defaultMailbox(tx, workspaceId);
-      const address = await this.contactAddress(tx, workspaceId, contactId);
+      const mailbox = await this.defaultMailbox(tx, workspaceId, ucUid);
+      const address = await this.contactAddress(
+        tx,
+        workspaceId,
+        contactId,
+        scope.governed ? scope.ids : undefined,
+      );
 
       // Live Stalwart threads (degrade-clean: [] when unconfigured).
       let live: StalwartThread[] = [];
@@ -400,7 +430,12 @@ export class EmailService {
       const own = await tx.emailMessage.findMany({
         // Explicit tenant fence (correct now while RLS is inert under the owner
         // role, and after the role flip): never read another workspace's rows.
-        where: { workspaceId, contactId, threadId: { not: null } },
+        where: {
+          workspaceId,
+          contactId,
+          threadId: { not: null },
+          ...(scope.governed ? { mailboxAccountId: { in: scope.ids } } : {}),
+        },
         orderBy: { createdAt: 'desc' },
       });
 
@@ -450,19 +485,25 @@ export class EmailService {
     mailboxId?: string,
   ): Promise<MessageView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       // When a mailbox is named (the client BFF passes it) use it — so external
       // (gmail/microsoft) threads read through their provider; otherwise fall
       // back to the workspace default (the federation/MCP contract path).
       const mailbox = mailboxId
-        ? await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } })
-        : await this.defaultMailbox(tx, workspaceId);
+        ? await this.mailboxForCallerInTx(tx, workspaceId, ucUid, mailboxId)
+        : await this.defaultMailbox(tx, workspaceId, ucUid);
+
+      // An ungoverned direct caller still gets the old empty response when it
+      // names another HUMAN mailbox. A governed caller was rejected above with
+      // a 404, before any SoR or provider read.
+      if (mailboxId && !mailbox) return [];
 
       // ⚠️ PER-USER FENCE — before ANY branch, for EVERY mailbox kind. This
       // method returns FULL MESSAGE BODIES, so an unfenced sovereign path is
       // the most sensitive read in the service. The check previously sat inside
       // the external-provider branch only, leaving James-hosted mail readable
       // by any co-member of the workspace.
-      if (mailbox && !(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
+      if (mailbox && !scope.governed && !(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
 
       let live: MessageView[] = [];
       if (mailbox && this.mailProvider.handles(mailbox)) {
@@ -475,7 +516,15 @@ export class EmailService {
       }
 
       const own = await tx.emailMessage.findMany({
-        where: { workspaceId, threadId },
+        where: {
+          workspaceId,
+          threadId,
+          ...(mailbox
+            ? { mailboxAccountId: mailbox.id }
+            : scope.governed
+              ? { mailboxAccountId: { in: scope.ids } }
+              : {}),
+        },
         orderBy: { createdAt: 'asc' },
       });
 
@@ -544,7 +593,7 @@ export class EmailService {
     reason: string | null;
   }> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
+      const mailbox = await this.mailboxForCallerInTx(tx, workspaceId, ucUid, mailboxId);
       if (!mailbox) {
         return {
           threads: [],
@@ -555,34 +604,7 @@ export class EmailService {
           reason: null,
         };
       }
-      // ⚠️ PER-USER FENCE — applies to EVERY mailbox kind, before any branch.
-      // A HUMAN mailbox is one person's private account; the workspaceId
-      // predicate above only proves same-tenant, not same-person. This check
-      // previously lived INSIDE the external-provider branch, leaving the
-      // sovereign (James) lane unfenced — a co-member could pass another
-      // member's hosted mailboxId and read their mail.
-      if (!(await this.mayActThroughMailbox(mailbox, ucUid))) {
-        return {
-          threads: [],
-          nextPageToken: null,
-          hasMore: false,
-          pagingMode: 'offset',
-          searchSupported: true,
-          reason: null,
-        };
-      }
-
       if (this.mailProvider.handles(mailbox)) {
-        if (!(await this.mayActThroughMailbox(mailbox, ucUid))) {
-          return {
-            threads: [],
-            nextPageToken: null,
-            hasMore: false,
-            pagingMode: 'page_token',
-            searchSupported: true,
-            reason: null,
-          };
-        }
         const page = await this.mailProvider.listInbox(mailbox, {
           folder,
           limit,
@@ -633,15 +655,8 @@ export class EmailService {
     pageToken?: string | null,
   ): Promise<ThreadView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
+      const mailbox = await this.mailboxForCallerInTx(tx, workspaceId, ucUid, mailboxId);
       if (!mailbox) return [];
-      // ⚠️ PER-USER FENCE — applies to EVERY mailbox kind, before any branch.
-      // A HUMAN mailbox is one person's private account; the workspaceId
-      // predicate above only proves same-tenant, not same-person. This check
-      // previously lived INSIDE the external-provider branch, leaving the
-      // sovereign (James) lane unfenced — a co-member could pass another
-      // member's hosted mailboxId and read their mail.
-      if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
 
       // External account (gmail / microsoft): the provider folders are
       // authoritative — fetch the live folder threads through the provider (the
@@ -834,13 +849,18 @@ export class EmailService {
     workspaceId: string,
     ucUid: string | null,
   ): Promise<MailboxAccount[]> {
+    const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
     const all = await tx.mailboxAccount.findMany({
       where: { workspaceId, active: true },
       orderBy: { createdAt: 'asc' },
     });
     const out: MailboxAccount[] = [];
     for (const mb of all) {
-      if (await this.mayActThroughMailbox(mb, ucUid)) out.push(mb);
+      if (!scope.ids.includes(mb.id)) continue;
+      // The membership resolver is authoritative for governed members. The
+      // legacy fallback retains the existing HUMAN-owner fence for direct
+      // service callers that predate memberships.
+      if (scope.governed || (await this.mayActThroughMailbox(mb, ucUid))) out.push(mb);
     }
     return out;
   }
@@ -1322,7 +1342,16 @@ export class EmailService {
     threadId: string,
   ): Promise<boolean> {
     const known = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
-      tx.emailMessage.findFirst({ where: { workspaceId, threadId }, select: { id: true } }),
+      resolveMailboxScope(tx, workspaceId, ucUid).then((scope) =>
+        tx.emailMessage.findFirst({
+          where: {
+            workspaceId,
+            threadId,
+            ...(scope.governed ? { mailboxAccountId: { in: scope.ids } } : {}),
+          },
+          select: { id: true },
+        }),
+      ),
     );
     if (known) return true;
     const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
@@ -1662,18 +1691,15 @@ export class EmailService {
     return { draft_id: draftId, updated };
   }
 
-  /** Resolve a mailbox by id inside the workspace + apply the per-user HUMAN fence. */
+  /** Resolve a mailbox by id inside the workspace + apply the member scope. */
   private async resolveMailboxForCaller(
     workspaceId: string,
     ucUid: string | null,
     mailboxId: string,
   ): Promise<MailboxAccount | null> {
-    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
-      if (!mailbox) return null;
-      if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return null;
-      return mailbox;
-    });
+    return this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      this.mailboxForCallerInTx(tx, workspaceId, ucUid, mailboxId),
+    );
   }
 
   // ── 3. compose_email (idempotent; send vs draft) ───────────────────────
@@ -1737,6 +1763,12 @@ export class EmailService {
           },
         });
         if (existing) {
+          // Idempotency must not become a mailbox-scope bypass: a repeat of a
+          // compose request is allowed only if its recorded mailbox is visible
+          // to the current member as well.
+          if (existing.mailboxAccountId) {
+            await this.mailboxForCallerInTx(tx, workspaceId, ucUid, existing.mailboxAccountId);
+          }
           this.logger.log(
             `compose_email idempotent hit for (${workspaceId}, ${input.externalSource}, ${input.externalRef}) — returning existing message ${existing.id} (no second send)`,
           );
@@ -1789,11 +1821,28 @@ export class EmailService {
         // explicit routing rule, which ALSO decides the lane (Graph vs James) and
         // REFUSES an unregistered address instead of silently falling back to the
         // workspace default. Same authorization gate applies to both forms.
-        const explicitFrom = input.fromMailboxAccountId
-          ? await tx.mailboxAccount.findFirst({
-              where: { id: input.fromMailboxAccountId, workspaceId },
-            })
-          : await this.resolveFromAddress(tx, workspaceId, input.fromAddress);
+        const mailboxScope = await resolveMailboxScope(tx, workspaceId, ucUid);
+        const requestedMailbox = input.fromMailboxAccountId
+          ? await tx.mailboxAccount.findFirst({ where: { id: input.fromMailboxAccountId, workspaceId } })
+          : null;
+        const explicitFrom = requestedMailbox ?? (await this.resolveFromAddress(tx, workspaceId, input.fromAddress));
+        if (input.fromMailboxAccountId) {
+          if (!requestedMailbox || !mailboxScope.ids.includes(requestedMailbox.id)) {
+            // Governed members must not learn whether the id was foreign or
+            // nonexistent. Legacy direct callers keep the old send-as error for
+            // an existing private mailbox, but never fall back to the default.
+            if (mailboxScope.governed) throw new NotFoundException('Mailbox not found.');
+            if (requestedMailbox) throw new ForbiddenException('You are not allowed to send as that mailbox.');
+            throw new NotFoundException('Mailbox not found.');
+          }
+          if (!mailboxScope.governed && !(await this.mayActThroughMailbox(requestedMailbox, ucUid))) {
+            throw new ForbiddenException('You are not allowed to send as that mailbox.');
+          }
+        } else if (explicitFrom && mailboxScope.governed && !mailboxScope.ids.includes(explicitFrom.id)) {
+          // Address routing is also a mailbox selection and must not bypass the
+          // same 404 fence as the mailbox-id form.
+          throw new NotFoundException('Mailbox not found.');
+        }
         // Send-as authorization: a human client may send AS a SHARED mailbox or one
         // they personally own — never spoof another person's (or an agent's) identity.
         // (The agent path doesn't set fromMailboxAccountId; it uses resolveSendMailbox.)
@@ -1805,12 +1854,16 @@ export class EmailService {
           // and survives the same id-flavor ambiguity as the read path. AGENT (and
           // anything else) falls through -> denied (no impersonating an agent).
           const ownsIt =
-            kind === 'SHARED' || (kind === 'HUMAN' && (await this.mayActThroughMailbox(explicitFrom, ucUid)));
+            kind === 'SHARED' ||
+            (kind === 'HUMAN' &&
+              (mailboxScope.governed
+                ? mailboxScope.ids.includes(explicitFrom.id)
+                : await this.mayActThroughMailbox(explicitFrom, ucUid)));
           if (!ownsIt) {
             throw new ForbiddenException('You are not allowed to send as that mailbox.');
           }
         }
-        const mailbox = explicitFrom ?? (await this.resolveSendMailbox(tx, workspaceId, agent));
+        const mailbox = explicitFrom ?? (await this.resolveSendMailbox(tx, workspaceId, agent, ucUid));
         const fromAddress = mailbox?.emailAddress ?? null;
 
         // Enforce the autonomy dial — gate send-vs-draft by the agent's level +
@@ -1832,7 +1885,7 @@ export class EmailService {
         const requestedMode: 'send' | 'draft' = input.mode === 'draft' ? 'draft' : 'send';
         const agentContext =
           agent && requestedMode === 'send'
-            ? await this.buildAgentComposeContext(tx, workspaceId, agent, mailbox, input)
+            ? await this.buildAgentComposeContext(tx, workspaceId, ucUid, agent, mailbox, input)
             : null;
         const decision = decideAgentComposeMode({
           requestedMode,
@@ -2140,6 +2193,24 @@ export class EmailService {
 
   // ── agent-inbox: list / approve / reject ───────────────────────────────
 
+  /**
+   * Agent-inbox email drafts inherit the mailbox scope of their staged message.
+   * Cleanup/SMS items have no email mailbox and remain visible to the normal
+   * workspace queue. A governed OWNED member therefore cannot even probe a
+   * foreign draft id; the caller sees the same null/404 as an unknown id.
+   */
+  private agentInboxScopeWhere(
+    scope: Awaited<ReturnType<typeof resolveMailboxScope>>,
+  ): Prisma.AgentInboxItemWhereInput {
+    if (!scope.governed) return {};
+    return {
+      OR: [
+        { messageId: null },
+        { message: { is: { mailboxAccountId: { in: scope.ids } } } },
+      ],
+    };
+  }
+
   /** The agent-inbox queue (PENDING by default), newest-first. */
   async listAgentInbox(
     workspaceId: string,
@@ -2147,12 +2218,17 @@ export class EmailService {
     state?: AgentInboxState,
   ): Promise<AgentInboxView[]> {
     const items = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       return tx.agentInboxItem.findMany({
         // Explicit workspaceId predicate (defense-in-depth: the real fence when
         // RLS is inert under the owner role) + a bound so this hot path — drained
         // on every agent-inbox view and assistant stream — can never turn into an
         // unbounded cross-tenant scan.
-        where: { workspaceId, ...(state ? { state } : { state: AgentInboxState.PENDING }) },
+        where: {
+          workspaceId,
+          ...this.agentInboxScopeWhere(scope),
+          ...(state ? { state } : { state: AgentInboxState.PENDING }),
+        },
         orderBy: { createdAt: 'desc' },
         include: { message: true },
         take: 200,
@@ -2169,8 +2245,11 @@ export class EmailService {
   /** Pending inbox rows plus one pending item for every proposed send kit. */
   async countAgentInboxPending(workspaceId: string, ucUid: string | null): Promise<number> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       const [drafts, kits] = await Promise.all([
-        tx.agentInboxItem.count({ where: { workspaceId, state: AgentInboxState.PENDING } }),
+        tx.agentInboxItem.count({
+          where: { workspaceId, ...this.agentInboxScopeWhere(scope), state: AgentInboxState.PENDING },
+        }),
         tx.agentSendKit.count({ where: { workspaceId, state: AgentSendKitState.PROPOSED } }),
       ]);
       return drafts + kits;
@@ -2570,9 +2649,13 @@ export class EmailService {
     ucUid: string | null,
     itemId: string,
   ): Promise<AgentInboxKind | null> {
-    const item = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
-      tx.agentInboxItem.findFirst({ where: { id: itemId, workspaceId }, select: { kind: true } }),
-    );
+    const item = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+      return tx.agentInboxItem.findFirst({
+        where: { id: itemId, workspaceId, ...this.agentInboxScopeWhere(scope) },
+        select: { kind: true },
+      });
+    });
     return item?.kind ?? null;
   }
 
@@ -2604,11 +2687,12 @@ export class EmailService {
       workspaceId,
       ucUid,
       async (tx): Promise<ApprovePrep> => {
+        const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
         // Tenant fence: scope by workspaceId so a foreign item id resolves to null
         // (→ 404) and can NEVER be acted on across tenants. RLS is inert under the
         // owner role today, so this explicit predicate is the real guard.
         const item = await tx.agentInboxItem.findFirst({
-          where: { id: itemId, workspaceId },
+          where: { id: itemId, workspaceId, ...this.agentInboxScopeWhere(scope) },
           include: { message: true },
         });
         if (!item) return { kind: 'null' };
@@ -2744,14 +2828,14 @@ export class EmailService {
           ? await tx.mailboxAccount.findFirst({
               where: { id: item.message.mailboxAccountId, workspaceId },
             })
-          : await this.defaultMailbox(tx, workspaceId);
+          : await this.defaultMailbox(tx, workspaceId, ucUid);
 
         // Per-user fence: an approved send goes out THROUGH the mailbox owner's
         // identity (for an external box, their KC-broker token). Only the owner may
         // approve a send from a HUMAN mailbox — an approver can't push mail out of a
         // co-member's personal Gmail/M365. SHARED/AGENT boxes stay approvable by any
         // reviewer (the workspace-resource model).
-        if (mailbox && !(await this.mayActThroughMailbox(mailbox, ucUid))) {
+        if (mailbox && !scope.governed && !(await this.mayActThroughMailbox(mailbox, ucUid))) {
           throw new ForbiddenException('Only the owner of that mailbox can approve a send from it.');
         }
 
@@ -2897,16 +2981,21 @@ export class EmailService {
     itemId: string,
     note?: string | null,
   ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
+    // Do this visibility probe before reconciling any provider-side mirror. A
+    // foreign OWNED draft must be indistinguishable from an unknown id and must
+    // not trigger an external mailbox lookup or delete attempt.
+    if ((await this.peekAgentInboxKind(workspaceId, ucUid, itemId)) === null) return null;
     // A rejected draft must not survive as a mirrored copy in the user's real
     // Drafts folder. Run BEFORE the tx (external call), best-effort; a no-op when
     // there was no mirror (every sovereign/James draft).
     await this.reconcileMirroredDraft(workspaceId, ucUid, itemId, 'rejected');
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       // Tenant fence: scope by workspaceId so a foreign item id resolves to null
       // (→ 404) and can NEVER be acted on across tenants. RLS is inert under the
       // owner role today, so this explicit predicate is the real guard.
       const item = await tx.agentInboxItem.findFirst({
-        where: { id: itemId, workspaceId },
+        where: { id: itemId, workspaceId, ...this.agentInboxScopeWhere(scope) },
         include: { message: true },
       });
       if (!item) return null;
@@ -3144,10 +3233,12 @@ export class EmailService {
   private async buildAgentComposeContext(
     tx: WorkspaceTxClient,
     workspaceId: string,
+    ucUid: string | null,
     agent: { recipientPolicy: unknown },
     mailbox: MailboxAccount | null,
     input: ComposeInput,
   ): Promise<AgentComposeContext> {
+    const mailboxScope = await resolveMailboxScope(tx, workspaceId, ucUid);
     const attachmentCount = input.attachments?.length ?? 0;
     // EVERY recipient (to + cc + bcc), normalized. bcc counts too — an external
     // bcc is still external mail (the safer side).
@@ -3246,6 +3337,7 @@ export class EmailService {
               workspaceId,
               threadId: input.inReplyToThreadId,
               direction: EmailDirection.RECEIVED,
+              ...(mailboxScope.governed ? { mailboxAccountId: { in: mailboxScope.ids } } : {}),
             },
             select: { fromAddress: true },
             take: 200,
@@ -3355,6 +3447,7 @@ export class EmailService {
     limit = 50,
   ): Promise<AutoSentItemView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       const events = await tx.agentActionEvent.findMany({
         // Explicit workspaceId predicate (RLS is inert under the owner role) +
         // a hard bound, mirroring listAgentInbox.
@@ -3364,16 +3457,26 @@ export class EmailService {
       });
       const ids = [...new Set(events.map((e) => e.messageId).filter((v): v is string => !!v))];
       const messages = ids.length
-        ? await tx.emailMessage.findMany({ where: { workspaceId, id: { in: ids } } })
+        ? await tx.emailMessage.findMany({
+            where: {
+              workspaceId,
+              id: { in: ids },
+              ...(scope.governed
+                ? { OR: [{ mailboxAccountId: null }, { mailboxAccountId: { in: scope.ids } }] }
+                : {}),
+            },
+          })
         : [];
       const byId = new Map(messages.map((m) => [m.id, m]));
-      return events.map((e) => ({
+      return events
+        .filter((e) => !e.messageId || byId.has(e.messageId))
+        .map((e) => ({
         id: e.id,
         agentKey: e.agentKey ?? null,
         createdAt: e.createdAt ? e.createdAt.toISOString() : null,
         detail: e.detail ?? null,
         message: e.messageId ? this.messageFullView(byId.get(e.messageId) ?? null) : null,
-      }));
+        }));
     });
   }
 
@@ -3388,12 +3491,13 @@ export class EmailService {
     ucUid: string | null,
     itemId: string,
   ): Promise<AgentInboxDetailView | null> {
-    const item = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
-      tx.agentInboxItem.findFirst({
-        where: { id: itemId, workspaceId },
+    const item = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+      return tx.agentInboxItem.findFirst({
+        where: { id: itemId, workspaceId, ...this.agentInboxScopeWhere(scope) },
         include: { message: true },
-      }),
-    );
+      });
+    });
     if (!item) return null;
     return {
       ...this.inboxView(item, item.message),
@@ -3646,7 +3750,7 @@ export class EmailService {
       }
       const byAddress = await this.resolveFromAddress(tx, workspaceId, input.fromAddress);
       if (byAddress) return byAddress;
-      return this.defaultMailbox(tx, workspaceId);
+      return this.defaultMailbox(tx, workspaceId, ucUid);
     });
   }
 
@@ -3696,14 +3800,22 @@ export class EmailService {
     tx: WorkspaceTxClient,
     workspaceId: string,
     agent: { mailboxAccountId: string | null } | null,
+    ucUid: string | null,
   ) {
     if (agent?.mailboxAccountId) {
       const mb = await tx.mailboxAccount.findFirst({
         where: { id: agent.mailboxAccountId, workspaceId },
       });
-      if (mb) return mb;
+      if (mb) {
+        const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+        if (scope.governed) {
+          if (scope.ids.includes(mb.id)) return mb;
+        } else if (await this.mayActThroughMailbox(mb, ucUid)) {
+          return mb;
+        }
+      }
     }
-    return this.defaultMailbox(tx, workspaceId);
+    return this.defaultMailbox(tx, workspaceId, ucUid);
   }
 
   /**
@@ -3956,7 +4068,7 @@ export class EmailService {
     if (direct) return direct;
     const row = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
       tx.emailMessage.findFirst({
-        where: { id: internalId, workspaceId },
+        where: { id: internalId, workspaceId, mailboxAccountId: mailbox.id },
         select: { providerMessageId: true },
       }),
     );
@@ -4089,14 +4201,20 @@ export class EmailService {
   /** The workspace's default mailbox account, or null. Explicitly tenant-scoped
    * (RLS is inert under the owner role) so a mailbox-less workspace can NEVER fall
    * back to another tenant's mailbox as its send identity. */
-  private async defaultMailbox(tx: WorkspaceTxClient, workspaceId: string) {
+  private async defaultMailbox(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    ucUid?: string | null,
+  ) {
+    const scope = ucUid === undefined ? null : await resolveMailboxScope(tx, workspaceId, ucUid);
+    const visible = scope?.governed ? { id: { in: scope.ids } } : {};
     const def = await tx.mailboxAccount.findFirst({
-      where: { workspaceId, isDefault: true, active: true },
+      where: { workspaceId, isDefault: true, active: true, ...visible },
       orderBy: { createdAt: 'asc' },
     });
     if (def) return def;
     return tx.mailboxAccount.findFirst({
-      where: { workspaceId, active: true },
+      where: { workspaceId, active: true, ...visible },
       orderBy: { createdAt: 'asc' },
     });
   }
@@ -4121,9 +4239,15 @@ export class EmailService {
     tx: WorkspaceTxClient,
     workspaceId: string,
     contactId: string,
+    mailboxIds?: string[],
   ): Promise<string | null> {
     const last = await tx.emailMessage.findFirst({
-      where: { workspaceId, contactId, toAddress: { not: null } },
+      where: {
+        workspaceId,
+        contactId,
+        toAddress: { not: null },
+        ...(mailboxIds ? { mailboxAccountId: { in: mailboxIds } } : {}),
+      },
       orderBy: { createdAt: 'desc' },
       select: { toAddress: true },
     });

@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { MailRule, Prisma } from '@prisma/client';
-import { assertMayActThroughMailbox } from '../common/mailbox/mailbox-fence';
+import { assertMailboxVisible } from '../common/mailbox/mailbox-scope';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
@@ -341,7 +341,7 @@ export class MailRulesService {
       select: { id: true, ownerKind: true, ownerKey: true, provider: true, active: true },
     });
     if (!mailbox) throw new NotFoundException('Mailbox not found in this workspace.');
-    await assertMayActThroughMailbox(tx, mailbox, ucUid);
+    await assertMailboxVisible(tx, workspaceId, ucUid, mailbox);
     // CREATE-only fence: the inbound watcher now runs rules on active sovereign
     // AND active external (Gmail/M365) mailboxes, so only an INACTIVE mailbox
     // would make a rule a silent no-op — refuse that loudly. (Per-action

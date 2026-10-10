@@ -62,6 +62,11 @@ enum MembershipStatus {
   REVOKED
 }
 
+enum MailboxScope {
+  ALL
+  OWNED
+}
+
 // The lifecycle of a workspace invitation (the create-org → invite layer).
 enum InvitationStatus {
   PENDING
@@ -436,6 +441,7 @@ model Membership {
   workspaceId String
   role        WorkspaceRole    @default(MEMBER)
   status      MembershipStatus @default(ACTIVE)
+  mailboxScope MailboxScope     @default(ALL)
   isDefault   Boolean          @default(false)
   createdAt   DateTime         @default(now())
   workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)

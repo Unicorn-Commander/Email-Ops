@@ -34,6 +34,7 @@ import {
   WORKSPACE_ROLES,
   type InviteView,
   type MemberView,
+  type MailboxScope,
   type MembershipStatus,
   type WorkspaceRole,
 } from '@/lib/workspacesApi';
@@ -145,6 +146,20 @@ export function ManageMembersDialog({
     }
   }
 
+  async function changeMailboxScope(member: MemberView, mailbox_scope: MailboxScope) {
+    if (mailbox_scope === member.mailbox_scope) return;
+    setRowBusy(member.user_key);
+    setRowError(null);
+    try {
+      await updateMember(workspaceId, member.user_key, { mailbox_scope });
+      await fetchAll(true);
+    } catch (err) {
+      setRowError(messageOf(err, 'Could not change the mailbox scope.'));
+    } finally {
+      setRowBusy(null);
+    }
+  }
+
   async function handleRemove(member: MemberView) {
     const who = member.display_name || member.email || member.user_key;
     const ok = await confirm({
@@ -247,6 +262,7 @@ export function ManageMembersDialog({
                   assignableRoles={assignableRoles}
                   busy={rowBusy === member.user_key}
                   onChangeRole={(role) => void changeRole(member, role)}
+                  onChangeMailboxScope={(scope) => void changeMailboxScope(member, scope)}
                   onRemove={() => void handleRemove(member)}
                 />
               ))}
@@ -335,6 +351,7 @@ function MemberRow({
   assignableRoles,
   busy,
   onChangeRole,
+  onChangeMailboxScope,
   onRemove,
 }: {
   member: MemberView;
@@ -343,6 +360,7 @@ function MemberRow({
   assignableRoles: WorkspaceRole[];
   busy: boolean;
   onChangeRole: (role: WorkspaceRole) => void;
+  onChangeMailboxScope: (scope: MailboxScope) => void;
   onRemove: () => void;
 }) {
   const name = member.display_name || member.email || member.user_key;
@@ -369,21 +387,38 @@ function MemberRow({
       )}
 
       {canManage ? (
-        <Select
-          aria-label={`Role for ${name}`}
-          value={member.role}
-          disabled={busy}
-          onChange={(event) => onChangeRole(event.target.value as WorkspaceRole)}
-          className="w-28 shrink-0 text-xs"
-        >
-          {assignableRoles.map((role) => (
-            <option key={role} value={role}>
-              {roleLabel(role)}
-            </option>
-          ))}
-        </Select>
+        <>
+          <Select
+            aria-label={`Role for ${name}`}
+            value={member.role}
+            disabled={busy}
+            onChange={(event) => onChangeRole(event.target.value as WorkspaceRole)}
+            className="w-28 shrink-0 text-xs"
+          >
+            {assignableRoles.map((role) => (
+              <option key={role} value={role}>
+                {roleLabel(role)}
+              </option>
+            ))}
+          </Select>
+          <Select
+            aria-label={`Mailbox scope for ${name}`}
+            value={member.mailbox_scope}
+            disabled={busy}
+            onChange={(event) => onChangeMailboxScope(event.target.value as MailboxScope)}
+            className="w-32 shrink-0 text-xs"
+          >
+            <option value="all">All mailboxes</option>
+            <option value="owned">Owned only</option>
+          </Select>
+        </>
       ) : (
-        <Badge variant={ROLE_TONE[member.role]}>{roleLabel(member.role)}</Badge>
+        <>
+          <Badge variant={ROLE_TONE[member.role]}>{roleLabel(member.role)}</Badge>
+          <Badge variant="neutral">
+            {member.mailbox_scope === 'owned' ? 'Owned mailboxes' : 'All mailboxes'}
+          </Badge>
+        </>
       )}
 
       {(canManage || member.is_self) && (
