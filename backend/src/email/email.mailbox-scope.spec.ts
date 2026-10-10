@@ -137,6 +137,7 @@ describe('EmailService member mailbox scope (integration)', () => {
   afterAll(async () => {
     if (!prisma) return;
     await prisma.agentInboxItem.deleteMany({ where: { workspaceId } });
+    await prisma.agentActionEvent.deleteMany({ where: { workspaceId } });
     await prisma.emailMessage.deleteMany({ where: { workspaceId } });
     await prisma.mailContact.deleteMany({ where: { workspaceId } });
     await prisma.mailboxAccount.deleteMany({ where: { workspaceId } });
