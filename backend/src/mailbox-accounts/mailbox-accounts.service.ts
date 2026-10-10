@@ -22,6 +22,7 @@ import {
   MailboxAccount,
   MailboxOwnerKind,
   MailboxProvisionState,
+  MembershipStatus,
   Prisma,
   WorkspaceRole,
 } from '@prisma/client';
@@ -312,7 +313,10 @@ export class MailboxAccountsService {
             select: { role: true, status: true },
           });
         }
-        if (membership && !roleAtLeast(membership.role, WorkspaceRole.ADMIN)) {
+        if (
+          membership &&
+          (membership.status !== MembershipStatus.ACTIVE || !roleAtLeast(membership.role, WorkspaceRole.ADMIN))
+        ) {
           throw new ForbiddenException('Only a workspace admin or owner may change mailbox ownership.');
         }
       }
