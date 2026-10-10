@@ -1825,7 +1825,9 @@ export class EmailService {
         const requestedMailbox = input.fromMailboxAccountId
           ? await tx.mailboxAccount.findFirst({ where: { id: input.fromMailboxAccountId, workspaceId } })
           : null;
-        const explicitFrom = requestedMailbox ?? (await this.resolveFromAddress(tx, workspaceId, input.fromAddress));
+        const explicitFrom = input.fromMailboxAccountId
+          ? requestedMailbox
+          : await this.resolveFromAddress(tx, workspaceId, input.fromAddress);
         if (input.fromMailboxAccountId) {
           if (!requestedMailbox || !mailboxScope.ids.includes(requestedMailbox.id)) {
             // Governed members must not learn whether the id was foreign or
