@@ -539,7 +539,7 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
         }),
       ).rejects.toBeInstanceOf(ConflictException);
 
-      await service.setPaused(WS, UC_UID, agent.id, false);
+      await prisma.agent.update({ where: { id: agent.id }, data: { paused: false } });
       const resumed = await service.composeEmail(WS, UC_UID, {
         contactId: null,
         toAddress: 'x@acme.test',
