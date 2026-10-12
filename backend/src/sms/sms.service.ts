@@ -24,7 +24,8 @@ import {
  *
  *   - IDEMPOTENT on (workspaceId, externalSource, externalRef) — a retry returns
  *     the existing row and sends nothing twice;
- *   - the workspace KILL SWITCH (Workspace.agentsPaused) blocks compose/send;
+ *   - the workspace KILL SWITCH (Workspace.agentsPaused) blocks agent-originated
+ *     compose/send while leaving the human compose path available;
  *   - the AGENT registry + per-agent pause are honored;
  *   - the AUTONOMY DIAL (decideComposeMode — the same pure function email uses)
  *     decides send vs stage-for-approval (L0/L1 always stage; L2 sends, audited);

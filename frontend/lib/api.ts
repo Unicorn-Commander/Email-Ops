@@ -368,6 +368,8 @@ export interface AgentInboxItemView {
   id: string;
   message_id: string | null;
   kind?: string;
+  approval_tier: 'owner_admin' | 'mailbox_owner';
+  approval_reason: string | null;
   state: AgentInboxState;
   drafted_by: string | null;
   summary: string | null;
@@ -1016,6 +1018,24 @@ export async function updateAgent(
   token?: string,
 ): Promise<AgentView> {
   return apiPatch<AgentView>(`${agentsBase(workspaceId)}/${encodeURIComponent(id)}`, body, token);
+}
+
+/** Pause one agent (owner/admin only; the server records an audit event). */
+export async function pauseAgent(
+  workspaceId: string,
+  id: string,
+  token?: string,
+): Promise<AgentView> {
+  return apiPost<AgentView>(`${agentsBase(workspaceId)}/${encodeURIComponent(id)}/pause`, {}, token);
+}
+
+/** Resume one agent (owner/admin only; the server records an audit event). */
+export async function resumeAgent(
+  workspaceId: string,
+  id: string,
+  token?: string,
+): Promise<AgentView> {
+  return apiPost<AgentView>(`${agentsBase(workspaceId)}/${encodeURIComponent(id)}/resume`, {}, token);
 }
 
 // ── Per-agent mailbox view (Fleet B) — see into each agent's own inbox ────────

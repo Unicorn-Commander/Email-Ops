@@ -7,6 +7,8 @@ export const MCP_TOOL_SCOPES = {
   list_my_workspaces: 'mail:read',
   email_ops_health: 'mail:read',
   list_agents: 'mail:read',
+  pause_agent: 'admin:provision',
+  resume_agent: 'admin:provision',
   provision_mailbox: 'admin:provision',
   provision_agent: 'admin:provision',
   set_disposition: 'mail:write',

@@ -53,7 +53,10 @@ import { MailboxAccountsService } from '../mailbox-accounts/mailbox-accounts.ser
 import { DispositionService } from '../mail-triage/disposition.service';
 import { SenderPolicyService } from '../mail-triage/sender-policy.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
-import { checkCleanerEntitlement, checkMailboxHostingEntitlement } from '../connected-accounts/entitlement';
+import {
+  checkCleanerEntitlement,
+  checkMailboxHostingEntitlement,
+} from '../connected-accounts/entitlement';
 import {
   CleanupExecutionResult,
   CleanupPlanResult,
@@ -144,8 +147,10 @@ export class EmailOpsTools {
     );
     this.mailboxes.assertValidAddress(args.email_address);
     const ownerKind = (args.owner_kind ?? 'SHARED') as MailboxOwnerKind;
-    const action = ownerKind === MailboxOwnerKind.AGENT ? 'agentMailbox.create' : 'humanMailbox.create';
-    const isSelfOwnMailbox = ownerKind === MailboxOwnerKind.HUMAN && !!ucUid && args.owner_key === ucUid;
+    const action =
+      ownerKind === MailboxOwnerKind.AGENT ? 'agentMailbox.create' : 'humanMailbox.create';
+    const isSelfOwnMailbox =
+      ownerKind === MailboxOwnerKind.HUMAN && !!ucUid && args.owner_key === ucUid;
     const input = {
       emailAddress: args.email_address,
       displayName: args.display_name ?? null,
@@ -166,7 +171,9 @@ export class EmailOpsTools {
       throw new ForbiddenException(hosting.reason);
     }
 
-    const decision = await this.policy.authorize(workspaceId, ucUid, role, action, { isSelfOwnMailbox });
+    const decision = await this.policy.authorize(workspaceId, ucUid, role, action, {
+      isSelfOwnMailbox,
+    });
     if (decision === 'requires_approval') {
       const request = await this.policy.fileRequest(workspaceId, ucUid, {
         kind: ownerKind === MailboxOwnerKind.AGENT ? 'AGENT_MAILBOX' : 'HUMAN_MAILBOX',
@@ -286,6 +293,44 @@ export class EmailOpsTools {
     const workspaceId = await this.resolve(user, args.workspace_id);
     const items = await this.agents.listAgents(workspaceId, ucUidOf(user as WithWorkspaceClaim));
     return { agents: items, count: items.length };
+  }
+
+  private assertCanPauseAgent(role: WorkspaceRole): void {
+    if (role !== WorkspaceRole.OWNER && role !== WorkspaceRole.ADMIN) {
+      throw new ForbiddenException('Only a workspace OWNER or ADMIN can pause or resume agents.');
+    }
+  }
+
+  async pauseAgent(
+    user: User,
+    args: { workspace_id?: string; agent_id: string },
+  ): Promise<{ ok: boolean; agent?: unknown; reason?: string }> {
+    const { workspaceId, role } = await this.membership.resolveWithRole(user, args.workspace_id);
+    this.assertCanPauseAgent(role);
+    const agent = await this.agents.setPaused(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.agent_id,
+      true,
+    );
+    if (!agent) return { ok: false, reason: 'agent not found in this workspace' };
+    return { ok: true, agent };
+  }
+
+  async resumeAgent(
+    user: User,
+    args: { workspace_id?: string; agent_id: string },
+  ): Promise<{ ok: boolean; agent?: unknown; reason?: string }> {
+    const { workspaceId, role } = await this.membership.resolveWithRole(user, args.workspace_id);
+    this.assertCanPauseAgent(role);
+    const agent = await this.agents.setPaused(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.agent_id,
+      false,
+    );
+    if (!agent) return { ok: false, reason: 'agent not found in this workspace' };
+    return { ok: true, agent };
   }
 
   // ── EmailOpsPort contract tools ────────────────────────────────────────
@@ -622,7 +667,13 @@ export class EmailOpsTools {
     const workspaceId = await this.resolve(user, args.workspace_id);
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
     if (args.mailbox_id) {
-      return this.email.setThreadReadState(workspaceId, ucUid, args.mailbox_id, args.thread_id, args.read);
+      return this.email.setThreadReadState(
+        workspaceId,
+        ucUid,
+        args.mailbox_id,
+        args.thread_id,
+        args.read,
+      );
     }
     const updated = await this.email.setThreadReadAcrossMailboxes(
       workspaceId,
@@ -669,7 +720,10 @@ export class EmailOpsTools {
       }
     };
     await Promise.all(
-      Array.from({ length: Math.min(BULK_DISPOSITION_CONCURRENCY, args.thread_ids.length) }, worker),
+      Array.from(
+        { length: Math.min(BULK_DISPOSITION_CONCURRENCY, args.thread_ids.length) },
+        worker,
+      ),
     );
     results.forEach((r, i) => {
       const id = args.thread_ids[i];
@@ -787,6 +841,7 @@ export class EmailOpsTools {
     args: { workspace_id?: string; item_id: string; note?: string; trust_recipients?: boolean },
   ): Promise<unknown> {
     const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    const { role } = await this.membership.resolveWithRole(user, args.workspace_id);
     // Gate BY KIND (mirrors the REST approve): peek first so a missing/foreign
     // id reads as not-found before any entitlement verdict. Approving an EMAIL
     // draft is the human-in-the-loop SEND → the dual-SKU compose gate; approving
@@ -813,6 +868,7 @@ export class EmailOpsTools {
       // trusting the external recipients.
       args.trust_recipients,
       !!(user as any).__isFederationActor || !!(user as any).__patAuth,
+      role,
     );
     if (!res) return { ok: false, reason: 'agent-inbox item not found in this workspace' };
     return { ok: true, ...res };
@@ -881,12 +937,13 @@ export class EmailOpsTools {
     return { items, count: items.length };
   }
 
-  async getSendKit(
-    user: User,
-    args: { workspace_id?: string; kit_id: string },
-  ): Promise<unknown> {
+  async getSendKit(user: User, args: { workspace_id?: string; kit_id: string }): Promise<unknown> {
     const workspaceId = await this.resolve(user, args.workspace_id);
-    const kit = await this.email.getSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), args.kit_id);
+    const kit = await this.email.getSendKit(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.kit_id,
+    );
     if (!kit) return { ok: false, reason: 'send kit not found in this workspace' };
     return kit;
   }
@@ -940,7 +997,6 @@ export class EmailOpsTools {
       args.note ?? null,
     );
   }
-
 
   // ── Mail-engine admin tools (control-plane; domains / quotas / teardown) ─
   // Read tools are member-level (resolve-and-authorize the workspace).
@@ -1002,7 +1058,8 @@ export class EmailOpsTools {
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
-    if (role !== WorkspaceRole.OWNER) throw new ForbiddenException('ensureMailDomain: requires workspace OWNER role');
+    if (role !== WorkspaceRole.OWNER)
+      throw new ForbiddenException('ensureMailDomain: requires workspace OWNER role');
     const binding = await this.mailDomains.bindDomain(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -1022,7 +1079,8 @@ export class EmailOpsTools {
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
-    if (role !== WorkspaceRole.OWNER) throw new ForbiddenException('removeMailDomain: requires workspace OWNER role');
+    if (role !== WorkspaceRole.OWNER)
+      throw new ForbiddenException('removeMailDomain: requires workspace OWNER role');
     const binding = await this.mailDomains.assertWorkspaceOwnsDomain(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -1042,7 +1100,8 @@ export class EmailOpsTools {
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
-    if (role !== WorkspaceRole.OWNER) throw new ForbiddenException('setMailboxQuota: requires workspace OWNER role');
+    if (role !== WorkspaceRole.OWNER)
+      throw new ForbiddenException('setMailboxQuota: requires workspace OWNER role');
     await this.mailDomains.assertWorkspaceOwnsDomain(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -1070,7 +1129,8 @@ export class EmailOpsTools {
       user,
       args.workspace_id ?? (user as WithWorkspaceClaim).__workspaceClaim ?? null,
     );
-    if (role !== WorkspaceRole.OWNER) throw new ForbiddenException('removeMailboxEngine: requires workspace OWNER role');
+    if (role !== WorkspaceRole.OWNER)
+      throw new ForbiddenException('removeMailboxEngine: requires workspace OWNER role');
     await this.mailDomains.assertWorkspaceOwnsDomain(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -1296,7 +1356,13 @@ export class UiControlTools {
   /** Pre-fill the composer (does NOT send — the human reviews + sends). */
   async compose(
     user: User,
-    args: { workspace_id?: string; to?: string; subject?: string; body?: string; thread_id?: string },
+    args: {
+      workspace_id?: string;
+      to?: string;
+      subject?: string;
+      body?: string;
+      thread_id?: string;
+    },
   ): Promise<unknown> {
     return this.enqueue(user, args.workspace_id, UiCommandKind.COMPOSE, {
       to: args.to ?? null,
@@ -1319,7 +1385,12 @@ export class UiControlTools {
   /** Show a toast in the cockpit (an agent → human status message). */
   async notify(
     user: User,
-    args: { workspace_id?: string; title: string; body?: string; tone?: 'info' | 'success' | 'warning' },
+    args: {
+      workspace_id?: string;
+      title: string;
+      body?: string;
+      tone?: 'info' | 'success' | 'warning';
+    },
   ): Promise<unknown> {
     return this.enqueue(user, args.workspace_id, UiCommandKind.NOTIFY, {
       title: args.title,
@@ -1444,7 +1515,11 @@ export class SchedulingTools {
     args: { workspace_id?: string; mailbox_id: string },
   ): Promise<{ scheduled_sends: unknown[]; count: number }> {
     const workspaceId = await this.resolve(user, args.workspace_id);
-    const scheduled_sends = await this.scheduling.listScheduledSends(user, workspaceId, args.mailbox_id);
+    const scheduled_sends = await this.scheduling.listScheduledSends(
+      user,
+      workspaceId,
+      args.mailbox_id,
+    );
     return { scheduled_sends, count: scheduled_sends.length };
   }
 
@@ -1536,13 +1611,18 @@ export class MailRulesTools {
     },
   ): Promise<MailRuleView> {
     const workspaceId = await this.resolve(user, args.workspace_id);
-    return this.mailRules.create(workspaceId, ucUidOf(user as WithWorkspaceClaim), args.mailbox_id, {
-      name: args.name,
-      enabled: args.enabled,
-      priority: args.priority,
-      match: args.match,
-      actions: args.actions,
-    });
+    return this.mailRules.create(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.mailbox_id,
+      {
+        name: args.name,
+        enabled: args.enabled,
+        priority: args.priority,
+        match: args.match,
+        actions: args.actions,
+      },
+    );
   }
 
   /** Update any subset of a rule's fields; provided fields re-validate as on create. */
@@ -1645,7 +1725,8 @@ export class TrustedCorrespondentTools {
       ucUidOf(user as WithWorkspaceClaim),
       args.address,
     );
-    if (!removed) return { ok: false, reason: 'address is not a trusted correspondent in this workspace' };
+    if (!removed)
+      return { ok: false, reason: 'address is not a trusted correspondent in this workspace' };
     return { ok: true };
   }
 

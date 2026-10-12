@@ -25,7 +25,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { Badge, Button, Card, Skeleton, SkeletonText, cn, useConfirm } from '@/components/ui';
 import { Tooltip } from '@/components/Tooltip';
 import { useAgentInbox } from '@/components/useAgentInbox';
-import { useAgents } from '@/components/useAgents';
+import { useAgents, type UseAgents } from '@/components/useAgents';
 import { useAutoSent } from '@/components/agent-inbox/useAutoSent';
 import { useSendKits, type UseSendKits } from '@/components/agent-inbox/useSendKits';
 import {
@@ -150,6 +150,10 @@ export default function AgentInboxPage() {
       ) : (
         <>
           <SendKitsSection kits={sendKits} canReview={canReview} />
+          <AgentPauseSection
+            agents={agents}
+            canManage={['ADMIN', 'OWNER'].includes((inbox.workspace?.role ?? '').toUpperCase())}
+          />
           <div className="flex flex-wrap items-center justify-between gap-3">
             <Tabs tab={tab} counts={tabCount} onChange={changeTab} />
             {tab !== 'auto-sent' && inbox.load === 'ready' && inbox.items.length > 0 && (
@@ -286,6 +290,94 @@ function SendKitsSection({ kits, canReview }: { kits: UseSendKits; canReview: bo
         </>
       )}
     </section>
+  );
+}
+
+function AgentPauseSection({ agents, canManage }: { agents: UseAgents; canManage: boolean }) {
+  return (
+    <section aria-labelledby="agent-controls-heading" className="space-y-3">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <h2 id="agent-controls-heading" className="text-lg font-semibold text-primary">Agent controls</h2>
+          <p className="mt-1 max-w-2xl text-sm leading-5 text-tertiary">
+            Pause one agent when its writes need investigation. Paused agents cannot compose or send until resumed.
+          </p>
+        </div>
+        {!canManage && <Badge variant="neutral">owner/admin only</Badge>}
+      </div>
+      {agents.load === 'loading' ? (
+        <Card padded><SkeletonText lines={2} /></Card>
+      ) : agents.load === 'error' ? (
+        <Card padded className="border-danger/30 ring-1 ring-danger/15">
+          <p className="text-sm font-medium text-primary">Could not load agent controls.</p>
+          <p className="mt-1 break-words text-xs text-danger">{agents.error ?? 'Unknown error.'}</p>
+        </Card>
+      ) : agents.items.length === 0 ? (
+        <Card padded><p className="text-sm text-tertiary">No registered agents are available.</p></Card>
+      ) : (
+        <div className="grid gap-2 md:grid-cols-2">
+          {agents.items.map((agent) => (
+            <PauseAgentRow key={agent.id} agent={agent} canManage={canManage} setPaused={agents.setPaused} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PauseAgentRow({
+  agent,
+  canManage,
+  setPaused,
+}: {
+  agent: AgentView;
+  canManage: boolean;
+  setPaused: UseAgents['setPaused'];
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function toggle() {
+    if (!canManage || busy) return;
+    setBusy(true);
+    setError(null);
+    const result = await setPaused(agent.id, !agent.paused);
+    if (!result.ok) setError(result.error ?? 'Could not change the agent pause state.');
+    setBusy(false);
+  }
+
+  return (
+    <Card className="flex items-center justify-between gap-3 px-4 py-3">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="truncate text-sm font-medium text-primary">{agent.display_name}</p>
+          {agent.paused ? <Badge variant="warning">Paused</Badge> : <Badge variant="success">Running</Badge>}
+        </div>
+        <p className="mt-0.5 truncate font-mono text-[11px] text-muted">{agent.key}</p>
+        {error && <p className="mt-1 break-words text-xs text-danger">{error}</p>}
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={!agent.paused}
+        aria-label={`${agent.paused ? 'Resume' : 'Pause'} ${agent.display_name}`}
+        disabled={!canManage || busy}
+        onClick={() => void toggle()}
+        className={cn(
+          'relative h-7 w-12 shrink-0 rounded-full border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40',
+          agent.paused ? 'border-warning/50 bg-warning/20' : 'border-success/50 bg-success/30',
+          !canManage || busy ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
+        )}
+      >
+        <span
+          aria-hidden
+          className={cn(
+            'absolute top-1 h-5 w-5 rounded-full bg-white shadow-token transition-transform',
+            agent.paused ? 'left-1' : 'left-6',
+          )}
+        />
+      </button>
+    </Card>
   );
 }
 
@@ -681,6 +773,7 @@ function ReviewCard({
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant={meta.badge}>{meta.label}</Badge>
             <StateBadge state={item.state} />
+            <ApprovalTierBadge tier={item.approval_tier} />
             <span className="inline-flex items-center gap-1.5 text-[11px] text-tertiary">
               <span className="h-1.5 w-1.5 rounded-full bg-accent/70" />
               <span className="font-mono">{agentLabel(item.drafted_by)}</span>
@@ -706,6 +799,12 @@ function ReviewCard({
           {item.kind === 'CLEANUP' && cleanupReason(item.payload) && (
             <p className="mt-1.5 text-xs leading-5 text-tertiary">
               <span className="font-medium text-secondary">Why:</span> {cleanupReason(item.payload)}
+            </p>
+          )}
+          {item.approval_reason && (
+            <p className="mt-1.5 text-xs leading-5 text-tertiary">
+              <span className="font-medium text-secondary">Approval routing:</span>{' '}
+              {item.approval_reason}
             </p>
           )}
           {pending && policy && policy.reasons.length > 0 && (
@@ -878,6 +977,14 @@ function StateBadge({ state }: { state: string }) {
   if (state === 'approved') return <Badge variant="success">approved</Badge>;
   if (state === 'rejected') return <Badge variant="danger">rejected</Badge>;
   return <Badge variant="warning">pending</Badge>;
+}
+
+function ApprovalTierBadge({ tier }: { tier: AgentInboxItemView['approval_tier'] }) {
+  return tier === 'owner_admin' ? (
+    <Badge variant="protected">owner/admin approval</Badge>
+  ) : (
+    <Badge variant="neutral">mailbox owner approval</Badge>
+  );
 }
 
 function RelativeTime({ iso, className }: { iso: string | null; className?: string }) {

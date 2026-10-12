@@ -212,6 +212,36 @@ export class McpService {
       async (args: any) => wrap(await tools.listAgents(user, args)),
     );
 
+    registerTool(
+      'pause_agent',
+      {
+        title: 'Pause one agent',
+        description:
+          'Pause one registered agent so its agent-originated writes are refused. ' +
+          'Only a workspace OWNER or ADMIN may use this control; the change is audited.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          agent_id: z.string(),
+        },
+      },
+      async (args: any) => wrap(await tools.pauseAgent(user, args)),
+    );
+
+    registerTool(
+      'resume_agent',
+      {
+        title: 'Resume one agent',
+        description:
+          'Resume one registered agent after a pause. Only a workspace OWNER or ADMIN may ' +
+          'use this control; the change is audited.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          agent_id: z.string(),
+        },
+      },
+      async (args: any) => wrap(await tools.resumeAgent(user, args)),
+    );
+
     // ── Conversational provisioning (write; runs AS the user, policy-gated) ──
 
     registerTool(
@@ -397,7 +427,16 @@ export class McpService {
           // mailbox picker (own HUMAN box or a SHARED box; never an agent's), and
           // REFUSED outright when the workspace has no mailbox for that address.
           from_address: z.string().min(3).max(320).optional(),
-          attachments: z.array(z.object({ filename: z.string().min(1), content_type: z.string().min(1), content_base64: z.string().min(1) })).max(5).optional(),
+          attachments: z
+            .array(
+              z.object({
+                filename: z.string().min(1),
+                content_type: z.string().min(1),
+                content_base64: z.string().min(1),
+              }),
+            )
+            .max(5)
+            .optional(),
           send_at: z.string().optional(),
           kit_id: z.string().max(200).optional(),
         },
@@ -862,7 +901,8 @@ export class McpService {
       'list_send_kits',
       {
         title: 'List agent send kits',
-        description: 'List send-kit proposals and approvals, optionally filtered by PROPOSED, APPROVED, or REJECTED.',
+        description:
+          'List send-kit proposals and approvals, optionally filtered by PROPOSED, APPROVED, or REJECTED.',
         inputSchema: {
           workspace_id: z.string().optional(),
           state: SEND_KIT_STATE.optional(),
@@ -875,7 +915,8 @@ export class McpService {
       'get_send_kit',
       {
         title: 'Get an agent send kit',
-        description: 'Get the full send-kit definition, including retained recipients and body template.',
+        description:
+          'Get the full send-kit definition, including retained recipients and body template.',
         inputSchema: {
           workspace_id: z.string().optional(),
           kit_id: z.string().min(1).max(200),
@@ -913,7 +954,8 @@ export class McpService {
       'reject_send_kit',
       {
         title: 'Reject an agent send kit',
-        description: 'Human-only rejection of a PROPOSED send kit; an optional note is retained for audit.',
+        description:
+          'Human-only rejection of a PROPOSED send kit; an optional note is retained for audit.',
         inputSchema: {
           workspace_id: z.string().optional(),
           kit_id: z.string().min(1).max(200),

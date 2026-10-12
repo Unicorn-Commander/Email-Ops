@@ -20,6 +20,8 @@ import { useRouter } from 'next/navigation';
 import {
   createAgent,
   listAgents,
+  pauseAgent,
+  resumeAgent,
   updateAgent,
   ApiError,
   type AgentView,
@@ -50,6 +52,8 @@ export interface UseAgents {
   create: (body: CreateAgentBody) => Promise<AgentMutationOutcome>;
   /** Update an agent (mailbox / autonomy / active / …). Refreshes on success. */
   update: (id: string, body: UpdateAgentBody) => Promise<AgentMutationOutcome>;
+  /** Pause or resume one agent. Refreshes on success. */
+  setPaused: (id: string, paused: boolean) => Promise<AgentMutationOutcome>;
 }
 
 function messageOf(err: unknown, fallback: string): string {
@@ -149,6 +153,22 @@ export function useAgents(): UseAgents {
     [workspace, fetchFor, guard401],
   );
 
+  const setPaused = useCallback(
+    async (id: string, paused: boolean): Promise<AgentMutationOutcome> => {
+      if (!workspace) return { ok: false, error: 'No active workspace.' };
+      try {
+        if (paused) await pauseAgent(workspace.workspace_id, id);
+        else await resumeAgent(workspace.workspace_id, id);
+        await fetchFor(workspace, true);
+        return { ok: true };
+      } catch (err) {
+        if (guard401(err)) return { ok: false, error: 'Session expired.' };
+        return { ok: false, error: messageOf(err, `Could not ${paused ? 'pause' : 'resume'} the agent.`) };
+      }
+    },
+    [workspace, fetchFor, guard401],
+  );
+
   return {
     workspace,
     items,
@@ -157,5 +177,6 @@ export function useAgents(): UseAgents {
     refresh,
     create,
     update,
+    setPaused,
   };
 }
