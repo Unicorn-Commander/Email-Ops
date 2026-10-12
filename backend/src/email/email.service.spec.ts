@@ -651,7 +651,41 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
   });
 
   describe('agent-inbox approve / reject flow', () => {
-    it('requires owner/admin for commercial drafts, while an admin can approve', async () => {
+    it('lets the mailbox owner approve routine mail but requires owner/admin for commercial drafts', async () => {
+      const mailbox = await prisma.mailboxAccount.create({
+        data: {
+          workspaceId: WS,
+          emailAddress: `james-${Date.now()}@magicunicorn.tech`,
+          displayName: 'James',
+          ownerKind: 'HUMAN',
+          ownerKey: UC_UID,
+        },
+      });
+      const routine = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        fromAddress: mailbox.emailAddress,
+        toAddress: 'routine-approval@acme.test',
+        subject: 'Re: Tuesday',
+        body: 'Thanks, that works for me.',
+        mode: 'draft',
+        externalSource: 'customer-ops',
+        externalRef: `routine-approval-${Date.now()}`,
+      });
+      const routineItem = await prisma.agentInboxItem.findUniqueOrThrow({
+        where: { messageId: routine.id },
+      });
+      expect(routineItem.approvalTier).toBe('MAILBOX_OWNER');
+      const routineApproved = await service.approveAgentInboxItem(
+        WS,
+        UC_UID,
+        routineItem.id,
+        null,
+        false,
+        false,
+        WorkspaceRole.MEMBER,
+      );
+      expect(routineApproved?.inbox.state).toBe('approved');
+
       const draft = await service.composeEmail(WS, UC_UID, {
         contactId: null,
         toAddress: 'commercial-approval@acme.test',
