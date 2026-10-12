@@ -77,7 +77,7 @@ describe('MailDomainService', () => {
         }),
         findMany: jest.fn(async () =>
           rows
-            .filter((row) => row.verified && row.verificationToken)
+            .filter((row) => row.verified)
             .map((row) => ({ id: row.id, workspaceId: row.workspaceId })),
         ),
       },

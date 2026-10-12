@@ -185,7 +185,7 @@ export class MailDomainService {
   /** One deterministic sweep pass, exposed for scheduler tests. */
   async runVerificationSweep(now = new Date()): Promise<number> {
     const rows = await this.prisma.systemClient.mailDomain.findMany({
-      where: { verified: true, verificationToken: { not: null } },
+      where: { verified: true },
       select: { id: true, workspaceId: true },
       take: 500,
     });
