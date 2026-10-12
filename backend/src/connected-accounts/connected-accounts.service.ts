@@ -1,6 +1,7 @@
 import {
   BadGatewayException,
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -111,6 +112,8 @@ const CATEGORY_LABELS: Record<string, string[]> = {
   forums: ['CATEGORY_FORUMS'],
 };
 
+const CLEANUP_AGENT_KEY = 'email-ops-agent';
+
 @Injectable()
 export class ConnectedAccountsService {
   private readonly logger = new Logger(ConnectedAccountsService.name);
@@ -202,7 +205,10 @@ export class ConnectedAccountsService {
 
     let analysis: Record<string, unknown> | null = null;
     try {
-      analysis = await this.engine.analyzeInbox(provider, this.credentialsFor(provider, accessToken));
+      analysis = await this.engine.analyzeInbox(
+        provider,
+        this.credentialsFor(provider, accessToken),
+      );
     } catch {
       analysis = null;
     }
@@ -324,100 +330,111 @@ export class ConnectedAccountsService {
       .map((row) => row.id)
       .filter((id) => safeIds.has(id));
 
-    return this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
-      const batchId = options.batchId ?? randomUUID();
-      const credentials = this.credentialsFor(provider, accessToken);
-      const vault = this.hasVaultEntitlement(user, workspaceId);
-      const archiveExpiresAt = vault ? null : this.daysFromNow(7);
-      let archiveRef: CleanupExecutionBackupRef | null = null;
-      let action: CleanupActionKind = CleanupActionKind.TRASH;
-      let completedCount = 0;
+    return this.prisma.withWorkspace(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      async (tx) => {
+        const batchId = options.batchId ?? randomUUID();
+        const credentials = this.credentialsFor(provider, accessToken);
+        const vault = this.hasVaultEntitlement(user, workspaceId);
+        const archiveExpiresAt = vault ? null : this.daysFromNow(7);
+        let archiveRef: CleanupExecutionBackupRef | null = null;
+        let action: CleanupActionKind = CleanupActionKind.TRASH;
+        let completedCount = 0;
 
-      if (mode === 'delete' || mode === 'archive_purge') {
-        action = CleanupActionKind.DELETE;
-        archiveRef = await this.createVerifiedGarageArchive({
-          workspaceId,
-          provider,
-          credentials,
-          messageIds: requested,
-          batchId,
-          query: serverPlan.backup_query,
-          archiveExpiresAt,
-          archiveRetained: vault,
+        if (mode === 'delete' || mode === 'archive_purge') {
+          action = CleanupActionKind.DELETE;
+          archiveRef = await this.createVerifiedGarageArchive({
+            workspaceId,
+            provider,
+            credentials,
+            messageIds: requested,
+            batchId,
+            query: serverPlan.backup_query,
+            archiveExpiresAt,
+            archiveRetained: vault,
+          });
+          const count = this.assertEngineApplied(
+            await this.engine.batchDelete(provider, credentials, requested),
+            'delete',
+          );
+          completedCount = count.count;
+        } else if (mode === 'trash') {
+          const count = this.assertEngineApplied(
+            await this.engine.batchTrash(provider, credentials, requested),
+            'trash',
+          );
+          completedCount = count.count;
+        } else {
+          throw new BadRequestException(
+            `"${mode}" cleanup is not implemented for direct execution.`,
+          );
+        }
+
+        // NOTE: The engine returns a single count for batch operations, not per-ID failures.
+        // Therefore, "failed" is an estimate: requested - completed. This is the best available
+        // metric for partial successes (e.g. some IDs already gone).
+        const result = this.cleanupResult({
+          completed: completedCount,
+          failed: Math.max(0, requested.length - completedCount),
+          bytesFreed: this.estimateBytes(serverPlan.safe, requested),
+          totalAttempted: requested.length,
         });
-        const count = this.assertEngineApplied(
-          await this.engine.batchDelete(provider, credentials, requested),
-          'delete',
-        );
-        completedCount = count.count;
-      } else if (mode === 'trash') {
-        const count = this.assertEngineApplied(
-          await this.engine.batchTrash(provider, credentials, requested),
-          'trash',
-        );
-        completedCount = count.count;
-      } else {
-        throw new BadRequestException(`"${mode}" cleanup is not implemented for direct execution.`);
-      }
-
-      // NOTE: The engine returns a single count for batch operations, not per-ID failures.
-      // Therefore, "failed" is an estimate: requested - completed. This is the best available
-      // metric for partial successes (e.g. some IDs already gone).
-      const result = this.cleanupResult({
-        completed: completedCount,
-        failed: Math.max(0, requested.length - completedCount),
-        bytesFreed: this.estimateBytes(serverPlan.safe, requested),
-        totalAttempted: requested.length,
-      });
-      const batch = await tx.cleanupBatch.create({
-        data: {
-          id: batchId,
-          workspaceId,
-          provider,
-          action,
-          mode,
-          state: CleanupBatchState.COMPLETED,
-          criteria: serverPlan.criteria as any,
-          plan: serverPlan as any,
-          result,
-          backupRef: archiveRef?.key ?? null,
-          backupVerified: archiveRef?.verified ?? false,
-          archiveBucket: archiveRef?.bucket ?? null,
-          archiveKey: archiveRef?.key ?? null,
-          archiveBytes: archiveRef?.bytes ? BigInt(archiveRef.bytes) : null,
-          archiveSha256: archiveRef?.sha256 ?? null,
-          archiveExpiresAt,
-          archiveRetained: vault,
-          requestedByUcUid: options.requestedByUcUid ?? ucUidOf(user as WithWorkspaceClaim),
-          approvedByUcUid: options.requestedByUcUid ?? ucUidOf(user as WithWorkspaceClaim),
-          agentInboxItemId: options.agentInboxItemId ?? null,
-          summary: this.batchSummary(action.toLowerCase(), provider, requested.length, archiveRef?.key ?? null),
-          params: this.batchParams(plan.criteria),
-          completedAt: new Date(),
-        },
-      });
-      if (options.agentInboxItemId) {
-        await tx.agentInboxItem.update({
-          where: { id: options.agentInboxItemId },
+        const batch = await tx.cleanupBatch.create({
           data: {
-            state: AgentInboxState.APPROVED,
-            reviewedByUcUid: options.requestedByUcUid ?? ucUidOf(user as WithWorkspaceClaim),
-            reviewedAt: new Date(),
+            id: batchId,
+            workspaceId,
+            provider,
+            action,
+            mode,
+            state: CleanupBatchState.COMPLETED,
+            criteria: serverPlan.criteria as any,
+            plan: serverPlan as any,
+            result,
+            backupRef: archiveRef?.key ?? null,
+            backupVerified: archiveRef?.verified ?? false,
+            archiveBucket: archiveRef?.bucket ?? null,
+            archiveKey: archiveRef?.key ?? null,
+            archiveBytes: archiveRef?.bytes ? BigInt(archiveRef.bytes) : null,
+            archiveSha256: archiveRef?.sha256 ?? null,
+            archiveExpiresAt,
+            archiveRetained: vault,
+            requestedByUcUid: options.requestedByUcUid ?? ucUidOf(user as WithWorkspaceClaim),
+            approvedByUcUid: options.requestedByUcUid ?? ucUidOf(user as WithWorkspaceClaim),
+            agentInboxItemId: options.agentInboxItemId ?? null,
+            summary: this.batchSummary(
+              action.toLowerCase(),
+              provider,
+              requested.length,
+              archiveRef?.key ?? null,
+            ),
+            params: this.batchParams(plan.criteria),
+            completedAt: new Date(),
           },
         });
-      }
-      return {
-        ok: true,
-        provider,
-        mode,
-        batch_id: batch.id,
-        action: action.toLowerCase(),
-        plan: serverPlan,
-        result,
-        backup_ref: archiveRef,
-        status: 'completed',
-      };
-    });
+        if (options.agentInboxItemId) {
+          await tx.agentInboxItem.update({
+            where: { id: options.agentInboxItemId },
+            data: {
+              state: AgentInboxState.APPROVED,
+              reviewedByUcUid: options.requestedByUcUid ?? ucUidOf(user as WithWorkspaceClaim),
+              reviewedAt: new Date(),
+            },
+          });
+        }
+        return {
+          ok: true,
+          provider,
+          mode,
+          batch_id: batch.id,
+          action: action.toLowerCase(),
+          plan: serverPlan,
+          result,
+          backup_ref: archiveRef,
+          status: 'completed',
+        };
+      },
+    );
   }
 
   async organize(
@@ -452,35 +469,39 @@ export class ConnectedAccountsService {
       bytesFreed: 0,
       totalAttempted: requested.length,
     });
-    return this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
-      const batch = await tx.cleanupBatch.create({
-        data: {
-          workspaceId,
+    return this.prisma.withWorkspace(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      async (tx) => {
+        const batch = await tx.cleanupBatch.create({
+          data: {
+            workspaceId,
+            provider,
+            action: CleanupActionKind.ORGANIZE,
+            mode: 'archive',
+            state: CleanupBatchState.COMPLETED,
+            criteria: plan.criteria as any,
+            plan: plan as any,
+            result,
+            requestedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+            approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+            summary: this.batchSummary('organize', provider, requested.length, null),
+            params: this.batchParams(criteria),
+            completedAt: new Date(),
+          },
+        });
+        return {
+          ok: true,
           provider,
-          action: CleanupActionKind.ORGANIZE,
           mode: 'archive',
-          state: CleanupBatchState.COMPLETED,
-          criteria: plan.criteria as any,
-          plan: plan as any,
+          batch_id: batch.id,
+          action: 'organize',
+          plan,
           result,
-          requestedByUcUid: ucUidOf(user as WithWorkspaceClaim),
-          approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
-          summary: this.batchSummary('organize', provider, requested.length, null),
-          params: this.batchParams(criteria),
-          completedAt: new Date(),
-        },
-      });
-      return {
-        ok: true,
-        provider,
-        mode: 'archive',
-        batch_id: batch.id,
-        action: 'organize',
-        plan,
-        result,
-        status: 'completed',
-      };
-    });
+          status: 'completed',
+        };
+      },
+    );
   }
 
   async unsubscribe(
@@ -490,6 +511,11 @@ export class ConnectedAccountsService {
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
+    await this.assertAgentWriteAllowed(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      CLEANUP_AGENT_KEY,
+    );
     // Still require a linked account up front, so an unlinked caller fails fast
     // instead of staging a batch that could never run on approve.
     await this.requireAccessToken(user, provider);
@@ -522,14 +548,21 @@ export class ConnectedAccountsService {
     );
   }
 
-  async undoBatch(user: User, provider: ConnectedProvider, batchId: string): Promise<CleanupExecutionResult> {
+  async undoBatch(
+    user: User,
+    provider: ConnectedProvider,
+    batchId: string,
+  ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
 
-    const batch = await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), (tx) =>
-      tx.cleanupBatch.findFirst({
-        where: { id: batchId, workspaceId, provider },
-      }),
+    const batch = await this.prisma.withWorkspace(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      (tx) =>
+        tx.cleanupBatch.findFirst({
+          where: { id: batchId, workspaceId, provider },
+        }),
     );
     if (!batch) {
       throw new NotFoundException('Cleanup batch not found.');
@@ -576,16 +609,20 @@ export class ConnectedAccountsService {
             `re-imported. The archive is still available — try again, or download it to re-import manually.`,
         };
       }
-      await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
-        await tx.cleanupBatch.update({
-          where: { id: batch.id },
-          data: {
-            state: CleanupBatchState.UNDONE,
-            restoredAt: new Date(),
-            undoneAt: new Date(),
-          },
-        });
-      });
+      await this.prisma.withWorkspace(
+        workspaceId,
+        ucUidOf(user as WithWorkspaceClaim),
+        async (tx) => {
+          await tx.cleanupBatch.update({
+            where: { id: batch.id },
+            data: {
+              state: CleanupBatchState.UNDONE,
+              restoredAt: new Date(),
+              undoneAt: new Date(),
+            },
+          });
+        },
+      );
       return {
         ok: true,
         provider,
@@ -595,9 +632,15 @@ export class ConnectedAccountsService {
         plan: batch.plan as unknown as CleanupPlanResult,
         result: this.cleanupResult({
           completed: restored.restored,
-          failed: Array.isArray(restored.failed) ? restored.failed.length : Number(restored.failed ?? 0),
+          failed: Array.isArray(restored.failed)
+            ? restored.failed.length
+            : Number(restored.failed ?? 0),
           bytesFreed: 0,
-          totalAttempted: restored.restored + (Array.isArray(restored.failed) ? restored.failed.length : Number(restored.failed ?? 0)),
+          totalAttempted:
+            restored.restored +
+            (Array.isArray(restored.failed)
+              ? restored.failed.length
+              : Number(restored.failed ?? 0)),
         }),
         status: 'undone',
       };
@@ -638,6 +681,8 @@ export class ConnectedAccountsService {
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
+    const requestedByUcUid = ucUidOf(user as WithWorkspaceClaim);
+    await this.assertAgentWriteAllowed(workspaceId, requestedByUcUid, CLEANUP_AGENT_KEY);
     const accessToken = await this.safeBrokerToken(user, provider);
     if (!accessToken) {
       throw new ForbiddenException(`no linked ${provider} account — sign in via ${provider} first`);
@@ -663,12 +708,12 @@ export class ConnectedAccountsService {
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
+    const requestedByUcUid = ucUidOf(user as WithWorkspaceClaim);
 
     // UNSUBSCRIBE is staged like every other agent destructive verb. On approve,
     // executeCleanupInternal runs the real engine unsubscribe against the
     // sender group in the staged criteria.
 
-    const requestedByUcUid = ucUidOf(user as WithWorkspaceClaim);
     const summary = this.batchSummary(mode, provider, plan.safe.length, null);
     const criteria = plan.criteria as CleanupCriteria;
     const staged = await this.prisma.withWorkspace(workspaceId, requestedByUcUid, async (tx) => {
@@ -757,13 +802,15 @@ export class ConnectedAccountsService {
     };
   }
 
-  private narrowPlanToSelection(plan: CleanupPlanResult, criteria: CleanupCriteria): CleanupPlanResult {
-    const raw =
-      Array.isArray(criteria.messageIds)
-        ? criteria.messageIds
-        : Array.isArray(criteria.message_ids)
-          ? criteria.message_ids
-          : null;
+  private narrowPlanToSelection(
+    plan: CleanupPlanResult,
+    criteria: CleanupCriteria,
+  ): CleanupPlanResult {
+    const raw = Array.isArray(criteria.messageIds)
+      ? criteria.messageIds
+      : Array.isArray(criteria.message_ids)
+        ? criteria.message_ids
+        : null;
     if (raw === null) return plan;
     const wanted = new Set(raw.map(String));
     const safe = plan.safe.filter((row) => wanted.has(row.id));
@@ -780,10 +827,13 @@ export class ConnectedAccountsService {
     user: User,
     batchId: string,
   ): Promise<CleanupExecutionResult | null> {
-    const batch = await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), (tx) =>
-      tx.cleanupBatch.findFirst({
-        where: { id: batchId, workspaceId },
-      }),
+    const batch = await this.prisma.withWorkspace(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      (tx) =>
+        tx.cleanupBatch.findFirst({
+          where: { id: batchId, workspaceId },
+        }),
     );
     if (!batch) return null;
     if (batch.state !== CleanupBatchState.PENDING) {
@@ -818,16 +868,26 @@ export class ConnectedAccountsService {
       // throws here. Record the batch as FAILED with the reason — never leave
       // it PENDING and never fall through to a destructive default.
       const reason = err instanceof Error ? err.message : 'cleanup could not be executed';
-      await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
-        await tx.cleanupBatch.update({
-          where: { id: batch.id },
-          data: {
-            state: CleanupBatchState.FAILED,
-            approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
-            result: { completed: 0, failed: 0, bytes_freed: 0, total_attempted: 0, reason } as any,
-          },
-        });
-      });
+      await this.prisma.withWorkspace(
+        workspaceId,
+        ucUidOf(user as WithWorkspaceClaim),
+        async (tx) => {
+          await tx.cleanupBatch.update({
+            where: { id: batch.id },
+            data: {
+              state: CleanupBatchState.FAILED,
+              approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+              result: {
+                completed: 0,
+                failed: 0,
+                bytes_freed: 0,
+                total_attempted: 0,
+                reason,
+              } as any,
+            },
+          });
+        },
+      );
       return {
         ok: false,
         provider: batch.provider as ConnectedProvider,
@@ -840,48 +900,66 @@ export class ConnectedAccountsService {
         reason,
       };
     }
-    await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), async (tx) => {
-      await tx.cleanupBatch.update({
-        where: { id: batch.id },
-        data: {
-          state: CleanupBatchState.COMPLETED,
-          completedAt: new Date(),
-          approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
-          result: result.result as any,
-          backupRef: result.backup_ref?.key ?? batch.backupRef,
-          backupVerified: result.backup_ref?.verified ?? batch.backupVerified,
-          archiveBucket: result.backup_ref?.bucket ?? (batch as any).archiveBucket ?? null,
-          archiveKey: result.backup_ref?.key ?? (batch as any).archiveKey ?? null,
-          archiveBytes: result.backup_ref?.bytes ? BigInt(result.backup_ref.bytes) : ((batch as any).archiveBytes ?? null),
-          archiveSha256: result.backup_ref?.sha256 ?? (batch as any).archiveSha256 ?? null,
-          archiveExpiresAt: result.backup_ref?.expires_at ? new Date(result.backup_ref.expires_at) : ((batch as any).archiveExpiresAt ?? null),
-          archiveRetained: result.backup_ref?.retained ?? (batch as any).archiveRetained ?? false,
-        },
-      });
-    });
+    await this.prisma.withWorkspace(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      async (tx) => {
+        await tx.cleanupBatch.update({
+          where: { id: batch.id },
+          data: {
+            state: CleanupBatchState.COMPLETED,
+            completedAt: new Date(),
+            approvedByUcUid: ucUidOf(user as WithWorkspaceClaim),
+            result: result.result as any,
+            backupRef: result.backup_ref?.key ?? batch.backupRef,
+            backupVerified: result.backup_ref?.verified ?? batch.backupVerified,
+            archiveBucket: result.backup_ref?.bucket ?? (batch as any).archiveBucket ?? null,
+            archiveKey: result.backup_ref?.key ?? (batch as any).archiveKey ?? null,
+            archiveBytes: result.backup_ref?.bytes
+              ? BigInt(result.backup_ref.bytes)
+              : ((batch as any).archiveBytes ?? null),
+            archiveSha256: result.backup_ref?.sha256 ?? (batch as any).archiveSha256 ?? null,
+            archiveExpiresAt: result.backup_ref?.expires_at
+              ? new Date(result.backup_ref.expires_at)
+              : ((batch as any).archiveExpiresAt ?? null),
+            archiveRetained: result.backup_ref?.retained ?? (batch as any).archiveRetained ?? false,
+          },
+        });
+      },
+    );
     return result;
   }
 
   async listCleanupActivity(user: User, provider: ConnectedProvider): Promise<CleanupBatchView[]> {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
-    const rows = await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), (tx) =>
-      tx.cleanupBatch.findMany({
-        where: { workspaceId, provider },
-        orderBy: { createdAt: 'desc' },
-        take: 25,
-      }),
+    const rows = await this.prisma.withWorkspace(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      (tx) =>
+        tx.cleanupBatch.findMany({
+          where: { workspaceId, provider },
+          orderBy: { createdAt: 'desc' },
+          take: 25,
+        }),
     );
     return rows.map((row) => this.batchView(row));
   }
 
-  async getArchiveDownloadUrl(user: User, provider: ConnectedProvider, batchId: string): Promise<{ url: string; expires_in_seconds: number }> {
+  async getArchiveDownloadUrl(
+    user: User,
+    provider: ConnectedProvider,
+    batchId: string,
+  ): Promise<{ url: string; expires_in_seconds: number }> {
     const workspaceId = await this.resolveWorkspace(user);
     this.requireCleanerEntitlement(user, workspaceId);
-    const batch = await this.prisma.withWorkspace(workspaceId, ucUidOf(user as WithWorkspaceClaim), (tx) =>
-      tx.cleanupBatch.findFirst({
-        where: { id: batchId, workspaceId, provider },
-      }),
+    const batch = await this.prisma.withWorkspace(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      (tx) =>
+        tx.cleanupBatch.findFirst({
+          where: { id: batchId, workspaceId, provider },
+        }),
     );
     if (!batch || !this.archiveLive(batch)) {
       throw new NotFoundException('Live archive not found for this batch.');
@@ -893,6 +971,29 @@ export class ConnectedAccountsService {
     };
   }
 
+  /** Shared pause fence for Cleaner writes staged as email-ops-agent. */
+  private async assertAgentWriteAllowed(
+    workspaceId: string,
+    ucUid: string | null,
+    agentKey: string,
+  ): Promise<void> {
+    const state = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const [workspace, agent] = await Promise.all([
+        tx.workspace.findUnique({ where: { id: workspaceId }, select: { agentsPaused: true } }),
+        tx.agent.findFirst({
+          where: { workspaceId, key: agentKey, active: true },
+          select: { paused: true },
+        }),
+      ]);
+      return {
+        agentsPaused: workspace?.agentsPaused ?? false,
+        agentPaused: agent?.paused ?? false,
+      };
+    });
+    if (state.agentsPaused) throw new ForbiddenException('Agents are paused for this workspace.');
+    if (state.agentPaused) throw new ConflictException(`Agent '${agentKey}' is paused.`);
+  }
+
   /**
    * The Cleaner Engine returns `null` from a cleanup call when the provider rejected
    * it (auth expired / rate-limited / transport error) — the engine surfaces that as
@@ -901,10 +1002,7 @@ export class ConnectedAccountsService {
    * to be recorded COMPLETED. Throw instead: the interactive path returns 502, and the
    * approval path's catch records the batch FAILED and keeps it retryable.
    */
-  private assertEngineApplied(
-    result: { count: number } | null,
-    action: string,
-  ): { count: number } {
+  private assertEngineApplied(result: { count: number } | null, action: string): { count: number } {
     if (result === null) {
       throw new BadGatewayException(
         `The mail provider did not confirm the ${action} — it may be rate-limited or the sign-in ` +
@@ -934,7 +1032,11 @@ export class ConnectedAccountsService {
     if (mode === 'trash') {
       action = 'trash';
       count = this.assertEngineApplied(
-        await this.engine.batchTrash(provider, this.credentialsFor(provider, accessToken), requested),
+        await this.engine.batchTrash(
+          provider,
+          this.credentialsFor(provider, accessToken),
+          requested,
+        ),
         'trash',
       );
     } else if (mode === 'archive') {
@@ -963,7 +1065,11 @@ export class ConnectedAccountsService {
         archiveRetained,
       });
       count = this.assertEngineApplied(
-        await this.engine.batchDelete(provider, this.credentialsFor(provider, accessToken), requested),
+        await this.engine.batchDelete(
+          provider,
+          this.credentialsFor(provider, accessToken),
+          requested,
+        ),
         'delete',
       );
       // NOTE: The engine returns a single count for batch operations, not per-ID failures.
@@ -1000,7 +1106,9 @@ export class ConnectedAccountsService {
       }
       const results = Array.isArray(engineResult.results) ? engineResult.results : [];
       const completed = results.filter((r) => r.status === 'unsubscribed').length;
-      const failed = results.filter((r) => r.status === 'failed' || r.status === 'unavailable').length;
+      const failed = results.filter(
+        (r) => r.status === 'failed' || r.status === 'unavailable',
+      ).length;
       return {
         ok: true,
         provider,
@@ -1018,7 +1126,9 @@ export class ConnectedAccountsService {
         unsubscribe_results: results,
       };
     } else {
-      throw new BadRequestException(`"${mode}" cleanup is not implemented — no messages were changed.`);
+      throw new BadRequestException(
+        `"${mode}" cleanup is not implemented — no messages were changed.`,
+      );
     }
     // NOTE: The engine returns a single count for batch operations, not per-ID failures.
     // Therefore, "failed" is an estimate: requested - completed. This is the best available
@@ -1113,12 +1223,14 @@ export class ConnectedAccountsService {
       batch_id: batch.id,
       action: batch.action.toLowerCase(),
       plan: batch.plan as unknown as CleanupPlanResult,
-      result: (batch.result as CleanupExecutionResult['result']) ?? this.cleanupResult({
-        completed: 0,
-        failed: 0,
-        bytesFreed: 0,
-        totalAttempted: 0,
-      }),
+      result:
+        (batch.result as CleanupExecutionResult['result']) ??
+        this.cleanupResult({
+          completed: 0,
+          failed: 0,
+          bytesFreed: 0,
+          totalAttempted: 0,
+        }),
       backup_ref: batch.backupRef
         ? {
             path: batch.backupRef,
@@ -1223,7 +1335,9 @@ export class ConnectedAccountsService {
     const verification = await this.engine.archiveVerify(archive.bucket, archive.key);
     const verified = Boolean(verification?.success);
     if (!verified) {
-      throw new ForbiddenException(`Archive verification failed: ${verification?.message ?? 'unknown error'}`);
+      throw new ForbiddenException(
+        `Archive verification failed: ${verification?.message ?? 'unknown error'}`,
+      );
     }
     return {
       path: archive.key,
@@ -1246,7 +1360,10 @@ export class ConnectedAccountsService {
   ): Promise<EngineMessageSummary[]> {
     const credentials = this.credentialsFor(provider, accessToken);
     const query = this.backupQueryFor(criteria);
-    const perPage = Math.max(1, Math.min(Number(criteria.max_results ?? criteria.maxResults ?? 200), 500));
+    const perPage = Math.max(
+      1,
+      Math.min(Number(criteria.max_results ?? criteria.maxResults ?? 200), 500),
+    );
     // An interactive plan is a bounded PREVIEW: cap how many messages a single
     // run reviews so the button returns in seconds, not minutes, on large
     // mailboxes. (Reviewing 2000 messages via serial metadata fetches took ~4min
@@ -1254,13 +1371,22 @@ export class ConnectedAccountsService {
     // comprehensive sweep is the scheduled/agent path, not this on-demand one.
     const reviewCap = Math.max(
       1,
-      Math.min(Number(criteria.max_results ?? criteria.maxResults ?? REVIEW_PREVIEW_CAP), REVIEW_PREVIEW_CAP),
+      Math.min(
+        Number(criteria.max_results ?? criteria.maxResults ?? REVIEW_PREVIEW_CAP),
+        REVIEW_PREVIEW_CAP,
+      ),
     );
     const messages: EngineMessageSummary[] = [];
     let pageToken: string | null | undefined = null;
 
     for (let page = 0; page < 10 && messages.length < reviewCap; page += 1) {
-      const res = await this.engine.listMessages(provider, credentials, query, perPage, pageToken ?? null);
+      const res = await this.engine.listMessages(
+        provider,
+        credentials,
+        query,
+        perPage,
+        pageToken ?? null,
+      );
       if (!res) {
         // The engine client maps any non-2xx (unsupported query, provider/Graph
         // failure, engine down) to null. A null FIRST page means the plan
@@ -1295,7 +1421,12 @@ export class ConnectedAccountsService {
       const results = await Promise.all(
         batch.map(async (message) => {
           if (this.needsEnrichment(message)) {
-            const full = await this.engine.getMessage(provider, credentials, message.id, 'metadata');
+            const full = await this.engine.getMessage(
+              provider,
+              credentials,
+              message.id,
+              'metadata',
+            );
             return full ?? message;
           }
           return message;
@@ -1404,9 +1535,7 @@ export class ConnectedAccountsService {
     // promotions only; NEVER an unbounded all-mail scan.
     const categories = Array.isArray(criteria.categories) ? criteria.categories : [];
     const terms = [
-      ...new Set(
-        categories.map((c) => CATEGORY_QUERY[String(c).toLowerCase()]).filter(Boolean),
-      ),
+      ...new Set(categories.map((c) => CATEGORY_QUERY[String(c).toLowerCase()]).filter(Boolean)),
     ];
     if (!terms.length) return 'category:promotions';
     return terms.length === 1 ? terms[0] : `(${terms.join(' OR ')})`;
@@ -1420,12 +1549,11 @@ export class ConnectedAccountsService {
   private selectedSafeIds(plan: CleanupPlanResult, criteria: CleanupCriteria): string[] {
     const safeIds = plan.safe.map((row) => row.id);
     const safeSet = new Set(safeIds);
-    const raw =
-      Array.isArray(criteria.messageIds)
-        ? criteria.messageIds
-        : Array.isArray(criteria.message_ids)
-          ? criteria.message_ids
-          : null;
+    const raw = Array.isArray(criteria.messageIds)
+      ? criteria.messageIds
+      : Array.isArray(criteria.message_ids)
+        ? criteria.message_ids
+        : null;
     if (raw === null) return safeIds;
     return raw.map((id) => String(id)).filter((id) => safeSet.has(id));
   }
@@ -1501,7 +1629,12 @@ export class ConnectedAccountsService {
     );
   }
 
-  private batchSummary(mode: string, provider: ConnectedProvider, count: number, backupRef: string | null): string {
+  private batchSummary(
+    mode: string,
+    provider: ConnectedProvider,
+    count: number,
+    backupRef: string | null,
+  ): string {
     const suffix = backupRef ? ` backup=${backupRef}` : '';
     return `${mode} ${count} messages on ${provider}${suffix}`;
   }
@@ -1536,7 +1669,10 @@ export class ConnectedAccountsService {
     const address = this.extractAddress(sender);
     const at = address.lastIndexOf('@');
     if (at < 0) return '';
-    return address.slice(at + 1).trim().toLowerCase();
+    return address
+      .slice(at + 1)
+      .trim()
+      .toLowerCase();
   }
 
   private async resolveWorkspace(user: User): Promise<string> {
@@ -1602,9 +1738,10 @@ export class ConnectedAccountsService {
     }
   }
 
-  private credentialsFor(provider: ConnectedProvider, accessToken: string): Record<string, unknown> {
-    return provider === 'gmail'
-      ? { token: accessToken }
-      : { access_token: accessToken };
+  private credentialsFor(
+    provider: ConnectedProvider,
+    accessToken: string,
+  ): Record<string, unknown> {
+    return provider === 'gmail' ? { token: accessToken } : { access_token: accessToken };
   }
 }
