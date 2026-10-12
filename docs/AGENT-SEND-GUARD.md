@@ -112,17 +112,25 @@ the same approval/send lane. Rejected items are not eligible.
 
 ## Attachments
 
-Compose accepts up to five files and 10 MB decoded total. The direct MCP/REST
-shape is `{filename, content_type, content_base64}`; the existing uploaded
-`blob_id` shape remains compatible. Attachment names and sizes are exposed in the
-agent inbox. Bytes are carried through connected Gmail/Graph MIME/fileAttachment
-lanes and through the James/JMAP multipart lane; a lane refuses delivery rather
-than silently dropping an attachment.
+Compose accepts `{documentId}` for an Email-Ops-stored document readable through
+the selected mailbox, or `{filename, contentType, contentBase64}` for inline
+bytes. The legacy snake-case and uploaded `blob_id` forms remain compatible.
+Defaults are at most five files, 10 MiB per file, 20 MiB decoded total, and
+`pdf`, `png`, `jpg`, `txt`, `csv`, `md`, `docx`, and `xlsx`; these are configurable
+with `EMAIL_OPS_ATTACHMENT_MAX_FILES`,
+`EMAIL_OPS_ATTACHMENT_MAX_FILE_BYTES`,
+`EMAIL_OPS_ATTACHMENT_MAX_TOTAL_BYTES`, and
+`EMAIL_OPS_ATTACHMENT_ALLOWED_TYPES`. Attachment names, sizes, and MIME types
+are exposed in the agent inbox before approval. Gmail/Graph and Postmark receive
+inline provider attachments; James uses its JMAP blob lane. A configured lane
+that cannot carry the requested form refuses compose before staging or sending.
 
 ## Operations
 
-Apply the additive Prisma migration before dogfood traffic. No new environment
-variable is required. The normal your-host steps are:
+The existing additive storage is reused: `EmailMessage.attachments` retains the
+staged metadata/content and `OutboundAttachment` stores RLS-fenced external
+document bytes. No new migration is required for this change. The normal
+your-host steps remain:
 
 ```sh
 cd backend

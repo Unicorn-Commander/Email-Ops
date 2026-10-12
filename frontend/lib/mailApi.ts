@@ -127,19 +127,33 @@ export interface MessageComposeView {
   external_source: string | null;
   external_ref: string | null;
   created_at: string | null;
+  attachments?: { name: string | null; type: string | null; size: number | null }[];
 }
 
-/** A blob reference included in a compose (already uploaded via the attachments endpoint). */
+/** A legacy blob reference included in a compose (already uploaded via the attachments endpoint). */
 export interface ComposeAttachmentRef {
   blob_id: string;
   name: string;
   type: string;
 }
 
+/** The complete REST compose attachment contract; blob refs remain compatible. */
+export type ComposeAttachment =
+  | ComposeAttachmentRef
+  | {
+      documentId?: string;
+      document_id?: string;
+      filename?: string;
+      contentType?: string;
+      content_type?: string;
+      contentBase64?: string;
+      content_base64?: string;
+    };
+
 /**
  * Body for compose / reply. `in_reply_to_thread_id` threads a reply.
- * Wave 2 adds cc/bcc, uploaded-blob attachment refs, and the RFC-5322 threading
- * hints `in_reply_to` / `references` (message ids; the backend resolves headers).
+ * Wave 2 adds cc/bcc, attachment refs/inline documents, and the RFC-5322
+ * threading hints `in_reply_to` / `references` (message ids; the backend resolves headers).
  * NOTE: multiple To recipients are sent comma-joined in `to_address`.
  */
 export interface ComposeBody {
@@ -151,7 +165,7 @@ export interface ComposeBody {
   draft_id?: string | null;
   cc?: string[];
   bcc?: string[];
-  attachments?: ComposeAttachmentRef[];
+  attachments?: ComposeAttachment[];
   in_reply_to?: string;
   references?: string[];
 }
@@ -986,7 +1000,7 @@ export interface ScheduleSendBody {
   to_addresses?: string[];
   cc?: string[];
   bcc?: string[];
-  attachments?: ComposeAttachmentRef[];
+  attachments?: ComposeAttachment[];
   in_reply_to_thread_id?: string;
   /** RFC-5322 threading passthrough (parity with the immediate-send lane). */
   in_reply_to?: string;

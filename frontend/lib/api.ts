@@ -381,7 +381,7 @@ export interface AgentInboxItemView {
   body_sha256: string | null;
   thread_id: string | null;
   kit_id: string | null;
-  attachments?: { name: string; size: number | null }[];
+  attachments?: { name: string; type: string | null; size: number | null }[];
   sends_at?: string | null;
   reviewed_by_uc_uid: string | null;
   reviewed_at: string | null;

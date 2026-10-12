@@ -260,7 +260,22 @@ describe('MailController (webmail wave)', () => {
       expect(input.references).toEqual(['ref-1']);
     });
 
-    it('400s when an attachment ref has no blob_id', async () => {
+    it('accepts the camel-case inline and documentId attachment contract', async () => {
+      const composeEmail = jest.fn().mockResolvedValue({ id: 'm1' });
+      await make({ composeEmail }).compose(WS, user(), 'mb-1', {
+        to_address: 'a@acme.test',
+        attachments: [
+          { filename: 'brief.txt', contentType: 'text/plain', contentBase64: 'SGk=' },
+          { documentId: 'doc-1' },
+        ],
+      } as never);
+      expect(composeEmail.mock.calls[0][2].attachments).toEqual([
+        { filename: 'brief.txt', contentType: 'text/plain', contentBase64: 'SGk=' },
+        { documentId: 'doc-1' },
+      ]);
+    });
+
+    it('400s when an attachment has neither a documentId nor inline content', async () => {
       await expect(
         make({ composeEmail: jest.fn() }).compose(WS, user(), 'mb-1', {
           to_address: 'a@acme.test',

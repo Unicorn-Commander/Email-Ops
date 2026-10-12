@@ -14,7 +14,7 @@
  *       -> { messages: MessageView[] }   (viewer-level; previews only)
  *   - compose_email(workspace_id, contact_id, to_address, to_addresses?, cc?,
  *       bcc?, reply_all?, subject, body, mode, in_reply_to_thread_id?,
- *       external_source, external_ref, from_address?)
+ *       external_source, external_ref, from_address?, attachments?)
  *       -> MessageComposeView (plus resolved to/cc/bcc + from_address).
  *       mode='send' queues delivery; mode='draft' stages the agent-inbox
  *       approval surface. IDEMPOTENT on (workspace_id, external_source,
@@ -337,7 +337,20 @@ export class EmailOpsTools {
       from_address?: string;
       send_at?: string;
       kit_id?: string;
-      attachments?: { filename: string; content_type: string; content_base64: string }[];
+      attachments?: {
+        documentId?: string;
+        document_id?: string;
+        blobId?: string;
+        blob_id?: string;
+        filename?: string;
+        name?: string;
+        contentType?: string;
+        content_type?: string;
+        type?: string;
+        contentBase64?: string;
+        content_base64?: string;
+        size?: number;
+      }[];
     },
   ): Promise<unknown> {
     const workspaceId = await this.resolve(user, args.workspace_id);
@@ -394,13 +407,7 @@ export class EmailOpsTools {
       fromAddress: args.from_address ?? null,
       sendAt: args.send_at ? new Date(args.send_at) : null,
       kitId: args.kit_id ?? null,
-      attachments: args.attachments?.map((a) => ({
-        filename: a.filename,
-        name: a.filename,
-        type: a.content_type,
-        content_type: a.content_type,
-        content_base64: a.content_base64,
-      })),
+      attachments: args.attachments,
     });
   }
 

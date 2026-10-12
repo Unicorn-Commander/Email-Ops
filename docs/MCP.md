@@ -120,7 +120,7 @@ gate re-derived server-side from the verified token).
 | :--- | :--- | :--- | :--- |
 | `list_threads_with_contact` | List threads with a contact | `workspace_id?`, `contact_id` | Yes |
 | `list_thread_messages` | List thread messages (previews) | `workspace_id?`, `thread_id` | Yes |
-| `compose_email` | Compose outbound email | previous fields plus `attachments?` (`filename`, `content_type`, `content_base64`, max 5 / 10 MB), `send_at?` (drafts, +5m to 14d), `kit_id?` | No |
+| `compose_email` | Compose outbound email | previous fields plus `attachments?` (`documentId` for a readable Email-Ops document, or `filename`, `contentType`, `contentBase64`; defaults max 5 files / 10 MiB each / 20 MiB total; allowed pdf/png/jpg/txt/csv/md/docx/xlsx), `send_at?` (drafts, +5m to 14d), `kit_id?` | No |
 
 ### Agent Inbox (Human-in-the-Loop)
 
