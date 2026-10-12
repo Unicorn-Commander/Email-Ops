@@ -44,6 +44,7 @@ import {
   AgentActionKind,
   AgentSendKit,
   AgentSendKitState,
+  AgentInboxApprovalTier,
   AgentInboxKind,
   AgentInboxState,
   EmailDirection,
@@ -54,13 +55,20 @@ import {
   Prisma,
   TrustedCorrespondentSource,
   TrustedCorrespondentScope,
+  WorkspaceRole,
 } from '@prisma/client';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { MAX_TARGET_ROWS } from '../connected-accounts/cleanup-targets';
 import { isAgentOrigin } from '../common/agent-origin';
+import { classifyApprovalTier } from '../agent-inbox/approval-routing';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
-import { StalwartDraftRequest, StalwartMailFolder, StalwartMessageDetail, StalwartThread } from '../stalwart/stalwart.types';
+import {
+  StalwartDraftRequest,
+  StalwartMailFolder,
+  StalwartMessageDetail,
+  StalwartThread,
+} from '../stalwart/stalwart.types';
 import { MailProviderDraftRequest, MailProviderPort } from '../mail-provider/mail-provider.port';
 import { routeFromAddress, routingTable } from '../mail-provider/mail-routing';
 import {
@@ -300,7 +308,9 @@ export interface AgentSendKitListView {
 }
 
 function sameInstant(a: Date, b: Date): boolean {
-  return Number.isFinite(a.getTime()) && Number.isFinite(b.getTime()) && a.getTime() === b.getTime();
+  return (
+    Number.isFinite(a.getTime()) && Number.isFinite(b.getTime()) && a.getTime() === b.getTime()
+  );
 }
 
 @Injectable()
@@ -339,9 +349,11 @@ export class EmailService {
    */
   private fireApprovalNotice(notice: ApprovalPendingNotice): void {
     if (!this.notifier) return;
-    void this.notifier.notifyApprovalPending(notice).catch((err) =>
-      this.logger.warn(`approval notify failed for item ${notice.id}: ${(err as Error).message}`),
-    );
+    void this.notifier
+      .notifyApprovalPending(notice)
+      .catch((err) =>
+        this.logger.warn(`approval notify failed for item ${notice.id}: ${(err as Error).message}`),
+      );
   }
 
   // ── status mapping ─────────────────────────────────────────────────────
@@ -497,7 +509,13 @@ export class EmailService {
       }
       const messages = [...byId.values()];
       if (mailbox) {
-        await this.rememberContactsFromMessages(tx, workspaceId, mailbox.id, mailbox.emailAddress, messages);
+        await this.rememberContactsFromMessages(
+          tx,
+          workspaceId,
+          mailbox.id,
+          mailbox.emailAddress,
+          messages,
+        );
       }
       return messages;
     });
@@ -1476,9 +1494,12 @@ export class EmailService {
       // wire-style); older rows carried camelCase. Accept EITHER so no staged
       // draft ever re-sends without the attachments the approver reviewed.
       const blobId = String(a.blobId ?? a.blob_id ?? '');
-      const contentBase64 = typeof a.contentBase64 === 'string'
-        ? a.contentBase64
-        : typeof a.content_base64 === 'string' ? a.content_base64 : '';
+      const contentBase64 =
+        typeof a.contentBase64 === 'string'
+          ? a.contentBase64
+          : typeof a.content_base64 === 'string'
+            ? a.content_base64
+            : '';
       if (!blobId && !contentBase64) continue;
       out.push({
         ...(blobId ? { blobId } : {}),
@@ -1595,7 +1616,13 @@ export class EmailService {
   ): Promise<{ moved: boolean }> {
     const mailbox = await this.resolveMailboxForCaller(workspaceId, ucUid, mailboxId);
     if (!mailbox || this.mailProvider.handles(mailbox)) return { moved: false };
-    return { moved: await this.stalwart.moveThreadToMailbox(mailbox.emailAddress, threadId, targetFolderId) };
+    return {
+      moved: await this.stalwart.moveThreadToMailbox(
+        mailbox.emailAddress,
+        threadId,
+        targetFolderId,
+      ),
+    };
   }
 
   async saveOrUpdateDraft(
@@ -1765,7 +1792,7 @@ export class EmailService {
         const agentInitiated = isAgentOrigin(input.externalSource, input.draftedBy) || !!agent;
         const ws = await tx.workspace.findUnique({
           where: { id: workspaceId },
-          select: { agentsPaused: true },
+          select: { agentsPaused: true, approvalKeywords: true },
         });
         if (ws?.agentsPaused && agentInitiated) {
           this.logger.log(`compose_email blocked: agents paused for workspace ${workspaceId}`);
@@ -1773,9 +1800,11 @@ export class EmailService {
         }
 
         // Per-agent kill switch: this ONE agent is paused (distinct from the
-        // workspace-wide pause above, which freezes the whole fleet).
+        // workspace-wide pause above, which freezes the agent fleet).
         if (agent?.paused) {
-          this.logger.log(`compose_email blocked: agent '${agentKey}' is paused (workspace ${workspaceId})`);
+          this.logger.log(
+            `compose_email blocked: agent '${agentKey}' is paused (workspace ${workspaceId})`,
+          );
           throw new ForbiddenException(`Agent '${agentKey}' is paused.`);
         }
 
@@ -1807,7 +1836,8 @@ export class EmailService {
           // and survives the same id-flavor ambiguity as the read path. AGENT (and
           // anything else) falls through -> denied (no impersonating an agent).
           const ownsIt =
-            kind === 'SHARED' || (kind === 'HUMAN' && (await this.mayActThroughMailbox(explicitFrom, ucUid)));
+            kind === 'SHARED' ||
+            (kind === 'HUMAN' && (await this.mayActThroughMailbox(explicitFrom, ucUid)));
           if (!ownsIt) {
             throw new ForbiddenException('You are not allowed to send as that mailbox.');
           }
@@ -1846,7 +1876,7 @@ export class EmailService {
         // Upstream policy holds (e.g. the runtime's thread-rate-cap) merge with
         // the gate's own reasons on the staged item's policy payload.
         const policyReasons: PolicyReason[] = [
-          ...(agentInitiated ? input.policyReasons ?? [] : []),
+          ...(agentInitiated ? (input.policyReasons ?? []) : []),
           ...decision.reasons,
         ];
         const mode = decision.mode === 'draft' ? EmailMode.DRAFT : EmailMode.SEND;
@@ -1903,18 +1933,20 @@ export class EmailService {
               toAddresses: input.toAddresses,
               cc: input.cc,
               bcc: input.bcc,
-            }) +
-            (held ? ` — held: ${policyReasons[0].code}` : '');
+            }) + (held ? ` — held: ${policyReasons[0].code}` : '');
           const inboxPayload = {
             ...(held ? { policy: { decision: 'hold', reasons: policyReasons } } : {}),
             ...(input.sendAt ? { sends_at: input.sendAt.toISOString() } : {}),
             ...(input.kitId ? { kit_id: input.kitId } : {}),
           };
+          const approval = classifyApprovalTier(input.subject, input.body, ws?.approvalKeywords);
           const inboxItem = await tx.agentInboxItem.create({
             data: {
               workspaceId,
               messageId: msg.id,
               state: AgentInboxState.PENDING,
+              approvalTier: approval.tier,
+              approvalReason: approval.matchedReason,
               draftedBy: input.draftedBy ?? input.externalSource,
               summary: itemSummary,
               ...(Object.keys(inboxPayload).length
@@ -1924,7 +1956,9 @@ export class EmailService {
           });
           if (mailbox) {
             await this.rememberContacts(tx, workspaceId, mailbox.id, mailbox.emailAddress, [
-              ...this.addressEntries(input.toAddresses?.length ? input.toAddresses : [input.toAddress]),
+              ...this.addressEntries(
+                input.toAddresses?.length ? input.toAddresses : [input.toAddress],
+              ),
               ...this.addressEntries(input.cc ?? []),
               ...this.addressEntries(input.bcc ?? []),
             ]);
@@ -1937,7 +1971,9 @@ export class EmailService {
             agentKey: input.draftedBy ?? input.externalSource,
             messageId: msg.id,
             actorUcUid: ucUid,
-            detail: decision.coerced ? `staged by dial (${decision.reason})` : (input.subject ?? null),
+            detail: decision.coerced
+              ? `staged by dial (${decision.reason})`
+              : (input.subject ?? null),
           });
           // Wave 9: notify Stable ONLY for an agent-initiated HELD draft (a send
           // the agent wanted that the gate held for a human). A human "save as
@@ -1994,7 +2030,10 @@ export class EmailService {
         let sendBody = input.body;
         let sendBodyHtml = input.bodyHtml ?? null;
         if (agent && input.transparencyFooter && agentContext) {
-          const { external } = splitRecipients(agentContext.recipients, agentContext.internalDomains);
+          const { external } = splitRecipients(
+            agentContext.recipients,
+            agentContext.internalDomains,
+          );
           if (external.length > 0) {
             sendBody = `${sendBody}${input.transparencyFooter.text}`;
             if (sendBodyHtml) sendBodyHtml = `${sendBodyHtml}${input.transparencyFooter.html}`;
@@ -2032,7 +2071,9 @@ export class EmailService {
         });
         if (mailbox) {
           await this.rememberContacts(tx, workspaceId, mailbox.id, mailbox.emailAddress, [
-            ...this.addressEntries(input.toAddresses?.length ? input.toAddresses : [input.toAddress]),
+            ...this.addressEntries(
+              input.toAddresses?.length ? input.toAddresses : [input.toAddress],
+            ),
             ...this.addressEntries(input.cc ?? []),
             ...this.addressEntries(input.bcc ?? []),
           ]);
@@ -2099,7 +2140,10 @@ export class EmailService {
       );
       if (resolved?.messageIdHeader) prep.send.req.inReplyTo = resolved.messageIdHeader;
       if (!prep.send.req.references) {
-        const chain = [...(resolved?.references ?? []), ...(resolved?.messageIdHeader ? [resolved.messageIdHeader] : [])];
+        const chain = [
+          ...(resolved?.references ?? []),
+          ...(resolved?.messageIdHeader ? [resolved.messageIdHeader] : []),
+        ];
         if (chain.length) prep.send.req.references = chain;
       }
     }
@@ -2209,7 +2253,8 @@ export class EmailService {
     proposedBy: string,
     input: AgentSendKitProposalInput,
   ): Promise<AgentSendKitListView> {
-    if (!proposedBy) throw new ForbiddenException('A proposer identity is required for a send kit.');
+    if (!proposedBy)
+      throw new ForbiddenException('A proposer identity is required for a send kit.');
     const title = input.title.trim();
     if (!title) throw new BadRequestException('title is required.');
     if (title.length > 200) throw new BadRequestException('title must be at most 200 characters.');
@@ -2222,7 +2267,9 @@ export class EmailService {
     const proposedAt = new Date();
 
     return this.prisma.withWorkspace(workspaceId, proposedBy, async (tx) => {
-      const existing = await tx.agentSendKit.findFirst({ where: { kitId: input.kitId, workspaceId } });
+      const existing = await tx.agentSendKit.findFirst({
+        where: { kitId: input.kitId, workspaceId },
+      });
       if (existing) {
         const state = existing.state ?? AgentSendKitState.APPROVED;
         const identical =
@@ -2238,7 +2285,15 @@ export class EmailService {
         }
         const replaced = await tx.agentSendKit.update({
           where: { kitId: input.kitId },
-          data: this.sendKitProposalData(workspaceId, proposedBy, title, input, definition, templateSha256, proposedAt),
+          data: this.sendKitProposalData(
+            workspaceId,
+            proposedBy,
+            title,
+            input,
+            definition,
+            templateSha256,
+            proposedAt,
+          ),
         });
         return { ...(await this.sendKitView(tx, replaced, true)), replaced: true };
       }
@@ -2246,7 +2301,15 @@ export class EmailService {
       const created = await tx.agentSendKit.create({
         data: {
           kitId: input.kitId,
-          ...this.sendKitProposalData(workspaceId, proposedBy, title, input, definition, templateSha256, proposedAt),
+          ...this.sendKitProposalData(
+            workspaceId,
+            proposedBy,
+            title,
+            input,
+            definition,
+            templateSha256,
+            proposedAt,
+          ),
         },
       });
       return { ...(await this.sendKitView(tx, created, true)), replaced: false };
@@ -2257,7 +2320,9 @@ export class EmailService {
     try {
       return buildAgentSendKitDefinition(input);
     } catch (error) {
-      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid send-kit definition.');
+      throw new BadRequestException(
+        error instanceof Error ? error.message : 'Invalid send-kit definition.',
+      );
     }
   }
 
@@ -2304,7 +2369,11 @@ export class EmailService {
     const utcEnd = new Date(utcStart.getTime() + 24 * 60 * 60 * 1000);
     const sentToday = tx.emailMessage?.count
       ? await tx.emailMessage.count({
-          where: { workspaceId: row.workspaceId, kitId: row.kitId, sentAt: { gte: utcStart, lt: utcEnd } },
+          where: {
+            workspaceId: row.workspaceId,
+            kitId: row.kitId,
+            sentAt: { gte: utcStart, lt: utcEnd },
+          },
         })
       : 0;
     const view: AgentSendKitListView = {
@@ -2318,7 +2387,9 @@ export class EmailService {
       expires_at: row.expiresAt?.toISOString?.() ?? '',
       subjects: row.subjects ?? [],
       recipient_count:
-        row.recipients && row.recipients.length > 0 ? row.recipients.length : row.recipientHashes?.length ?? 0,
+        row.recipients && row.recipients.length > 0
+          ? row.recipients.length
+          : (row.recipientHashes?.length ?? 0),
       template_sha256: row.templateSha256,
       proposed_by: row.proposedBy,
       proposed_at: row.proposedAt?.toISOString() ?? null,
@@ -2356,7 +2427,8 @@ export class EmailService {
       !!v && typeof v === 'object' && !Array.isArray(v);
     const candidates = items
       .filter((it) => {
-        if (it.state !== AgentInboxState.PENDING || it.kind !== AgentInboxKind.CLEANUP) return false;
+        if (it.state !== AgentInboxState.PENDING || it.kind !== AgentInboxKind.CLEANUP)
+          return false;
         if (!isRec(it.payload)) return false;
         const p = it.payload;
         return (
@@ -2370,10 +2442,17 @@ export class EmailService {
     for (const it of candidates) {
       try {
         const payload = it.payload as Record<string, unknown>;
-        const ids = (payload.thread_ids as unknown[]).map((t) => String(t ?? '').trim()).filter(Boolean);
+        const ids = (payload.thread_ids as unknown[])
+          .map((t) => String(t ?? '').trim())
+          .filter(Boolean);
         const verb =
           String(payload.action ?? '').toUpperCase() === 'TRASH' ? 'Move to Trash' : 'Archive';
-        const rows = await this.resolveNativeCleanupTargets(workspaceId, ucUid, ids, MAX_TARGET_ROWS);
+        const rows = await this.resolveNativeCleanupTargets(
+          workspaceId,
+          ucUid,
+          ids,
+          MAX_TARGET_ROWS,
+        );
         if (rows.length === 0) continue; // engine dormant/rotated — retry next list
         const next = {
           ...payload,
@@ -2421,6 +2500,8 @@ export class EmailService {
       new Set(threadIds.map((t) => String(t ?? '').trim()).filter(Boolean)),
     ).slice(0, 50);
     if (ids.length === 0) return null;
+    const draftedBy = opts?.agentKey ?? 'email-ops-assistant';
+    await this.assertAgentWriteAllowed(workspaceId, ucUid, draftedBy);
     const folder = this.dispositionFolder(disposition);
     const verb = disposition === MessageDisposition.TRASH ? 'Move to Trash' : 'Archive';
     const summary = `${verb} ${ids.length} thread${ids.length === 1 ? '' : 's'} in your inbox`;
@@ -2438,8 +2519,10 @@ export class EmailService {
     };
     // The agent's stated WHY, shown beside the targets on the approval card —
     // "what + why" is the minimum a human needs to trust a destructive batch.
-    const reason = String(opts?.reason ?? '').trim().slice(0, 300) || null;
-    const draftedBy = opts?.agentKey ?? 'email-ops-assistant';
+    const reason =
+      String(opts?.reason ?? '')
+        .trim()
+        .slice(0, 300) || null;
     const item = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       return tx.agentInboxItem.create({
         data: {
@@ -2473,6 +2556,29 @@ export class EmailService {
       draftedBy,
     });
     return this.inboxView(item, null);
+  }
+
+  /** Shared pause fence for agent-originated writes outside compose_email. */
+  async assertAgentWriteAllowed(
+    workspaceId: string,
+    ucUid: string | null,
+    agentKey: string,
+  ): Promise<void> {
+    const state = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const [workspace, agent] = await Promise.all([
+        tx.workspace.findUnique({ where: { id: workspaceId }, select: { agentsPaused: true } }),
+        tx.agent.findFirst({
+          where: { workspaceId, key: agentKey, active: true },
+          select: { paused: true },
+        }),
+      ]);
+      return {
+        agentsPaused: workspace?.agentsPaused ?? false,
+        agentPaused: agent?.paused ?? false,
+      };
+    });
+    if (state.agentsPaused) throw new ForbiddenException('Agents are paused for this workspace.');
+    if (state.agentPaused) throw new ForbiddenException(`Agent '${agentKey}' is paused.`);
   }
 
   /**
@@ -2541,7 +2647,12 @@ export class EmailService {
   ): Promise<number> {
     let moved = 0;
     for (const threadId of threadIds) {
-      const res = await this.moveThreadToFolderAcrossMailboxes(workspaceId, ucUid, threadId, disposition);
+      const res = await this.moveThreadToFolderAcrossMailboxes(
+        workspaceId,
+        ucUid,
+        threadId,
+        disposition,
+      );
       if (res.moved) {
         moved += 1;
       }
@@ -2550,7 +2661,13 @@ export class EmailService {
       for (const threadId of threadIds) {
         await tx.threadDisposition.upsert({
           where: { workspaceId_threadId: { workspaceId, threadId } },
-          create: { workspaceId, threadId, disposition, setByUcUid: ucUid, setByAgentKey: 'email-ops-assistant' },
+          create: {
+            workspaceId,
+            threadId,
+            disposition,
+            setByUcUid: ucUid,
+            setByAgentKey: 'email-ops-assistant',
+          },
           update: { disposition, setByUcUid: ucUid, setByAgentKey: 'email-ops-assistant' },
         });
       }
@@ -2596,6 +2713,7 @@ export class EmailService {
     note?: string | null,
     trustRecipients?: boolean,
     agentPrincipal = false,
+    reviewerRole?: WorkspaceRole,
   ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
     // PHASE 1 — validate + authorize (a short tx). A CLEANUP item executes wholly
     // in-tx as before; an EMAIL item resolves its mailbox + returns the send plan,
@@ -2626,6 +2744,20 @@ export class EmailService {
           };
         }
 
+        // The REST and MCP fronts pass the fresh workspace role. Keep the
+        // omitted-role behavior for internal callers that predate this gate;
+        // public callers never rely on that compatibility path.
+        if (
+          item.approvalTier === AgentInboxApprovalTier.OWNER_ADMIN &&
+          reviewerRole !== undefined &&
+          reviewerRole !== WorkspaceRole.OWNER &&
+          reviewerRole !== WorkspaceRole.ADMIN
+        ) {
+          throw new ForbiddenException(
+            'This draft requires a workspace OWNER or ADMIN to approve.',
+          );
+        }
+
         if (item.message?.sendAt && item.message.sendAt.getTime() > Date.now()) {
           return {
             kind: 'result',
@@ -2636,24 +2768,54 @@ export class EmailService {
           };
         }
 
-        if (agentPrincipal && item.kind === AgentInboxKind.EMAIL && item.message && item.draftedBy) {
+        if (
+          agentPrincipal &&
+          item.kind === AgentInboxKind.EMAIL &&
+          item.message &&
+          item.draftedBy
+        ) {
           const recipients = [
-            ...(item.message.toAddresses?.length ? item.message.toAddresses : [item.message.toAddress ?? '']),
+            ...(item.message.toAddresses?.length
+              ? item.message.toAddresses
+              : [item.message.toAddress ?? '']),
             ...(item.message.ccAddresses ?? []),
             ...(item.message.bccAddresses ?? []),
-          ].map((r) => normalizeAddress(r)).filter(Boolean);
-          const domains = new Set((await tx.mailDomain.findMany({ where: { workspaceId, verified: true }, select: { domain: true } })).map((d) => d.domain.toLowerCase()));
-          const trusted = await tx.trustedCorrespondent.findMany({ where: { workspaceId }, select: { address: true, scope: true } });
+          ]
+            .map((r) => normalizeAddress(r))
+            .filter(Boolean);
+          const domains = new Set(
+            (
+              await tx.mailDomain.findMany({
+                where: { workspaceId, verified: true },
+                select: { domain: true },
+              })
+            ).map((d) => d.domain.toLowerCase()),
+          );
+          const trusted = await tx.trustedCorrespondent.findMany({
+            where: { workspaceId },
+            select: { address: true, scope: true },
+          });
           const external = recipients.filter((r) => {
             const domain = r.split('@')[1] ?? '';
-            return !domains.has(domain) && !trusted.some((t) => t.scope === TrustedCorrespondentScope.ADDRESS ? t.address === r : t.address === domain);
+            return (
+              !domains.has(domain) &&
+              !trusted.some((t) =>
+                t.scope === TrustedCorrespondentScope.ADDRESS
+                  ? t.address === r
+                  : t.address === domain,
+              )
+            );
           });
           if (external.length) {
             const now = new Date();
             const kit = item.message.kitId
-              ? await tx.agentSendKit.findFirst({ where: { kitId: item.message.kitId, workspaceId } })
+              ? await tx.agentSendKit.findFirst({
+                  where: { kitId: item.message.kitId, workspaceId },
+                })
               : null;
-            const utcStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+            const utcStart = new Date(
+              Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+            );
             const utcEnd = new Date(utcStart.getTime() + 24 * 60 * 60 * 1000);
             const sentToday = kit
               ? await tx.emailMessage.count({
@@ -2711,7 +2873,11 @@ export class EmailService {
           const batchId = payload.batch_id;
           if (!batchId || typeof batchId !== 'string') return { kind: 'null' };
 
-          const executed = await this.connectedAccounts.approveCleanupBatch(workspaceId, owner, batchId);
+          const executed = await this.connectedAccounts.approveCleanupBatch(
+            workspaceId,
+            owner,
+            batchId,
+          );
           if (!executed) return { kind: 'null' };
           // Truthful UI: only a batch that actually ran flips the item to APPROVED.
           // A failed/disabled/rejected batch must NOT report success — throw with the
@@ -2753,7 +2919,9 @@ export class EmailService {
         // co-member's personal Gmail/M365. SHARED/AGENT boxes stay approvable by any
         // reviewer (the workspace-resource model).
         if (mailbox && !(await this.mayActThroughMailbox(mailbox, ucUid))) {
-          throw new ForbiddenException('Only the owner of that mailbox can approve a send from it.');
+          throw new ForbiddenException(
+            'Only the owner of that mailbox can approve a send from it.',
+          );
         }
 
         return {
@@ -2764,7 +2932,8 @@ export class EmailService {
           subject: item.message.subject ?? null,
           mailbox: mailbox ?? null,
           req: {
-            fromAddress: item.message.fromAddress ?? mailbox?.emailAddress ?? item.message.toAddress!,
+            fromAddress:
+              item.message.fromAddress ?? mailbox?.emailAddress ?? item.message.toAddress!,
             fromName: mailbox?.displayName ?? null,
             toAddress: item.message.toAddress!,
             // Rebuild the FULL payload the approver reviewed — cc/bcc/multi-recipient/
@@ -2795,7 +2964,12 @@ export class EmailService {
     if (prep.kind === 'native-cleanup') {
       // Execute the bulk move in James (best-effort per thread) + tag the overlay,
       // all OUTSIDE the authorize tx, then flip the item to APPROVED + audit.
-      const moved = await this.runNativeCleanup(workspaceId, ucUid, prep.disposition, prep.threadIds);
+      const moved = await this.runNativeCleanup(
+        workspaceId,
+        ucUid,
+        prep.disposition,
+        prep.threadIds,
+      );
       return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
         const updated = await tx.agentInboxItem.update({
           where: { id: prep.itemId },
@@ -2851,7 +3025,8 @@ export class EmailService {
           `${result.reason ? ` (${result.reason})` : ''}; item stays PENDING for retry`,
       );
       throw new BadRequestException(
-        result.reason ?? 'The message could not be sent — nothing was approved. Try again or reject.',
+        result.reason ??
+          'The message could not be sent — nothing was approved. Try again or reject.',
       );
     }
 
@@ -2914,7 +3089,10 @@ export class EmailService {
       if (item.state !== AgentInboxState.PENDING) {
         return {
           inbox: this.inboxView(item, item.message),
-          message: item.kind === AgentInboxKind.EMAIL && item.message ? this.composeView(item.message) : null,
+          message:
+            item.kind === AgentInboxKind.EMAIL && item.message
+              ? this.composeView(item.message)
+              : null,
         };
       }
       if (item.kind === AgentInboxKind.CLEANUP) {
@@ -2965,7 +3143,8 @@ export class EmailService {
     approvedBy: string,
     input: AgentSendKitApprovalInput,
   ): Promise<AgentSendKitListView> {
-    if (!approvedBy) throw new ForbiddenException('A human identity is required to approve a send kit.');
+    if (!approvedBy)
+      throw new ForbiddenException('A human identity is required to approve a send kit.');
 
     const legacyFields = [
       input.bodyTemplate,
@@ -2986,7 +3165,9 @@ export class EmailService {
       input.capPerDay !== undefined &&
       input.expiresAt !== undefined;
     if (hasLegacyDefinition && !hasCompleteLegacyDefinition) {
-      throw new BadRequestException('The legacy approval form must include the complete kit definition.');
+      throw new BadRequestException(
+        'The legacy approval form must include the complete kit definition.',
+      );
     }
 
     let definition: AgentSendKitDefinition | null = null;
@@ -3013,7 +3194,9 @@ export class EmailService {
     }
 
     return this.prisma.withWorkspace(workspaceId, approvedBy, async (tx) => {
-      const existing = await tx.agentSendKit.findFirst({ where: { kitId: input.kitId, workspaceId } });
+      const existing = await tx.agentSendKit.findFirst({
+        where: { kitId: input.kitId, workspaceId },
+      });
       if (!existing) {
         if (!definition || !input.expiresAt) {
           throw new NotFoundException('The proposed send kit was not found in this workspace.');
@@ -3104,7 +3287,8 @@ export class EmailService {
     kitId: string,
     note?: string | null,
   ): Promise<AgentSendKitListView> {
-    if (!rejectedBy) throw new ForbiddenException('A human identity is required to reject a send kit.');
+    if (!rejectedBy)
+      throw new ForbiddenException('A human identity is required to reject a send kit.');
     return this.prisma.withWorkspace(workspaceId, rejectedBy, async (tx) => {
       const existing = await tx.agentSendKit.findFirst({ where: { kitId, workspaceId } });
       if (!existing) throw new NotFoundException('The send kit was not found in this workspace.');
@@ -3450,10 +3634,16 @@ export class EmailService {
   ): { blobId: string | null; name: string | null; type: string | null; size?: number | null }[] {
     if (!Array.isArray(value)) return [];
     return value
-      .filter((a): a is Record<string, unknown> => !!a && typeof a === 'object' && !Array.isArray(a))
+      .filter(
+        (a): a is Record<string, unknown> => !!a && typeof a === 'object' && !Array.isArray(a),
+      )
       .map((a) => ({
         blobId:
-          typeof a.blobId === 'string' ? a.blobId : typeof a.blob_id === 'string' ? a.blob_id : null,
+          typeof a.blobId === 'string'
+            ? a.blobId
+            : typeof a.blob_id === 'string'
+              ? a.blob_id
+              : null,
         name: typeof a.name === 'string' ? a.name : null,
         type: typeof a.type === 'string' ? a.type : null,
         ...(typeof a.size === 'number' ? { size: a.size } : {}),
@@ -3914,7 +4104,8 @@ export class EmailService {
     for (const a of attachments) {
       const name = a.filename ?? a.name;
       const type = a.content_type ?? a.type;
-      if (!name?.trim() || !type?.trim()) throw new BadRequestException('Each attachment needs a filename and content_type.');
+      if (!name?.trim() || !type?.trim())
+        throw new BadRequestException('Each attachment needs a filename and content_type.');
       if (a.content_base64) {
         if (!/^[A-Za-z0-9+/]*={0,2}$/.test(a.content_base64) || a.content_base64.length % 4 !== 0) {
           throw new BadRequestException(`Attachment ${name} has invalid base64 content.`);
@@ -3923,7 +4114,8 @@ export class EmailService {
         total += bytes;
       }
     }
-    if (total > 10 * 1024 * 1024) throw new BadRequestException('Attachments exceed the 10 MB total limit.');
+    if (total > 10 * 1024 * 1024)
+      throw new BadRequestException('Attachments exceed the 10 MB total limit.');
   }
 
   /**
@@ -3967,7 +4159,10 @@ export class EmailService {
     return null;
   }
 
-    private async callEngine(mailbox: MailboxAccount | null, req: SendReq): Promise<EngineSendResult> {
+  private async callEngine(
+    mailbox: MailboxAccount | null,
+    req: SendReq,
+  ): Promise<EngineSendResult> {
     if (mailbox && this.mailProvider.handles(mailbox)) {
       // Resolve staged external attachment bytes (consume-on-send) and pass them
       // inline to the provider, which folds them into the Gmail MIME / Graph
@@ -4016,7 +4211,11 @@ export class EmailService {
     const jamesAttachments = [] as { blobId: string; name: string; type: string }[];
     for (const attachment of req.attachments ?? []) {
       if (attachment.blobId) {
-        jamesAttachments.push({ blobId: attachment.blobId, name: attachment.name, type: attachment.type });
+        jamesAttachments.push({
+          blobId: attachment.blobId,
+          name: attachment.name,
+          type: attachment.type,
+        });
       } else if (attachment.contentBase64) {
         const uploaded = await this.stalwart.uploadBlob(
           req.fromAddress,
@@ -4025,9 +4224,19 @@ export class EmailService {
           attachment.name,
         );
         if (!uploaded) {
-          return { accepted: false, providerMessageId: null, threadId: req.inReplyToThreadId, lane: null, reason: 'attachment_upload_failed' };
+          return {
+            accepted: false,
+            providerMessageId: null,
+            threadId: req.inReplyToThreadId,
+            lane: null,
+            reason: 'attachment_upload_failed',
+          };
         }
-        jamesAttachments.push({ blobId: uploaded.blobId, name: attachment.name, type: attachment.type });
+        jamesAttachments.push({
+          blobId: uploaded.blobId,
+          name: attachment.name,
+          type: attachment.type,
+        });
       }
     }
     const r = await this.stalwart.send(
@@ -4244,8 +4453,7 @@ export class EmailService {
     ccAddresses?: string[];
     bccAddresses?: string[];
   }): MessageComposeView {
-    const to =
-      m.toAddresses?.length ? m.toAddresses : m.toAddress ? [m.toAddress] : [];
+    const to = m.toAddresses?.length ? m.toAddresses : m.toAddress ? [m.toAddress] : [];
     return {
       id: m.id,
       thread_id: m.threadId ?? null,
@@ -4266,6 +4474,8 @@ export class EmailService {
       id: string;
       messageId: string | null;
       kind?: AgentInboxKind;
+      approvalTier?: AgentInboxApprovalTier;
+      approvalReason?: string | null;
       payload?: unknown;
       state: AgentInboxState;
       draftedBy: string | null;
@@ -4302,24 +4512,33 @@ export class EmailService {
       id: it.id,
       message_id: it.messageId,
       kind: it.kind ?? 'EMAIL',
+      approval_tier: (it.approvalTier ?? AgentInboxApprovalTier.MAILBOX_OWNER).toLowerCase() as
+        | 'owner_admin'
+        | 'mailbox_owner',
+      approval_reason: it.approvalReason ?? null,
       state: it.state.toLowerCase(),
       drafted_by: it.draftedBy ?? null,
       summary: it.summary ?? (isCleanup ? this.cleanupSummary(payload) : null),
-      to_address: isCleanup ? null : msg?.toAddress ?? null,
+      to_address: isCleanup ? null : (msg?.toAddress ?? null),
       to_addresses: toAddresses,
-      cc: isCleanup ? [] : msg?.ccAddresses ?? [],
-      bcc: isCleanup ? [] : msg?.bccAddresses ?? [],
-      from_address: isCleanup ? null : msg?.fromAddress ?? null,
-      subject: isCleanup ? this.cleanupSubject(payload) : msg?.subject ?? null,
+      cc: isCleanup ? [] : (msg?.ccAddresses ?? []),
+      bcc: isCleanup ? [] : (msg?.bccAddresses ?? []),
+      from_address: isCleanup ? null : (msg?.fromAddress ?? null),
+      subject: isCleanup ? this.cleanupSubject(payload) : (msg?.subject ?? null),
       body_preview: isCleanup
         ? this.cleanupBodyPreview(payload)
         : msg
-          ? msg.preview ?? this.snippet(msg.body)
-        : null,
+          ? (msg.preview ?? this.snippet(msg.body))
+          : null,
       body_sha256: isCleanup || msg?.body == null ? null : plainTextBodySha256(msg.body),
-      thread_id: isCleanup ? null : msg?.inReplyToThreadId ?? null,
-      kit_id: isCleanup ? null : msg?.kitId ?? null,
-      attachments: isCleanup ? [] : this.attachmentsMeta(msg?.attachments).map((a) => ({ name: a.name ?? 'attachment', size: a.size ?? null })),
+      thread_id: isCleanup ? null : (msg?.inReplyToThreadId ?? null),
+      kit_id: isCleanup ? null : (msg?.kitId ?? null),
+      attachments: isCleanup
+        ? []
+        : this.attachmentsMeta(msg?.attachments).map((a) => ({
+            name: a.name ?? 'attachment',
+            size: a.size ?? null,
+          })),
       sends_at: this.readSendAt(it.payload),
       reviewed_by_uc_uid: it.reviewedByUcUid ?? null,
       reviewed_at: it.reviewedAt ? it.reviewedAt.toISOString() : null,
@@ -4399,9 +4618,14 @@ export class EmailService {
       const verb = payload.action === MessageDisposition.TRASH ? 'trashed' : 'archived';
       return `${nativeIds.length} thread${nativeIds.length === 1 ? '' : 's'} will be ${verb} in your James mailbox on approval.`;
     }
-    const plan = payload.plan && typeof payload.plan === 'object' ? (payload.plan as Record<string, unknown>) : null;
+    const plan =
+      payload.plan && typeof payload.plan === 'object'
+        ? (payload.plan as Record<string, unknown>)
+        : null;
     const safe = Array.isArray(plan?.safe) ? (plan?.safe as Array<Record<string, unknown>>) : [];
-    const protectedCount = Array.isArray(plan?.protected) ? (plan?.protected as unknown[]).length : 0;
+    const protectedCount = Array.isArray(plan?.protected)
+      ? (plan?.protected as unknown[]).length
+      : 0;
     return `${safe.length} safe · ${protectedCount} protected`;
   }
 

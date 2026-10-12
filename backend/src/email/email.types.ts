@@ -225,6 +225,8 @@ export interface AgentInboxView {
   id: string;
   message_id: string | null;
   kind?: string;
+  approval_tier: 'owner_admin' | 'mailbox_owner';
+  approval_reason: string | null;
   state: string; // pending | approved | rejected
   drafted_by: string | null;
   summary: string | null;

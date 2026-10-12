@@ -47,12 +47,13 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
-import { AgentInboxKind, AgentInboxState, User } from '@prisma/client';
+import { AgentInboxKind, AgentInboxState, User, WorkspaceRole } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { MembershipService } from '../common/workspace/membership.service';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decorator';
+import { WorkspaceRoleParam } from '../common/workspace/workspace-role.decorator';
 import { entitlementsOf, ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { EmailService } from '../email/email.service';
 import { checkComposeEntitlement } from '../email/entitlement';
@@ -86,9 +87,26 @@ class ApproveSendKitDto {
   @IsString() @Matches(/^[0-9a-f]{64}$/i) template_sha256!: string;
   @IsOptional() @IsString() @MaxLength(100000) body_template?: string;
   @IsOptional() @IsObject() placeholder_rules?: Record<string, string>;
-  @IsOptional() @IsArray() @IsInt({ each: true }) @Min(0, { each: true }) @ArrayMaxSize(100) optional_lines?: number[];
-  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(100) @IsString({ each: true }) @MaxLength(500, { each: true }) subjects?: string[];
-  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(1000) @IsString({ each: true }) @MaxLength(320, { each: true }) recipients?: string[];
+  @IsOptional()
+  @IsArray()
+  @IsInt({ each: true })
+  @Min(0, { each: true })
+  @ArrayMaxSize(100)
+  optional_lines?: number[];
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(100)
+  @IsString({ each: true })
+  @MaxLength(500, { each: true })
+  subjects?: string[];
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(1000)
+  @IsString({ each: true })
+  @MaxLength(320, { each: true })
+  recipients?: string[];
   @IsOptional() @IsString() @MaxLength(320) from_address?: string;
   @IsOptional() @IsInt() @Min(0) cap_per_day?: number;
   @IsOptional() @IsISO8601() expires_at?: string;
@@ -99,9 +117,24 @@ class ProposeSendKitDto {
   @IsString() @MaxLength(200) title!: string;
   @IsString() @MaxLength(100000) body_template!: string;
   @IsOptional() @IsObject() placeholder_rules?: Record<string, string>;
-  @IsOptional() @IsArray() @IsInt({ each: true }) @Min(0, { each: true }) @ArrayMaxSize(100) optional_lines?: number[];
-  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(100) @IsString({ each: true }) @MaxLength(500, { each: true }) subjects!: string[];
-  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(1000) @IsString({ each: true }) @MaxLength(320, { each: true }) recipients!: string[];
+  @IsOptional()
+  @IsArray()
+  @IsInt({ each: true })
+  @Min(0, { each: true })
+  @ArrayMaxSize(100)
+  optional_lines?: number[];
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(100)
+  @IsString({ each: true })
+  @MaxLength(500, { each: true })
+  subjects!: string[];
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(1000)
+  @IsString({ each: true })
+  @MaxLength(320, { each: true })
+  recipients!: string[];
   @IsString() @MaxLength(320) from_address!: string;
   @IsInt() @Min(0) cap_per_day!: number;
   @IsISO8601() expires_at!: string;
@@ -127,7 +160,10 @@ class RejectSendKitDto {
 @Controller('workspaces/:workspaceId/agent-inbox')
 @UseGuards(JwtAuthGuard, WorkspaceMembershipGuard)
 export class AgentInboxController {
-  constructor(private readonly email: EmailService, private readonly membership: MembershipService) {}
+  constructor(
+    private readonly email: EmailService,
+    private readonly membership: MembershipService,
+  ) {}
 
   @Post('send-kits/approve')
   @ApiOperation({ summary: 'Human-only approval of an agent send kit template.' })
@@ -201,7 +237,11 @@ export class AgentInboxController {
     @CurrentUser() user: User,
     @Param('kitId') kitId: string,
   ) {
-    const kit = await this.email.getSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), kitId);
+    const kit = await this.email.getSendKit(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      kitId,
+    );
     if (!kit) throw new NotFoundException('Send kit not found in this workspace.');
     return kit;
   }
@@ -236,7 +276,12 @@ export class AgentInboxController {
       throw new ForbiddenException('Only a signed-in human may reject a send kit.');
     }
     await this.membership.assertCanReviewInbox(user, workspaceId);
-    return this.email.rejectSendKit(workspaceId, ucUidOf(user as WithWorkspaceClaim), kitId, body.note);
+    return this.email.rejectSendKit(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      kitId,
+      body.note,
+    );
   }
 
   @Get()
@@ -329,6 +374,7 @@ export class AgentInboxController {
     @CurrentUser() user: User,
     @Param('id') id: string,
     @Body() body: ReviewBodyDto,
+    @WorkspaceRoleParam() role?: WorkspaceRole,
   ) {
     await this.membership.assertCanReviewInbox(user, workspaceId);
     // Gate BY KIND (defense-in-depth, re-derived off the verified token; mirrors
@@ -350,13 +396,24 @@ export class AgentInboxController {
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
-    const res = await this.email.approveAgentInboxItem(
-      workspaceId,
-      ucUidOf(user as WithWorkspaceClaim),
-      id,
-      body.note ?? null,
-      body.trustRecipients,
-    );
+    const res =
+      role === undefined
+        ? await this.email.approveAgentInboxItem(
+            workspaceId,
+            ucUidOf(user as WithWorkspaceClaim),
+            id,
+            body.note ?? null,
+            body.trustRecipients,
+          )
+        : await this.email.approveAgentInboxItem(
+            workspaceId,
+            ucUidOf(user as WithWorkspaceClaim),
+            id,
+            body.note ?? null,
+            body.trustRecipients,
+            false,
+            role,
+          );
     if (!res) {
       throw new NotFoundException('Agent-inbox item not found in this workspace.');
     }
