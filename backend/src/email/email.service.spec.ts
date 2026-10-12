@@ -218,6 +218,32 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
   });
 
   describe('compose_email — send', () => {
+    it('refuses an attachment before staging when the selected lane cannot carry it', async () => {
+      (stalwart as any).supportsAttachments = jest.fn().mockReturnValue(false);
+      const ref = `attachment-refusal-${Date.now()}`;
+      await expect(
+        service.composeEmail(WS, UC_UID, {
+          contactId: null,
+          toAddress: 'refused@acme.test',
+          subject: 'Should not stage',
+          body: 'No silent drop.',
+          mode: 'draft',
+          externalSource: 'customer-ops',
+          externalRef: ref,
+          attachments: [
+            {
+              filename: 'brief.pdf',
+              contentType: 'application/pdf',
+              contentBase64: 'JVBERi0xLjQ=',
+            },
+          ],
+        }),
+      ).rejects.toThrow(/compose was refused before anything was sent/);
+      await expect(
+        prisma.emailMessage.findFirst({ where: { workspaceId: WS, externalRef: ref } }),
+      ).resolves.toBeNull();
+    });
+
     it('records the SoR row + hands to the engine (status sent; wire shape matches the contract)', async () => {
       const ref = `send-${Date.now()}`;
       const result = await service.composeEmail(WS, UC_UID, {
@@ -683,6 +709,69 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       expect(mine).toBeTruthy();
       expect(mine!.state).toBe('pending');
       expect(mine!.to_address).toBe('queue@acme.test');
+    });
+
+    it('listAgentInbox exposes attachment name, size, and MIME type before approval', async () => {
+      const ref = `attachment-list-${Date.now()}`;
+      await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'attachment@acme.test',
+        subject: 'Attachment review',
+        body: 'The file is staged for review.',
+        mode: 'draft',
+        externalSource: 'customer-ops',
+        externalRef: ref,
+        attachments: [
+          {
+            filename: 'brief.txt',
+            contentType: 'text/plain',
+            contentBase64: 'SGVsbG8=',
+          },
+        ],
+      });
+      const items = await service.listAgentInbox(WS, UC_UID);
+      const mine = items.find((item) => item.subject === 'Attachment review');
+      expect(mine?.attachments).toEqual([{ name: 'brief.txt', type: 'text/plain', size: 5 }]);
+    });
+
+    it('resolves a readable documentId into staged attachment bytes and metadata', async () => {
+      const mailbox = await prisma.mailboxAccount.findFirstOrThrow({ where: { workspaceId: WS } });
+      const document = await prisma.outboundAttachment.create({
+        data: {
+          workspaceId: WS,
+          mailboxId: mailbox.id,
+          filename: 'stored.txt',
+          mimeType: 'text/plain',
+          size: 4,
+          bytes: Buffer.from('docs'),
+        },
+      });
+      const ref = `document-list-${Date.now()}`;
+      const draft = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'document@acme.test',
+        subject: 'Stored document review',
+        body: 'The stored document is staged.',
+        mode: 'draft',
+        externalSource: 'customer-ops',
+        externalRef: ref,
+        attachments: [{ documentId: document.id }],
+      });
+      const staged = await prisma.emailMessage.findUniqueOrThrow({ where: { id: draft.id } });
+      expect(staged.attachments).toEqual([
+        expect.objectContaining({
+          filename: 'stored.txt',
+          name: 'stored.txt',
+          content_type: 'text/plain',
+          type: 'text/plain',
+          content_base64: Buffer.from('docs').toString('base64'),
+          size: 4,
+        }),
+      ]);
+      const items = await service.listAgentInbox(WS, UC_UID);
+      expect(items.find((item) => item.subject === 'Stored document review')?.attachments).toEqual([
+        { name: 'stored.txt', type: 'text/plain', size: 4 },
+      ]);
     });
   });
 

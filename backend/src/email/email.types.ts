@@ -115,16 +115,22 @@ export interface MessageComposeView {
   cc: string[];
   bcc: string[];
   from_address: string | null;
+  /** Attachment metadata retained with the composed message (bytes are never echoed). */
+  attachments?: { name: string | null; type: string | null; size: number | null }[];
 }
 
-/** One uploaded compose attachment reference (webmail wave: compose extension). */
+/** One compose attachment. Camel-case fields are the current MCP/REST contract. */
 export interface ComposeAttachmentInput {
+  documentId?: string;
+  document_id?: string;
+  blobId?: string;
   blob_id?: string;
-  name: string;
-  type: string;
-  /** Direct MCP/REST compose form. Bytes are validated and staged server-side. */
+  name?: string;
+  type?: string;
   filename?: string;
+  contentType?: string;
   content_type?: string;
+  contentBase64?: string;
   content_base64?: string;
   size?: number;
 }
@@ -244,7 +250,7 @@ export interface AgentInboxView {
   thread_id: string | null;
   /** The human-approved send kit attached to this staged message, if any. */
   kit_id: string | null;
-  attachments?: { name: string; size: number | null }[];
+  attachments?: { name: string; type: string | null; size: number | null }[];
   sends_at?: string | null;
   reviewed_by_uc_uid: string | null;
   reviewed_at: string | null;
