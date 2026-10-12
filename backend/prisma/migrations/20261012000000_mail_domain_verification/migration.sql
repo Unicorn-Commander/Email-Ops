@@ -9,4 +9,3 @@ ALTER TABLE "mail_domains"
   ADD COLUMN "verifiedAt" TIMESTAMP(3),
   ADD COLUMN "lastVerificationCheckAt" TIMESTAMP(3),
   ADD COLUMN "lastVerificationError" TEXT;
-
