@@ -57,6 +57,7 @@ import {
 } from '@prisma/client';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { MAX_TARGET_ROWS } from '../connected-accounts/cleanup-targets';
+import { isAgentOrigin } from '../common/agent-origin';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { StalwartDraftRequest, StalwartMailFolder, StalwartMessageDetail, StalwartThread } from '../stalwart/stalwart.types';
@@ -1743,18 +1744,6 @@ export class EmailService {
           return { done: this.composeView(existing) };
         }
 
-        // Kill switch: when the workspace is paused, agents cannot compose/send.
-        // (An idempotent repeat above still returns; a human approving an already-
-        // staged draft is a separate path and stays unaffected.)
-        const ws = await tx.workspace.findUnique({
-          where: { id: workspaceId },
-          select: { agentsPaused: true },
-        });
-        if (ws?.agentsPaused) {
-          this.logger.log(`compose_email blocked: agents paused for workspace ${workspaceId}`);
-          throw new ForbiddenException('Agents are paused for this workspace.');
-        }
-
         // Resolve the registered agent that drafted this (by its provenance key).
         const agentKey = input.draftedBy ?? input.externalSource;
         const agent = agentKey
@@ -1769,6 +1758,19 @@ export class EmailService {
               },
             })
           : null;
+
+        // Kill switch: when the workspace is paused, agent-originated compose
+        // is blocked. Human web-client compose remains available so operators
+        // can continue working while the fleet is paused.
+        const agentInitiated = isAgentOrigin(input.externalSource, input.draftedBy) || !!agent;
+        const ws = await tx.workspace.findUnique({
+          where: { id: workspaceId },
+          select: { agentsPaused: true },
+        });
+        if (ws?.agentsPaused && agentInitiated) {
+          this.logger.log(`compose_email blocked: agents paused for workspace ${workspaceId}`);
+          throw new ForbiddenException('Agents are paused for this workspace.');
+        }
 
         // Per-agent kill switch: this ONE agent is paused (distinct from the
         // workspace-wide pause above, which freezes the whole fleet).
@@ -1843,7 +1845,6 @@ export class EmailService {
         });
         // Upstream policy holds (e.g. the runtime's thread-rate-cap) merge with
         // the gate's own reasons on the staged item's policy payload.
-        const agentInitiated = !!agent || input.externalSource === AGENT_REPLY_RUNTIME_SOURCE;
         const policyReasons: PolicyReason[] = [
           ...(agentInitiated ? input.policyReasons ?? [] : []),
           ...decision.reasons,

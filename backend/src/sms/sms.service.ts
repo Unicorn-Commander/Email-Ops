@@ -7,6 +7,7 @@ import {
   SmsMode,
 } from '@prisma/client';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
+import { isAgentOrigin } from '../common/agent-origin';
 import { TwilioPort } from '../twilio/twilio.port';
 import { decideComposeMode } from '../email/autonomy';
 import {
@@ -84,16 +85,6 @@ export class SmsService {
         return this.composeView(existing);
       }
 
-      // Workspace kill switch.
-      const ws = await tx.workspace.findUnique({
-        where: { id: workspaceId },
-        select: { agentsPaused: true },
-      });
-      if (ws?.agentsPaused) {
-        this.logger.log(`compose_sms blocked: agents paused for workspace ${workspaceId}`);
-        throw new ForbiddenException('Agents are paused for this workspace.');
-      }
-
       // Agent resolution + per-agent kill switch.
       const agentKey = input.draftedBy ?? input.externalSource;
       const agent = agentKey
@@ -102,6 +93,19 @@ export class SmsService {
             select: { key: true, autonomyLevel: true, recipientPolicy: true, paused: true },
           })
         : null;
+
+      // Keep the workspace fence aligned with email: a paused fleet blocks
+      // agent-originated compose, while the human client remains available.
+      const agentInitiated = isAgentOrigin(input.externalSource, input.draftedBy) || !!agent;
+      const ws = await tx.workspace.findUnique({
+        where: { id: workspaceId },
+        select: { agentsPaused: true },
+      });
+      if (ws?.agentsPaused && agentInitiated) {
+        this.logger.log(`compose_sms blocked: agents paused for workspace ${workspaceId}`);
+        throw new ForbiddenException('Agents are paused for this workspace.');
+      }
+
       if (agent?.paused) {
         this.logger.log(`compose_sms blocked: agent '${agentKey}' is paused (workspace ${workspaceId})`);
         throw new ForbiddenException(`Agent '${agentKey}' is paused.`);
