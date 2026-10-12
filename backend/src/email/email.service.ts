@@ -1805,7 +1805,7 @@ export class EmailService {
           this.logger.log(
             `compose_email blocked: agent '${agentKey}' is paused (workspace ${workspaceId})`,
           );
-          throw new ForbiddenException(`Agent '${agentKey}' is paused.`);
+          throw new ConflictException(`Agent '${agentKey}' is paused.`);
         }
 
         // Send identity: a registered agent sends from its OWN primary mailbox
@@ -2578,7 +2578,7 @@ export class EmailService {
       };
     });
     if (state.agentsPaused) throw new ForbiddenException('Agents are paused for this workspace.');
-    if (state.agentPaused) throw new ForbiddenException(`Agent '${agentKey}' is paused.`);
+    if (state.agentPaused) throw new ConflictException(`Agent '${agentKey}' is paused.`);
   }
 
   /**

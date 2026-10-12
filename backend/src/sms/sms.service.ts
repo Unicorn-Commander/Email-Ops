@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import {
   AgentActionKind,
   AgentInboxState,
@@ -108,8 +108,10 @@ export class SmsService {
       }
 
       if (agent?.paused) {
-        this.logger.log(`compose_sms blocked: agent '${agentKey}' is paused (workspace ${workspaceId})`);
-        throw new ForbiddenException(`Agent '${agentKey}' is paused.`);
+        this.logger.log(
+          `compose_sms blocked: agent '${agentKey}' is paused (workspace ${workspaceId})`,
+        );
+        throw new ConflictException(`Agent '${agentKey}' is paused.`);
       }
 
       // Send-from line: an explicit account (scoped to the workspace), else the default.
@@ -176,7 +178,9 @@ export class SmsService {
           agentKey,
           messageId: msg.id,
           actorUcUid: ucUid,
-          detail: decision.coerced ? `SMS staged by dial (${decision.reason})` : `SMS → ${input.toPhoneNumber}`,
+          detail: decision.coerced
+            ? `SMS staged by dial (${decision.reason})`
+            : `SMS → ${input.toPhoneNumber}`,
         });
         return this.composeView(msg);
       }
@@ -227,7 +231,10 @@ export class SmsService {
   ): Promise<SmsInboxView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const items = await tx.agentInboxItem.findMany({
-        where: { smsMessageId: { not: null }, ...(state ? { state } : { state: AgentInboxState.PENDING }) },
+        where: {
+          smsMessageId: { not: null },
+          ...(state ? { state } : { state: AgentInboxState.PENDING }),
+        },
         orderBy: { createdAt: 'desc' },
         include: { smsMessage: true },
       });
@@ -250,7 +257,10 @@ export class SmsService {
       });
       if (!item || !item.smsMessage) return null;
       if (item.state !== AgentInboxState.PENDING) {
-        return { inbox: this.inboxView(item, item.smsMessage), message: this.composeView(item.smsMessage) };
+        return {
+          inbox: this.inboxView(item, item.smsMessage),
+          message: this.composeView(item.smsMessage),
+        };
       }
 
       const sent = await this.handToTwilio(tx, item.smsMessage.id, {
@@ -313,7 +323,9 @@ export class SmsService {
         },
         include: { smsMessage: true },
       });
-      this.logger.log(`agent-inbox SMS item ${itemId} REJECTED by ${ucUid ?? '(unknown)'} — never sent`);
+      this.logger.log(
+        `agent-inbox SMS item ${itemId} REJECTED by ${ucUid ?? '(unknown)'} — never sent`,
+      );
       await this.recordAction(tx, workspaceId, {
         kind: AgentActionKind.REJECTED,
         agentKey: item.draftedBy,
@@ -356,7 +368,11 @@ export class SmsService {
         select: { id: true },
       });
       if (already) {
-        return { outcome: 'duplicate' as const, workspaceId: account.workspaceId, smsMessageId: already.id };
+        return {
+          outcome: 'duplicate' as const,
+          workspaceId: account.workspaceId,
+          smsMessageId: already.id,
+        };
       }
       try {
         const msg = await tx.smsMessage.create({
@@ -374,14 +390,22 @@ export class SmsService {
             receivedAt: input.occurredAt ?? new Date(),
           },
         });
-        return { outcome: 'recorded' as const, workspaceId: account.workspaceId, smsMessageId: msg.id };
+        return {
+          outcome: 'recorded' as const,
+          workspaceId: account.workspaceId,
+          smsMessageId: msg.id,
+        };
       } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
           const dup = await tx.smsMessage.findFirst({
             where: { providerMessageId: input.providerMessageId, direction: 'RECEIVED' },
             select: { id: true },
           });
-          return { outcome: 'duplicate' as const, workspaceId: account.workspaceId, smsMessageId: dup?.id ?? null };
+          return {
+            outcome: 'duplicate' as const,
+            workspaceId: account.workspaceId,
+            smsMessageId: dup?.id ?? null,
+          };
         }
         throw err;
       }
@@ -434,7 +458,13 @@ export class SmsService {
   private async recordAction(
     tx: WorkspaceTxClient,
     workspaceId: string,
-    data: { kind: AgentActionKind; agentKey?: string | null; messageId?: string | null; actorUcUid?: string | null; detail?: string | null },
+    data: {
+      kind: AgentActionKind;
+      agentKey?: string | null;
+      messageId?: string | null;
+      actorUcUid?: string | null;
+      detail?: string | null;
+    },
   ): Promise<void> {
     await tx.agentActionEvent.create({
       data: {
@@ -493,7 +523,7 @@ export class SmsService {
       drafted_by: it.draftedBy ?? null,
       summary: it.summary ?? null,
       to: msg?.toPhoneNumber ?? null,
-      body_preview: msg ? msg.preview ?? this.snippet(msg.body) : null,
+      body_preview: msg ? (msg.preview ?? this.snippet(msg.body)) : null,
       reviewed_by_uc_uid: it.reviewedByUcUid ?? null,
       reviewed_at: it.reviewedAt ? it.reviewedAt.toISOString() : null,
       review_note: it.reviewNote ?? null,

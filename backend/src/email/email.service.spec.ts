@@ -1,3 +1,4 @@
+import { ConflictException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
@@ -536,7 +537,7 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
           externalSource: key,
           externalRef: `pa-${Date.now()}`,
         }),
-      ).rejects.toThrow(/paused/i);
+      ).rejects.toBeInstanceOf(ConflictException);
 
       await service.setPaused(WS, UC_UID, agent.id, false);
       const resumed = await service.composeEmail(WS, UC_UID, {
