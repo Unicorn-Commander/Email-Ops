@@ -16,12 +16,20 @@ ALTER TABLE "agent_inbox_items"
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'email_ops_app') THEN
+    GRANT USAGE ON TYPE "AgentInboxApprovalTier" TO email_ops_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON "agent_inbox_items" TO email_ops_app;
     GRANT SELECT, UPDATE ON "workspaces" TO email_ops_app;
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'email_ops_ro') THEN
+    GRANT USAGE ON TYPE "AgentInboxApprovalTier" TO email_ops_ro;
     GRANT SELECT ON "agent_inbox_items" TO email_ops_ro;
     GRANT SELECT ON "workspaces" TO email_ops_ro;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'email_ops_audit') THEN
+    GRANT USAGE ON TYPE "AgentInboxApprovalTier" TO email_ops_audit;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'email_ops_owner') THEN
+    GRANT USAGE ON TYPE "AgentInboxApprovalTier" TO email_ops_owner;
   END IF;
 END
 $$;
