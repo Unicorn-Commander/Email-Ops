@@ -960,15 +960,38 @@ export class EmailOpsTools {
       ucUidOf(user as WithWorkspaceClaim),
     );
     if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
-    const owned = new Set(bindings.map((binding) => binding.domain));
+    const owned = new Map(
+      bindings.map((binding) => [this.mailDomains.canonicalDomain(binding.domain), binding]),
+    );
     const domains = (await this.admin.listDomains()).filter((item) => {
       try {
         return owned.has(this.mailDomains.canonicalDomain(item.domain));
       } catch {
         return false;
       }
+    }).map((item) => {
+      const binding = owned.get(this.mailDomains.canonicalDomain(item.domain));
+      return {
+        ...item,
+        verified: binding?.verified ?? false,
+        verifiedAt: binding?.verifiedAt?.toISOString() ?? null,
+        lastVerificationCheckAt: binding?.lastVerificationCheckAt?.toISOString() ?? null,
+      };
     });
     return { domains };
+  }
+
+  /** Read one domain's verification state and TXT instructions. */
+  async getMailDomainVerification(
+    user: User,
+    args: { workspace_id?: string; domain_id: string },
+  ): Promise<unknown> {
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    return this.mailDomains.getDomainVerification(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.domain_id,
+    );
   }
 
   /** List engine-hosted accounts under this workspace's bound domains. */

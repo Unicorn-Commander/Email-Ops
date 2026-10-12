@@ -996,6 +996,21 @@ export class McpService {
     );
 
     registerTool(
+      'get_mail_domain_verification',
+      {
+        title: 'Get mail domain verification',
+        description:
+          'Read one caller-workspace mail domain verification state and, when a challenge ' +
+          'has been requested, the TXT record instructions. Read-only / member-level.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          domain_id: z.string(),
+        },
+      },
+      async (args: any) => wrap(await tools.getMailDomainVerification(user, args)),
+    );
+
+    registerTool(
       'list_mail_accounts',
       {
         title: 'List mail engine accounts',
