@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { AuthModule } from '../auth/auth.module';
+import { WorkspaceModule } from '../common/workspace/workspace.module';
 import { MailEngineAdminPort } from './mail-engine-admin.port';
 import { JamesAdminClient } from './james-admin.client';
 import { MailDomainController } from './mail-domain.controller';
@@ -14,6 +16,7 @@ import { promises as dns } from 'node:dns';
  * REGISTERED), so this module is always safe to import.
  */
 @Module({
+  imports: [AuthModule, WorkspaceModule],
   controllers: [MailDomainController],
   providers: [
     MailDomainService,
