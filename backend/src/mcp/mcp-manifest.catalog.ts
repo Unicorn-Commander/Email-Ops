@@ -101,6 +101,56 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
       "read_only": true
     },
     {
+      "name": "pause_agent",
+      "description": "Pause one registered agent so its agent-originated writes are refused. Only a workspace OWNER or ADMIN may use this control; the change is audited.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "admin:provision"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "resume_agent",
+      "description": "Resume one registered agent after a pause. Only a workspace OWNER or ADMIN may use this control; the change is audited.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "admin:provision"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
       "name": "provision_mailbox",
       "description": "Create a mailbox (human / agent / shared) by talking to an agent. Runs AS the calling user: the workspace provisioning policy is enforced with the user’s own role — so this only does what that user is allowed to. Returns {status:\"created\", mailbox} when applied, or {status:\"pending_approval\", request} when the policy requires an approver (a human approves it in the Mailboxes view). owner_kind AGENT is the higher-trust send-identity path (admin by default).",
       "input_schema": {
@@ -326,7 +376,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "compose_email",
-      "description": "Compose an outbound email. mode=send queues delivery now (Apache James, or Postmark for the transactional high-rep lane, or the connected Gmail/Microsoft Graph lane when from_address is a connected mailbox); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires the email-ops entitlement; a CROSS-APP compose (external_source=customer-ops) additionally requires customer-ops. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created. SEND IDENTITY: pass from_address to choose which registered mailbox it leaves from; the lane follows the mailbox — Microsoft 365 addresses go out through Microsoft Graph, Gmail through the Gmail API, sovereign domains through Apache James (Postmark for the transactional high-rep lane). Omit from_address to use the agent’s own mailbox or the workspace default, as before. RECIPIENTS: to_address is the back-compat single To; to_addresses (1-50) is the full To list — if both are set, to_address MUST equal the first entry. cc and bcc are 0-50 addresses each; an address may not appear in both To/Cc and Bcc. REPLY INTO A THREAD: pass in_reply_to_thread_id (the thread id from list_threads / search_mail / get_thread for THAT mailbox) AND from_address = that mailbox. On connected Gmail this sets threadId + In-Reply-To/References; on Microsoft 365 it uses Graph createReply / conversationId so Outlook threads it; on sovereign James it sets In-Reply-To/References. reply_all=true (default false) with in_reply_to_thread_id derives To/Cc from the latest message in that thread (everyone except the sending mailbox, matching Outlook Reply-all) then merges any explicit to/cc/bcc. RETURNS the resolved recipient set (to, cc, bcc), the mode actually applied (an unattended send may be downgraded to draft / pending_approval), and thread_id (the provider conversation id on Gmail/M365).",
+      "description": "Compose an outbound email. mode=send queues delivery now (Apache James, or Postmark for the transactional high-rep lane, or the connected Gmail/Microsoft Graph lane when from_address is a connected mailbox); mode=draft stages it into the AGENT INBOX approval surface (a human approves before it leaves — the safe default for an agent). IDEMPOTENT on (workspace_id, external_source, external_ref): a repeat returns the EXISTING message and queues NO second send. Requires the email-ops entitlement; a CROSS-APP compose (external_source=customer-ops) additionally requires customer-ops. Email-Ops stores no contact record (contact_id is a thin reference) and is the system-of-record for the message it created. SEND IDENTITY: pass from_address to choose which registered mailbox it leaves from; the lane follows the mailbox — Microsoft 365 addresses go out through Microsoft Graph, Gmail through the Gmail API, sovereign domains through Apache James (Postmark for the transactional high-rep lane). Omit from_address to use the agent’s own mailbox or the workspace default, as before. ATTACHMENTS: optional attachments are either {documentId} for an Email-Ops-stored document the caller may read, or {filename, contentType, contentBase64}. Defaults are at most 5 files, 10 MiB per file, 20 MiB total, and pdf/png/jpg/txt/csv/md/docx/xlsx; EMAIL_OPS_ATTACHMENT_* settings may tighten or extend these. The selected lane must support attachments or compose is refused; supported attachments are retained through Graph, Gmail, Postmark, and James/JMAP. Snake-case fields remain accepted for compatibility. RECIPIENTS: to_address is the back-compat single To; to_addresses (1-50) is the full To list — if both are set, to_address MUST equal the first entry. cc and bcc are 0-50 addresses each; an address may not appear in both To/Cc and Bcc. REPLY INTO A THREAD: pass in_reply_to_thread_id (the thread id from list_threads / search_mail / get_thread for THAT mailbox) AND from_address = that mailbox. On connected Gmail this sets threadId + In-Reply-To/References; on Microsoft 365 it uses Graph createReply / conversationId so Outlook threads it; on sovereign James it sets In-Reply-To/References. reply_all=true (default false) with in_reply_to_thread_id derives To/Cc from the latest message in that thread (everyone except the sending mailbox, matching Outlook Reply-all) then merges any explicit to/cc/bcc. RETURNS the resolved recipient set (to, cc, bcc), the mode actually applied (an unattended send may be downgraded to draft / pending_approval), and thread_id (the provider conversation id on Gmail/M365).",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -407,6 +457,28 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
             "type": "string",
             "minLength": 3,
             "maxLength": 320
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "documentId": { "type": "string", "minLength": 1 },
+                "document_id": { "type": "string", "minLength": 1 },
+                "blobId": { "type": "string", "minLength": 1 },
+                "blob_id": { "type": "string", "minLength": 1 },
+                "filename": { "type": "string", "minLength": 1 },
+                "name": { "type": "string", "minLength": 1 },
+                "contentType": { "type": "string", "minLength": 1 },
+                "content_type": { "type": "string", "minLength": 1 },
+                "type": { "type": "string", "minLength": 1 },
+                "contentBase64": { "type": "string", "minLength": 1 },
+                "content_base64": { "type": "string", "minLength": 1 },
+                "size": { "type": "integer", "minimum": 0 }
+              },
+              "additionalProperties": false
+            },
+            "maxItems": 20
           }
         },
         "required": [
@@ -1536,7 +1608,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "list_mail_domains",
-      "description": "List the domains the sovereign mail engine (Apache James) currently serves. Read-only / member-level. Returns { domains: [{ domain }] } or { status:\"engine_not_configured\" } when no WebAdmin endpoint is wired.",
+      "description": "List the domains the sovereign mail engine (Apache James) currently serves, including verified, verifiedAt, and lastVerificationCheckAt. Read-only / member-level. Returns { domains: [{ domain, verified, verifiedAt, lastVerificationCheckAt }] } or { status:\"engine_not_configured\" } when no WebAdmin endpoint is wired.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1544,6 +1616,31 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
             "type": "string"
           }
         },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:mail_engine"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "get_mail_domain_verification",
+      "description": "Read one caller-workspace mail domain verification state and TXT instructions. Read-only / member-level.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "domain_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain_id"
+        ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },

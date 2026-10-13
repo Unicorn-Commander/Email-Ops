@@ -64,6 +64,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decorator';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { EmailService } from '../email/email.service';
+import { composeAttachmentPolicy, validateComposeAttachments } from '../email/compose-attachments';
 import { BulkThreadAction, ComposeInput, MailFolder } from '../email/email.types';
 
 const MAIL_FOLDERS: MailFolder[] = ['inbox', 'archive', 'spam', 'trash', 'sent', 'drafts'];
@@ -110,8 +111,21 @@ class ComposeMailDto {
   // webmail wave — all optional (back-compat).
   @IsOptional() @IsArray() @ArrayMaxSize(50) @IsEmail({}, { each: true }) cc?: string[];
   @IsOptional() @IsArray() @ArrayMaxSize(50) @IsEmail({}, { each: true }) bcc?: string[];
-  /** Either uploaded refs or direct compose files: [{filename, content_type, content_base64}]. */
-  @IsOptional() @IsArray() @ArrayMaxSize(20) attachments?: { blob_id?: string; name?: string; type?: string; filename?: string; content_type?: string; content_base64?: string }[];
+  /** A stored documentId, an uploaded blob ref, or direct {filename, contentType, contentBase64}. */
+  @IsOptional() @IsArray() @ArrayMaxSize(20) attachments?: {
+    documentId?: string;
+    document_id?: string;
+    blobId?: string;
+    blob_id?: string;
+    name?: string;
+    type?: string;
+    filename?: string;
+    contentType?: string;
+    content_type?: string;
+    contentBase64?: string;
+    content_base64?: string;
+    size?: number;
+  }[];
   /** The INTERNAL message id being replied to (from the thread detail) — the server resolves the real Message-ID/References. */
   @IsOptional() @IsString() @MaxLength(500) in_reply_to?: string;
   @IsOptional() @IsArray() @ArrayMaxSize(100) @IsString({ each: true }) references?: string[];
@@ -159,17 +173,31 @@ function parseComposePayload(body: ComposeMailDto) {
     throw new BadRequestException('to_address must be one or more comma-separated email addresses.');
   }
   const attachments = (body.attachments ?? []).map((a) => {
-    if (!a || (typeof a.blob_id !== 'string' && typeof a.content_base64 !== 'string')) {
-      throw new BadRequestException('each attachment needs blob_id or content_base64.');
+    if (!a || typeof a !== 'object') {
+      throw new BadRequestException('each attachment must be an object.');
     }
-    return {
-      ...(a.blob_id ? { blob_id: a.blob_id } : {}),
-      name: typeof a.name === 'string' && a.name.trim() ? a.name : (a.filename ?? 'attachment'),
-      type: typeof a.type === 'string' && a.type.trim() ? a.type : (a.content_type ?? 'application/octet-stream'),
-      ...(a.filename ? { filename: a.filename } : {}),
-      ...(a.content_type ? { content_type: a.content_type } : {}),
-      ...(a.content_base64 ? { content_base64: a.content_base64 } : {}),
-    };
+    const documentId = a.documentId ?? a.document_id;
+    const blobId = a.blobId ?? a.blob_id;
+    const filename = a.filename ?? a.name;
+    const contentType = a.contentType ?? a.content_type ?? a.type;
+    const contentBase64 = a.contentBase64 ?? a.content_base64;
+    if (!documentId && !blobId && !contentBase64) {
+      throw new BadRequestException(
+        'each attachment needs documentId or filename, contentType, and contentBase64.',
+      );
+    }
+    if (documentId && (blobId || contentBase64)) {
+      throw new BadRequestException('an attachment must use documentId or inline content, not both.');
+    }
+    if (contentBase64 && (!filename || !contentType)) {
+      throw new BadRequestException('inline attachments need filename and contentType.');
+    }
+    // Preserve the exact legacy shape when callers use blob_id/name/type; the
+    // service performs the shared caps/type validation and accepts both spellings.
+    const out = { ...a };
+    if (blobId && !filename) out.name = 'attachment';
+    if (blobId && !contentType) out.type = 'application/octet-stream';
+    return out;
   });
   return { toAddresses, attachments };
 }
@@ -543,11 +571,11 @@ export class MailController {
   }
 
   @Post(':mailboxId/attachments')
-  @ApiOperation({ summary: 'Upload a compose attachment (multipart `file`, 25MB cap) to the mail engine blob store.' })
+  @ApiOperation({ summary: 'Upload a compose attachment (multipart `file`, policy-capped) to the mail engine blob store.' })
   @ApiConsumes('multipart/form-data')
   @ApiResponse({ status: 201, description: '{ blob_id, name, type, size } — reference it from compose.attachments.' })
   @ApiResponse({ status: 501, description: 'The mail engine cannot accept uploads (dormant or non-JMAP).' })
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 25 * 1024 * 1024 } }))
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: composeAttachmentPolicy().maxFileBytes } }))
   async uploadAttachment(
     @ResolvedWorkspace() workspaceId: string,
     @CurrentUser() user: User,
@@ -555,6 +583,18 @@ export class MailController {
     @UploadedFile() file?: { buffer: Buffer; originalname: string; mimetype: string; size: number },
   ) {
     if (!file?.buffer) throw new BadRequestException('Multipart field `file` is required.');
+    try {
+      validateComposeAttachments([
+        {
+          blob_id: 'upload-validation',
+          filename: file.originalname || 'attachment',
+          content_type: file.mimetype || 'application/octet-stream',
+          size: file.buffer.length,
+        },
+      ], composeAttachmentPolicy());
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid attachment.');
+    }
     const result = await this.email.uploadAttachment(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -589,7 +629,13 @@ export class MailController {
       cc: body.cc?.length ? body.cc : undefined,
       bcc: body.bcc?.length ? body.bcc : undefined,
       attachments: attachments.length
-        ? attachments.filter((a) => a.blob_id).map((a) => ({ blobId: a.blob_id!, name: a.name, type: a.type }))
+        ? attachments
+            .filter((a) => a.blob_id ?? a.blobId)
+            .map((a) => ({
+              blobId: (a.blob_id ?? a.blobId)!,
+              name: a.name ?? a.filename ?? 'attachment',
+              type: a.type ?? a.content_type ?? a.contentType ?? 'application/octet-stream',
+            }))
         : undefined,
       inReplyToMessageId: body.in_reply_to ?? null,
     });
@@ -614,7 +660,13 @@ export class MailController {
       cc: body.cc?.length ? body.cc : undefined,
       bcc: body.bcc?.length ? body.bcc : undefined,
       attachments: attachments.length
-        ? attachments.filter((a) => a.blob_id).map((a) => ({ blobId: a.blob_id!, name: a.name, type: a.type }))
+        ? attachments
+            .filter((a) => a.blob_id ?? a.blobId)
+            .map((a) => ({
+              blobId: (a.blob_id ?? a.blobId)!,
+              name: a.name ?? a.filename ?? 'attachment',
+              type: a.type ?? a.content_type ?? a.contentType ?? 'application/octet-stream',
+            }))
         : undefined,
       inReplyToMessageId: body.in_reply_to ?? null,
     });

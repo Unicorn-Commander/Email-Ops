@@ -1,10 +1,5 @@
 import { ForbiddenException, UnauthorizedException } from '@nestjs/common';
-import {
-  enforceExtraScope,
-  enforceMcpToolScope,
-  MCP_TOOL_SCOPES,
-  McpToolName,
-} from './mcp-scopes';
+import { enforceExtraScope, enforceMcpToolScope, MCP_TOOL_SCOPES, McpToolName } from './mcp-scopes';
 
 const NOW = '2026-07-17T12:00:00.000Z';
 
@@ -50,8 +45,9 @@ describe('MCP PAT scope enforcement', () => {
 
   it('allows a grandfathered wildcard PAT to invoke every registered tool', () => {
     const toolNames = Object.keys(MCP_TOOL_SCOPES) as McpToolName[];
-    // Send-kit proposals: +4 lifecycle/read tools alongside approve_send_kit → 65.
-    expect(toolNames).toHaveLength(65);
+    // Send-kit proposals: +4 lifecycle/read tools alongside approve_send_kit,
+    // plus read-only mail-domain verification, plus agent pause/resume → 68.
+    expect(toolNames).toHaveLength(68);
     for (const toolName of toolNames) {
       expect(() => enforceMcpToolScope(pat(['*']), toolName, NOW)).not.toThrow();
     }

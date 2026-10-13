@@ -266,7 +266,10 @@ export class StalwartClient extends StalwartPort {
    * surface is James-first) — degrade-clean: always returns an empty
    * threads array, never throws. Swap MAIL_ENGINE=james to light this up for real.
    */
-  async listFolderThreads(_mailbox: string, _query: StalwartFolderQuery): Promise<StalwartFolderThreadsResult> {
+  async listFolderThreads(
+    _mailbox: string,
+    _query: StalwartFolderQuery,
+  ): Promise<StalwartFolderThreadsResult> {
     return { threads: [] };
   }
 
@@ -346,8 +349,28 @@ export class StalwartClient extends StalwartPort {
   }
 
   /** NOT SUPPORTED on Stalwart (webmail-wave reply-threading resolution) — degrade-clean null. */
-  async getMessageHeaders(_mailbox: string, _messageId: string): Promise<StalwartMessageHeaders | null> {
+  async getMessageHeaders(
+    _mailbox: string,
+    _messageId: string,
+  ): Promise<StalwartMessageHeaders | null> {
     return null;
+  }
+
+  /** The legacy adapter can carry attachments only through Postmark inline bytes. */
+  supportsAttachments(transactional: boolean, attachments: unknown[] = []): boolean {
+    return (
+      transactional &&
+      this.postmarkConfigured &&
+      attachments.every((raw) => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+        const value = raw as Record<string, unknown>;
+        return !value.blobId && !value.blob_id && !!(value.contentBase64 ?? value.content_base64);
+      })
+    );
+  }
+
+  supportsInlineAttachments(transactional: boolean, attachments: unknown[] = []): boolean {
+    return this.supportsAttachments(transactional, attachments);
   }
 
   async send(
@@ -355,17 +378,23 @@ export class StalwartClient extends StalwartPort {
     request: StalwartSendRequest,
     transactional: boolean,
   ): Promise<StalwartSendResult> {
-    // Neither Stalwart lane carries attachments. Fail loud rather than silently drop
-    // the file (accepted:true with a missing attachment). uploadBlob returns null for
-    // Stalwart mailboxes so no blob_id is normally minted — this guards a stale/forged
-    // ref or a draft staged under James then approved after an engine switch.
-    if ((request.attachments?.length ?? 0) > 0) {
+    // Stalwart's legacy submission adapter has no attachment blob store. The only
+    // supported form is inline bytes on the transactional Postmark lane; refuse
+    // every other combination before a message can be accepted without its file.
+    if (
+      (request.attachments?.length ?? 0) > 0 &&
+      !(
+        transactional &&
+        this.postmarkConfigured &&
+        request.attachments?.every((attachment) => !attachment.blobId && !!attachment.contentBase64)
+      )
+    ) {
       return {
         accepted: false,
         providerMessageId: null,
         threadId: request.inReplyToThreadId ?? null,
         lane: null,
-        reason: 'the Stalwart engine cannot carry attachments — nothing was sent',
+        reason: 'the configured Stalwart lane cannot carry these attachments — nothing was sent',
       };
     }
     // Transactional → Postmark (high-rep) when configured.
@@ -431,6 +460,15 @@ export class StalwartClient extends StalwartPort {
           TextBody: request.body,
           ...(request.bodyHtml ? { HtmlBody: request.bodyHtml } : {}),
           MessageStream: 'outbound',
+          ...(request.attachments?.length
+            ? {
+                Attachments: request.attachments.map((attachment) => ({
+                  Name: attachment.name,
+                  Content: attachment.contentBase64,
+                  ContentType: attachment.type,
+                })),
+              }
+            : {}),
           // Wave 7: custom headers (e.g. the X-UC-Agent-Autoreply loop marker).
           ...(request.headers?.length
             ? { Headers: request.headers.map((h) => ({ Name: h.name, Value: h.value })) }
@@ -484,7 +522,9 @@ export class StalwartClient extends StalwartPort {
           create: {
             outbound: {
               from: [{ email: request.fromAddress, name: request.fromName ?? null }],
-              to: (request.toAddresses?.length ? request.toAddresses : [request.toAddress]).map((email) => ({ email })),
+              to: (request.toAddresses?.length ? request.toAddresses : [request.toAddress]).map(
+                (email) => ({ email }),
+              ),
               subject: request.subject,
               bodyValues: request.bodyHtml
                 ? { body: { value: request.body }, html: { value: request.bodyHtml } }

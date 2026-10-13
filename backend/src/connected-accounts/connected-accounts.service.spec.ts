@@ -1,4 +1,9 @@
-import { BadGatewayException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
+import {
+  BadGatewayException,
+  ConflictException,
+  ForbiddenException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { CleanupActionKind, CleanupBatchState, User } from '@prisma/client';
 import { KeycloakBrokerService } from '../auth/keycloak-broker.service';
 import { MembershipService } from '../common/workspace/membership.service';
@@ -37,6 +42,12 @@ describe('ConnectedAccountsService', () => {
     },
     user: {
       findFirst: jest.fn().mockResolvedValue(user),
+    },
+    workspace: {
+      findUnique: jest.fn().mockResolvedValue({ agentsPaused: false }),
+    },
+    agent: {
+      findFirst: jest.fn().mockResolvedValue({ paused: false }),
     },
   } as any;
 
@@ -159,10 +170,28 @@ describe('ConnectedAccountsService', () => {
     expect(engine.batchDelete).not.toHaveBeenCalled();
   });
 
+  it('refuses the paused cleanup agent before provider credentials are read', async () => {
+    (tx.agent.findFirst as jest.Mock).mockResolvedValueOnce({ paused: true });
+
+    await expect(
+      service().stageCleanupRequest(user, 'gmail', 'trash', CleanupActionKind.TRASH, {
+        query: 'category:promotions',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(broker.getProviderAccessToken).not.toHaveBeenCalled();
+    expect(tx.agentInboxItem.create).not.toHaveBeenCalled();
+  });
+
   it('records FAILED (not a silent COMPLETED) when the engine rejects the trash', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
       messages: [
-        { id: 'm-1', sender: 'Promo <promo@shop.com>', size_bytes: 100, labels: ['CATEGORY_PROMOTIONS'], is_starred: false },
+        {
+          id: 'm-1',
+          sender: 'Promo <promo@shop.com>',
+          size_bytes: 100,
+          labels: ['CATEGORY_PROMOTIONS'],
+          is_starred: false,
+        },
       ],
       next_token: null,
     });
@@ -182,8 +211,20 @@ describe('ConnectedAccountsService', () => {
   it('SAFETY: personal mail is never "safe", and an empty selection trashes nothing', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
       messages: [
-        { id: 'm-1', sender: 'Promo <promo@shop.com>', size_bytes: 100, labels: ['CATEGORY_PROMOTIONS'], is_starred: false },
-        { id: 'm-2', sender: 'Friend <friend@example.com>', size_bytes: 200, labels: [], is_starred: false },
+        {
+          id: 'm-1',
+          sender: 'Promo <promo@shop.com>',
+          size_bytes: 100,
+          labels: ['CATEGORY_PROMOTIONS'],
+          is_starred: false,
+        },
+        {
+          id: 'm-2',
+          sender: 'Friend <friend@example.com>',
+          size_bytes: 200,
+          labels: [],
+          is_starred: false,
+        },
       ],
       next_token: null,
     });
@@ -204,7 +245,9 @@ describe('ConnectedAccountsService', () => {
 
   it('permanent delete requires a verified Garage archive before purge', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
-      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false },
+      ],
       next_token: null,
     });
     (engine.archiveCreate as jest.Mock).mockResolvedValue({
@@ -231,14 +274,19 @@ describe('ConnectedAccountsService', () => {
       confirmToken: 'ARCHIVE',
     });
     expect(engine.archiveCreate).toHaveBeenCalled();
-    expect(engine.archiveVerify).toHaveBeenCalledWith('archives', 'workspaces/ws-1/archives/gmail/batch.eml.zip');
+    expect(engine.archiveVerify).toHaveBeenCalledWith(
+      'archives',
+      'workspaces/ws-1/archives/gmail/batch.eml.zip',
+    );
     expect(engine.batchDelete).toHaveBeenCalledWith('gmail', { token: 'broker-token' }, ['m-1']);
     expect(result.backup_ref?.verified).toBe(true);
   });
 
   it('permanent delete with confirm but without ARCHIVE token is rejected', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
-      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false },
+      ],
       next_token: null,
     });
     const plan = await service().planCleanup(user, 'gmail', { query: 'category:promotions' });
@@ -269,7 +317,9 @@ describe('ConnectedAccountsService', () => {
 
   it('does not purge when archive verification fails', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
-      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false },
+      ],
       next_token: null,
     });
     (engine.archiveCreate as jest.Mock).mockResolvedValue({
@@ -295,13 +345,21 @@ describe('ConnectedAccountsService', () => {
 
   it('stages agent destructive calls into the approval queue instead of executing them', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
-      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false },
+      ],
       next_token: null,
     });
 
-    const staged = await service().stageCleanupRequest(user, 'gmail', 'trash', CleanupActionKind.TRASH, {
-      query: 'category:promotions',
-    });
+    const staged = await service().stageCleanupRequest(
+      user,
+      'gmail',
+      'trash',
+      CleanupActionKind.TRASH,
+      {
+        query: 'category:promotions',
+      },
+    );
     expect(staged.status).toBe('pending');
     expect(tx.agentInboxItem.create).toHaveBeenCalled();
     expect(engine.batchTrash).not.toHaveBeenCalled();
@@ -327,11 +385,18 @@ describe('ConnectedAccountsService', () => {
     (engine.archiveRestore as jest.Mock).mockResolvedValue({ restored: 1, failed: [] });
 
     const res = await service().undoBatch(user, 'gmail', 'batch-1');
-    expect(engine.archiveRestore).toHaveBeenCalledWith('gmail', { token: 'broker-token' }, 'archives', 'archive.zip');
-    expect(tx.cleanupBatch.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: 'batch-1' },
-      data: expect.objectContaining({ state: CleanupBatchState.UNDONE }),
-    }));
+    expect(engine.archiveRestore).toHaveBeenCalledWith(
+      'gmail',
+      { token: 'broker-token' },
+      'archives',
+      'archive.zip',
+    );
+    expect(tx.cleanupBatch.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'batch-1' },
+        data: expect.objectContaining({ state: CleanupBatchState.UNDONE }),
+      }),
+    );
     expect(res.ok).toBe(true);
     expect(res.status).toBe('undone');
     expect(prisma.withWorkspace).toHaveBeenCalledWith('ws-1', 'kc-sub-user', expect.any(Function));
@@ -385,7 +450,12 @@ describe('ConnectedAccountsService', () => {
     });
     expect(organized.ok).toBe(true);
     expect(organized.status).toBe('completed');
-    expect(engine.batchArchive).toHaveBeenCalledWith('gmail', { token: 'broker-token' }, ['m-1'], null);
+    expect(engine.batchArchive).toHaveBeenCalledWith(
+      'gmail',
+      { token: 'broker-token' },
+      ['m-1'],
+      null,
+    );
 
     // the original bug: these must never trash and never fake a completed batch
     expect(engine.batchTrash).not.toHaveBeenCalled();
@@ -399,11 +469,16 @@ describe('ConnectedAccountsService', () => {
     // path must take the same human-approval gate as every other destructive
     // verb — it must NOT execute on the caller's behalf.
     (engine.listMessages as jest.Mock).mockResolvedValue({
-      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false },
+      ],
       next_token: null,
     });
 
-    const unsub = await service().unsubscribe(user, 'gmail', ['promo@example.com', 'news@example.com']);
+    const unsub = await service().unsubscribe(user, 'gmail', [
+      'promo@example.com',
+      'news@example.com',
+    ]);
 
     expect(unsub.status).toBe('pending');
     expect(unsub.staged).toBe(true);
@@ -415,7 +490,9 @@ describe('ConnectedAccountsService', () => {
 
   it('stages unsubscribe via stageCleanupRequest without calling the engine yet', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
-      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false },
+      ],
       next_token: null,
     });
 
@@ -434,17 +511,31 @@ describe('ConnectedAccountsService', () => {
 
   it('stages delete and organize for approval without executing provider writes', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
-      messages: [{ id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false }],
+      messages: [
+        { id: 'm-1', sender: 'Promo <promo@example.com>', size_bytes: 100, is_starred: false },
+      ],
       next_token: null,
     });
 
-    const del = await service().stageCleanupRequest(user, 'gmail', 'delete', CleanupActionKind.DELETE, {
-      query: '',
-    });
+    const del = await service().stageCleanupRequest(
+      user,
+      'gmail',
+      'delete',
+      CleanupActionKind.DELETE,
+      {
+        query: '',
+      },
+    );
     expect(del.status).toBe('pending');
-    const org = await service().stageCleanupRequest(user, 'gmail', 'archive', CleanupActionKind.ORGANIZE, {
-      query: '',
-    });
+    const org = await service().stageCleanupRequest(
+      user,
+      'gmail',
+      'archive',
+      CleanupActionKind.ORGANIZE,
+      {
+        query: '',
+      },
+    );
     expect(org.status).toBe('pending');
     expect(tx.agentInboxItem.create).toHaveBeenCalled();
     expect(engine.batchTrash).not.toHaveBeenCalled();
@@ -457,8 +548,24 @@ describe('ConnectedAccountsService', () => {
     // included — as safe. Rows must now VISIBLY match the query.
     (engine.listMessages as jest.Mock).mockResolvedValue({
       messages: [
-        { id: 'm-1', sender: 'Shop <deals@shop.com>', subject: 'Sale', snippet: 'buy', size_bytes: 100, labels: [], is_starred: false },
-        { id: 'm-2', sender: 'Wife <jordan@example.com>', subject: 'dinner', snippet: 'tonight?', size_bytes: 200, labels: [], is_starred: false },
+        {
+          id: 'm-1',
+          sender: 'Shop <deals@shop.com>',
+          subject: 'Sale',
+          snippet: 'buy',
+          size_bytes: 100,
+          labels: [],
+          is_starred: false,
+        },
+        {
+          id: 'm-2',
+          sender: 'Wife <jordan@example.com>',
+          subject: 'dinner',
+          snippet: 'tonight?',
+          size_bytes: 200,
+          labels: [],
+          is_starred: false,
+        },
       ],
       next_token: null,
     });
@@ -476,9 +583,33 @@ describe('ConnectedAccountsService', () => {
   it('free-text queries match against sender, subject and snippet (case-insensitive)', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
       messages: [
-        { id: 'm-1', sender: 'Shop <deals@shop.com>', subject: 'GMKtec mini PC deal', snippet: 'sale', size_bytes: 100, labels: [], is_starred: false },
-        { id: 'm-2', sender: 'Shop <deals@shop.com>', subject: 'Other', snippet: 'your gmktec order shipped', size_bytes: 200, labels: [], is_starred: false },
-        { id: 'm-3', sender: 'Wife <jordan@example.com>', subject: 'dinner', snippet: 'tonight?', size_bytes: 300, labels: [], is_starred: false },
+        {
+          id: 'm-1',
+          sender: 'Shop <deals@shop.com>',
+          subject: 'GMKtec mini PC deal',
+          snippet: 'sale',
+          size_bytes: 100,
+          labels: [],
+          is_starred: false,
+        },
+        {
+          id: 'm-2',
+          sender: 'Shop <deals@shop.com>',
+          subject: 'Other',
+          snippet: 'your gmktec order shipped',
+          size_bytes: 200,
+          labels: [],
+          is_starred: false,
+        },
+        {
+          id: 'm-3',
+          sender: 'Wife <jordan@example.com>',
+          subject: 'dinner',
+          snippet: 'tonight?',
+          size_bytes: 300,
+          labels: [],
+          is_starred: false,
+        },
       ],
       next_token: null,
     });
@@ -509,9 +640,30 @@ describe('ConnectedAccountsService', () => {
   it('freesBytes sums the real sizes of the safe rows', async () => {
     (engine.listMessages as jest.Mock).mockResolvedValue({
       messages: [
-        { id: 'm-1', sender: 'Shop <deals@shop.com>', subject: 'Sale', size_bytes: 1111, labels: [], is_starred: false },
-        { id: 'm-2', sender: 'Shop <deals@shop.com>', subject: 'Sale 2', size_bytes: 2222, labels: [], is_starred: false },
-        { id: 'm-3', sender: 'Wife <jordan@example.com>', subject: 'dinner', size_bytes: 9999, labels: [], is_starred: false },
+        {
+          id: 'm-1',
+          sender: 'Shop <deals@shop.com>',
+          subject: 'Sale',
+          size_bytes: 1111,
+          labels: [],
+          is_starred: false,
+        },
+        {
+          id: 'm-2',
+          sender: 'Shop <deals@shop.com>',
+          subject: 'Sale 2',
+          size_bytes: 2222,
+          labels: [],
+          is_starred: false,
+        },
+        {
+          id: 'm-3',
+          sender: 'Wife <jordan@example.com>',
+          subject: 'dinner',
+          size_bytes: 9999,
+          labels: [],
+          is_starred: false,
+        },
       ],
       next_token: null,
     });
@@ -528,8 +680,24 @@ describe('ConnectedAccountsService', () => {
     // starred (high-importance) mail stays protected.
     (engine.listMessages as jest.Mock).mockResolvedValue({
       messages: [
-        { id: 'm-1', sender: 'GMKtec <sales@gmktec.com>', subject: 'Order', snippet: 'thanks', size_bytes: 4096, labels: [], is_starred: false },
-        { id: 'm-2', sender: 'GMKtec <sales@gmktec.com>', subject: 'Warranty', snippet: 'info', size_bytes: 2048, labels: [], is_starred: true },
+        {
+          id: 'm-1',
+          sender: 'GMKtec <sales@gmktec.com>',
+          subject: 'Order',
+          snippet: 'thanks',
+          size_bytes: 4096,
+          labels: [],
+          is_starred: false,
+        },
+        {
+          id: 'm-2',
+          sender: 'GMKtec <sales@gmktec.com>',
+          subject: 'Warranty',
+          snippet: 'info',
+          size_bytes: 2048,
+          labels: [],
+          is_starred: true,
+        },
       ],
       next_token: null,
     });
@@ -550,21 +718,48 @@ describe('ConnectedAccountsService', () => {
     // undefined; a row with a concrete size must NOT be re-fetched.
     (engine.listMessages as jest.Mock).mockResolvedValue({
       messages: [
-        { id: 'm-1', sender: 'GMKtec <service@gmktec.com>', subject: 'GMKtec order', snippet: 'thanks', size_bytes: null, labels: [], is_starred: false },
-        { id: 'm-2', sender: 'GMKtec <service@gmktec.com>', subject: 'GMKtec invoice', snippet: 'attached', size_bytes: 2048, labels: [], is_starred: false },
+        {
+          id: 'm-1',
+          sender: 'GMKtec <service@gmktec.com>',
+          subject: 'GMKtec order',
+          snippet: 'thanks',
+          size_bytes: null,
+          labels: [],
+          is_starred: false,
+        },
+        {
+          id: 'm-2',
+          sender: 'GMKtec <service@gmktec.com>',
+          subject: 'GMKtec invoice',
+          snippet: 'attached',
+          size_bytes: 2048,
+          labels: [],
+          is_starred: false,
+        },
       ],
       next_token: null,
     });
     // get_message's standalone expand works, so the per-message fetch returns the real size.
     (engine.getMessage as jest.Mock).mockResolvedValue({
-      id: 'm-1', sender: 'GMKtec <service@gmktec.com>', subject: 'GMKtec order', snippet: 'thanks', size_bytes: 86984, labels: [], is_starred: false,
+      id: 'm-1',
+      sender: 'GMKtec <service@gmktec.com>',
+      subject: 'GMKtec order',
+      snippet: 'thanks',
+      size_bytes: 86984,
+      labels: [],
+      is_starred: false,
     });
 
     const plan = await service().planCleanup(user, 'microsoft', { query: 'gmktec' });
 
     // Only the size-unknown row was enriched; the concrete-size row was not re-fetched.
     expect(engine.getMessage).toHaveBeenCalledTimes(1);
-    expect(engine.getMessage).toHaveBeenCalledWith('microsoft', { access_token: 'broker-token' }, 'm-1', 'metadata');
+    expect(engine.getMessage).toHaveBeenCalledWith(
+      'microsoft',
+      { access_token: 'broker-token' },
+      'm-1',
+      'metadata',
+    );
     expect(plan.safe.map((r) => r.id)).toEqual(['m-1', 'm-2']);
     expect(plan.freesBytes).toBe(86984 + 2048); // real sizes, never null-coerced 0
   });

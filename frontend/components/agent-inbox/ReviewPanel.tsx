@@ -127,7 +127,13 @@ function degradedMessage(item: AgentInboxItemView): StagedMessageView {
     cc_addresses: [],
     html_body: null,
     text_body: null,
-    attachments: [],
+    attachments: (item.attachments ?? []).map((attachment) => ({
+      name: attachment.name,
+      type: attachment.type,
+      size: attachment.size,
+      blob_id: null,
+      cid: null,
+    })),
     thread_id: payloadStr(item.payload, ['thread_id', 'in_reply_to_thread_id', 'conversation_id']),
     mailbox_id: payloadStr(item.payload, ['mailbox_id', 'mailbox_account_id', 'from_mailbox_id']),
   };

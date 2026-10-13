@@ -129,6 +129,22 @@ describe('AgentsController (delegation + RBAC gate)', () => {
     });
   });
 
+  it('POST pause/resume requires owner/admin and delegates to the audited service switch', async () => {
+    const setPaused = jest.fn().mockResolvedValue({ id: 'a1', paused: true });
+    const ctl = make({ setPaused });
+    await ctl.pause(WS, user(), WorkspaceRole.ADMIN, 'a1');
+    expect(setPaused).toHaveBeenCalledWith(WS, 'kc-sub-aaron', 'a1', true);
+
+    setPaused.mockResolvedValue({ id: 'a1', paused: false });
+    await ctl.resume(WS, user(), WorkspaceRole.OWNER, 'a1');
+    expect(setPaused).toHaveBeenLastCalledWith(WS, 'kc-sub-aaron', 'a1', false);
+
+    await expect(ctl.pause(WS, user(), WorkspaceRole.MEMBER, 'a1')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(setPaused).toHaveBeenCalledTimes(2);
+  });
+
   it('POST :id/mailboxes binds (after the gate) and DELETE unbinds', async () => {
     const bindMailbox = jest.fn().mockResolvedValue({ id: 'a1' });
     await make({ bindMailbox }).bindMailbox(WS, user(), WorkspaceRole.ADMIN, 'a1', {

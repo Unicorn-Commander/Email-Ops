@@ -47,6 +47,44 @@ import { TrustedCorrespondentsService } from '../trusted-correspondents/trusted-
 import { enforceMcpToolScope, McpToolName, PatTaggedIdentity } from './mcp-scopes';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
+const COMPOSE_ATTACHMENT = z
+  .object({
+    documentId: z.string().min(1).max(200).optional(),
+    document_id: z.string().min(1).max(200).optional(),
+    blobId: z.string().min(1).max(200).optional(),
+    blob_id: z.string().min(1).max(200).optional(),
+    filename: z.string().min(1).max(255).optional(),
+    name: z.string().min(1).max(255).optional(),
+    contentType: z.string().min(1).max(200).optional(),
+    content_type: z.string().min(1).max(200).optional(),
+    type: z.string().min(1).max(200).optional(),
+    contentBase64: z.string().min(1).optional(),
+    content_base64: z.string().min(1).optional(),
+  })
+  .superRefine((attachment, ctx) => {
+    const documentId = attachment.documentId ?? attachment.document_id;
+    const blobId = attachment.blobId ?? attachment.blob_id;
+    const filename = attachment.filename ?? attachment.name;
+    const contentType = attachment.contentType ?? attachment.content_type ?? attachment.type;
+    const contentBase64 = attachment.contentBase64 ?? attachment.content_base64;
+    const hasInline = Boolean(
+      filename || contentType || contentBase64,
+    );
+    const sourceCount = Number(Boolean(documentId)) + Number(Boolean(blobId)) + Number(hasInline);
+
+    if (sourceCount !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Attachment must use exactly one of documentId, blobId, or inline content.',
+      });
+    }
+    if (hasInline && (!filename || !contentType || !contentBase64)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Inline attachments require filename, contentType, and contentBase64.',
+      });
+    }
+  });
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
 const SEND_KIT_STATE = z.enum(['PROPOSED', 'APPROVED', 'REJECTED']);
 const MAIL_FOLDER = z.enum(['inbox', 'archive', 'spam', 'trash', 'sent', 'drafts']);
@@ -212,6 +250,36 @@ export class McpService {
       async (args: any) => wrap(await tools.listAgents(user, args)),
     );
 
+    registerTool(
+      'pause_agent',
+      {
+        title: 'Pause one agent',
+        description:
+          'Pause one registered agent so its agent-originated writes are refused. ' +
+          'Only a workspace OWNER or ADMIN may use this control; the change is audited.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          agent_id: z.string(),
+        },
+      },
+      async (args: any) => wrap(await tools.pauseAgent(user, args)),
+    );
+
+    registerTool(
+      'resume_agent',
+      {
+        title: 'Resume one agent',
+        description:
+          'Resume one registered agent after a pause. Only a workspace OWNER or ADMIN may ' +
+          'use this control; the change is audited.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          agent_id: z.string(),
+        },
+      },
+      async (args: any) => wrap(await tools.resumeAgent(user, args)),
+    );
+
     // ── Conversational provisioning (write; runs AS the user, policy-gated) ──
 
     registerTool(
@@ -363,8 +431,11 @@ export class McpService {
           'Microsoft Graph, Gmail through the Gmail API, sovereign domains through Apache ' +
           'James (Postmark for the transactional high-rep lane). Omit from_address to use ' +
           'the agent’s own mailbox or the workspace default, as before. ' +
-          'ATTACHMENTS: optional attachments (maximum 5 files / 10 MB total) use ' +
-          '{filename, content_type, content_base64}; they are retained through Graph, Gmail, and James/JMAP. ' +
+          'ATTACHMENTS: optional attachments are either {documentId} for an Email-Ops-stored document the caller may read, or ' +
+          '{filename, contentType, contentBase64}. Defaults are at most 5 files, 10 MiB per file, 20 MiB total, and ' +
+          'pdf/png/jpg/txt/csv/md/docx/xlsx; EMAIL_OPS_ATTACHMENT_* settings may tighten or extend these. ' +
+          'The selected lane must support attachments or compose is refused; supported attachments are retained through ' +
+          'Graph, Gmail, Postmark, and James/JMAP. Snake-case fields remain accepted for compatibility. ' +
           'For mode=draft, send_at may defer delivery from 5 minutes to 14 days; rejection before that time skips it. ' +
           'RECIPIENTS: to_address is the back-compat single To; to_addresses (1-50) is the ' +
           'full To list — if both are set, to_address MUST equal the first entry. cc and ' +
@@ -397,7 +468,7 @@ export class McpService {
           // mailbox picker (own HUMAN box or a SHARED box; never an agent's), and
           // REFUSED outright when the workspace has no mailbox for that address.
           from_address: z.string().min(3).max(320).optional(),
-          attachments: z.array(z.object({ filename: z.string().min(1), content_type: z.string().min(1), content_base64: z.string().min(1) })).max(5).optional(),
+          attachments: z.array(COMPOSE_ATTACHMENT).max(20).optional(),
           send_at: z.string().optional(),
           kit_id: z.string().max(200).optional(),
         },
@@ -862,7 +933,8 @@ export class McpService {
       'list_send_kits',
       {
         title: 'List agent send kits',
-        description: 'List send-kit proposals and approvals, optionally filtered by PROPOSED, APPROVED, or REJECTED.',
+        description:
+          'List send-kit proposals and approvals, optionally filtered by PROPOSED, APPROVED, or REJECTED.',
         inputSchema: {
           workspace_id: z.string().optional(),
           state: SEND_KIT_STATE.optional(),
@@ -875,7 +947,8 @@ export class McpService {
       'get_send_kit',
       {
         title: 'Get an agent send kit',
-        description: 'Get the full send-kit definition, including retained recipients and body template.',
+        description:
+          'Get the full send-kit definition, including retained recipients and body template.',
         inputSchema: {
           workspace_id: z.string().optional(),
           kit_id: z.string().min(1).max(200),
@@ -913,7 +986,8 @@ export class McpService {
       'reject_send_kit',
       {
         title: 'Reject an agent send kit',
-        description: 'Human-only rejection of a PROPOSED send kit; an optional note is retained for audit.',
+        description:
+          'Human-only rejection of a PROPOSED send kit; an optional note is retained for audit.',
         inputSchema: {
           workspace_id: z.string().optional(),
           kit_id: z.string().min(1).max(200),
@@ -993,6 +1067,21 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await tools.listMailDomains(user, args ?? {})),
+    );
+
+    registerTool(
+      'get_mail_domain_verification',
+      {
+        title: 'Get mail domain verification',
+        description:
+          'Read one caller-workspace mail domain verification state and, when a challenge ' +
+          'has been requested, the TXT record instructions. Read-only / member-level.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          domain_id: z.string(),
+        },
+      },
+      async (args: any) => wrap(await tools.getMailDomainVerification(user, args)),
     );
 
     registerTool(

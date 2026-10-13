@@ -24,6 +24,7 @@ describe('AgentsService', () => {
       mailboxAccountId: null,
       autonomyLevel: AgentAutonomyLevel.L1_APPROVE_TO_SEND,
       recipientPolicy: null,
+      paused: false,
       active: true,
       createdAt: new Date('2026-06-23T00:00:00.000Z'),
       updatedAt: new Date('2026-06-23T00:00:00.000Z'),
@@ -78,7 +79,10 @@ describe('AgentsService', () => {
     tx.agentInboxItem.count.mockResolvedValue(2);
     const svc = makeService(tx);
 
-    const view = await svc.createAgent(WS, UID, { key: 'customer-ops', displayName: 'Customer-Ops' });
+    const view = await svc.createAgent(WS, UID, {
+      key: 'customer-ops',
+      displayName: 'Customer-Ops',
+    });
 
     expect(tx.agent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -205,6 +209,32 @@ describe('AgentsService', () => {
     expect(tx.agent.update).toHaveBeenCalledWith({
       where: { id: 'agent-1' },
       data: { paused: true },
+    });
+  });
+
+  it('setPaused persists the per-agent switch and audits pause/resume', async () => {
+    const tx = makeTx();
+    tx.agent.findFirst.mockResolvedValue(agentRow({ paused: false }));
+    tx.agent.findFirstOrThrow
+      .mockResolvedValueOnce(agentRow({ paused: true }))
+      .mockResolvedValueOnce(agentRow({ paused: false }));
+    const svc = makeService(tx);
+
+    const paused = await svc.setPaused(WS, UID, 'agent-1', true);
+    expect(paused?.paused).toBe(true);
+    expect(tx.agent.update).toHaveBeenCalledWith({
+      where: { id: 'agent-1' },
+      data: { paused: true },
+    });
+    expect(tx.agentActionEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ kind: 'PAUSED', agentKey: 'customer-ops', actorUcUid: UID }),
+    });
+
+    tx.agent.findFirst.mockResolvedValue(agentRow({ paused: true }));
+    const resumed = await svc.setPaused(WS, UID, 'agent-1', false);
+    expect(resumed?.paused).toBe(false);
+    expect(tx.agentActionEvent.create).toHaveBeenLastCalledWith({
+      data: expect.objectContaining({ kind: 'RESUMED', agentKey: 'customer-ops', actorUcUid: UID }),
     });
   });
 

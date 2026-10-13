@@ -20,6 +20,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
    *   1. Postmark providerMessageId -> email message workspace resolver.
    *   2. Twilio inbound toPhoneNumber -> SMS account workspace resolver.
    *   3. Archive-retention expired cleanup batch scanner.
+   *   4. Mail-domain verification's bounded daily scheduler scan.
    *
    * Never use this for user-facing reads or writes. Follow-on mutations must
    * run through withWorkspace(resolvedWorkspaceId, ...) on the normal client.

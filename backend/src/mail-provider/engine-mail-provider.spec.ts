@@ -30,6 +30,7 @@ function make(opts: {
   threads?: unknown;
   thread?: unknown;
   send?: unknown;
+  draft?: unknown;
   profile?: unknown;
   archive?: unknown;
   trash?: unknown;
@@ -49,6 +50,7 @@ function make(opts: {
     listMailThreads: jest.fn().mockResolvedValue(opts.threads ?? null),
     getMailThread: jest.fn().mockResolvedValue(opts.thread ?? null),
     sendMail: jest.fn().mockResolvedValue(opts.send ?? null),
+    createMailDraft: jest.fn().mockResolvedValue(opts.draft ?? null),
     archiveMailThread: jest.fn().mockResolvedValue(opts.archive ?? null),
     trashMailThread: jest.fn().mockResolvedValue(opts.trash ?? null),
     spamMailThread: jest.fn().mockResolvedValue(opts.spam ?? null),
@@ -245,6 +247,7 @@ describe('EngineMailProvider', () => {
       body: 'b',
       cc: ['c@y.test'],
       bcc: ['d@y.test'],
+      attachments: [{ filename: 'brief.pdf', mimeType: 'application/pdf', contentBase64: 'JVBERi0xLjQ=' }],
     });
     expect(ok).toEqual({ accepted: true, providerMessageId: 'pm-1', threadId: 't9', reason: null });
     expect(happy.engine.sendMail).toHaveBeenCalledWith(
@@ -255,6 +258,29 @@ describe('EngineMailProvider', () => {
         toAddresses: ['a@y.test', 'b@y.test'],
         cc: ['c@y.test'],
         bcc: ['d@y.test'],
+        attachments: [{ filename: 'brief.pdf', mimeType: 'application/pdf', contentBase64: 'JVBERi0xLjQ=' }],
+      }),
+    );
+
+    const draftProvider = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      draft: { created: true, draft_id: 'draft-1', thread_id: null, web_link: null, reason: null },
+    });
+    await expect(
+      draftProvider.provider.createDraft(gmailbox(), {
+        from: 'person84@example.com',
+        to: 'a@y.test',
+        subject: 'draft',
+        body: 'b',
+        attachments: [{ filename: 'brief.pdf', mimeType: 'application/pdf', contentBase64: 'JVBERi0xLjQ=' }],
+      }),
+    ).resolves.toMatchObject({ created: true, draftId: 'draft-1' });
+    expect(draftProvider.engine.createMailDraft).toHaveBeenCalledWith(
+      'gmail',
+      { token: 'gtok' },
+      expect.objectContaining({
+        attachments: [{ filename: 'brief.pdf', mimeType: 'application/pdf', contentBase64: 'JVBERi0xLjQ=' }],
       }),
     );
 
