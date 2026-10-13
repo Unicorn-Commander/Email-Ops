@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import {
   AgentActionKind,
   AgentInboxState,
@@ -7,6 +7,7 @@ import {
   SmsMode,
 } from '@prisma/client';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
+import { isAgentOrigin } from '../common/agent-origin';
 import { TwilioPort } from '../twilio/twilio.port';
 import { decideComposeMode } from '../email/autonomy';
 import {
@@ -23,7 +24,8 @@ import {
  *
  *   - IDEMPOTENT on (workspaceId, externalSource, externalRef) — a retry returns
  *     the existing row and sends nothing twice;
- *   - the workspace KILL SWITCH (Workspace.agentsPaused) blocks compose/send;
+ *   - the workspace KILL SWITCH (Workspace.agentsPaused) blocks agent-originated
+ *     compose/send while leaving the human compose path available;
  *   - the AGENT registry + per-agent pause are honored;
  *   - the AUTONOMY DIAL (decideComposeMode — the same pure function email uses)
  *     decides send vs stage-for-approval (L0/L1 always stage; L2 sends, audited);
@@ -84,16 +86,6 @@ export class SmsService {
         return this.composeView(existing);
       }
 
-      // Workspace kill switch.
-      const ws = await tx.workspace.findUnique({
-        where: { id: workspaceId },
-        select: { agentsPaused: true },
-      });
-      if (ws?.agentsPaused) {
-        this.logger.log(`compose_sms blocked: agents paused for workspace ${workspaceId}`);
-        throw new ForbiddenException('Agents are paused for this workspace.');
-      }
-
       // Agent resolution + per-agent kill switch.
       const agentKey = input.draftedBy ?? input.externalSource;
       const agent = agentKey
@@ -102,9 +94,24 @@ export class SmsService {
             select: { key: true, autonomyLevel: true, recipientPolicy: true, paused: true },
           })
         : null;
+
+      // Keep the workspace fence aligned with email: a paused fleet blocks
+      // agent-originated compose, while the human client remains available.
+      const agentInitiated = isAgentOrigin(input.externalSource, input.draftedBy) || !!agent;
+      const ws = await tx.workspace.findUnique({
+        where: { id: workspaceId },
+        select: { agentsPaused: true },
+      });
+      if (ws?.agentsPaused && agentInitiated) {
+        this.logger.log(`compose_sms blocked: agents paused for workspace ${workspaceId}`);
+        throw new ForbiddenException('Agents are paused for this workspace.');
+      }
+
       if (agent?.paused) {
-        this.logger.log(`compose_sms blocked: agent '${agentKey}' is paused (workspace ${workspaceId})`);
-        throw new ForbiddenException(`Agent '${agentKey}' is paused.`);
+        this.logger.log(
+          `compose_sms blocked: agent '${agentKey}' is paused (workspace ${workspaceId})`,
+        );
+        throw new ConflictException(`Agent '${agentKey}' is paused.`);
       }
 
       // Send-from line: an explicit account (scoped to the workspace), else the default.
@@ -171,7 +178,9 @@ export class SmsService {
           agentKey,
           messageId: msg.id,
           actorUcUid: ucUid,
-          detail: decision.coerced ? `SMS staged by dial (${decision.reason})` : `SMS → ${input.toPhoneNumber}`,
+          detail: decision.coerced
+            ? `SMS staged by dial (${decision.reason})`
+            : `SMS → ${input.toPhoneNumber}`,
         });
         return this.composeView(msg);
       }
@@ -222,7 +231,10 @@ export class SmsService {
   ): Promise<SmsInboxView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const items = await tx.agentInboxItem.findMany({
-        where: { smsMessageId: { not: null }, ...(state ? { state } : { state: AgentInboxState.PENDING }) },
+        where: {
+          smsMessageId: { not: null },
+          ...(state ? { state } : { state: AgentInboxState.PENDING }),
+        },
         orderBy: { createdAt: 'desc' },
         include: { smsMessage: true },
       });
@@ -245,7 +257,10 @@ export class SmsService {
       });
       if (!item || !item.smsMessage) return null;
       if (item.state !== AgentInboxState.PENDING) {
-        return { inbox: this.inboxView(item, item.smsMessage), message: this.composeView(item.smsMessage) };
+        return {
+          inbox: this.inboxView(item, item.smsMessage),
+          message: this.composeView(item.smsMessage),
+        };
       }
 
       const sent = await this.handToTwilio(tx, item.smsMessage.id, {
@@ -308,7 +323,9 @@ export class SmsService {
         },
         include: { smsMessage: true },
       });
-      this.logger.log(`agent-inbox SMS item ${itemId} REJECTED by ${ucUid ?? '(unknown)'} — never sent`);
+      this.logger.log(
+        `agent-inbox SMS item ${itemId} REJECTED by ${ucUid ?? '(unknown)'} — never sent`,
+      );
       await this.recordAction(tx, workspaceId, {
         kind: AgentActionKind.REJECTED,
         agentKey: item.draftedBy,
@@ -351,7 +368,11 @@ export class SmsService {
         select: { id: true },
       });
       if (already) {
-        return { outcome: 'duplicate' as const, workspaceId: account.workspaceId, smsMessageId: already.id };
+        return {
+          outcome: 'duplicate' as const,
+          workspaceId: account.workspaceId,
+          smsMessageId: already.id,
+        };
       }
       try {
         const msg = await tx.smsMessage.create({
@@ -369,14 +390,22 @@ export class SmsService {
             receivedAt: input.occurredAt ?? new Date(),
           },
         });
-        return { outcome: 'recorded' as const, workspaceId: account.workspaceId, smsMessageId: msg.id };
+        return {
+          outcome: 'recorded' as const,
+          workspaceId: account.workspaceId,
+          smsMessageId: msg.id,
+        };
       } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
           const dup = await tx.smsMessage.findFirst({
             where: { providerMessageId: input.providerMessageId, direction: 'RECEIVED' },
             select: { id: true },
           });
-          return { outcome: 'duplicate' as const, workspaceId: account.workspaceId, smsMessageId: dup?.id ?? null };
+          return {
+            outcome: 'duplicate' as const,
+            workspaceId: account.workspaceId,
+            smsMessageId: dup?.id ?? null,
+          };
         }
         throw err;
       }
@@ -429,7 +458,13 @@ export class SmsService {
   private async recordAction(
     tx: WorkspaceTxClient,
     workspaceId: string,
-    data: { kind: AgentActionKind; agentKey?: string | null; messageId?: string | null; actorUcUid?: string | null; detail?: string | null },
+    data: {
+      kind: AgentActionKind;
+      agentKey?: string | null;
+      messageId?: string | null;
+      actorUcUid?: string | null;
+      detail?: string | null;
+    },
   ): Promise<void> {
     await tx.agentActionEvent.create({
       data: {
@@ -488,7 +523,7 @@ export class SmsService {
       drafted_by: it.draftedBy ?? null,
       summary: it.summary ?? null,
       to: msg?.toPhoneNumber ?? null,
-      body_preview: msg ? msg.preview ?? this.snippet(msg.body) : null,
+      body_preview: msg ? (msg.preview ?? this.snippet(msg.body)) : null,
       reviewed_by_uc_uid: it.reviewedByUcUid ?? null,
       reviewed_at: it.reviewedAt ? it.reviewedAt.toISOString() : null,
       review_note: it.reviewNote ?? null,

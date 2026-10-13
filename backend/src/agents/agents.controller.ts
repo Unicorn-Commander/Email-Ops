@@ -38,7 +38,13 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
-import { AgentAutonomyLevel, AgentTier, MailboxAccessLevel, User, WorkspaceRole } from '@prisma/client';
+import {
+  AgentAutonomyLevel,
+  AgentTier,
+  MailboxAccessLevel,
+  User,
+  WorkspaceRole,
+} from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -178,6 +184,12 @@ export class AgentsController {
     }
   }
 
+  private assertCanPause(role: WorkspaceRole): void {
+    if (role !== WorkspaceRole.OWNER && role !== WorkspaceRole.ADMIN) {
+      throw new ForbiddenException('Only a workspace OWNER or ADMIN can pause or resume agents.');
+    }
+  }
+
   @Get()
   @ApiOperation({ summary: 'List the workspace’s registered agents (the fleet).' })
   @ApiResponse({ status: 200, description: 'The agents + count.' })
@@ -275,7 +287,10 @@ export class AgentsController {
     if (body.recipient_policy !== undefined) patch.recipientPolicy = body.recipient_policy;
     if (body.tier !== undefined) patch.tier = body.tier;
     if (body.manager_agent_key !== undefined) patch.managerAgentKey = body.manager_agent_key;
-    if (body.paused !== undefined) patch.paused = body.paused;
+    if (body.paused !== undefined) {
+      this.assertCanPause(role);
+      patch.paused = body.paused;
+    }
     if (body.active !== undefined) patch.active = body.active;
 
     // agent.edit, plus the ADMIN_ONLY agentMailbox gate when the send identity is
@@ -300,6 +315,50 @@ export class AgentsController {
     if (!updated) {
       throw new NotFoundException('Agent not found in this workspace.');
     }
+    return updated;
+  }
+
+  @Post(':id/pause')
+  @ApiOperation({ summary: 'Pause one agent (workspace owner/admin only).' })
+  @ApiResponse({ status: 200, description: 'The paused agent.' })
+  @ApiResponse({ status: 403, description: 'Only a workspace owner/admin may pause agents.' })
+  @ApiResponse({ status: 404, description: 'No such agent in this workspace.' })
+  async pause(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @WorkspaceRoleParam() role: WorkspaceRole,
+    @Param('id') id: string,
+  ) {
+    this.assertCanPause(role);
+    const updated = await this.agents.setPaused(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      id,
+      true,
+    );
+    if (!updated) throw new NotFoundException('Agent not found in this workspace.');
+    return updated;
+  }
+
+  @Post(':id/resume')
+  @ApiOperation({ summary: 'Resume one agent (workspace owner/admin only).' })
+  @ApiResponse({ status: 200, description: 'The resumed agent.' })
+  @ApiResponse({ status: 403, description: 'Only a workspace owner/admin may resume agents.' })
+  @ApiResponse({ status: 404, description: 'No such agent in this workspace.' })
+  async resume(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @WorkspaceRoleParam() role: WorkspaceRole,
+    @Param('id') id: string,
+  ) {
+    this.assertCanPause(role);
+    const updated = await this.agents.setPaused(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      id,
+      false,
+    );
+    if (!updated) throw new NotFoundException('Agent not found in this workspace.');
     return updated;
   }
 

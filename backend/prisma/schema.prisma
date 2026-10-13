@@ -198,6 +198,11 @@ enum AgentInboxKind {
   CLEANUP
 }
 
+enum AgentInboxApprovalTier {
+  OWNER_ADMIN
+  MAILBOX_OWNER
+}
+
 enum AgentSendKitState {
   PROPOSED
   APPROVED
@@ -401,6 +406,9 @@ model Workspace {
   // Kill switch: when true, agents cannot compose/send mail in this workspace
   // (a human approving an already-staged draft still works).
   agentsPaused      Boolean                @default(false)
+  // Optional workspace override for the deterministic agent-inbox approval
+  // classifier. NULL uses the built-in conservative keyword list.
+  approvalKeywords  Json?
   entitlementCache  Json? // offline/dedicated only; null on shared SaaS
   syncedAt          DateTime               @default(now())
   createdAt         DateTime               @default(now())
@@ -1122,6 +1130,10 @@ model AgentInboxItem {
   // path is untouched.
   smsMessageId    String?         @unique
   kind            AgentInboxKind  @default(EMAIL)
+  // The approval authority required by the deterministic content classifier.
+  approvalTier    AgentInboxApprovalTier @default(MAILBOX_OWNER)
+  // The first matched currency, percentage, or configured keyword, for review UI.
+  approvalReason  String?
   payload         Json?
   state           AgentInboxState @default(PENDING)
   // Which agent/source drafted this (provenance; 'customer-ops' for a cockpit

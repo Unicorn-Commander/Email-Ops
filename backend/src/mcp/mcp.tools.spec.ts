@@ -53,19 +53,32 @@ describe('EmailOpsTools', () => {
     function threadTools(messages: unknown[] = []) {
       const email = { listThreadMessages: jest.fn().mockResolvedValue(messages) };
       const membership = { resolveAndAuthorize: jest.fn().mockResolvedValue('ws-1') };
-      const t = new EmailOpsTools(membership as any, email as any,
-        {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any);
+      const t = new EmailOpsTools(
+        membership as any,
+        email as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
       return { t, email, membership };
     }
     it.each(['getThread', 'listThreadMessages'] as const)(
-      '%s errors for an empty implicit-default lookup', async (method) => {
+      '%s errors for an empty implicit-default lookup',
+      async (method) => {
         const { t } = threadTools();
-        await expect(t[method]({} as any, { thread_id: 'external-thread' }))
-          .rejects.toThrow('Pass mailbox_id from search_mail or list_threads');
+        await expect(t[method]({} as any, { thread_id: 'external-thread' })).rejects.toThrow(
+          'Pass mailbox_id from search_mail or list_threads',
+        );
       },
     );
     it.each(['getThread', 'listThreadMessages'] as const)(
-      '%s passes explicit source and preserves empty scoped responses', async (method) => {
+      '%s passes explicit source and preserves empty scoped responses',
+      async (method) => {
         const { t, email } = threadTools();
         const result = await t[method]({} as any, { thread_id: 'external', mailbox_id: 'mb-1' });
         expect(result.messages).toEqual([]);
@@ -74,14 +87,17 @@ describe('EmailOpsTools', () => {
     );
     it('keeps existing successful default-mailbox reads', async () => {
       const { t } = threadTools([{ id: 'message' }]);
-      expect(await t.getThread({} as any, { thread_id: 'local' }))
-        .toEqual({ messages: [{ id: 'message' }], count: 1 });
+      expect(await t.getThread({} as any, { thread_id: 'local' })).toEqual({
+        messages: [{ id: 'message' }],
+        count: 1,
+      });
     });
     it('rejects workspace resolution before mail access', async () => {
       const { t, email, membership } = threadTools();
       membership.resolveAndAuthorize.mockRejectedValue(new ForbiddenException());
-      await expect(t.getThread({} as any, { thread_id: 'external', mailbox_id: 'other' }))
-        .rejects.toThrow(ForbiddenException);
+      await expect(
+        t.getThread({} as any, { thread_id: 'external', mailbox_id: 'other' }),
+      ).rejects.toThrow(ForbiddenException);
       expect(email.listThreadMessages).not.toHaveBeenCalled();
     });
   });
@@ -107,8 +123,88 @@ describe('EmailOpsTools', () => {
       (admin.isConfigured as jest.Mock).mockReturnValue(true);
       (admin.ensureDomain as jest.Mock).mockResolvedValue({ provisioned: true });
 
-      const result = await tools.ensureMailDomain({} as any, { workspace_id: 'ws-1', domain: 'example.com' });
+      const result = await tools.ensureMailDomain({} as any, {
+        workspace_id: 'ws-1',
+        domain: 'example.com',
+      });
       expect(result.status).toBe('ok');
+    });
+  });
+
+  describe('agent pause controls and inbox shapes', () => {
+    it('returns the paused agent shape for an ADMIN and refuses a MEMBER', async () => {
+      const membership = { resolveWithRole: jest.fn() } as any;
+      const agents = {
+        setPaused: jest.fn().mockResolvedValue({ id: 'agent-1', paused: true }),
+      } as any;
+      const t = new EmailOpsTools(
+        membership,
+        {} as any,
+        agents,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+      membership.resolveWithRole.mockResolvedValue({
+        workspaceId: 'ws-1',
+        role: WorkspaceRole.ADMIN,
+      });
+
+      await expect(
+        t.pauseAgent({ __ucUid: 'uid-1' } as any, { agent_id: 'agent-1' }),
+      ).resolves.toEqual({
+        ok: true,
+        agent: { id: 'agent-1', paused: true },
+      });
+      expect(agents.setPaused).toHaveBeenCalledWith('ws-1', 'uid-1', 'agent-1', true);
+
+      membership.resolveWithRole.mockResolvedValue({
+        workspaceId: 'ws-1',
+        role: WorkspaceRole.MEMBER,
+      });
+      await expect(
+        t.pauseAgent({ __ucUid: 'uid-1' } as any, { agent_id: 'agent-1' }),
+      ).rejects.toThrow('Only a workspace OWNER or ADMIN');
+      expect(agents.setPaused).toHaveBeenCalledTimes(1);
+    });
+
+    it('passes approval tier and matched reason through list_agent_inbox', async () => {
+      const membership = { resolveAndAuthorize: jest.fn().mockResolvedValue('ws-1') } as any;
+      const email = {
+        listAgentInbox: jest
+          .fn()
+          .mockResolvedValue([
+            {
+              id: 'item-1',
+              approval_tier: 'owner_admin',
+              approval_reason: 'currency amount: $900',
+            },
+          ]),
+        countAgentInboxPending: jest.fn().mockResolvedValue(1),
+      } as any;
+      const t = new EmailOpsTools(
+        membership,
+        email,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+
+      await expect(t.listAgentInbox({ __ucUid: 'uid-1' } as any, {})).resolves.toEqual({
+        items: [
+          { id: 'item-1', approval_tier: 'owner_admin', approval_reason: 'currency amount: $900' },
+        ],
+        count: 1,
+      });
     });
   });
 
@@ -134,7 +230,10 @@ describe('EmailOpsTools', () => {
       (admin.isConfigured as jest.Mock).mockReturnValue(true);
       (admin.setQuota as jest.Mock).mockResolvedValue({ provisioned: true });
 
-      const result = await tools.setMailboxQuota({} as any, { workspace_id: 'ws-1', address: 'user@example.com' });
+      const result = await tools.setMailboxQuota({} as any, {
+        workspace_id: 'ws-1',
+        address: 'user@example.com',
+      });
       expect(result.status).toBe('ok');
     });
   });
@@ -192,7 +291,11 @@ describe('EmailOpsTools', () => {
         }),
       };
       const t = toolsWith(email);
-      const res = await t.searchMail({} as any, { workspace_id: 'ws-1', mailbox_id: 'mb-g', q: 'invoice' });
+      const res = await t.searchMail({} as any, {
+        workspace_id: 'ws-1',
+        mailbox_id: 'mb-g',
+        q: 'invoice',
+      });
       expect(res.search_supported).toBe(true);
       expect(res.has_more).toBe(true);
       expect(res.next_page_token).toBe('nx');
@@ -234,7 +337,10 @@ describe('EmailOpsTools', () => {
       );
     }
 
-    const view = (threadId: string, over: Partial<{ moved: boolean; viewEffective: boolean }> = {}) => ({
+    const view = (
+      threadId: string,
+      over: Partial<{ moved: boolean; viewEffective: boolean }> = {},
+    ) => ({
       thread_id: threadId,
       disposition: MessageDisposition.TRASH,
       set_by_uc_uid: '',
@@ -404,7 +510,13 @@ describe('EmailOpsTools', () => {
           {
             id: 'm1',
             attachments: [
-              { blob_id: 'msg-1::att-1', name: 'invoice.pdf', type: 'application/pdf', size: 5, cid: null },
+              {
+                blob_id: 'msg-1::att-1',
+                name: 'invoice.pdf',
+                type: 'application/pdf',
+                size: 5,
+                cid: null,
+              },
             ],
           },
         ]),
@@ -434,8 +546,20 @@ describe('EmailOpsTools', () => {
           {
             id: 'msg-1',
             attachments: [
-              { blob_id: 'msg-1::ROTATED-A', name: 'analysis.docx', type: 'application/msword-x', size: 13671, cid: null },
-              { blob_id: 'msg-1::ROTATED-B', name: 'other.docx', type: 'application/msword-x', size: 19256, cid: null },
+              {
+                blob_id: 'msg-1::ROTATED-A',
+                name: 'analysis.docx',
+                type: 'application/msword-x',
+                size: 13671,
+                cid: null,
+              },
+              {
+                blob_id: 'msg-1::ROTATED-B',
+                name: 'other.docx',
+                type: 'application/msword-x',
+                size: 19256,
+                cid: null,
+              },
             ],
           },
         ]),
@@ -454,7 +578,9 @@ describe('EmailOpsTools', () => {
     it('over the size cap: returns { error, size, max_bytes } and NO bytes (never truncates)', async () => {
       const big = Buffer.alloc(MCP_ATTACHMENT_MAX_BYTES + 1);
       const email: Partial<EmailService> = {
-        downloadAttachment: jest.fn().mockResolvedValue({ data: big, contentType: 'video/mp4', filename: 'big.mp4' }),
+        downloadAttachment: jest
+          .fn()
+          .mockResolvedValue({ data: big, contentType: 'video/mp4', filename: 'big.mp4' }),
       };
       const t = toolsWith(email);
       const res: any = await t.getAttachment({} as any, {
@@ -571,7 +697,9 @@ describe('EmailOpsTools', () => {
         to_address: 'a@acme.test',
         send_at: sendAt,
         kit_id: 'kit-1',
-        attachments: [{ filename: 'brief.txt', content_type: 'text/plain', content_base64: 'SGk=' }],
+        attachments: [
+          { filename: 'brief.txt', content_type: 'text/plain', content_base64: 'SGk=' },
+        ],
       });
       expect(composeEmail).toHaveBeenCalledWith(
         'ws-1',

@@ -109,7 +109,14 @@ export class AgentsService {
       if (input.mailboxAccountId) {
         await this.setPrimaryMailbox(tx, workspaceId, created.id, input.mailboxAccountId);
       }
-      await this.recordAgentAction(tx, workspaceId, AgentActionKind.AGENT_CREATED, created.key, ucUid, null);
+      await this.recordAgentAction(
+        tx,
+        workspaceId,
+        AgentActionKind.AGENT_CREATED,
+        created.key,
+        ucUid,
+        null,
+      );
 
       const fresh = await tx.agent.findFirstOrThrow({ where: { id: created.id } });
       return this.toViewOne(tx, workspaceId, fresh, await resolveMailboxScope(tx, workspaceId, ucUid));
@@ -156,10 +163,42 @@ export class AgentsService {
       }
 
       const auditKind =
-        patch.autonomyLevel !== undefined
-          ? AgentActionKind.AUTONOMY_CHANGED
-          : AgentActionKind.AGENT_UPDATED;
+        patch.paused !== undefined && patch.paused !== existing.paused
+          ? patch.paused
+            ? AgentActionKind.PAUSED
+            : AgentActionKind.RESUMED
+          : patch.autonomyLevel !== undefined
+            ? AgentActionKind.AUTONOMY_CHANGED
+            : AgentActionKind.AGENT_UPDATED;
       await this.recordAgentAction(tx, workspaceId, auditKind, existing.key, ucUid, null);
+
+      const updated = await tx.agent.findFirstOrThrow({ where: { id: existing.id } });
+      return this.toViewOne(tx, workspaceId, updated, await resolveMailboxScope(tx, workspaceId, ucUid));
+    });
+  }
+
+  /** Toggle one agent's kill switch and record the governance event. */
+  async setPaused(
+    workspaceId: string,
+    ucUid: string | null,
+    id: string,
+    paused: boolean,
+  ): Promise<AgentView | null> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const existing = await tx.agent.findFirst({ where: { id, workspaceId } });
+      if (!existing) return null;
+
+      if (existing.paused !== paused) {
+        await tx.agent.update({ where: { id: existing.id }, data: { paused } });
+        await this.recordAgentAction(
+          tx,
+          workspaceId,
+          paused ? AgentActionKind.PAUSED : AgentActionKind.RESUMED,
+          existing.key,
+          ucUid,
+          paused ? 'Agent paused' : 'Agent resumed',
+        );
+      }
 
       const updated = await tx.agent.findFirstOrThrow({ where: { id: existing.id } });
       return this.toViewOne(tx, workspaceId, updated, await resolveMailboxScope(tx, workspaceId, ucUid));
@@ -187,7 +226,14 @@ export class AgentsService {
         await this.upsertBinding(tx, workspaceId, agentId, input.mailboxAccountId, access, false);
         await this.setPrimaryMailbox(tx, workspaceId, agentId, input.mailboxAccountId);
       } else {
-        await this.upsertBinding(tx, workspaceId, agentId, input.mailboxAccountId, requested, false);
+        await this.upsertBinding(
+          tx,
+          workspaceId,
+          agentId,
+          input.mailboxAccountId,
+          requested,
+          false,
+        );
       }
       // Safety net: enforce the one-primary + cache invariant from ANY state
       // (e.g. re-binding the current primary as non-primary must not orphan the

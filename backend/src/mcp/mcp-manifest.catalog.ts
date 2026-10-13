@@ -101,6 +101,56 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
       "read_only": true
     },
     {
+      "name": "pause_agent",
+      "description": "Pause one registered agent so its agent-originated writes are refused. Only a workspace OWNER or ADMIN may use this control; the change is audited.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "admin:provision"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "resume_agent",
+      "description": "Resume one registered agent after a pause. Only a workspace OWNER or ADMIN may use this control; the change is audited.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "admin:provision"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
       "name": "provision_mailbox",
       "description": "Create a mailbox (human / agent / shared) by talking to an agent. Runs AS the calling user: the workspace provisioning policy is enforced with the user’s own role — so this only does what that user is allowed to. Returns {status:\"created\", mailbox} when applied, or {status:\"pending_approval\", request} when the policy requires an approver (a human approves it in the Mailboxes view). owner_kind AGENT is the higher-trust send-identity path (admin by default).",
       "input_schema": {

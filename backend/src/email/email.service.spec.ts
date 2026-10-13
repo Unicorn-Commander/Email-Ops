@@ -1,3 +1,4 @@
+import { ConflictException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
@@ -17,7 +18,7 @@ import {
   StalwartUploadResult,
 } from '../stalwart/stalwart.types';
 import { EmailService } from './email.service';
-import { AgentAutonomyLevel, MessageDisposition } from '@prisma/client';
+import { AgentAutonomyLevel, MessageDisposition, WorkspaceRole } from '@prisma/client';
 import { TEST_DATABASE_URL } from '../../test/test-db';
 
 /**
@@ -145,7 +146,13 @@ class FakeStalwart extends StalwartPort {
   ): Promise<StalwartSendResult> {
     this.sendCalls.push({ req, transactional });
     if (!this.acceptSend) {
-      return { accepted: false, providerMessageId: null, threadId: null, lane: 'stalwart', reason: 'rejected' };
+      return {
+        accepted: false,
+        providerMessageId: null,
+        threadId: null,
+        lane: 'stalwart',
+        reason: 'rejected',
+      };
     }
     return {
       accepted: true,
@@ -213,7 +220,12 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       handles: () => false,
       listInbox: async () => [],
       listThreadMessages: async () => [],
-      send: async () => ({ accepted: false, providerMessageId: null, threadId: null, reason: 'test' }),
+      send: async () => ({
+        accepted: false,
+        providerMessageId: null,
+        threadId: null,
+        reason: 'test',
+      }),
     } as any);
   });
 
@@ -387,7 +399,10 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
           key,
           displayName: 'L2 Policy Agent',
           autonomyLevel: AgentAutonomyLevel.L2_AUTONOMOUS_AUDIT,
-          recipientPolicy: { requireApprovalForExternal: true, internalDomains: ['magicunicorn.tech'] },
+          recipientPolicy: {
+            requireApprovalForExternal: true,
+            internalDomains: ['magicunicorn.tech'],
+          },
         },
       });
       const result = await service.composeEmail(WS, UC_UID, {
@@ -503,7 +518,7 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
 
     it('blocks a PAUSED agent (the per-agent kill switch)', async () => {
       const key = `paused-agent-${Date.now()}`;
-      await prisma.agent.create({
+      const agent = await prisma.agent.create({
         data: {
           workspaceId: WS,
           key,
@@ -522,7 +537,19 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
           externalSource: key,
           externalRef: `pa-${Date.now()}`,
         }),
-      ).rejects.toThrow(/paused/i);
+      ).rejects.toBeInstanceOf(ConflictException);
+
+      await prisma.agent.update({ where: { id: agent.id }, data: { paused: false } });
+      const resumed = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'x@acme.test',
+        subject: 'after resume',
+        body: 'Routine reply.',
+        mode: 'draft',
+        externalSource: key,
+        externalRef: `pa-resumed-${Date.now()}`,
+      });
+      expect(resumed.status).toBe('pending_approval');
     });
   });
 
@@ -539,7 +566,11 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
         externalSource: 'customer-ops',
         externalRef: ref,
       });
-      expect(result).toMatchObject({ status: 'pending_approval', mode: 'draft', external_ref: ref });
+      expect(result).toMatchObject({
+        status: 'pending_approval',
+        mode: 'draft',
+        external_ref: ref,
+      });
       // The engine was NOT called — a draft never leaves until approved.
       expect(stalwart.sendCalls).toHaveLength(0);
 
@@ -550,6 +581,45 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       expect(item).toBeTruthy();
       expect(item?.state).toBe('PENDING');
       expect(item?.draftedBy).toBe('customer-ops');
+    });
+
+    it('stamps the content approval tier and exposes it in the inbox view', async () => {
+      const routine = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'routine@acme.test',
+        subject: 'Re: Tuesday',
+        body: 'Thanks, that works for me.',
+        mode: 'draft',
+        externalSource: 'customer-ops',
+        externalRef: `routine-tier-${Date.now()}`,
+      });
+      const routineItem = await prisma.agentInboxItem.findUniqueOrThrow({
+        where: { messageId: routine.id },
+      });
+      expect(routineItem.approvalTier).toBe('MAILBOX_OWNER');
+      expect(routineItem.approvalReason).toBeNull();
+
+      const commercial = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'commercial@acme.test',
+        subject: 'Pricing proposal',
+        body: 'We can offer 20% off the $900 package.',
+        mode: 'draft',
+        externalSource: 'customer-ops',
+        externalRef: `commercial-tier-${Date.now()}`,
+      });
+      const commercialItem = await prisma.agentInboxItem.findUniqueOrThrow({
+        where: { messageId: commercial.id },
+      });
+      expect(commercialItem.approvalTier).toBe('OWNER_ADMIN');
+      expect(commercialItem.approvalReason).toMatch(/currency amount|percentage/);
+
+      const listed = await service.listAgentInbox(WS, UC_UID);
+      const view = listed.find((item) => item.id === commercialItem.id);
+      expect(view).toMatchObject({
+        approval_tier: 'owner_admin',
+        approval_reason: commercialItem.approvalReason,
+      });
     });
   });
 
@@ -581,6 +651,81 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
   });
 
   describe('agent-inbox approve / reject flow', () => {
+    it('lets the mailbox owner approve routine mail but requires owner/admin for commercial drafts', async () => {
+      const mailbox = await prisma.mailboxAccount.create({
+        data: {
+          workspaceId: WS,
+          emailAddress: `james-${Date.now()}@magicunicorn.tech`,
+          displayName: 'James',
+          ownerKind: 'HUMAN',
+          ownerKey: UC_UID,
+        },
+      });
+      const routine = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        fromAddress: mailbox.emailAddress,
+        toAddress: 'routine-approval@acme.test',
+        subject: 'Re: Tuesday',
+        body: 'Thanks, that works for me.',
+        mode: 'draft',
+        externalSource: 'customer-ops',
+        externalRef: `routine-approval-${Date.now()}`,
+      });
+      const routineItem = await prisma.agentInboxItem.findUniqueOrThrow({
+        where: { messageId: routine.id },
+      });
+      expect(routineItem.approvalTier).toBe('MAILBOX_OWNER');
+      const routineApproved = await service.approveAgentInboxItem(
+        WS,
+        UC_UID,
+        routineItem.id,
+        null,
+        false,
+        false,
+        WorkspaceRole.MEMBER,
+      );
+      expect(routineApproved?.inbox.state).toBe('approved');
+
+      const draft = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'commercial-approval@acme.test',
+        subject: 'Contract pricing',
+        body: 'Please approve the $900 contract.',
+        mode: 'draft',
+        externalSource: 'customer-ops',
+        externalRef: `tier-approval-${Date.now()}`,
+      });
+      const item = await prisma.agentInboxItem.findUniqueOrThrow({
+        where: { messageId: draft.id },
+      });
+
+      await expect(
+        service.approveAgentInboxItem(
+          WS,
+          'uc-mailbox-member',
+          item.id,
+          null,
+          false,
+          false,
+          WorkspaceRole.MEMBER,
+        ),
+      ).rejects.toThrow('This draft requires a workspace OWNER or ADMIN to approve.');
+      expect((await prisma.agentInboxItem.findUnique({ where: { id: item.id } }))?.state).toBe(
+        'PENDING',
+      );
+
+      const approved = await service.approveAgentInboxItem(
+        WS,
+        UC_UID,
+        item.id,
+        null,
+        false,
+        false,
+        WorkspaceRole.ADMIN,
+      );
+      expect(approved?.inbox.state).toBe('approved');
+    });
+
     it('APPROVE sends the staged draft (PENDING → APPROVED; message → sent)', async () => {
       const ref = `appr-${Date.now()}`;
       const draft = await service.composeEmail(WS, UC_UID, {
@@ -627,7 +772,9 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
         externalSource: 'customer-ops',
         externalRef: ref,
       });
-      const item = await prisma.agentInboxItem.findUniqueOrThrow({ where: { messageId: draft.id } });
+      const item = await prisma.agentInboxItem.findUniqueOrThrow({
+        where: { messageId: draft.id },
+      });
 
       await service.approveAgentInboxItem(WS, 'uc-approver', item.id, 'ship it');
       expect(stalwart.sendCalls).toHaveLength(1);
@@ -638,7 +785,9 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       expect(sent.cc).toEqual(['cc1@acme.test']);
       expect(sent.bcc).toEqual(['bcc1@acme.test']);
       expect(sent.bodyHtml).toBe('<p>rich body</p>');
-      expect(sent.attachments).toEqual([{ blobId: 'blob-9', name: 'deck.pdf', type: 'application/pdf' }]);
+      expect(sent.attachments).toEqual([
+        { blobId: 'blob-9', name: 'deck.pdf', type: 'application/pdf' },
+      ]);
     });
 
     it('REJECT marks the message REJECTED and never sends', async () => {
@@ -711,7 +860,12 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
         handles: (mb: { provider: string }) => mb.provider === 'gmail',
         listInbox: async () => [],
         listThreadMessages: async () => [],
-        send: async () => ({ accepted: false, providerMessageId: null, threadId: null, reason: 'test' }),
+        send: async () => ({
+          accepted: false,
+          providerMessageId: null,
+          threadId: null,
+          reason: 'test',
+        }),
         archiveThread: jest.fn().mockResolvedValue(false),
         trashThread: jest.fn().mockResolvedValue(false),
         spamThread: jest.fn().mockResolvedValue(false),
@@ -808,7 +962,12 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       });
       const { service: svc } = externalService();
 
-      const out = await svc.applyThreadDisposition(WS, UC_UID, threadId, MessageDisposition.ARCHIVE);
+      const out = await svc.applyThreadDisposition(
+        WS,
+        UC_UID,
+        threadId,
+        MessageDisposition.ARCHIVE,
+      );
 
       expect(out.moved).toBe(false);
       expect(out.viewEffective).toBe(true);
@@ -1021,7 +1180,9 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
         externalSource: 'customer-ops',
         externalRef: ref,
       });
-      const item = await prisma.agentInboxItem.findUniqueOrThrow({ where: { messageId: draft.id } });
+      const item = await prisma.agentInboxItem.findUniqueOrThrow({
+        where: { messageId: draft.id },
+      });
       await service.approveAgentInboxItem(WS, 'uc-approver', item.id, 'ok');
       expect(stalwart.sendCalls).toHaveLength(1);
       expect(stalwart.sendCalls[0].req.toAddresses).toEqual(['a@acme.test', 'b@acme.test']);
