@@ -1050,6 +1050,16 @@ export class JamesClient extends StalwartPort {
     }
   }
 
+  /** James can carry both stored blob references and inline compose bytes. */
+  supportsAttachments(_transactional: boolean, _attachments: unknown[] = []): boolean {
+    return this.jmapUrl !== null;
+  }
+
+  /** James materializes inline compose bytes in its own blob store before JMAP send. */
+  supportsInlineAttachments(): boolean {
+    return false;
+  }
+
   async send(
     mailbox: string,
     request: StalwartSendRequest,

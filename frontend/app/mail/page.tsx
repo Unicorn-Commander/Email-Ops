@@ -823,7 +823,12 @@ export default function MailPage() {
       bodyHtml: body.body_html,
       draftId: body.draft_id ?? null,
       // The blob refs are what matter; size is unknown post-hoc (display-only).
-      attachments: body.attachments?.map((a) => ({ ...a, size: 0 })),
+      attachments: body.attachments
+        ?.filter(
+          (a): a is Extract<typeof a, { blob_id: string }> =>
+            'blob_id' in a && typeof a.blob_id === 'string',
+        )
+        .map((a) => ({ ...a, size: 0 })),
       thread_id: body.in_reply_to_thread_id,
     });
     setComposeOpen(true);

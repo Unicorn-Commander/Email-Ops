@@ -47,6 +47,44 @@ import { TrustedCorrespondentsService } from '../trusted-correspondents/trusted-
 import { enforceMcpToolScope, McpToolName, PatTaggedIdentity } from './mcp-scopes';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
+const COMPOSE_ATTACHMENT = z
+  .object({
+    documentId: z.string().min(1).max(200).optional(),
+    document_id: z.string().min(1).max(200).optional(),
+    blobId: z.string().min(1).max(200).optional(),
+    blob_id: z.string().min(1).max(200).optional(),
+    filename: z.string().min(1).max(255).optional(),
+    name: z.string().min(1).max(255).optional(),
+    contentType: z.string().min(1).max(200).optional(),
+    content_type: z.string().min(1).max(200).optional(),
+    type: z.string().min(1).max(200).optional(),
+    contentBase64: z.string().min(1).optional(),
+    content_base64: z.string().min(1).optional(),
+  })
+  .superRefine((attachment, ctx) => {
+    const documentId = attachment.documentId ?? attachment.document_id;
+    const blobId = attachment.blobId ?? attachment.blob_id;
+    const filename = attachment.filename ?? attachment.name;
+    const contentType = attachment.contentType ?? attachment.content_type ?? attachment.type;
+    const contentBase64 = attachment.contentBase64 ?? attachment.content_base64;
+    const hasInline = Boolean(
+      filename || contentType || contentBase64,
+    );
+    const sourceCount = Number(Boolean(documentId)) + Number(Boolean(blobId)) + Number(hasInline);
+
+    if (sourceCount !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Attachment must use exactly one of documentId, blobId, or inline content.',
+      });
+    }
+    if (hasInline && (!filename || !contentType || !contentBase64)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Inline attachments require filename, contentType, and contentBase64.',
+      });
+    }
+  });
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
 const SEND_KIT_STATE = z.enum(['PROPOSED', 'APPROVED', 'REJECTED']);
 const MAIL_FOLDER = z.enum(['inbox', 'archive', 'spam', 'trash', 'sent', 'drafts']);
@@ -393,8 +431,11 @@ export class McpService {
           'Microsoft Graph, Gmail through the Gmail API, sovereign domains through Apache ' +
           'James (Postmark for the transactional high-rep lane). Omit from_address to use ' +
           'the agent’s own mailbox or the workspace default, as before. ' +
-          'ATTACHMENTS: optional attachments (maximum 5 files / 10 MB total) use ' +
-          '{filename, content_type, content_base64}; they are retained through Graph, Gmail, and James/JMAP. ' +
+          'ATTACHMENTS: optional attachments are either {documentId} for an Email-Ops-stored document the caller may read, or ' +
+          '{filename, contentType, contentBase64}. Defaults are at most 5 files, 10 MiB per file, 20 MiB total, and ' +
+          'pdf/png/jpg/txt/csv/md/docx/xlsx; EMAIL_OPS_ATTACHMENT_* settings may tighten or extend these. ' +
+          'The selected lane must support attachments or compose is refused; supported attachments are retained through ' +
+          'Graph, Gmail, Postmark, and James/JMAP. Snake-case fields remain accepted for compatibility. ' +
           'For mode=draft, send_at may defer delivery from 5 minutes to 14 days; rejection before that time skips it. ' +
           'RECIPIENTS: to_address is the back-compat single To; to_addresses (1-50) is the ' +
           'full To list — if both are set, to_address MUST equal the first entry. cc and ' +
@@ -427,16 +468,7 @@ export class McpService {
           // mailbox picker (own HUMAN box or a SHARED box; never an agent's), and
           // REFUSED outright when the workspace has no mailbox for that address.
           from_address: z.string().min(3).max(320).optional(),
-          attachments: z
-            .array(
-              z.object({
-                filename: z.string().min(1),
-                content_type: z.string().min(1),
-                content_base64: z.string().min(1),
-              }),
-            )
-            .max(5)
-            .optional(),
+          attachments: z.array(COMPOSE_ATTACHMENT).max(20).optional(),
           send_at: z.string().optional(),
           kit_id: z.string().max(200).optional(),
         },

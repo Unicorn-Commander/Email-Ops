@@ -79,6 +79,7 @@ import {
   AutoSentItemView,
   BulkActionResult,
   ComposeInput,
+  ComposeAttachmentInput,
   EngagementCaptureInput,
   EngagementCaptureResult,
   MailboxCountsView,
@@ -121,6 +122,11 @@ import {
   toResolved,
   type ResolvedComposeRecipients,
 } from './compose-recipients';
+import {
+  composeAttachmentPolicy,
+  NormalizedComposeAttachment,
+  validateComposeAttachments,
+} from './compose-attachments';
 
 /**
  * Fan-out bounds for the multi-mailbox webmail endpoints (unified inbox +
@@ -230,6 +236,12 @@ type ComposeDraftMirror = {
   inboxItemId: string;
   mailbox: MailboxAccount;
   req: MailProviderDraftRequest;
+  attachments: {
+    blobId?: string;
+    filename: string;
+    mimeType: string;
+    contentBase64?: string;
+  }[];
 };
 
 type ComposePrep =
@@ -1218,11 +1230,34 @@ export class EmailService {
     return { blob_id: up.blobId, name: filename, type: up.type, size: up.size };
   }
 
+  /** Read staged external bytes for a provider-side draft mirror without consuming them. */
+  private async readOutboundAttachments(
+    mailbox: MailboxAccount,
+    blobIds: string[],
+  ): Promise<{ id: string; filename: string; mimeType: string; contentBase64: string }[]> {
+    if (!blobIds.length) return [];
+    return this.prisma.withWorkspace(mailbox.workspaceId, null, async (tx) => {
+      const rows = await tx.outboundAttachment.findMany({
+        where: { id: { in: [...new Set(blobIds)] }, mailboxId: mailbox.id },
+      });
+      const byId = new Map(rows.map((row) => [row.id, row]));
+      return blobIds
+        .map((id) => byId.get(id))
+        .filter((row): row is NonNullable<typeof row> => !!row)
+        .map((row) => ({
+          id: row.id,
+          filename: row.filename,
+          mimeType: row.mimeType,
+          contentBase64: Buffer.from(row.bytes).toString('base64'),
+        }));
+    });
+  }
+
   /**
    * Resolve staged external outbound-attachment blob ids to inline bytes for the
-   * provider send, and DELETE the rows (consume-on-send). Ids that don't resolve
-   * (foreign / already consumed) are skipped — a caller that references a stale
-   * id simply sends without that file rather than 500ing. Scoped to the
+   * provider send, and DELETE the rows (consume-on-send) only after every
+   * referenced row resolves. A foreign/stale id returns an empty result so the
+   * caller refuses the send without consuming a partial set. Scoped to the
    * mailbox's workspace via RLS.
    */
   private async resolveOutboundAttachments(
@@ -1231,11 +1266,16 @@ export class EmailService {
   ): Promise<{ filename: string; mimeType: string; contentBase64: string }[]> {
     if (!blobIds.length) return [];
     return this.prisma.withWorkspace(mailbox.workspaceId, null, async (tx) => {
+      const uniqueIds = [...new Set(blobIds)];
       const rows = await tx.outboundAttachment.findMany({
-        where: { id: { in: blobIds }, mailboxId: mailbox.id },
+        where: { id: { in: uniqueIds }, mailboxId: mailbox.id },
       });
+      // A partial lookup is a failed compose, not a reason to consume the
+      // attachments that did resolve. Preserve every row so an approver can
+      // retry after the stale/foreign reference is corrected.
+      if (rows.length !== uniqueIds.length) return [];
       if (rows.length) {
-        await tx.outboundAttachment.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } });
+        await tx.outboundAttachment.deleteMany({ where: { id: { in: uniqueIds } } });
       }
       // Preserve the caller's order (findMany does not guarantee it).
       const byId = new Map(rows.map((r) => [r.id, r]));
@@ -1752,13 +1792,9 @@ export class EmailService {
     ucUid: string | null,
     input: ComposeInput,
   ): Promise<MessageComposeView> {
-    this.validateComposeAttachments(input.attachments);
     input = {
       ...input,
-      attachments: input.attachments?.map((a) => ({
-        ...a,
-        ...(a.content_base64 ? { size: Buffer.from(a.content_base64, 'base64').length } : {}),
-      })),
+      attachments: this.normalizeComposeAttachments(input.attachments),
     };
     if (input.sendAt) {
       const now = Date.now();
@@ -1911,6 +1947,20 @@ export class EmailService {
           throw new NotFoundException('Mailbox not found.');
         }
         const fromAddress = mailbox?.emailAddress ?? null;
+
+        // Resolve Email-Ops document references while the workspace RLS context
+        // and the selected send mailbox are both known. The normalized payload is
+        // what gets staged, reviewed, mirrored, and later replayed on approval.
+        input = {
+          ...input,
+          attachments: await this.resolveComposeAttachmentDocuments(
+            tx,
+            workspaceId,
+            mailbox,
+            input.attachments,
+          ),
+        };
+        this.assertAttachmentLaneSupports(mailbox, input.attachments);
 
         // Enforce the autonomy dial — gate send-vs-draft by the agent's level +
         // recipient policy. Conservative: the decision only ever makes a send MORE
@@ -2078,13 +2128,14 @@ export class EmailService {
                     bodyHtml: input.bodyHtml ?? null,
                     cc: input.cc,
                     bcc: input.bcc,
-                    attachments: input.attachments?.map((a) => ({
-                      filename: a.filename ?? a.name,
-                      mimeType: a.content_type ?? a.type,
-                      contentBase64: a.content_base64 ?? '',
-                    })),
                     inReplyToThreadId: input.inReplyToThreadId ?? null,
                   },
+                  attachments: (input.attachments ?? []).map((a) => ({
+                    ...(a.blob_id ? { blobId: a.blob_id } : {}),
+                    filename: a.filename ?? a.name ?? 'attachment',
+                    mimeType: a.content_type ?? a.type ?? 'application/octet-stream',
+                    ...(a.content_base64 ? { contentBase64: a.content_base64 } : {}),
+                  })),
                 }
               : undefined;
           return { done: this.composeView(msg), notify, mirror };
@@ -3807,8 +3858,16 @@ export class EmailService {
             : typeof a.blob_id === 'string'
               ? a.blob_id
               : null,
-        name: typeof a.name === 'string' ? a.name : null,
-        type: typeof a.type === 'string' ? a.type : null,
+        name:
+          typeof a.name === 'string' ? a.name : typeof a.filename === 'string' ? a.filename : null,
+        type:
+          typeof a.type === 'string'
+            ? a.type
+            : typeof a.content_type === 'string'
+              ? a.content_type
+              : typeof a.contentType === 'string'
+                ? a.contentType
+                : null,
         ...(typeof a.size === 'number' ? { size: a.size } : {}),
       }));
   }
@@ -3836,7 +3895,33 @@ export class EmailService {
     mirror: ComposeDraftMirror,
   ): Promise<void> {
     try {
-      const res = await this.mailProvider.createDraft(mirror.mailbox, mirror.req);
+      const blobIds = mirror.attachments
+        .map((attachment) => attachment.blobId)
+        .filter((id): id is string => !!id);
+      const staged = await this.readOutboundAttachments(mirror.mailbox, blobIds);
+      const stagedById = new Map(staged.map((attachment) => [attachment.id, attachment]));
+      const attachments = mirror.attachments.map((attachment) => {
+        if (!attachment.blobId) {
+          return {
+            filename: attachment.filename,
+            mimeType: attachment.mimeType,
+            contentBase64: attachment.contentBase64 ?? '',
+          };
+        }
+        const stored = stagedById.get(attachment.blobId);
+        if (!stored) {
+          throw new Error(`attachment document ${attachment.blobId} is no longer readable`);
+        }
+        return {
+          filename: stored.filename,
+          mimeType: stored.mimeType,
+          contentBase64: stored.contentBase64,
+        };
+      });
+      const res = await this.mailProvider.createDraft(mirror.mailbox, {
+        ...mirror.req,
+        attachments: attachments.length ? attachments : undefined,
+      });
       if (!res.created || !res.draftId) {
         this.logger.warn(
           `compose_email draft mirror NOT created in ${mirror.mailbox.provider} for inbox item ` +
@@ -4275,25 +4360,124 @@ export class EmailService {
 
   // ── helpers ────────────────────────────────────────────────────────────
 
-  private validateComposeAttachments(attachments?: ComposeInput['attachments']): void {
-    if (!attachments?.length) return;
-    if (attachments.length > 5) throw new BadRequestException('At most 5 attachments are allowed.');
-    let total = 0;
-    for (const a of attachments) {
-      const name = a.filename ?? a.name;
-      const type = a.content_type ?? a.type;
-      if (!name?.trim() || !type?.trim())
-        throw new BadRequestException('Each attachment needs a filename and content_type.');
-      if (a.content_base64) {
-        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(a.content_base64) || a.content_base64.length % 4 !== 0) {
-          throw new BadRequestException(`Attachment ${name} has invalid base64 content.`);
-        }
-        const bytes = Buffer.from(a.content_base64, 'base64').length;
-        total += bytes;
-      }
+  private normalizeComposeAttachments(
+    attachments?: ComposeInput['attachments'],
+  ): ComposeAttachmentInput[] | undefined {
+    if (!attachments?.length) return undefined;
+    try {
+      return validateComposeAttachments(attachments, composeAttachmentPolicy()).map((attachment) =>
+        this.serializeComposeAttachment(attachment),
+      );
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid attachment.');
     }
-    if (total > 10 * 1024 * 1024)
-      throw new BadRequestException('Attachments exceed the 10 MB total limit.');
+  }
+
+  /** Convert the canonical record back to the persisted, backwards-compatible wire shape. */
+  private serializeComposeAttachment(
+    attachment: NormalizedComposeAttachment,
+  ): ComposeAttachmentInput {
+    return {
+      ...(attachment.documentId ? { documentId: attachment.documentId } : {}),
+      ...(attachment.blobId ? { blob_id: attachment.blobId } : {}),
+      ...(attachment.filename ? { filename: attachment.filename, name: attachment.filename } : {}),
+      ...(attachment.contentType
+        ? { content_type: attachment.contentType, type: attachment.contentType }
+        : {}),
+      ...(attachment.contentBase64 ? { content_base64: attachment.contentBase64 } : {}),
+      ...(attachment.size != null ? { size: attachment.size } : {}),
+    };
+  }
+
+  /**
+   * Resolve documentId and external uploaded-blob references under the selected
+   * mailbox. A missing/foreign document is a compose error, never a send that
+   * silently omits a file.
+   */
+  private async resolveComposeAttachmentDocuments(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    mailbox: MailboxAccount | null,
+    attachments?: ComposeInput['attachments'],
+  ): Promise<ComposeAttachmentInput[] | undefined> {
+    if (!attachments?.length) return undefined;
+
+    let normalized: NormalizedComposeAttachment[];
+    try {
+      normalized = validateComposeAttachments(attachments, composeAttachmentPolicy());
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid attachment.');
+    }
+
+    const external = !!mailbox && this.mailProvider.handles(mailbox);
+    const ids = normalized
+      .map((attachment) => attachment.documentId ?? (external ? attachment.blobId : undefined))
+      .filter((id): id is string => !!id);
+    const rows =
+      ids.length && mailbox
+        ? await tx.outboundAttachment.findMany({
+            where: { workspaceId, mailboxId: mailbox.id, id: { in: [...new Set(ids)] } },
+            select: { id: true, filename: true, mimeType: true, size: true, bytes: true },
+          })
+        : [];
+    const byId = new Map(rows.map((row) => [row.id, row]));
+
+    const resolved = normalized.map((attachment) => {
+      const documentId = attachment.documentId ?? (external ? attachment.blobId : undefined);
+      if (!documentId) return this.serializeComposeAttachment(attachment);
+      const row = byId.get(documentId);
+      if (!row) {
+        throw new BadRequestException(
+          `Attachment documentId '${documentId}' is not readable from the selected mailbox.`,
+        );
+      }
+      return this.serializeComposeAttachment(
+        external
+          ? {
+              blobId: row.id,
+              filename: row.filename,
+              contentType: row.mimeType,
+              size: row.size,
+            }
+          : {
+              filename: row.filename,
+              contentType: row.mimeType,
+              contentBase64: Buffer.from(row.bytes).toString('base64'),
+              size: row.size,
+            },
+      );
+    });
+
+    try {
+      return validateComposeAttachments(resolved, composeAttachmentPolicy()).map((attachment) =>
+        this.serializeComposeAttachment(attachment),
+      );
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid attachment.');
+    }
+  }
+
+  /** Refuse a configured mail engine before writing a staged/queued row. */
+  private assertAttachmentLaneSupports(
+    mailbox: MailboxAccount | null,
+    attachments?: ComposeInput['attachments'],
+  ): void {
+    if (!attachments?.length || (mailbox && this.mailProvider.handles(mailbox))) return;
+    const engine = this.stalwart as unknown as {
+      supportsAttachments?: (
+        transactional: boolean,
+        attachments: ComposeAttachmentInput[],
+      ) => boolean;
+    };
+    if (typeof engine.supportsAttachments !== 'function') return;
+    const transactional = mailbox?.postmarkLane ?? true;
+    if (!engine.supportsAttachments(transactional, attachments)) {
+      const lane =
+        mailbox?.postmarkLane === false ? 'the James/SMTP lane' : 'the configured mail lane';
+      throw new BadRequestException(
+        `Attachments are not supported by ${lane}; compose was refused before anything was sent.`,
+      );
+    }
   }
 
   /**
@@ -4345,21 +4529,35 @@ export class EmailService {
       // Resolve staged external attachment bytes (consume-on-send) and pass them
       // inline to the provider, which folds them into the Gmail MIME / Graph
       // attachments array. A stale/foreign blob id simply resolves to nothing
-      // rather than failing the send.
-      const staged = await this.resolveOutboundAttachments(
-        mailbox,
-        (req.attachments ?? []).map((a) => a.blobId).filter((id): id is string => !!id),
-      );
-      const attachments = [
-        ...staged,
-        ...(req.attachments ?? [])
-          .filter((a) => !!a.contentBase64)
-          .map((a) => ({
-            filename: a.name,
-            mimeType: a.type,
-            contentBase64: a.contentBase64!,
-          })),
+      // rather than sending a message that silently lost its file.
+      const blobIds = [
+        ...new Set(
+          (req.attachments ?? [])
+            .map((attachment) => attachment.blobId)
+            .filter((id): id is string => !!id),
+        ),
       ];
+      const staged = await this.resolveOutboundAttachments(mailbox, blobIds);
+      const stagedById = new Map(blobIds.map((id, index) => [id, staged[index]]));
+      if (staged.length !== new Set(blobIds).size) {
+        return {
+          accepted: false,
+          providerMessageId: null,
+          threadId: req.inReplyToThreadId,
+          lane: null,
+          reason: 'attachment document is no longer readable; nothing was sent',
+        };
+      }
+      const attachments = (req.attachments ?? []).map((attachment) => {
+        const stored = attachment.blobId ? stagedById.get(attachment.blobId) : undefined;
+        return (
+          stored ?? {
+            filename: attachment.name,
+            mimeType: attachment.type,
+            contentBase64: attachment.contentBase64 ?? '',
+          }
+        );
+      });
       const toList = req.toAddresses?.length ? req.toAddresses : [req.toAddress];
       const r = await this.mailProvider.send(mailbox, {
         from: req.fromAddress,
@@ -4386,13 +4584,33 @@ export class EmailService {
         reason: r.reason,
       };
     }
-    const jamesAttachments = [] as { blobId: string; name: string; type: string }[];
+    const engine = this.stalwart as unknown as {
+      supportsInlineAttachments?: (
+        transactional: boolean,
+        attachments: SendReq['attachments'],
+      ) => boolean;
+    };
+    const inlineAttachments =
+      typeof engine.supportsInlineAttachments === 'function' &&
+      engine.supportsInlineAttachments(req.transactional, req.attachments);
+    const jamesAttachments = [] as {
+      blobId?: string;
+      name: string;
+      type: string;
+      contentBase64?: string;
+    }[];
     for (const attachment of req.attachments ?? []) {
       if (attachment.blobId) {
         jamesAttachments.push({
           blobId: attachment.blobId,
           name: attachment.name,
           type: attachment.type,
+        });
+      } else if (attachment.contentBase64 && inlineAttachments) {
+        jamesAttachments.push({
+          name: attachment.name,
+          type: attachment.type,
+          contentBase64: attachment.contentBase64,
         });
       } else if (attachment.contentBase64) {
         const uploaded = await this.stalwart.uploadBlob(
@@ -4642,6 +4860,7 @@ export class EmailService {
     toAddresses?: string[];
     ccAddresses?: string[];
     bccAddresses?: string[];
+    attachments?: unknown;
   }): MessageComposeView {
     const to = m.toAddresses?.length ? m.toAddresses : m.toAddress ? [m.toAddress] : [];
     return {
@@ -4656,6 +4875,11 @@ export class EmailService {
       cc: m.ccAddresses ?? [],
       bcc: m.bccAddresses ?? [],
       from_address: m.fromAddress ?? null,
+      attachments: this.attachmentsMeta(m.attachments).map((attachment) => ({
+        name: attachment.name,
+        type: attachment.type,
+        size: attachment.size ?? null,
+      })),
     };
   }
 
@@ -4727,6 +4951,7 @@ export class EmailService {
         ? []
         : this.attachmentsMeta(msg?.attachments).map((a) => ({
             name: a.name ?? 'attachment',
+            type: a.type ?? null,
             size: a.size ?? null,
           })),
       sends_at: this.readSendAt(it.payload),

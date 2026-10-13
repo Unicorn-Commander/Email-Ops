@@ -58,14 +58,18 @@ describe('StalwartClient', () => {
     it('listFolderThreads / getThreadDetail / setThreadRead / getMailboxCounts / downloadBlob / uploadBlob all degrade clean WITHOUT any fetch', async () => {
       const fetchSpy = jest.fn();
       global.fetch = fetchSpy as any;
-      await expect(client.listFolderThreads('desk@x.test', { folder: 'inbox', limit: 10, offset: 0 })).resolves.toEqual({
+      await expect(
+        client.listFolderThreads('desk@x.test', { folder: 'inbox', limit: 10, offset: 0 }),
+      ).resolves.toEqual({
         threads: [],
       });
       await expect(client.getThreadDetail('desk@x.test', 'thread-1')).resolves.toEqual([]);
       await expect(client.setThreadRead('desk@x.test', 'thread-1', true)).resolves.toBe(false);
       await expect(client.getMailboxCounts('desk@x.test')).resolves.toBeNull();
       await expect(client.downloadBlob('desk@x.test', 'blob-1')).resolves.toBeNull();
-      await expect(client.uploadBlob('desk@x.test', Buffer.from('x'), 'text/plain', 'f.txt')).resolves.toBeNull();
+      await expect(
+        client.uploadBlob('desk@x.test', Buffer.from('x'), 'text/plain', 'f.txt'),
+      ).resolves.toBeNull();
       await expect(client.getMessageHeaders('desk@x.test', 'msg-1')).resolves.toBeNull();
       expect(fetchSpy).not.toHaveBeenCalled();
     });
@@ -128,13 +132,64 @@ describe('StalwartClient', () => {
       const client = new StalwartClient(makeConfig(CONFIGURED));
       const r = await client.send(
         'desk@x.test',
-        { fromAddress: 'desk@x.test', fromName: 'Desk', toAddress: 'jane@acme.test', subject: 's', body: 'b' },
+        {
+          fromAddress: 'desk@x.test',
+          fromName: 'Desk',
+          toAddress: 'jane@acme.test',
+          subject: 's',
+          body: 'b',
+        },
         true,
       );
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       expect(fetchSpy.mock.calls[0][0]).toBe('https://api.postmarkapp.com/email');
       expect(fetchSpy.mock.calls[0][1].headers['X-Postmark-Server-Token']).toBe('pm-token');
       expect(r).toMatchObject({ accepted: true, lane: 'postmark', providerMessageId: 'pm-123' });
+    });
+
+    it('includes inline attachments in the Postmark provider message', async () => {
+      const fetchSpy = jest.fn().mockResolvedValue(jsonResponse({ MessageID: 'pm-attached' }));
+      global.fetch = fetchSpy as any;
+      const client = new StalwartClient(makeConfig(CONFIGURED));
+      await expect(
+        client.send(
+          'desk@x.test',
+          {
+            fromAddress: 'desk@x.test',
+            toAddress: 'jane@acme.test',
+            subject: 'with file',
+            body: 'see attached',
+            attachments: [
+              { name: 'brief.pdf', type: 'application/pdf', contentBase64: 'JVBERi0xLjQ=' },
+            ],
+          },
+          true,
+        ),
+      ).resolves.toMatchObject({ accepted: true, lane: 'postmark' });
+      const body = JSON.parse(fetchSpy.mock.calls[0][1].body as string);
+      expect(body.Attachments).toEqual([
+        { Name: 'brief.pdf', Content: 'JVBERi0xLjQ=', ContentType: 'application/pdf' },
+      ]);
+    });
+
+    it('refuses an attachment form the legacy lane cannot carry', async () => {
+      const fetchSpy = jest.fn();
+      global.fetch = fetchSpy as any;
+      const client = new StalwartClient(makeConfig(CONFIGURED));
+      const result = await client.send(
+        'desk@x.test',
+        {
+          fromAddress: 'desk@x.test',
+          toAddress: 'jane@acme.test',
+          subject: 'missing blob',
+          body: 'b',
+          attachments: [{ blobId: 'doc-1', name: 'brief.pdf', type: 'application/pdf' }],
+        },
+        true,
+      );
+      expect(result).toMatchObject({ accepted: false, lane: null });
+      expect(result.reason).toMatch(/cannot carry/i);
+      expect(fetchSpy).not.toHaveBeenCalled();
     });
 
     it('reads return [] (never throw) on a transport error', async () => {

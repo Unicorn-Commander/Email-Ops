@@ -175,8 +175,8 @@ export interface StalwartSendRequest {
   /** Additional recipients (optional; back-compat when omitted). */
   cc?: string[];
   bcc?: string[];
-  /** Attachments to carry, referencing blobIds already uploaded to the engine. */
-  attachments?: { blobId: string; name: string; type: string }[];
+  /** Attachments to carry, referencing engine blobs or inline Postmark bytes. */
+  attachments?: { blobId?: string; name: string; type: string; contentBase64?: string }[];
   /** The Message-ID header of the message being replied to (for In-Reply-To). */
   inReplyTo?: string | null;
   /** The References header chain (oldest first), for correct thread linking. */
