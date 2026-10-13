@@ -18,8 +18,9 @@
  *     (any member sees + edits them, v1).
  */
 
-import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, Space, SpaceVisibility } from '@prisma/client';
+import { resolveMailboxScope } from '../common/mailbox/mailbox-scope';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { CreateSpaceInput, SpaceView, UpdateSpaceInput } from './spaces.types';
 
@@ -54,7 +55,8 @@ export class SpacesService {
         },
         orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       });
-      return this.toViews(tx, spaces);
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+      return this.toViews(tx, spaces, scope.governed ? new Set(scope.ids) : null);
     });
   }
 
@@ -79,7 +81,8 @@ export class SpacesService {
         icon: input.icon ?? null,
       };
       const created = await tx.space.create({ data });
-      return this.toViewOne(tx, created);
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+      return this.toViewOne(tx, created, scope.governed ? new Set(scope.ids) : null);
     });
   }
 
@@ -112,7 +115,8 @@ export class SpacesService {
         await tx.space.update({ where: { id: existing.id }, data });
       }
       const fresh = await tx.space.findFirstOrThrow({ where: { id: existing.id } });
-      return this.toViewOne(tx, fresh);
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+      return this.toViewOne(tx, fresh, scope.governed ? new Set(scope.ids) : null);
     });
   }
 
@@ -141,7 +145,8 @@ export class SpacesService {
       this.assertCanModify(space, await this.resolveCaller(tx, ucUid));
 
       const ids = [...new Set(mailboxIds)];
-      await this.assertMailboxesInWorkspace(tx, workspaceId, ids);
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+      await this.assertMailboxesInWorkspace(tx, workspaceId, ids, scope.governed ? new Set(scope.ids) : null);
       await tx.spaceMailbox.deleteMany({ where: { spaceId: id } });
       if (ids.length) {
         await tx.spaceMailbox.createMany({
@@ -149,7 +154,7 @@ export class SpacesService {
         });
       }
       const fresh = await tx.space.findFirstOrThrow({ where: { id } });
-      return this.toViewOne(tx, fresh);
+      return this.toViewOne(tx, fresh, scope.governed ? new Set(scope.ids) : null);
     });
   }
 
@@ -174,7 +179,8 @@ export class SpacesService {
         });
       }
       const fresh = await tx.space.findFirstOrThrow({ where: { id } });
-      return this.toViewOne(tx, fresh);
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+      return this.toViewOne(tx, fresh, scope.governed ? new Set(scope.ids) : null);
     });
   }
 
@@ -226,6 +232,7 @@ export class SpacesService {
     tx: WorkspaceTxClient,
     workspaceId: string,
     ids: string[],
+    visibleMailboxIds: Set<string> | null = null,
   ): Promise<void> {
     if (!ids.length) return;
     const found = await tx.mailboxAccount.findMany({
@@ -236,6 +243,9 @@ export class SpacesService {
       throw new BadRequestException(
         'One or more mailbox_ids do not reference a mailbox in this workspace.',
       );
+    }
+    if (visibleMailboxIds && found.some((mailbox) => !visibleMailboxIds.has(mailbox.id))) {
+      throw new NotFoundException('Mailbox not found.');
     }
   }
 
@@ -259,7 +269,11 @@ export class SpacesService {
 
   // ── view mapping ──────────────────────────────────────────────────────────
 
-  private async toViews(tx: WorkspaceTxClient, spaces: Space[]): Promise<SpaceView[]> {
+  private async toViews(
+    tx: WorkspaceTxClient,
+    spaces: Space[],
+    visibleMailboxIds: Set<string> | null = null,
+  ): Promise<SpaceView[]> {
     if (spaces.length === 0) return [];
     const ids = spaces.map((s) => s.id);
     const [mbLinks, agLinks] = await Promise.all([
@@ -268,17 +282,29 @@ export class SpacesService {
     ]);
     const mbBy = this.groupBy(mbLinks, (l) => l.spaceId, (l) => l.mailboxAccountId);
     const agBy = this.groupBy(agLinks, (l) => l.spaceId, (l) => l.agentId);
-    return spaces.map((s) => this.toView(s, mbBy.get(s.id) ?? [], agBy.get(s.id) ?? []));
+    return spaces.map((s) =>
+      this.toView(
+        s,
+        (mbBy.get(s.id) ?? []).filter((mailboxId) => !visibleMailboxIds || visibleMailboxIds.has(mailboxId)),
+        agBy.get(s.id) ?? [],
+      ),
+    );
   }
 
-  private async toViewOne(tx: WorkspaceTxClient, space: Space): Promise<SpaceView> {
+  private async toViewOne(
+    tx: WorkspaceTxClient,
+    space: Space,
+    visibleMailboxIds: Set<string> | null = null,
+  ): Promise<SpaceView> {
     const [mbLinks, agLinks] = await Promise.all([
       tx.spaceMailbox.findMany({ where: { spaceId: space.id } }),
       tx.spaceAgent.findMany({ where: { spaceId: space.id } }),
     ]);
     return this.toView(
       space,
-      mbLinks.map((l) => l.mailboxAccountId),
+      mbLinks
+        .map((l) => l.mailboxAccountId)
+        .filter((mailboxId) => !visibleMailboxIds || visibleMailboxIds.has(mailboxId)),
       agLinks.map((l) => l.agentId),
     );
   }

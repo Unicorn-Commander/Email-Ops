@@ -13,6 +13,7 @@ import { AgentAutonomyLevel, AgentInboxState, AgentSendKitState, EmailMessageSta
 import { PrismaService } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import { FederationPrincipalCheck } from '../common/workspace/federation-principal.check';
+import { resolveMailboxScope } from '../common/mailbox/mailbox-scope';
 import { EmailHealthCheck, EmailHealthReport } from './email-health.types';
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -101,28 +102,51 @@ export class EmailHealthService {
       workspaceId,
       ucUid,
       async (tx) => {
-        const [mailboxes, agents, pending, proposedKits, failed7d] = await Promise.all([
-          tx.mailboxAccount.findMany({
-            where: { workspaceId, active: true },
-            select: { emailAddress: true, isDefault: true },
-          }),
+        const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+        const mailboxes = await tx.mailboxAccount.findMany({
+          where: {
+            workspaceId,
+            active: true,
+            ...(scope.governed ? { id: { in: scope.ids } } : {}),
+          },
+          select: { id: true, emailAddress: true, isDefault: true },
+        });
+        const visibleMailboxIds = scope.ids;
+        const visibleAddresses = mailboxes.map((mailbox) => mailbox.emailAddress);
+        const mailboxMessageScope = scope.governed ? { mailboxAccountId: { in: visibleMailboxIds } } : {};
+        const inboxItemScope = scope.governed
+          ? { message: { is: { mailboxAccountId: { in: visibleMailboxIds } } } }
+          : {};
+        const kitScope = scope.governed
+          ? { fromAddress: { in: visibleAddresses } }
+          : {};
+        const [agents, pending, proposedKits, failed7d] = await Promise.all([
           tx.agent.findMany({
-            where: { workspaceId, active: true },
+            where: {
+              workspaceId,
+              active: true,
+              ...(scope.governed ? { mailboxAccountId: { in: visibleMailboxIds } } : {}),
+            },
             select: { autonomyLevel: true, mailboxAccountId: true },
           }),
           tx.agentInboxItem.findMany({
-            where: { workspaceId, state: AgentInboxState.PENDING },
+            where: { workspaceId, state: AgentInboxState.PENDING, ...inboxItemScope },
             select: { createdAt: true },
             orderBy: { createdAt: 'asc' },
           }),
           tx.agentSendKit?.findMany
             ? tx.agentSendKit.findMany({
-                where: { workspaceId, state: AgentSendKitState.PROPOSED },
+                where: { workspaceId, state: AgentSendKitState.PROPOSED, ...kitScope },
                 select: { proposedAt: true },
               })
             : Promise.resolve([]),
           tx.emailMessage.count({
-            where: { workspaceId, status: EmailMessageStatus.FAILED, createdAt: { gte: since } },
+            where: {
+              workspaceId,
+              status: EmailMessageStatus.FAILED,
+              createdAt: { gte: since },
+              ...mailboxMessageScope,
+            },
           }),
         ]);
         return { mailboxes, agents, pending, proposedKits, failed7d };

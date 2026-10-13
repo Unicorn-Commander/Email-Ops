@@ -23,6 +23,7 @@ import {
   Prisma,
 } from '@prisma/client';
 import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
+import { resolveMailboxScope } from '../common/mailbox/mailbox-scope';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import {
   AgentMailboxView,
@@ -32,6 +33,8 @@ import {
   UpdateAgentInput,
 } from './agents.types';
 
+type MailboxProjectionScope = Awaited<ReturnType<typeof resolveMailboxScope>>;
+
 @Injectable()
 export class AgentsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -39,11 +42,12 @@ export class AgentsService {
   /** The workspace's agents — active first, then alphabetical. */
   async listAgents(workspaceId: string, ucUid: string | null): Promise<AgentView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       const agents = await tx.agent.findMany({
         where: { workspaceId },
         orderBy: [{ active: 'desc' }, { displayName: 'asc' }],
       });
-      return this.toViews(tx, workspaceId, agents);
+      return this.toViews(tx, workspaceId, agents, scope);
     });
   }
 
@@ -57,8 +61,9 @@ export class AgentsService {
   /** One agent by id (scoped to the workspace). Null → 404 at the controller. */
   async getAgent(workspaceId: string, ucUid: string | null, id: string): Promise<AgentView | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       const agent = await tx.agent.findFirst({ where: { id, workspaceId } });
-      return agent ? this.toViewOne(tx, workspaceId, agent) : null;
+      return agent ? this.toViewOne(tx, workspaceId, agent, scope) : null;
     });
   }
 
@@ -114,7 +119,7 @@ export class AgentsService {
       );
 
       const fresh = await tx.agent.findFirstOrThrow({ where: { id: created.id } });
-      return this.toViewOne(tx, workspaceId, fresh);
+      return this.toViewOne(tx, workspaceId, fresh, await resolveMailboxScope(tx, workspaceId, ucUid));
     });
   }
 
@@ -168,7 +173,7 @@ export class AgentsService {
       await this.recordAgentAction(tx, workspaceId, auditKind, existing.key, ucUid, null);
 
       const updated = await tx.agent.findFirstOrThrow({ where: { id: existing.id } });
-      return this.toViewOne(tx, workspaceId, updated);
+      return this.toViewOne(tx, workspaceId, updated, await resolveMailboxScope(tx, workspaceId, ucUid));
     });
   }
 
@@ -196,7 +201,7 @@ export class AgentsService {
       }
 
       const updated = await tx.agent.findFirstOrThrow({ where: { id: existing.id } });
-      return this.toViewOne(tx, workspaceId, updated);
+      return this.toViewOne(tx, workspaceId, updated, await resolveMailboxScope(tx, workspaceId, ucUid));
     });
   }
 
@@ -244,7 +249,7 @@ export class AgentsService {
         `${input.mailboxAccountId}${input.isPrimary ? ' (primary)' : ''}`,
       );
       const fresh = await tx.agent.findFirstOrThrow({ where: { id: agentId } });
-      return this.toViewOne(tx, workspaceId, fresh);
+      return this.toViewOne(tx, workspaceId, fresh, await resolveMailboxScope(tx, workspaceId, ucUid));
     });
   }
 
@@ -277,7 +282,7 @@ export class AgentsService {
         );
       }
       const fresh = await tx.agent.findFirstOrThrow({ where: { id: agentId } });
-      return this.toViewOne(tx, workspaceId, fresh);
+      return this.toViewOne(tx, workspaceId, fresh, await resolveMailboxScope(tx, workspaceId, ucUid));
     });
   }
 
@@ -378,6 +383,7 @@ export class AgentsService {
     tx: WorkspaceTxClient,
     workspaceId: string,
     agents: Agent[],
+    scope: MailboxProjectionScope,
   ): Promise<AgentView[]> {
     if (agents.length === 0) return [];
     const agentIds = agents.map((a) => a.id);
@@ -387,10 +393,16 @@ export class AgentsService {
       orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
     });
 
+    const visibleMailboxIds = scope.governed ? new Set(scope.ids) : null;
+    const visibleBindings = visibleMailboxIds
+      ? bindings.filter((binding) => visibleMailboxIds.has(binding.mailboxAccountId))
+      : bindings;
     const mailboxIds = [
       ...new Set([
-        ...bindings.map((b) => b.mailboxAccountId),
-        ...agents.map((a) => a.mailboxAccountId).filter((v): v is string => !!v),
+        ...visibleBindings.map((b) => b.mailboxAccountId),
+        ...agents
+          .map((a) => a.mailboxAccountId)
+          .filter((v): v is string => !!v && (!visibleMailboxIds || visibleMailboxIds.has(v))),
       ]),
     ];
     const mailboxes = mailboxIds.length
@@ -404,20 +416,33 @@ export class AgentsService {
     const keys = agents.map((a) => a.key);
     const grouped = await tx.agentInboxItem.groupBy({
       by: ['draftedBy'],
-      where: { workspaceId, state: AgentInboxState.PENDING, draftedBy: { in: keys } },
+      where: {
+        workspaceId,
+        state: AgentInboxState.PENDING,
+        draftedBy: { in: keys },
+        ...(visibleMailboxIds
+          ? { OR: [{ messageId: null }, { message: { is: { mailboxAccountId: { in: [...visibleMailboxIds] } } } }] }
+          : {}),
+      },
       _count: { _all: true },
     });
     const pendingByKey = new Map(grouped.map((g) => [g.draftedBy ?? '', g._count._all]));
 
     const bindingsByAgent = new Map<string, AgentMailbox[]>();
-    for (const b of bindings) {
+    for (const b of visibleBindings) {
       const list = bindingsByAgent.get(b.agentId);
       if (list) list.push(b);
       else bindingsByAgent.set(b.agentId, [b]);
     }
 
     return agents.map((a) =>
-      this.toView(a, addrById, bindingsByAgent.get(a.id) ?? [], pendingByKey.get(a.key) ?? 0),
+      this.toView(
+        a,
+        addrById,
+        bindingsByAgent.get(a.id) ?? [],
+        pendingByKey.get(a.key) ?? 0,
+        visibleMailboxIds,
+      ),
     );
   }
 
@@ -425,15 +450,22 @@ export class AgentsService {
     tx: WorkspaceTxClient,
     workspaceId: string,
     agent: Agent,
+    scope: MailboxProjectionScope,
   ): Promise<AgentView> {
     const bindings = await tx.agentMailbox.findMany({
       where: { workspaceId, agentId: agent.id },
       orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
     });
+    const visibleMailboxIds = scope.governed ? new Set(scope.ids) : null;
+    const visibleBindings = visibleMailboxIds
+      ? bindings.filter((binding) => visibleMailboxIds.has(binding.mailboxAccountId))
+      : bindings;
     const mailboxIds = [
       ...new Set([
-        ...bindings.map((b) => b.mailboxAccountId),
-        ...(agent.mailboxAccountId ? [agent.mailboxAccountId] : []),
+        ...visibleBindings.map((b) => b.mailboxAccountId),
+        ...(agent.mailboxAccountId && (!visibleMailboxIds || visibleMailboxIds.has(agent.mailboxAccountId))
+          ? [agent.mailboxAccountId]
+          : []),
       ]),
     ];
     const mailboxes = mailboxIds.length
@@ -444,9 +476,16 @@ export class AgentsService {
       : [];
     const addrById = new Map(mailboxes.map((m) => [m.id, m.emailAddress]));
     const pending = await tx.agentInboxItem.count({
-      where: { workspaceId, state: AgentInboxState.PENDING, draftedBy: agent.key },
+      where: {
+        workspaceId,
+        state: AgentInboxState.PENDING,
+        draftedBy: agent.key,
+        ...(visibleMailboxIds
+          ? { OR: [{ messageId: null }, { message: { is: { mailboxAccountId: { in: [...visibleMailboxIds] } } } }] }
+          : {}),
+      },
     });
-    return this.toView(agent, addrById, bindings, pending);
+    return this.toView(agent, addrById, visibleBindings, pending, visibleMailboxIds);
   }
 
   private toView(
@@ -454,7 +493,12 @@ export class AgentsService {
     addrById: Map<string, string>,
     bindings: AgentMailbox[],
     pendingCount: number,
+    visibleMailboxIds: Set<string> | null = null,
   ): AgentView {
+    const visiblePrimaryMailboxId =
+      agent.mailboxAccountId && (!visibleMailboxIds || visibleMailboxIds.has(agent.mailboxAccountId))
+        ? agent.mailboxAccountId
+        : null;
     const mailboxes: AgentMailboxView[] = bindings.map((b) => ({
       mailbox_account_id: b.mailboxAccountId,
       mailbox_address: addrById.get(b.mailboxAccountId) ?? null,
@@ -467,10 +511,8 @@ export class AgentsService {
       display_name: agent.displayName,
       description: agent.description,
       avatar_url: agent.avatarUrl,
-      mailbox_account_id: agent.mailboxAccountId,
-      mailbox_address: agent.mailboxAccountId
-        ? (addrById.get(agent.mailboxAccountId) ?? null)
-        : null,
+      mailbox_account_id: visiblePrimaryMailboxId,
+      mailbox_address: visiblePrimaryMailboxId ? (addrById.get(visiblePrimaryMailboxId) ?? null) : null,
       mailboxes,
       autonomy_level: agent.autonomyLevel,
       recipient_policy: (agent.recipientPolicy as Record<string, unknown> | null) ?? null,
