@@ -417,9 +417,9 @@ export class EmailOpsTools {
   // (mail.controller.ts) uses, so there is ONE implementation, ONE RLS path, and
   // the SAME degrade-clean contract (reads → [] when the engine is dormant, never
   // a 500). Reads are member-level (resolve-and-authorize the workspace); set_read
-  // + bulk_disposition are member-level writes. The per-mailbox owner fence
-  // (EmailService.mayActThroughMailbox) is preserved for external mailboxes — no
-  // cross-tenant read is introduced.
+  // + bulk_disposition are member-level writes. Mailbox visibility is resolved
+  // once by EmailService's membership scope; the legacy HUMAN-owner fence still
+  // protects direct service callers that have no membership row.
 
   /** List a mailbox's threads for a folder — or the UNIFIED inbox when no mailbox_id. */
   async listThreads(

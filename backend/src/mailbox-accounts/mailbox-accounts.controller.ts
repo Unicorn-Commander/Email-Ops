@@ -39,6 +39,7 @@ import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membersh
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decorator';
 import { WorkspaceRoleParam } from '../common/workspace/workspace-role.decorator';
+import { roleAtLeast } from '../common/workspace/role-rank';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
 import { ProvisionDecision } from '../provisioning/provisioning-policy';
@@ -423,6 +424,9 @@ export class MailboxAccountsController {
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
     const existing = await this.mailboxes.getMailbox(workspaceId, ucUid, id);
     if (!existing) throw new NotFoundException('Mailbox not found in this workspace.');
+    if (body.owner_key !== undefined && !roleAtLeast(role, WorkspaceRole.ADMIN)) {
+      throw new ForbiddenException('Only a workspace admin or owner may change mailbox ownership.');
+    }
     const action =
       existing.owner_kind === MailboxOwnerKind.AGENT ? 'agentMailbox.edit' : 'humanMailbox.edit';
 

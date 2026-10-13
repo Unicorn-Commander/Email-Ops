@@ -46,6 +46,7 @@ import {
   MemberView,
   MyInviteView,
   UpdateMemberInput,
+  mailboxScopeToWire,
   inviteStatusToWire,
   roleToWire,
   statusToWire,
@@ -141,6 +142,7 @@ export class WorkspacesService {
         display_name: u ? this.userDisplayName(u) : null,
         role: roleToWire(m.role),
         status: statusToWire(m.status),
+        mailbox_scope: mailboxScopeToWire(m.mailboxScope),
         is_default: m.isDefault,
         is_self: callerKeys.has(m.userKey),
         created_at: m.createdAt.toISOString(),
@@ -175,6 +177,7 @@ export class WorkspacesService {
     const data: Prisma.MembershipUpdateInput = {
       ...(patch.role !== undefined ? { role: patch.role } : {}),
       ...(patch.status !== undefined ? { status: patch.status } : {}),
+      ...(patch.mailboxScope !== undefined ? { mailboxScope: patch.mailboxScope } : {}),
     };
     // Last-owner protection — the count check + the write run in ONE transaction
     // that LOCKS the active-owner rows (FOR UPDATE), so two concurrent owner-
@@ -207,6 +210,7 @@ export class WorkspacesService {
       display_name: u ? this.userDisplayName(u) : null,
       role: roleToWire(updated.role),
       status: statusToWire(updated.status),
+      mailbox_scope: mailboxScopeToWire(updated.mailboxScope),
       is_default: updated.isDefault,
       is_self: this.callerKeys(user).includes(targetUserKey),
       created_at: updated.createdAt.toISOString(),

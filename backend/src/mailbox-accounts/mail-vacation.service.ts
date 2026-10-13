@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
-import { assertMayActThroughMailbox } from '../common/mailbox/mailbox-fence';
+import { assertMailboxVisible } from '../common/mailbox/mailbox-scope';
 import { StalwartPort } from '../stalwart/stalwart.port';
 
 export interface MailVacationSettingsView {
@@ -114,9 +114,9 @@ export class MailVacationService {
   ) {
     const mailbox = await tx.mailboxAccount.findFirst({
       where: { id: mailboxId, workspaceId },
-      select: { emailAddress: true, ownerKind: true, ownerKey: true },
+      select: { id: true, emailAddress: true, ownerKind: true, ownerKey: true },
     });
-    if (mailbox) await assertMayActThroughMailbox(this.prisma, mailbox, ucUid);
+    if (mailbox) await assertMailboxVisible(tx, workspaceId, ucUid, mailbox);
     return mailbox;
   }
 }

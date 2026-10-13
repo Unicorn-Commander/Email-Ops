@@ -114,6 +114,18 @@ gate re-derived server-side from the verified token).
 | `set_read` | Mark thread read/unread | `workspace_id?`, `thread_id`, `read`, `mailbox_id?` | No |
 | `bulk_disposition` | Bulk-triage threads into a folder | `workspace_id?`, `thread_ids[]`, `disposition` | No |
 
+### Member mailbox scope
+
+Workspace memberships carry `mailbox_scope: "all"` (the default, preserving
+existing behavior) or `"owned"`. An ADMIN/OWNER always has `all` visibility.
+For an `owned` member, human mailboxes are visible only when `owner_key` is the
+member's identity key. Agent mailboxes are currently excluded because Email-Ops
+has no human-to-agent manager relation; the existing `Agent.managerAgentKey`
+link is agent-to-agent only. Aggregate inboxes, counts, search, drafts, and
+send/triage operations use the same scope. An explicit mailbox or draft outside
+the scope is returned as not found (404-equivalent), without revealing whether
+it exists.
+
 ### EmailOpsPort Contract (Customer-Ops)
 
 | Tool Name | Purpose | Key Parameters | Read-Only |

@@ -4,6 +4,7 @@ import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util'
 import { EmailService } from '../email/email.service';
 import { AgentInboxView, MailboxCountsView, ThreadView } from '../email/email.types';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
+import { resolveMailboxScope } from '../common/mailbox/mailbox-scope';
 import {
   AgentMailboxRosterResponse,
   AgentMailboxStats,
@@ -36,14 +37,15 @@ export class AgentViewService {
     const limit = clampThreadLimit(input.threadLimit);
 
     const resolved = await this.prisma.withWorkspace(input.workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, input.workspaceId, ucUid);
       const agent = await tx.agent.findFirst({
         where: { id: input.agentId, workspaceId: input.workspaceId },
       });
       if (!agent) return null;
 
-      const mailbox = await this.resolveViewableMailbox(tx, input.workspaceId, agent);
+      const mailbox = await this.resolveViewableMailbox(tx, input.workspaceId, agent, scope.ids, scope.governed);
 
-      const counts = await this.countAgentInboxByState(tx, input.workspaceId, agent.key);
+      const counts = await this.countAgentInboxByState(tx, input.workspaceId, agent.key, scope);
       const lastActivityAt = await this.lastActivityAt(tx, input.workspaceId, agent.key, mailbox?.emailAddress ?? null);
 
       return { agent, mailbox, counts, lastActivityAt };
@@ -81,6 +83,7 @@ export class AgentViewService {
 
     const [roster, mailboxCounts] = await Promise.all([
       this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+        const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
         const agents = await tx.agent.findMany({
           where: { workspaceId },
           orderBy: [{ active: 'desc' }, { displayName: 'asc' }],
@@ -92,7 +95,11 @@ export class AgentViewService {
           .filter((id): id is string => !!id);
         const mailboxes = mailboxIds.length
           ? await tx.mailboxAccount.findMany({
-              where: { id: { in: [...new Set(mailboxIds)] }, workspaceId },
+              where: {
+                id: { in: [...new Set(mailboxIds)] },
+                workspaceId,
+                ...(scope.governed ? { id: { in: scope.ids } } : {}),
+              },
             })
           : [];
         const mailboxById = new Map(mailboxes.map((mailbox) => [mailbox.id, mailbox]));
@@ -103,6 +110,9 @@ export class AgentViewService {
             workspaceId,
             state: AgentInboxState.PENDING,
             draftedBy: { in: agents.map((agent) => agent.key) },
+            ...(scope.governed
+              ? { OR: [{ messageId: null }, { message: { is: { mailboxAccountId: { in: scope.ids } } } }] }
+              : {}),
           },
           _count: { _all: true },
         });
@@ -142,12 +152,14 @@ export class AgentViewService {
     tx: WorkspaceTxClient,
     workspaceId: string,
     agent: NonNullable<AgentRow>,
+    visibleMailboxIds: string[],
+    governed: boolean,
   ): Promise<MailboxRow> {
     if (agent.mailboxAccountId) {
       const send = await tx.mailboxAccount.findFirst({
         where: { id: agent.mailboxAccountId, workspaceId },
       });
-      if (send) return send;
+      if (send && (!governed || visibleMailboxIds.includes(send.id))) return send;
     }
     const binding = await tx.agentMailbox.findFirst({
       where: {
@@ -160,17 +172,26 @@ export class AgentViewService {
       orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
       include: { mailbox: true },
     });
-    return binding?.mailbox ?? null;
+    return binding?.mailbox && (!governed || visibleMailboxIds.includes(binding.mailbox.id))
+      ? binding.mailbox
+      : null;
   }
 
   private async countAgentInboxByState(
     tx: WorkspaceTxClient,
     workspaceId: string,
     agentKey: string,
+    scope: Awaited<ReturnType<typeof resolveMailboxScope>>,
   ): Promise<{ pending: number; approved: number; rejected: number }> {
     const grouped = await tx.agentInboxItem.groupBy({
       by: ['state'],
-      where: { workspaceId, draftedBy: agentKey },
+      where: {
+        workspaceId,
+        draftedBy: agentKey,
+        ...(scope.governed
+          ? { OR: [{ messageId: null }, { message: { is: { mailboxAccountId: { in: scope.ids } } } }] }
+          : {}),
+      },
       _count: { _all: true },
     });
     const byState = new Map(grouped.map((row) => [row.state, row._count._all]));
