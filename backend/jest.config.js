@@ -31,6 +31,7 @@ const INTEGRATION_SPECS = [
   'email/email.service.spec.ts',
   'email/email.cross-tenant.spec.ts',
   'email/email.intra-tenant.spec.ts',
+  'email/email.mailbox-scope.spec.ts',
   // Wave 7: the agent-send autonomy matrix end-to-end + the trusted-
   // correspondent tenant fence (both construct a real PrismaService).
   'email/email.autonomy-wave7.spec.ts',

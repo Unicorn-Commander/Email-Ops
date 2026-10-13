@@ -26,6 +26,8 @@ export type WorkspaceRole = 'viewer' | 'member' | 'manager' | 'admin' | 'owner';
 
 /** Lifecycle of a membership (wire). */
 export type MembershipStatus = 'active' | 'suspended' | 'revoked';
+/** Mailbox visibility granted to a member. */
+export type MailboxScope = 'all' | 'owned';
 
 /** Lifecycle of an invitation (wire). */
 export type InvitationStatus = 'pending' | 'accepted' | 'revoked' | 'expired';
@@ -63,6 +65,7 @@ export interface MemberView {
   display_name: string | null;
   role: WorkspaceRole;
   status: MembershipStatus;
+  mailbox_scope: MailboxScope;
   is_default: boolean;
   /** True when this row is the caller themselves. */
   is_self: boolean;
@@ -111,6 +114,7 @@ export interface UpdateOrgBody {
 export interface UpdateMemberBody {
   role?: WorkspaceRole;
   status?: MembershipStatus;
+  mailbox_scope?: MailboxScope;
 }
 
 /** Body for inviting an email to an org (ADMIN+). Role defaults to `member`. */

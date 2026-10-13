@@ -41,14 +41,17 @@ import { listMyWorkspaces } from '../common/workspace/list-my-workspaces';
 import { WorkspacesService } from './workspaces.service';
 import {
   MembershipStatusWire,
+  MailboxScopeWire,
   UpdateMemberInput,
   WorkspaceRoleWire,
+  mailboxScopeFromWire,
   roleFromWire,
   statusFromWire,
 } from './workspaces.types';
 
 const ROLE_VALUES: WorkspaceRoleWire[] = ['viewer', 'member', 'manager', 'admin', 'owner'];
 const STATUS_VALUES: MembershipStatusWire[] = ['active', 'suspended', 'revoked'];
+const MAILBOX_SCOPE_VALUES: MailboxScopeWire[] = ['all', 'owned'];
 
 /** Body for POST workspaces (create org). */
 class CreateOrgDto {
@@ -81,6 +84,10 @@ class UpdateMemberDto {
   @IsOptional()
   @IsIn(STATUS_VALUES)
   status?: MembershipStatusWire;
+
+  @IsOptional()
+  @IsIn(MAILBOX_SCOPE_VALUES)
+  mailbox_scope?: MailboxScopeWire;
 }
 
 /** Body for inviting an email into the org. */
@@ -157,6 +164,7 @@ export class WorkspacesController {
     const patch: UpdateMemberInput = {};
     if (body.role !== undefined) patch.role = roleFromWire(body.role);
     if (body.status !== undefined) patch.status = statusFromWire(body.status);
+    if (body.mailbox_scope !== undefined) patch.mailboxScope = mailboxScopeFromWire(body.mailbox_scope);
     const updated = await this.workspaces.updateMember(workspaceId, user, userKey, patch);
     if (!updated) throw new NotFoundException('No such member in this organization.');
     return updated;
