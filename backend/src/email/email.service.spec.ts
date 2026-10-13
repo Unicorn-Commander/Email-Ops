@@ -884,7 +884,22 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
     });
 
     it('resolves a readable documentId into staged attachment bytes and metadata', async () => {
-      const mailbox = await prisma.mailboxAccount.findFirstOrThrow({ where: { workspaceId: WS } });
+      // Stage the document under the mailbox compose actually selects for this
+      // caller. findFirst over the workspace is not that mailbox once other
+      // suites (e.g. #21's mailbox-scope fixtures) add mailboxes to WS.
+      const probe = await service.composeEmail(WS, UC_UID, {
+        contactId: null,
+        toAddress: 'document@acme.test',
+        subject: 'Stored document mailbox probe',
+        body: 'probe',
+        mode: 'draft',
+        externalSource: 'customer-ops',
+        externalRef: `document-probe-${Date.now()}`,
+      });
+      const probed = await prisma.emailMessage.findUniqueOrThrow({ where: { id: probe.id } });
+      const mailbox = await prisma.mailboxAccount.findUniqueOrThrow({
+        where: { id: probed.mailboxAccountId! },
+      });
       const document = await prisma.outboundAttachment.create({
         data: {
           workspaceId: WS,
