@@ -1536,7 +1536,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "list_mail_domains",
-      "description": "List the domains the sovereign mail engine (Apache James) currently serves. Read-only / member-level. Returns { domains: [{ domain }] } or { status:\"engine_not_configured\" } when no WebAdmin endpoint is wired.",
+      "description": "List the domains the sovereign mail engine (Apache James) currently serves, including verified, verifiedAt, and lastVerificationCheckAt. Read-only / member-level. Returns { domains: [{ domain, verified, verifiedAt, lastVerificationCheckAt }] } or { status:\"engine_not_configured\" } when no WebAdmin endpoint is wired.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1544,6 +1544,31 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
             "type": "string"
           }
         },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:mail_engine"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "get_mail_domain_verification",
+      "description": "Read one caller-workspace mail domain verification state and TXT instructions. Read-only / member-level.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "domain_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain_id"
+        ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },

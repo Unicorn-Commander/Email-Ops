@@ -101,6 +101,13 @@ export const InboxTrayIcon = (p: SVGProps<SVGSVGElement>) => (
   </Svg>
 );
 
+export const GlobeIcon = (p: SVGProps<SVGSVGElement>) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9S14.4 18.5 12 21M12 3c-2.4 2.5-3.6 5.5-3.6 9S9.6 18.5 12 21" />
+  </Svg>
+);
+
 export const TrashIcon = (p: SVGProps<SVGSVGElement>) => (
   <Svg {...p}>
     <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6v14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V6" />

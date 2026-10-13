@@ -246,6 +246,9 @@ enum AgentActionKind {
   PROVISION_REJECTED
   PROVISION_APPLIED
   PROVISION_FAILED
+  MAIL_DOMAIN_VERIFICATION_REQUESTED
+  MAIL_DOMAIN_VERIFIED
+  MAIL_DOMAIN_VERIFICATION_FAILED
 }
 
 // ── Mailbox ownership + agent access (the command-center plane) ──
@@ -1025,6 +1028,11 @@ model MailDomain {
   workspaceId String
   domain      String
   verified    Boolean  @default(false)
+  verificationToken          String?
+  verificationRequestedAt    DateTime?
+  verifiedAt                 DateTime?
+  lastVerificationCheckAt   DateTime?
+  lastVerificationError     String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

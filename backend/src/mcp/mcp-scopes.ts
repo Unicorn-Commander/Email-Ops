@@ -64,6 +64,7 @@ export const MCP_TOOL_SCOPES = {
   trust_correspondent: 'mail:write',
   untrust_correspondent: 'mail:write',
   list_mail_domains: 'mail:read',
+  get_mail_domain_verification: 'mail:read',
   list_mail_accounts: 'mail:read',
   ensure_mail_domain: 'admin:provision',
   remove_mail_domain: 'admin:provision',

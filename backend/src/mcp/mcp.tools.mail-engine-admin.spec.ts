@@ -39,6 +39,11 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
     workspaceId: 'ws-1',
     domain: 'owned.test',
     verified: false,
+    verificationToken: null,
+    verificationRequestedAt: null,
+    verifiedAt: null,
+    lastVerificationCheckAt: null,
+    lastVerificationError: null,
     createdAt: new Date('2026-07-17T12:00:00.000Z'),
     updatedAt: new Date('2026-07-17T12:00:00.000Z'),
   };
@@ -47,6 +52,18 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
     bindDomain: jest.fn().mockResolvedValue(binding),
     listDomains: jest.fn().mockResolvedValue([binding]),
     assertWorkspaceOwnsDomain: jest.fn().mockResolvedValue(binding),
+    getDomainVerification: jest.fn().mockResolvedValue({
+      id: 'domain-1',
+      domain: 'owned.test',
+      verified: false,
+      verificationRequestedAt: null,
+      verifiedAt: null,
+      lastVerificationCheckAt: null,
+      lastVerificationError: null,
+      recordName: '_emailops-verify.owned.test',
+      recordType: 'TXT',
+      recordValue: 'emailops-verify=token',
+    }),
     domainOf: jest.fn((address: string) => address.slice(address.lastIndexOf('@') + 1).toLowerCase()),
     canonicalDomain: jest.fn((domain: string) => domain.trim().replace(/\.$/, '').toLowerCase()),
   } as unknown as MailDomainService;
@@ -101,12 +118,31 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
 
   it('returns only bound domains and accounts from global engine list responses', async () => {
     await expect(makeTools().listMailDomains(user, {})).resolves.toEqual({
-      domains: [{ domain: 'owned.test' }],
+      domains: [{
+        domain: 'owned.test',
+        verified: false,
+        verifiedAt: null,
+        lastVerificationCheckAt: null,
+      }],
     });
     await expect(makeTools().listMailAccounts(user, {})).resolves.toEqual({
       accounts: [{ address: 'alice@owned.test' }],
     });
     expect(mailDomains.listDomains).toHaveBeenCalledWith('ws-1', 'uc-user-1');
+  });
+
+  it('reads one domain verification state, including TXT instructions', async () => {
+    await expect(
+      makeTools().getMailDomainVerification(user, { domain_id: 'domain-1' }),
+    ).resolves.toMatchObject({
+      recordName: '_emailops-verify.owned.test',
+      recordValue: 'emailops-verify=token',
+    });
+    expect(mailDomains.getDomainVerification).toHaveBeenCalledWith(
+      'ws-1',
+      'uc-user-1',
+      'domain-1',
+    );
   });
 
   it.each([

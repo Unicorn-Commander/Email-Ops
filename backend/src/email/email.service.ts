@@ -171,6 +171,18 @@ interface SendReq {
  */
 export const AGENT_AUTOREPLY_HEADER = 'X-UC-Agent-Autoreply';
 
+/** The send-kit guard treats only explicitly verified domains as internal. */
+export async function verifiedInternalDomains(
+  tx: Pick<WorkspaceTxClient, 'mailDomain'>,
+  workspaceId: string,
+): Promise<Set<string>> {
+  const rows = await tx.mailDomain.findMany({
+    where: { workspaceId, verified: true },
+    select: { domain: true },
+  });
+  return new Set(rows.map((row) => row.domain.toLowerCase()));
+}
+
 interface DraftReq {
   toAddress: string;
   toAddresses?: string[];
@@ -2780,7 +2792,7 @@ export class EmailService {
             ...(item.message.ccAddresses ?? []),
             ...(item.message.bccAddresses ?? []),
           ].map((r) => normalizeAddress(r)).filter(Boolean);
-          const domains = new Set((await tx.mailDomain.findMany({ where: { workspaceId, verified: true }, select: { domain: true } })).map((d) => d.domain.toLowerCase()));
+          const domains = await verifiedInternalDomains(tx, workspaceId);
           const trusted = await tx.trustedCorrespondent.findMany({ where: { workspaceId }, select: { address: true, scope: true } });
           const external = recipients.filter((r) => {
             const domain = r.split('@')[1] ?? '';

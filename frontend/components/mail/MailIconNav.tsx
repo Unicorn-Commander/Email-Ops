@@ -28,6 +28,7 @@ import {
   CheckSquareIcon,
   RobotIcon,
   InboxTrayIcon,
+  GlobeIcon,
   TrashIcon,
   GearIcon,
   DeviceIcon,
@@ -49,6 +50,7 @@ const TOP: NavItem[] = [
   { href: '/agent-inbox', label: 'Approvals', icon: CheckSquareIcon, badgeKey: 'approvals' },
   { href: '/agents', label: 'Agents', icon: RobotIcon },
   { href: '/mailboxes', label: 'Mailboxes', icon: InboxTrayIcon },
+  { href: '/domains', label: 'Domains', icon: GlobeIcon },
   { href: '/insights', label: 'Insights', icon: BarChartIcon },
 ];
 
