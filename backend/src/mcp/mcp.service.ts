@@ -1060,7 +1060,8 @@ export class McpService {
         description:
           'List only the caller workspace’s bound domains that the sovereign mail engine ' +
           '(Apache James) currently serves. Read-only / member-level. Returns ' +
-          '{ domains: [{ domain }] } or ' +
+          '{ domains: [{ id, domain, verified, verifiedAt, lastVerificationCheckAt }] } ' +
+          '(id is the domain_id for get_mail_domain_verification) or ' +
           '{ status:"engine_not_configured" } when no WebAdmin endpoint is wired.',
         inputSchema: {
           workspace_id: z.string().optional(),
