@@ -1036,6 +1036,10 @@ export class EmailOpsTools {
       const binding = owned.get(this.mailDomains.canonicalDomain(item.domain));
       return {
         ...item,
+        // The binding id is what get_mail_domain_verification (and the
+        // verification REST routes) take as domain_id; without it an agent
+        // can list a domain but never look up or start its verification.
+        id: binding?.id ?? null,
         verified: binding?.verified ?? false,
         verifiedAt: binding?.verifiedAt?.toISOString() ?? null,
         lastVerificationCheckAt: binding?.lastVerificationCheckAt?.toISOString() ?? null,

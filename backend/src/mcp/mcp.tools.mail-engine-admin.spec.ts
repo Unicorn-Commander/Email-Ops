@@ -120,6 +120,7 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
     await expect(makeTools().listMailDomains(user, {})).resolves.toEqual({
       domains: [{
         domain: 'owned.test',
+        id: 'domain-1',
         verified: false,
         verifiedAt: null,
         lastVerificationCheckAt: null,

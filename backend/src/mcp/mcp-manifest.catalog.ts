@@ -1608,7 +1608,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "list_mail_domains",
-      "description": "List the domains the sovereign mail engine (Apache James) currently serves, including verified, verifiedAt, and lastVerificationCheckAt. Read-only / member-level. Returns { domains: [{ domain, verified, verifiedAt, lastVerificationCheckAt }] } or { status:\"engine_not_configured\" } when no WebAdmin endpoint is wired.",
+      "description": "List the domains the sovereign mail engine (Apache James) currently serves, including verified, verifiedAt, and lastVerificationCheckAt. Read-only / member-level. Returns { domains: [{ id, domain, verified, verifiedAt, lastVerificationCheckAt }] } (id is the domain_id for get_mail_domain_verification) or { status:\"engine_not_configured\" } when no WebAdmin endpoint is wired.",
       "input_schema": {
         "type": "object",
         "properties": {
