@@ -212,6 +212,8 @@ function MailPanesGrid({
   foldersCollapsed,
   railCollapsed,
   threadOpen,
+  mobileFoldersOpen = false,
+  onCloseMobileFolders,
   folders,
   list,
   reader,
@@ -220,6 +222,9 @@ function MailPanesGrid({
   foldersCollapsed: boolean;
   railCollapsed: boolean;
   threadOpen: boolean;
+  /** Phones/tablets: the folders pane slides in as a drawer over the list. */
+  mobileFoldersOpen?: boolean;
+  onCloseMobileFolders?: () => void;
   folders: ReactNode;
   list: ReactNode;
   reader: ReactNode;
@@ -247,9 +252,34 @@ function MailPanesGrid({
       )}
       style={{ '--cols': gridCols } as CSSProperties}
     >
-      {/* (2) accounts + folders — hidden on mobile. Collapses to a slim
-          avatar rail (never fully vanishes) instead of disappearing. */}
-      <div className="overflow-hidden max-lg:hidden">{folders}</div>
+      {/* (2) accounts + folders. Collapses to a slim avatar rail (never fully
+          vanishes) on desktop; below lg it is a drawer opened from the list
+          header, closed by the backdrop or by picking a folder/mailbox. */}
+      {mobileFoldersOpen && (
+        <button
+          type="button"
+          aria-label="Close folders"
+          onClick={onCloseMobileFolders}
+          className="fixed inset-0 z-40 bg-black/50 lg:hidden"
+        />
+      )}
+      <div
+        className={cn(
+          'overflow-hidden',
+          mobileFoldersOpen
+            ? 'max-lg:fixed max-lg:inset-y-0 max-lg:left-0 max-lg:z-50 max-lg:w-[85vw] max-lg:max-w-[320px] max-lg:overflow-y-auto max-lg:border-r max-lg:border-subtle max-lg:bg-surface-raised max-lg:shadow-xl'
+            : 'max-lg:hidden',
+        )}
+        onClick={(e) => {
+          // A pick inside the drawer (mailbox or folder button) closes it;
+          // disclosure toggles (aria-expanded) keep it open.
+          if (!mobileFoldersOpen) return;
+          const btn = (e.target as HTMLElement).closest('button, a');
+          if (btn && !btn.hasAttribute('aria-expanded')) onCloseMobileFolders?.();
+        }}
+      >
+        {folders}
+      </div>
 
       {/* (3) conversation list — the only left pane on mobile until a thread opens. */}
       <section
@@ -335,6 +365,7 @@ export default function MailPage() {
 
   // Chrome collapse state (reused folders store + new rail store).
   const [foldersCollapsed, toggleFolders] = useMailboxCollapsed();
+  const [mobileFoldersOpen, setMobileFoldersOpen] = useState(false);
   const [railCollapsed, toggleRail] = useRailCollapsed();
 
   // Selection (bulk actions) + keyboard cursor over the thread list.
@@ -1352,8 +1383,10 @@ export default function MailPage() {
           foldersCollapsed={foldersCollapsed}
           railCollapsed={railCollapsed}
           threadOpen={threadOpen}
+          mobileFoldersOpen={mobileFoldersOpen}
+          onCloseMobileFolders={() => setMobileFoldersOpen(false)}
           folders={
-            foldersCollapsed ? (
+            foldersCollapsed && !mobileFoldersOpen ? (
               <FoldersRail
                 mailboxes={visibleMailboxes}
                 selectedId={
@@ -1420,6 +1453,7 @@ export default function MailPage() {
           }
           list={
             <ConversationList
+              onOpenFolders={() => setMobileFoldersOpen(true)}
               banner={banner}
               error={mail.threadsError ?? mail.error}
               title={listTitle}
@@ -2006,7 +2040,7 @@ function FoldersColumn({
       >
         <Link
           href="/agent-inbox"
-          className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-secondary transition-colors hover:bg-surface-overlay"
+          className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 max-lg:py-2.5 text-secondary transition-colors hover:bg-surface-overlay"
         >
           <CheckSquareIcon className="h-4 w-4 shrink-0 text-tertiary" />
           <span className="flex-1 text-[13px]">Needs approval</span>
@@ -2028,7 +2062,7 @@ function FoldersColumn({
             onClick={() => onSelectFolder(f.id)}
             aria-current={active}
             className={cn(
-              'mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left transition-colors',
+              'mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 max-lg:py-2.5 text-left transition-colors',
               active
                 ? 'bg-surface-elevated text-primary'
                 : 'text-secondary hover:bg-surface-overlay',
@@ -2047,7 +2081,7 @@ function FoldersColumn({
             <button
               type="button"
               onClick={onOpenSnoozed}
-              className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
+              className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 max-lg:py-2.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
             >
               <ClockIcon className="h-4 w-4 shrink-0 text-tertiary" />
               <span className="flex-1 text-[13px]">Snoozed</span>
@@ -2057,7 +2091,7 @@ function FoldersColumn({
             <button
               type="button"
               onClick={onOpenScheduled}
-              className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
+              className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 max-lg:py-2.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
             >
               <SendIcon className="h-4 w-4 shrink-0 text-tertiary" />
               <span className="flex-1 text-[13px]">Scheduled</span>
@@ -2070,7 +2104,7 @@ function FoldersColumn({
             <button
               type="button"
               onClick={onOpenRules}
-              className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
+              className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 max-lg:py-2.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
             >
               <FunnelIcon className="h-4 w-4 shrink-0 text-tertiary" />
               <span className="flex-1 text-[13px]">Rules</span>
@@ -2438,6 +2472,7 @@ function dateBucketKey(iso: string | null): string {
 }
 
 function ConversationList({
+  onOpenFolders,
   banner,
   error,
   title,
@@ -2471,6 +2506,8 @@ function ConversationList({
   onToggleFlag,
   onEmptyFolder,
 }: {
+  /** Phones/tablets: open the folders & accounts drawer. */
+  onOpenFolders?: () => void;
   banner: ListBanner | null;
   error: string | null;
   title: string;
@@ -2511,8 +2548,21 @@ function ConversationList({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="sticky top-0 z-[2] flex items-center justify-between gap-2 border-b border-subtle bg-surface-base/90 px-4 py-3 backdrop-blur">
-        <div className="flex min-w-0 items-baseline gap-2.5">
+      <div className="sticky top-0 z-[2] flex flex-wrap items-center justify-between gap-2 border-b border-subtle bg-surface-base/90 px-4 py-3 backdrop-blur">
+        <div className="flex min-w-0 items-center gap-2.5">
+          {onOpenFolders && (
+            <button
+              type="button"
+              onClick={onOpenFolders}
+              aria-label="Folders and mailboxes"
+              className="-ml-1.5 flex h-10 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium text-secondary hover:bg-surface-overlay hover:text-primary lg:hidden"
+            >
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-[18px] w-[18px]" aria-hidden>
+                <path d="M3 5h14M3 10h14M3 15h14" strokeLinecap="round" />
+              </svg>
+              Folders
+            </button>
+          )}
           <h2 className="truncate text-[15px] font-semibold tracking-[-0.01em]">{title}</h2>
           {unreadCount != null && unreadCount > 0 && (
             <span className="shrink-0 text-[12px] text-tertiary">{unreadCount} unread</span>
@@ -2537,7 +2587,7 @@ function ConversationList({
                 onClick={() => onFilter(seg)}
                 aria-pressed={filter === seg}
                 className={cn(
-                  'rounded-md px-2.5 py-1 text-[12px] font-medium capitalize transition-colors',
+                  'rounded-md px-2.5 py-1 text-[12px] font-medium capitalize transition-colors max-lg:min-h-9 max-lg:px-3 max-lg:text-[13px]',
                   filter === seg
                     ? 'bg-surface-raised text-primary shadow-token'
                     : 'text-tertiary hover:text-secondary',
@@ -3373,22 +3423,22 @@ function Reader({
   return (
     <div className="flex h-full flex-col bg-surface-raised">
       <div className="sticky top-0 z-[2] border-b border-subtle bg-surface-raised/[0.92] px-5 py-3.5 backdrop-blur sm:px-6">
-        <div className="mb-3 flex items-center gap-2.5">
+        <div className="mb-3 flex flex-wrap items-center gap-2.5 lg:flex-nowrap">
           <button
             type="button"
             onClick={onBack}
             aria-label="Back to conversations"
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-tertiary hover:bg-surface-overlay hover:text-primary lg:hidden"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-lg text-tertiary hover:bg-surface-overlay hover:text-primary lg:hidden"
           >
             <ChevronLeftIcon className="h-[18px] w-[18px]" />
           </button>
           <h1
             title={thread?.subject?.trim() || undefined}
-            className="flex-1 text-[19px] font-bold leading-[1.3] tracking-[-0.015em] text-primary"
+            className="min-w-0 flex-1 break-words text-[19px] font-bold leading-[1.3] tracking-[-0.015em] text-primary max-lg:basis-[calc(100%-3.25rem)] max-lg:text-[17px]"
           >
             {thread?.subject?.trim() || '(no subject)'}
           </h1>
-          <div className="flex shrink-0 items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1 max-lg:w-full max-lg:justify-between max-lg:gap-0">
             <ReaderTool
               label={thread?.flagged ? 'Unstar conversation' : 'Star conversation'}
               hint={
@@ -3464,13 +3514,14 @@ function Reader({
               />
             )}
             {/* Divide destructive triage from safe compose actions. */}
-            <span aria-hidden className="mx-0.5 h-5 w-px bg-border-subtle" />
+            <span aria-hidden className="mx-0.5 h-5 w-px bg-border-subtle max-lg:hidden" />
             <ReaderTool label="Reply" hint="Reply to the latest message (r)" onClick={onFocusReply}>
               <ReplyIcon className="h-[17px] w-[17px]" />
             </ReaderTool>
             <ReaderTool
               label="Pop out message"
               hint="Pop out — read this in an overlay, or eject it to its own window"
+              className="max-lg:hidden"
               accent
               onClick={onPopout}
             >
@@ -3498,8 +3549,8 @@ function Reader({
             {when}
             {mailbox && (
               <>
-                <br />
-                <span className="text-muted">to {mailbox.email_address}</span>
+                <br className="max-sm:hidden" />
+                <span className="text-muted max-sm:hidden">to {mailbox.email_address}</span>
               </>
             )}
           </span>
@@ -3641,6 +3692,7 @@ function ReaderTool({
   accent,
   danger,
   disabled,
+  className,
   children,
 }: {
   label: string;
@@ -3650,6 +3702,7 @@ function ReaderTool({
   accent?: boolean;
   danger?: boolean;
   disabled?: boolean;
+  className?: string;
   children: ReactNode;
 }) {
   return (
@@ -3660,7 +3713,8 @@ function ReaderTool({
         disabled={disabled}
         aria-label={label}
         className={cn(
-          'grid h-8 w-8 place-items-center rounded-lg text-tertiary transition-colors disabled:opacity-50',
+          'grid h-10 w-10 place-items-center rounded-lg text-tertiary transition-colors disabled:opacity-50 lg:h-8 lg:w-8',
+          className,
           accent
             ? 'hover:bg-accent/12 hover:text-accent'
             : danger

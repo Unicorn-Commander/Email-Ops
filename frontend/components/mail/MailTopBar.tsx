@@ -104,7 +104,7 @@ export function MailTopBar({
   const searchBox = (
     <label
       className={cn(
-        'flex h-8 max-w-[560px] flex-1 items-center gap-2.5 rounded-lg border border-subtle bg-surface-overlay px-3 text-tertiary transition-colors',
+        'flex h-10 min-w-0 max-w-[560px] flex-1 items-center gap-2.5 rounded-lg sm:h-8 border border-subtle bg-surface-overlay px-3 text-tertiary transition-colors',
         searchAvailable ? 'hover:border-border' : 'cursor-not-allowed opacity-70',
       )}
     >
@@ -144,7 +144,7 @@ export function MailTopBar({
   );
 
   return (
-    <header className="flex h-12 shrink-0 items-center gap-3.5 border-b border-subtle bg-surface-raised pl-3 pr-3.5">
+    <header className="flex h-14 shrink-0 items-center gap-2 border-b border-subtle bg-surface-raised pl-3 pr-2 sm:h-12 sm:gap-3.5 sm:pr-3.5">
       {/* Folders toggle — hands the accounts/folders column back its width. */}
       <Tooltip
         content={foldersCollapsed ? 'Show the accounts & folders pane' : 'Hide the accounts & folders pane'}
@@ -179,13 +179,13 @@ export function MailTopBar({
         searchBox
       ) : (
         <Tooltip content={searchUnavailableReason} bubbleClassName="max-w-[320px]">
-          <div className="flex max-w-[560px] flex-1">{searchBox}</div>
+          <div className="flex min-w-0 max-w-[560px] flex-1">{searchBox}</div>
         </Tooltip>
       )}
 
       <span className="hidden h-5 w-px shrink-0 bg-border-subtle lg:block" aria-hidden />
 
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-1 sm:gap-2">
         <Tooltip
           content={
             agentsPaused
@@ -229,7 +229,7 @@ export function MailTopBar({
             aria-label={railCollapsed ? 'Show agent activity rail' : 'Hide agent activity rail'}
             aria-pressed={!railCollapsed}
             className={cn(
-              'grid h-8 w-8 place-items-center rounded-lg border border-transparent transition-colors',
+              'hidden h-8 w-8 place-items-center rounded-lg border border-transparent transition-colors lg:grid',
               !railCollapsed
                 ? 'bg-accent/12 text-accent'
                 : 'text-secondary hover:bg-surface-overlay hover:text-primary',
@@ -244,7 +244,7 @@ export function MailTopBar({
             type="button"
             onClick={onRefresh}
             aria-label="Refresh mail"
-            className="grid h-8 w-8 place-items-center rounded-lg border border-transparent text-secondary transition-colors hover:bg-surface-overlay hover:text-primary"
+            className="grid h-10 w-10 place-items-center sm:h-8 sm:w-8 rounded-lg border border-transparent text-secondary transition-colors hover:bg-surface-overlay hover:text-primary"
           >
             <RefreshIcon className={cn('h-[17px] w-[17px]', refreshing && 'animate-spin')} />
           </button>
@@ -255,7 +255,7 @@ export function MailTopBar({
             type="button"
             onClick={onHelp}
             aria-label="Help — how Email-Ops works"
-            className="grid h-8 w-8 place-items-center rounded-lg border border-transparent text-[17px] font-semibold text-secondary transition-colors hover:bg-surface-overlay hover:text-primary"
+            className="hidden h-8 w-8 place-items-center sm:grid rounded-lg border border-transparent text-[17px] font-semibold text-secondary transition-colors hover:bg-surface-overlay hover:text-primary"
           >
             ?
           </button>
@@ -266,7 +266,7 @@ export function MailTopBar({
             type="button"
             onClick={() => setPref(resolved === 'dark' ? 'light' : 'dark')}
             aria-label="Toggle theme"
-            className="grid h-8 w-8 place-items-center rounded-lg border border-transparent text-secondary transition-colors hover:bg-surface-overlay hover:text-primary"
+            className="hidden h-8 w-8 place-items-center sm:grid rounded-lg border border-transparent text-secondary transition-colors hover:bg-surface-overlay hover:text-primary"
           >
             {resolved === 'dark' ? (
               <MoonIcon className="h-[17px] w-[17px]" />
@@ -282,7 +282,7 @@ export function MailTopBar({
             onClick={onCompose}
             disabled={!canCompose}
             aria-label="Compose"
-            className="flex h-8 items-center gap-1.5 rounded-lg bg-accent pl-2.5 pr-3.5 text-[13px] font-semibold text-white shadow-[0_2px_8px_-1px_rgb(var(--accent)/0.5)] transition-colors hover:bg-accent-hover disabled:opacity-50 disabled:shadow-none"
+            className="flex h-10 min-w-10 items-center justify-center gap-1.5 rounded-lg bg-accent px-2.5 text-[13px] sm:h-8 sm:pl-2.5 sm:pr-3.5 font-semibold text-white shadow-[0_2px_8px_-1px_rgb(var(--accent)/0.5)] transition-colors hover:bg-accent-hover disabled:opacity-50 disabled:shadow-none"
           >
             <PlusIcon className="h-[15px] w-[15px]" />
             <span className="hidden sm:inline">Compose</span>
