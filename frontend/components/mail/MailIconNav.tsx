@@ -80,8 +80,8 @@ export function MailIconNav({ pendingCount }: { pendingCount: number }) {
         aria-label={item.label}
         aria-current={active ? 'page' : undefined}
         className={cn(
-          'relative flex h-9 items-center rounded-[9px] transition-colors duration-fast ease-token',
-          expanded ? 'w-full gap-3 px-2.5' : 'w-9 justify-center',
+          'relative flex h-10 items-center rounded-[9px] transition-colors duration-fast ease-token lg:h-9',
+          expanded ? 'w-full gap-3 px-2.5' : 'w-10 justify-center lg:w-9',
           active
             ? 'bg-accent/12 text-accent'
             : 'text-tertiary hover:bg-surface-overlay hover:text-secondary',
@@ -125,8 +125,8 @@ export function MailIconNav({ pendingCount }: { pendingCount: number }) {
         aria-expanded={expanded}
         title={expanded ? 'Collapse menu' : 'Expand menu'}
         className={cn(
-          'mb-0.5 flex h-9 items-center rounded-[9px] text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay hover:text-secondary',
-          expanded ? 'w-full gap-3 px-2.5' : 'w-9 justify-center',
+          'mb-0.5 flex h-10 items-center rounded-[9px] text-tertiary transition-colors duration-fast ease-token hover:bg-surface-overlay hover:text-secondary lg:h-9',
+          expanded ? 'w-full gap-3 px-2.5' : 'w-10 justify-center lg:w-9',
         )}
       >
         <ChevronRightIcon

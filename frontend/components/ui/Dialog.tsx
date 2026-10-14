@@ -28,7 +28,7 @@ export function Dialog({
         <RadixDialog.Content
           className={cn(
             'lo-dialog-content fixed left-1/2 top-1/2 z-50',
-            'w-[calc(100vw-2rem)] max-w-md',
+            'w-[calc(100vw-2rem)] max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto',
             'rounded-token-lg border border-border bg-surface-elevated text-secondary shadow-token-lg',
             'focus:outline-none',
             className,
@@ -48,7 +48,7 @@ export function Dialog({
             {children ? <div className="mt-4 text-sm text-secondary">{children}</div> : null}
           </div>
           {footer ? (
-            <div className="flex items-center justify-end gap-2 border-t border-subtle p-4">
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-subtle p-4">
               {footer}
             </div>
           ) : null}
