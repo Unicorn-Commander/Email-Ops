@@ -24,6 +24,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { AgentInboxState, Prisma } from '@prisma/client';
+import { BUSINESS_TIME_ZONE } from '../common/business-time';
 import { PrismaService } from '../prisma/prisma.service';
 import { notifySweepEnabled } from './notify.flags';
 import { AGENT_INBOX_DEEP_LINK, StableNotifierService } from './stable-notifier.service';
@@ -101,7 +102,7 @@ export class StaleApprovalSweepService {
     private readonly notifier: StableNotifierService,
   ) {}
 
-  @Cron(CronExpression.EVERY_HOUR)
+  @Cron(CronExpression.EVERY_HOUR, { timeZone: BUSINESS_TIME_ZONE })
   async scheduledSweep(): Promise<void> {
     if (!notifySweepEnabled()) return; // dormant until deliberately turned on
     if (this.notifier.isDormant()) return; // no room wired → nothing to post

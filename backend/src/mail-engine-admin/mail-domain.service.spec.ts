@@ -1,9 +1,19 @@
 import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { MailDomain, Prisma, WorkspaceRole } from '@prisma/client';
+import { BUSINESS_TIME_ZONE } from '../common/business-time';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailDomainService } from './mail-domain.service';
 
 describe('MailDomainService', () => {
+  it('registers the verification sweep cron in the business zone', () => {
+    const options = Reflect.getMetadata(
+      'SCHEDULE_CRON_OPTIONS',
+      MailDomainService.prototype.scheduledVerificationSweep,
+    ) as { timeZone?: string };
+
+    expect(options.timeZone).toBe(BUSINESS_TIME_ZONE);
+  });
+
   const rows: MailDomain[] = [];
   const auditEvents: unknown[] = [];
   let sequence = 0;

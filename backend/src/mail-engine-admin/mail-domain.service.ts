@@ -12,6 +12,7 @@ import { AgentActionKind, MailDomain, Prisma, WorkspaceRole } from '@prisma/clie
 import { randomBytes } from 'crypto';
 import { promises as dns } from 'node:dns';
 import { domainToASCII } from 'url';
+import { BUSINESS_TIME_ZONE } from '../common/business-time';
 import { PrismaService } from '../prisma/prisma.service';
 
 export const MAIL_DOMAIN_DNS_RESOLVER = Symbol('MAIL_DOMAIN_DNS_RESOLVER');
@@ -168,7 +169,7 @@ export class MailDomainService {
   }
 
   /** Daily system sweep. A failed re-check records an error but never un-verifies. */
-  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, { timeZone: BUSINESS_TIME_ZONE })
   async scheduledVerificationSweep(): Promise<void> {
     if (this.verificationSweepRunning) return;
     this.verificationSweepRunning = true;

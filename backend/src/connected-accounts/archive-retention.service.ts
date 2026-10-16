@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { CleanupBatchState } from '@prisma/client';
+import { BUSINESS_TIME_ZONE } from '../common/business-time';
 import { PrismaService } from '../prisma/prisma.service';
 import { ArchiveStorageService } from './archive-storage.service';
 
@@ -13,7 +14,7 @@ export class ArchiveRetentionService {
     private readonly storage: ArchiveStorageService,
   ) {}
 
-  @Cron(CronExpression.EVERY_DAY_AT_3AM)
+  @Cron(CronExpression.EVERY_DAY_AT_3AM, { timeZone: BUSINESS_TIME_ZONE })
   async sweepExpiredArchives(): Promise<void> {
     const now = new Date();
     // Cross-workspace maintenance scan: intentionally uses the documented

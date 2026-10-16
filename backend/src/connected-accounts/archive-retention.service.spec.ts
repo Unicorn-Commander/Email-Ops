@@ -1,8 +1,18 @@
 import { CleanupBatchState } from '@prisma/client';
+import { BUSINESS_TIME_ZONE } from '../common/business-time';
 import { PrismaService } from '../prisma/prisma.service';
 import { ArchiveRetentionService } from './archive-retention.service';
 
 describe('ArchiveRetentionService', () => {
+  it('registers the daily maintenance cron in the business zone', () => {
+    const options = Reflect.getMetadata(
+      'SCHEDULE_CRON_OPTIONS',
+      ArchiveRetentionService.prototype.sweepExpiredArchives,
+    ) as { timeZone?: string };
+
+    expect(options.timeZone).toBe(BUSINESS_TIME_ZONE);
+  });
+
   it('scans expired archives through the BYPASSRLS system client and scopes each mutation', async () => {
     const expired = {
       id: 'batch-expired',

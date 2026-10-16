@@ -1,10 +1,20 @@
 import { InboundWatcherService } from './inbound-watcher.service';
+import { BUSINESS_TIME_ZONE } from '../common/business-time';
 
 /**
  * Pure-unit coverage (no DB): flag-gating, per-message classify, cursor advance
  * (incl. baseline), degrade-clean, and per-mailbox isolation of failures.
  */
 describe('InboundWatcherService', () => {
+  it('registers the polling cron with the business zone', () => {
+    const options = Reflect.getMetadata(
+      'SCHEDULE_CRON_OPTIONS',
+      InboundWatcherService.prototype.scheduledSweep,
+    ) as { timeZone?: string };
+
+    expect(options.timeZone).toBe(BUSINESS_TIME_ZONE);
+  });
+
   function make(opts: {
     mailboxes: any[];
     poll: (mb: string, since: string | null) => any;

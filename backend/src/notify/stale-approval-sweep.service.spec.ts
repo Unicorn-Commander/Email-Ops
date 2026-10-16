@@ -4,6 +4,7 @@ import {
   readLastReminded,
   StaleApprovalSweepService,
 } from './stale-approval-sweep.service';
+import { BUSINESS_TIME_ZONE } from '../common/business-time';
 import { AGENT_INBOX_DEEP_LINK } from './stable-notifier.service';
 
 /**
@@ -13,6 +14,15 @@ import { AGENT_INBOX_DEEP_LINK } from './stable-notifier.service';
  * confirm-on-success stamp (a failed post writes no stamp → retried next hour).
  */
 describe('StaleApprovalSweepService', () => {
+  it('registers the hourly sweep cron with the business zone', () => {
+    const options = Reflect.getMetadata(
+      'SCHEDULE_CRON_OPTIONS',
+      StaleApprovalSweepService.prototype.scheduledSweep,
+    ) as { timeZone?: string };
+
+    expect(options.timeZone).toBe(BUSINESS_TIME_ZONE);
+  });
+
   const NOW = new Date('2026-07-20T12:00:00Z');
   const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3600_000);
 

@@ -7,6 +7,7 @@ import { InboundPollResult } from '../stalwart/stalwart.types';
 import { MailTriageService } from '../mail-triage/mail-triage.service';
 import { MailRulesService } from '../mail-rules/mail-rules.service';
 import { MailRuleRow } from '../mail-rules/mail-rules.types';
+import { BUSINESS_TIME_ZONE } from '../common/business-time';
 import { inboundWatcherEnabled, inboundWatcherExternalEnabled } from '../common/workspace/feature-flags';
 import { AgentReplyService } from '../agent-reply/agent-reply.service';
 import { MailboxAccount, MessageDisposition } from '@prisma/client';
@@ -39,7 +40,7 @@ export class InboundWatcherService {
     private readonly agentReply: AgentReplyService,
   ) {}
 
-  @Cron(CronExpression.EVERY_MINUTE)
+  @Cron(CronExpression.EVERY_MINUTE, { timeZone: BUSINESS_TIME_ZONE })
   async scheduledSweep(): Promise<void> {
     if (!inboundWatcherEnabled()) return; // inert until deliberately turned on
     if (this.running) return; // never overlap a slow sweep with the next tick
