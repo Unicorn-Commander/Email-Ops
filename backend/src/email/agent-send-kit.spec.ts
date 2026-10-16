@@ -275,6 +275,87 @@ describe('approve_send_kit and agent-inbox projections', () => {
     });
   });
 
+  it('counts send-kit preview sends in the current New York calendar day', async () => {
+    jest.setSystemTime(new Date('2026-10-17T00:30:00.000Z'));
+    const row = storedKit({ expiresAt: new Date('2026-11-02T00:00:00.000Z') });
+    const count = jest.fn().mockResolvedValue(1);
+    const tx = {
+      agentSendKit: { findMany: jest.fn().mockResolvedValue([row]) },
+      emailMessage: { count },
+    };
+
+    await serviceWithTx(tx).listSendKits('workspace-1', 'human-1');
+
+    expect(count).toHaveBeenCalledWith({
+      where: {
+        workspaceId: 'workspace-1',
+        kitId: 'kit-1',
+        sentAt: {
+          gte: new Date('2026-10-16T04:00:00.000Z'),
+          lt: new Date('2026-10-17T04:00:00.000Z'),
+        },
+      },
+    });
+  });
+
+  it('counts send-kit approval-path sends in the current New York calendar day', async () => {
+    jest.setSystemTime(new Date('2026-10-17T00:30:00.000Z'));
+    const count = jest.fn().mockResolvedValue(2);
+    const staged = message();
+    const item = {
+      id: 'inbox-1',
+      workspaceId: 'workspace-1',
+      messageId: 'message-1',
+      kind: AgentInboxKind.EMAIL,
+      state: AgentInboxState.PENDING,
+      approvalTier: 'MAILBOX_OWNER',
+      draftedBy: 'agent-1',
+      payload: null,
+      message: {
+        id: 'message-1',
+        mailboxAccountId: null,
+        sendAt: null,
+        kitId: 'kit-1',
+        fromAddress: staged.fromAddress,
+        toAddress: staged.toAddress,
+        toAddresses: staged.toAddresses,
+        ccAddresses: staged.ccAddresses,
+        bccAddresses: staged.bccAddresses,
+        subject: staged.subject,
+        body: staged.body,
+        bodyHtml: null,
+        attachments: [],
+      },
+    };
+    const tx = {
+      agentInboxItem: { findFirst: jest.fn().mockResolvedValue(item) },
+      mailDomain: { findMany: jest.fn().mockResolvedValue([]) },
+      trustedCorrespondent: { findMany: jest.fn().mockResolvedValue([]) },
+      agentSendKit: {
+        findFirst: jest.fn().mockResolvedValue(
+          storedKit({ state: AgentSendKitState.APPROVED, expiresAt: new Date('2026-11-02T00:00:00.000Z') }),
+        ),
+      },
+      emailMessage: { count },
+    };
+
+    const service = serviceWithTx(tx);
+    await expect(
+      service.approveAgentInboxItem('workspace-1', 'agent-1', 'inbox-1', null, false, true),
+    ).rejects.toThrow('daily cap');
+
+    expect(count).toHaveBeenCalledWith({
+      where: {
+        workspaceId: 'workspace-1',
+        kitId: 'kit-1',
+        sentAt: {
+          gte: new Date('2026-10-16T04:00:00.000Z'),
+          lt: new Date('2026-10-17T04:00:00.000Z'),
+        },
+      },
+    });
+  });
+
   it('adds proposed kits to the pending inbox count', async () => {
     const tx = {
       agentInboxItem: { count: jest.fn().mockResolvedValue(3) },

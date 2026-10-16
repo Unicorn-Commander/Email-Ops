@@ -49,6 +49,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { EmailMode } from '@prisma/client';
 import { agentAvatarAbsoluteUrl } from '../agents/agent-avatar';
 import { withTimeout } from '../common/async/concurrency';
+import { businessDayWindow } from '../common/business-time';
 import { ConnectedAccountsEnginePort } from '../connected-accounts/connected-accounts.port';
 import { EmailService } from '../email/email.service';
 import { AGENT_REPLY_RUNTIME_SOURCE } from '../email/email.types';
@@ -66,9 +67,6 @@ export const AGENT_REPLY_SOURCE = AGENT_REPLY_RUNTIME_SOURCE;
  */
 export const THREAD_AUTO_SEND_CAP = 5;
 const THREAD_AUTO_SEND_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-/** The per-MAILBOX runtime-draft cap window (rolling 24h) — the spam-blast guard. */
-const MAILBOX_DRAFT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** Reply-quoting: hard cap on the quoted original (a "…" marker follows a truncation). */
 const MAX_QUOTE_CHARS = 2000;
@@ -222,8 +220,9 @@ export class AgentReplyService {
       // re-checks it, but checking here first means a paused fleet does no
       // thread read and no LLM call — and we skip quietly instead of catching a
       // ForbiddenException.
-      const capSince = new Date(Date.now() - THREAD_AUTO_SEND_WINDOW_MS);
-      const mailboxSince = new Date(Date.now() - MAILBOX_DRAFT_WINDOW_MS);
+      const now = new Date();
+      const capSince = new Date(now.getTime() - THREAD_AUTO_SEND_WINDOW_MS);
+      const mailboxWindow = businessDayWindow(now);
       const gate = await this.prisma.withWorkspace(workspaceId, null, async (tx) => {
         const ws = await tx.workspace.findUnique({
           where: { id: workspaceId },
@@ -253,16 +252,16 @@ export class AgentReplyService {
             },
           }),
           // Wave 9 spam-blast guard: ALL runtime composes (any mode) for THIS
-          // agent mailbox in the last 24h. externalRef is `${mailboxId}:...` for
+          // agent mailbox in the New York business day. externalRef is `${mailboxId}:...` for
           // every runtime compose off this box, so a prefix match is the cheapest
           // CORRECT "this mailbox" predicate (equality-pinned workspace+source
           // range-scan on externalRef) and covers registered + unregistered alike.
-          mailboxComposes24h: await tx.emailMessage.count({
+          mailboxComposesToday: await tx.emailMessage.count({
             where: {
               workspaceId,
               externalSource: AGENT_REPLY_SOURCE,
               externalRef: { startsWith: `${agentMailbox.id}:` },
-              createdAt: { gt: mailboxSince },
+              createdAt: { gte: mailboxWindow.start, lt: mailboxWindow.end },
             },
           }),
           // Wave 7 outbound quality: respect a stored default signature for the
@@ -298,16 +297,16 @@ export class AgentReplyService {
         );
         return null;
       }
-      // Wave 9 spam-blast guard: this mailbox has already produced its daily cap
+      // Wave 9 spam-blast guard: this mailbox has already produced its business-day cap
       // of runtime composes. Skip ENTIRELY here (before the thread read + LLM) so a
       // looping/compromised agent burns no LLM cost and stages no further drafts.
       // Distinct from loop guard (d): that caps per-THREAD auto-SENDS; this caps
-      // per-MAILBOX total composes (any mode) in 24h.
+      // per-MAILBOX total composes (any mode) in the New York calendar day.
       const mailboxCap = agentDraftsPerMailboxPerDay();
-      if (gate.mailboxComposes24h >= mailboxCap) {
+      if (gate.mailboxComposesToday >= mailboxCap) {
         this.logger.warn(
           `agent-reply skip: mailbox draft cap reached for ${agentMailbox.emailAddress} ` +
-            `(${gate.mailboxComposes24h}/${mailboxCap} runtime composes in 24h) — thread=${msg.threadId}`,
+            `(${gate.mailboxComposesToday}/${mailboxCap} runtime composes in business day) — thread=${msg.threadId}`,
         );
         return null;
       }

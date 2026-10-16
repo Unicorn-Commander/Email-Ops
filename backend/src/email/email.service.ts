@@ -61,6 +61,7 @@ import { ConnectedAccountsService } from '../connected-accounts/connected-accoun
 import { MAX_TARGET_ROWS } from '../connected-accounts/cleanup-targets';
 import { isAgentOrigin } from '../common/agent-origin';
 import { classifyApprovalTier } from '../agent-inbox/approval-routing';
+import { businessDayWindow } from '../common/business-time';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
 import {
@@ -2559,14 +2560,13 @@ export class EmailService {
     full: boolean,
   ): Promise<AgentSendKitListView> {
     const now = new Date();
-    const utcStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-    const utcEnd = new Date(utcStart.getTime() + 24 * 60 * 60 * 1000);
+    const dayWindow = businessDayWindow(now);
     const sentToday = tx.emailMessage?.count
       ? await tx.emailMessage.count({
           where: {
             workspaceId: row.workspaceId,
             kitId: row.kitId,
-            sentAt: { gte: utcStart, lt: utcEnd },
+            sentAt: { gte: dayWindow.start, lt: dayWindow.end },
           },
         })
       : 0;
@@ -3000,16 +3000,13 @@ export class EmailService {
                   where: { kitId: item.message.kitId, workspaceId },
                 })
               : null;
-            const utcStart = new Date(
-              Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-            );
-            const utcEnd = new Date(utcStart.getTime() + 24 * 60 * 60 * 1000);
+            const dayWindow = businessDayWindow(now);
             const sentToday = kit
               ? await tx.emailMessage.count({
                   where: {
                     workspaceId,
                     kitId: item.message.kitId,
-                    sentAt: { gte: utcStart, lt: utcEnd },
+                    sentAt: { gte: dayWindow.start, lt: dayWindow.end },
                   },
                 })
               : 0;
