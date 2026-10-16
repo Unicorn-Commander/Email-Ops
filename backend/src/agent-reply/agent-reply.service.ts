@@ -49,7 +49,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { EmailMode } from '@prisma/client';
 import { agentAvatarAbsoluteUrl } from '../agents/agent-avatar';
 import { withTimeout } from '../common/async/concurrency';
-import { businessDayWindow } from '../common/business-time';
 import { ConnectedAccountsEnginePort } from '../connected-accounts/connected-accounts.port';
 import { EmailService } from '../email/email.service';
 import { AGENT_REPLY_RUNTIME_SOURCE } from '../email/email.types';
@@ -67,6 +66,9 @@ export const AGENT_REPLY_SOURCE = AGENT_REPLY_RUNTIME_SOURCE;
  */
 export const THREAD_AUTO_SEND_CAP = 5;
 const THREAD_AUTO_SEND_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** The per-MAILBOX runtime-draft safety-cap window (rolling 24h). */
+const MAILBOX_DRAFT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** Reply-quoting: hard cap on the quoted original (a "…" marker follows a truncation). */
 const MAX_QUOTE_CHARS = 2000;
@@ -222,7 +224,7 @@ export class AgentReplyService {
       // ForbiddenException.
       const now = new Date();
       const capSince = new Date(now.getTime() - THREAD_AUTO_SEND_WINDOW_MS);
-      const mailboxWindow = businessDayWindow(now);
+      const mailboxSince = new Date(now.getTime() - MAILBOX_DRAFT_WINDOW_MS);
       const gate = await this.prisma.withWorkspace(workspaceId, null, async (tx) => {
         const ws = await tx.workspace.findUnique({
           where: { id: workspaceId },
@@ -252,16 +254,16 @@ export class AgentReplyService {
             },
           }),
           // Wave 9 spam-blast guard: ALL runtime composes (any mode) for THIS
-          // agent mailbox in the New York business day. externalRef is `${mailboxId}:...` for
+          // agent mailbox in any rolling 24-hour window. externalRef is `${mailboxId}:...` for
           // every runtime compose off this box, so a prefix match is the cheapest
           // CORRECT "this mailbox" predicate (equality-pinned workspace+source
           // range-scan on externalRef) and covers registered + unregistered alike.
-          mailboxComposesToday: await tx.emailMessage.count({
+          mailboxComposes24h: await tx.emailMessage.count({
             where: {
               workspaceId,
               externalSource: AGENT_REPLY_SOURCE,
               externalRef: { startsWith: `${agentMailbox.id}:` },
-              createdAt: { gte: mailboxWindow.start, lt: mailboxWindow.end },
+              createdAt: { gt: mailboxSince },
             },
           }),
           // Wave 7 outbound quality: respect a stored default signature for the
@@ -297,16 +299,16 @@ export class AgentReplyService {
         );
         return null;
       }
-      // Wave 9 spam-blast guard: this mailbox has already produced its business-day cap
+      // Wave 9 spam-blast guard: this mailbox has already produced its rolling 24h cap
       // of runtime composes. Skip ENTIRELY here (before the thread read + LLM) so a
       // looping/compromised agent burns no LLM cost and stages no further drafts.
       // Distinct from loop guard (d): that caps per-THREAD auto-SENDS; this caps
-      // per-MAILBOX total composes (any mode) in the New York calendar day.
+      // per-MAILBOX total composes (any mode) in any 24-hour window.
       const mailboxCap = agentDraftsPerMailboxPerDay();
-      if (gate.mailboxComposesToday >= mailboxCap) {
+      if (gate.mailboxComposes24h >= mailboxCap) {
         this.logger.warn(
           `agent-reply skip: mailbox draft cap reached for ${agentMailbox.emailAddress} ` +
-            `(${gate.mailboxComposesToday}/${mailboxCap} runtime composes in business day) — thread=${msg.threadId}`,
+            `(${gate.mailboxComposes24h}/${mailboxCap} runtime composes in any 24-hour window) — thread=${msg.threadId}`,
         );
         return null;
       }
@@ -721,7 +723,20 @@ export class AgentReplyService {
     if (!iso) return 'an earlier message';
     const d = new Date(iso);
     if (isNaN(d.getTime())) return 'an earlier message';
-    const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const MON = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
     const hh = String(d.getUTCHours()).padStart(2, '0');
     const mm = String(d.getUTCMinutes()).padStart(2, '0');
     return `${MON[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()} at ${hh}:${mm} UTC`;

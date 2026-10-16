@@ -634,8 +634,8 @@ describe('AgentReplyService', () => {
       });
     });
 
-    it('counts the current New York calendar day, not the preceding rolling 24 hours', async () => {
-      jest.useFakeTimers().setSystemTime(new Date('2026-10-17T00:30:00.000Z'));
+    it('counts the preceding rolling 24 hours across an Eastern midnight', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-10-17T04:30:00.000Z'));
       try {
         const { svc, emailMessageCount } = make({ mailboxComposes: 0 });
         await svc.draftReplyForInbound('ws1', MAILBOX, MSG);
@@ -644,8 +644,7 @@ describe('AgentReplyService', () => {
           (c: any[]) => c[0]?.where?.externalRef !== undefined,
         );
         expect(mailboxCall?.[0].where.createdAt).toEqual({
-          gte: new Date('2026-10-16T04:00:00.000Z'),
-          lt: new Date('2026-10-17T04:00:00.000Z'),
+          gt: new Date('2026-10-16T04:30:00.000Z'),
         });
       } finally {
         jest.useRealTimers();

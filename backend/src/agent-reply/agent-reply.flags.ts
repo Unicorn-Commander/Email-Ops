@@ -28,13 +28,15 @@ export function agentReplyRuntimeEnabled(getEnv: EnvGetter = defaultGetter): boo
   return truthy(getEnv('AGENT_REPLY_RUNTIME_ENABLED'), false);
 }
 
-/** Default per-mailbox runtime-draft ceiling (composes/day) when env is unset. */
+/** Default per-mailbox runtime-draft safety ceiling (any 24-hour window). */
 export const DEFAULT_AGENT_DRAFTS_PER_MAILBOX_PER_DAY = 20;
 
 /**
- * The spam-blast guard: at most this many runtime composes per AGENT MAILBOX per
- * rolling 24h. Over it, the runtime skips ENTIRELY (no thread read, no LLM cost,
- * no draft). Distinct from the per-THREAD auto-send cap (loop guard d).
+ * The spam-blast safety guard: at most this many runtime composes per AGENT
+ * MAILBOX in any rolling 24-hour window. Over it, the runtime skips ENTIRELY
+ * (no thread read, no LLM cost, no draft). Distinct from the per-THREAD
+ * auto-send cap (loop guard d). The exported names and environment variable
+ * retain their historical PER_DAY spelling for compatibility.
  * EMAIL_OPS_AGENT_DRAFTS_PER_MAILBOX_PER_DAY overrides; a non-positive/garbage
  * value falls back to the default (never disables the guard by accident).
  */
