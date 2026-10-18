@@ -226,9 +226,18 @@ describe('native unsubscribe target resolution and execution', () => {
 
 describe('NativeUnsubscribeHttpClient', () => {
   const originalFetch = global.fetch;
+  let lookupSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    // The client refuses non-public destinations; resolve the test host to a public address.
+    lookupSpy = jest
+      .spyOn(NativeUnsubscribeHttpClient.prototype as any, 'lookupHost')
+      .mockResolvedValue([{ address: '203.0.113.5', family: 4 }]);
+  });
 
   afterEach(() => {
     global.fetch = originalFetch;
+    lookupSpy.mockRestore();
   });
 
   it('uses an HTTPS form POST and never follows redirects', async () => {
