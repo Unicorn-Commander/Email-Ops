@@ -646,6 +646,7 @@ export class JamesClient extends StalwartPort {
           properties: [
             'id', 'threadId', 'from', 'to', 'cc', 'bcc', 'subject', 'receivedAt', 'preview', 'keywords',
             'messageId', 'references', 'htmlBody', 'textBody', 'bodyValues', 'attachments',
+            'header:List-Unsubscribe:asText', 'header:List-Unsubscribe-Post:asText',
           ],
           fetchHTMLBodyValues: true,
           fetchTextBodyValues: true,
@@ -679,6 +680,11 @@ export class JamesClient extends StalwartPort {
       const references = Array.isArray(referencesArr)
         ? referencesArr.filter((r): r is string => typeof r === 'string')
         : null;
+      const headers: Record<string, string> = {};
+      for (const name of ['List-Unsubscribe', 'List-Unsubscribe-Post']) {
+        const value = (m as any)[`header:${name}:asText`];
+        if (typeof value === 'string' && value.trim()) headers[name] = value;
+      }
       const attachments: StalwartAttachment[] = Array.isArray((m as any).attachments)
         ? (m as any).attachments
             .filter((a: unknown) => a && typeof a === 'object' && typeof (a as any).blobId === 'string')
@@ -705,6 +711,7 @@ export class JamesClient extends StalwartPort {
         textBody,
         messageIdHeader,
         references,
+        headers,
         isUnread: keywords['$seen'] !== true,
         flagged: keywords['$flagged'] === true,
         attachments,

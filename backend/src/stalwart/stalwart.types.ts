@@ -81,6 +81,8 @@ export interface StalwartMessageDetail extends StalwartMessage {
   messageIdHeader: string | null;
   /** The References header, as a list of Message-IDs (oldest first), when available. */
   references: string[] | null;
+  /** Selected RFC headers returned by the JMAP `header:<name>:asText` properties. */
+  headers?: Record<string, string>;
   isUnread: boolean;
   flagged: boolean;
   attachments: StalwartAttachment[];
