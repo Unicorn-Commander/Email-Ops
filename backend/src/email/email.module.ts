@@ -4,6 +4,7 @@ import { StalwartModule } from '../stalwart/stalwart.module';
 import { ConnectedAccountsModule } from '../connected-accounts/connected-accounts.module';
 import { MailProviderModule } from '../mail-provider/mail-provider.module';
 import { NotifyModule } from '../notify/notify.module';
+import { NativeUnsubscribeHttpClient, NativeUnsubscribeHttpPort } from './native-unsubscribe-http';
 
 /**
  * The Email-Ops core domain: the SoR + the EmailOpsPort contract logic + the
@@ -13,7 +14,11 @@ import { NotifyModule } from '../notify/notify.module';
  */
 @Module({
   imports: [StalwartModule, ConnectedAccountsModule, MailProviderModule, NotifyModule],
-  providers: [EmailService],
+  providers: [
+    NativeUnsubscribeHttpClient,
+    { provide: NativeUnsubscribeHttpPort, useExisting: NativeUnsubscribeHttpClient },
+    EmailService,
+  ],
   exports: [EmailService],
 })
 export class EmailModule {}

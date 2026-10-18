@@ -442,6 +442,8 @@ describe('JamesClient', () => {
                     htmlBody: [{ partId: 'html' }],
                     textBody: [{ partId: 'text' }],
                     bodyValues: { html: { value: '<p>hi</p>' }, text: { value: 'hi' } },
+                    'header:List-Unsubscribe:asText': '<https://example.test/unsubscribe>',
+                    'header:List-Unsubscribe-Post:asText': 'List-Unsubscribe=One-Click',
                     attachments: [
                       { blobId: 'blob-1', name: 'f.pdf', type: 'application/pdf', size: 123, cid: null },
                     ],
@@ -463,10 +465,22 @@ describe('JamesClient', () => {
         textBody: 'hi',
         messageIdHeader: 'abc@x.test',
         references: ['zzz@x.test'],
+        headers: {
+          'List-Unsubscribe': '<https://example.test/unsubscribe>',
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        },
         isUnread: false,
         cc: [{ address: 'c@x.test', name: null }],
         attachments: [{ blobId: 'blob-1', name: 'f.pdf', type: 'application/pdf', size: 123, cid: null }],
       });
+      const emailGet = fetchSpy.mock.calls
+        .filter(([, init]) => Boolean((init as RequestInit | undefined)?.body))
+        .map(([, init]) => JSON.parse((init as RequestInit).body as string))
+        .flatMap((body) => body.methodCalls as any[])
+        .find((call) => call[0] === 'Email/get');
+      expect(emailGet[1].properties).toEqual(
+        expect.arrayContaining(['header:List-Unsubscribe:asText', 'header:List-Unsubscribe-Post:asText']),
+      );
     });
 
     it('setThreadRead patches $seen on every message in the thread (two-step: resolve ids, then Email/set)', async () => {

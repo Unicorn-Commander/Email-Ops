@@ -39,6 +39,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import {
   AgentActionKind,
@@ -128,6 +129,13 @@ import {
   NormalizedComposeAttachment,
   validateComposeAttachments,
 } from './compose-attachments';
+import {
+  executeNativeUnsubscribeTargets,
+  NativeUnsubscribeBatchResult,
+  NativeUnsubscribeTarget,
+  resolveNativeUnsubscribeTargets,
+} from './native-unsubscribe';
+import { NativeUnsubscribeHttpPort } from './native-unsubscribe-http';
 
 /**
  * Fan-out bounds for the multi-mailbox webmail endpoints (unified inbox +
@@ -273,6 +281,13 @@ type ApprovePrep =
       draftedBy: string | null;
     }
   | {
+      kind: 'native-unsubscribe';
+      itemId: string;
+      targets: NativeUnsubscribeTarget[];
+      payload: Record<string, unknown>;
+      draftedBy: string | null;
+    }
+  | {
       kind: 'send';
       itemId: string;
       messageId: string;
@@ -365,6 +380,9 @@ export class EmailService {
     // positional-construction unit specs stay valid; guarded on every use.
     // Dormant unless the notify webhook env is wired.
     private readonly notifier?: StableNotifierService,
+    // Native RFC 8058 HTTP is a separate injectable seam so approval tests never
+    // need to make a real network request. Kept last for positional test fakes.
+    @Optional() private readonly nativeUnsubscribeHttp?: NativeUnsubscribeHttpPort,
   ) {}
 
   /**
@@ -2752,6 +2770,103 @@ export class EmailService {
     return this.inboxView(item, null);
   }
 
+  /**
+   * Stage a NATIVE UNSUBSCRIBE request after reading the advertised RFC 2369 /
+   * RFC 8058 target from each requested James thread. Only threads with an
+   * explicit HTTPS one-click URL or mailto target enter the approval queue;
+   * sender-based guesses and GET-only links are never staged.
+   */
+  async stageNativeUnsubscribe(
+    workspaceId: string,
+    ucUid: string | null,
+    threadIds: string[],
+    opts?: { agentKey?: string | null; reason?: string | null },
+  ): Promise<{
+    view: AgentInboxView | null;
+    stagedThreadIds: string[];
+    skipped: Array<{ thread_id: string; reason: string }>;
+    targets: {
+      verb: string;
+      scope: 'threads';
+      provider: string;
+      total: number;
+      rows: Array<{ subject: string | null; sender: string | null }>;
+      truncated: boolean;
+    } | null;
+  }> {
+    const ids = Array.from(
+      new Set(threadIds.map((id) => String(id).trim()).filter(Boolean)),
+    ).slice(0, 50);
+    if (ids.length === 0) return { view: null, stagedThreadIds: [], skipped: [], targets: null };
+    const draftedBy = opts?.agentKey ?? 'email-ops-assistant';
+    await this.assertAgentWriteAllowed(workspaceId, ucUid, draftedBy);
+    const rationale =
+      String(opts?.reason ?? '')
+        .trim()
+        .slice(0, 300) ||
+      'Use the List-Unsubscribe target advertised by the message; no sender or URL was guessed.';
+    const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      this.readableMailboxes(tx, workspaceId, ucUid),
+    );
+    const nativeMailboxes = mailboxes.filter((mailbox) => !this.mailProvider.handles(mailbox));
+    const resolution = await resolveNativeUnsubscribeTargets(
+      nativeMailboxes,
+      ids,
+      (mailbox, threadId) => this.stalwart.getThreadDetail(mailbox, threadId),
+      rationale,
+    );
+    if (resolution.targets.length === 0) {
+      return { view: null, stagedThreadIds: [], skipped: resolution.skipped, targets: null };
+    }
+
+    const preview = {
+      verb: 'Unsubscribe',
+      scope: 'threads' as const,
+      provider: 'this inbox',
+      total: resolution.targets.length,
+      rows: resolution.targets.slice(0, MAX_TARGET_ROWS).map((target) => ({
+        subject: target.subject,
+        sender: target.sender,
+      })),
+      truncated: resolution.targets.length > MAX_TARGET_ROWS,
+    };
+    const summary = `Unsubscribe ${resolution.targets.length} thread${resolution.targets.length === 1 ? '' : 's'} in your inbox`;
+    const item = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) =>
+      tx.agentInboxItem.create({
+        data: {
+          workspaceId,
+          messageId: null,
+          kind: AgentInboxKind.CLEANUP,
+          payload: {
+            native: true,
+            action: 'UNSUBSCRIBE',
+            folder: 'inbox',
+            thread_ids: resolution.targets.map((target) => target.thread_id),
+            unsubscribe_targets: resolution.targets,
+            targets: preview,
+            reason: rationale,
+          } as any,
+          state: AgentInboxState.PENDING,
+          draftedBy,
+          summary,
+        },
+      }),
+    );
+    this.fireApprovalNotice({
+      id: item.id,
+      workspaceId,
+      kind: AgentInboxKind.CLEANUP,
+      summary,
+      draftedBy,
+    });
+    return {
+      view: this.inboxView(item, null),
+      stagedThreadIds: resolution.targets.map((target) => target.thread_id),
+      skipped: resolution.skipped,
+      targets: preview,
+    };
+  }
+
   /** Shared pause fence for agent-originated writes outside compose_email. */
   async assertAgentWriteAllowed(
     workspaceId: string,
@@ -2824,6 +2939,17 @@ export class EmailService {
     } catch {
       return [];
     }
+  }
+
+  /** Execute parsed native unsubscribe targets through the approved lanes. */
+  private async runNativeUnsubscribe(
+    targets: NativeUnsubscribeTarget[],
+  ): Promise<NativeUnsubscribeBatchResult> {
+    return executeNativeUnsubscribeTargets(
+      targets,
+      this.nativeUnsubscribeHttp,
+      (mailbox, request, transactional) => this.stalwart.send(mailbox, request, transactional),
+    );
   }
 
   /**
@@ -3038,6 +3164,17 @@ export class EmailService {
           const payload = this.cleanupPayload(item.payload);
           const nativeIds = this.nativeCleanupThreadIds(payload);
           if (nativeIds) {
+            if (String(payload.action ?? '').toUpperCase() === 'UNSUBSCRIBE') {
+              const targets = this.nativeUnsubscribeTargets(payload);
+              if (targets.length === 0) return { kind: 'null' };
+              return {
+                kind: 'native-unsubscribe',
+                itemId,
+                targets,
+                payload,
+                draftedBy: item.draftedBy,
+              };
+            }
             // Native bulk-triage: defer execution to AFTER the tx — the JMAP moves
             // are external calls and must not run inside the withWorkspace tx.
             const disposition =
@@ -3173,6 +3310,38 @@ export class EmailService {
         });
         this.logger.log(
           `agent-inbox native cleanup item ${prep.itemId} APPROVED by ${ucUid ?? '(unknown)'} — ${moved}/${prep.threadIds.length} threads moved in James`,
+        );
+        return { inbox: this.inboxView(updated, null), message: null };
+      });
+    }
+
+    if (prep.kind === 'native-unsubscribe') {
+      // One-click POSTs and mailto sends are external calls, so execute them
+      // outside the authorize transaction. Each target gets its own result.
+      const result = await this.runNativeUnsubscribe(prep.targets);
+      return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+        const updated = await tx.agentInboxItem.update({
+          where: { id: prep.itemId },
+          data: {
+            state: AgentInboxState.APPROVED,
+            reviewedByUcUid: ucUid,
+            reviewedAt: new Date(),
+            reviewNote: note ?? null,
+            payload: {
+              ...prep.payload,
+              result,
+            } as unknown as Prisma.InputJsonValue,
+          },
+        });
+        await this.recordAction(tx, workspaceId, {
+          kind: AgentActionKind.APPROVED,
+          agentKey: prep.draftedBy,
+          messageId: null,
+          actorUcUid: ucUid,
+          detail: `native unsubscribe: ${result.completed}/${result.total_attempted} thread(s) succeeded; ${result.failed} failed`,
+        });
+        this.logger.log(
+          `agent-inbox native unsubscribe item ${prep.itemId} APPROVED by ${ucUid ?? '(unknown)'} — ${result.completed}/${result.total_attempted} threads succeeded`,
         );
         return { inbox: this.inboxView(updated, null), message: null };
       });
@@ -4995,6 +5164,21 @@ export class EmailService {
       : {};
   }
 
+  private nativeUnsubscribeTargets(payload: Record<string, unknown>): NativeUnsubscribeTarget[] {
+    const raw = payload.unsubscribe_targets;
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((value): value is NativeUnsubscribeTarget => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+      const target = value as Record<string, unknown>;
+      return (
+        typeof target.thread_id === 'string' &&
+        typeof target.message_id === 'string' &&
+        typeof target.mailbox === 'string' &&
+        (typeof target.one_click_url === 'string' || typeof target.mailto === 'string')
+      );
+    });
+  }
+
   /** Threads targeted by a NATIVE bulk-triage cleanup payload (else null). */
   private nativeCleanupThreadIds(payload: Record<string, unknown>): string[] | null {
     if (payload.native !== true) return null;
@@ -5005,6 +5189,9 @@ export class EmailService {
   private cleanupSummary(payload: Record<string, unknown>): string | null {
     const nativeIds = this.nativeCleanupThreadIds(payload);
     if (nativeIds) {
+      if (String(payload.action ?? '').toUpperCase() === 'UNSUBSCRIBE') {
+        return `Unsubscribe ${nativeIds.length} thread${nativeIds.length === 1 ? '' : 's'} in your inbox`;
+      }
       const verb = payload.action === MessageDisposition.TRASH ? 'Move to Trash' : 'Archive';
       return `${verb} ${nativeIds.length} thread${nativeIds.length === 1 ? '' : 's'} in your inbox`;
     }
@@ -5018,6 +5205,7 @@ export class EmailService {
 
   private cleanupSubject(payload: Record<string, unknown>): string | null {
     if (this.nativeCleanupThreadIds(payload)) {
+      if (String(payload.action ?? '').toUpperCase() === 'UNSUBSCRIBE') return 'Unsubscribe threads';
       return payload.action === MessageDisposition.TRASH ? 'Trash threads' : 'Archive threads';
     }
     const action = typeof payload.action === 'string' ? payload.action : 'Cleanup';
@@ -5027,6 +5215,9 @@ export class EmailService {
   private cleanupBodyPreview(payload: Record<string, unknown>): string | null {
     const nativeIds = this.nativeCleanupThreadIds(payload);
     if (nativeIds) {
+      if (String(payload.action ?? '').toUpperCase() === 'UNSUBSCRIBE') {
+        return `${nativeIds.length} thread${nativeIds.length === 1 ? '' : 's'} will use their advertised unsubscribe target in your James mailbox on approval.`;
+      }
       const verb = payload.action === MessageDisposition.TRASH ? 'trashed' : 'archived';
       return `${nativeIds.length} thread${nativeIds.length === 1 ? '' : 's'} will be ${verb} in your James mailbox on approval.`;
     }

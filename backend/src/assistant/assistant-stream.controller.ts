@@ -94,7 +94,7 @@ interface StagedDraft {
 interface StagedCleanup {
   kind: 'cleanup';
   item_id: string | null;
-  /** The proposed verb as shown to the user: TRASH | ARCHIVE | DELETE. */
+  /** The proposed verb as shown to the user: TRASH | ARCHIVE | DELETE | UNSUBSCRIBE. */
   action: string;
   /** The connected provider the batch would run on (gmail | microsoft). */
   provider: string | null;
@@ -306,8 +306,8 @@ export class AssistantStreamController {
   ): Promise<StagedCleanup> {
     const rawAction = String(a.action ?? 'ARCHIVE').trim().toUpperCase();
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
-    // Native has no permanent-delete and no unsubscribe: DELETE→Trash, and
-    // anything not TRASH maps to Archive (the safe default).
+    // Native has no permanent-delete: DELETE→Trash, and anything not TRASH or
+    // UNSUBSCRIBE maps to Archive (the safe default).
     const disposition =
       rawAction === 'TRASH' || rawAction === 'DELETE'
         ? MessageDisposition.TRASH
@@ -315,10 +315,10 @@ export class AssistantStreamController {
     const shownAction = disposition === MessageDisposition.TRASH ? 'TRASH' : 'ARCHIVE';
     const verb = disposition === MessageDisposition.TRASH ? 'Move to Trash' : 'Archive';
     const n = threadIds.length;
-    const fail = (error: string): StagedCleanup => ({
+    const fail = (error: string, action = shownAction): StagedCleanup => ({
       kind: 'cleanup',
       item_id: null,
-      action: shownAction,
+      action,
       provider: 'this inbox',
       count: n,
       bytes: 0,
@@ -327,7 +327,50 @@ export class AssistantStreamController {
     });
 
     if (rawAction === 'UNSUBSCRIBE') {
-      return fail('Unsubscribe isn’t available yet — no mail was changed.');
+      try {
+        const staged = await this.email.stageNativeUnsubscribe(workspaceId, ucUid, threadIds, {
+          reason: String(a.reason ?? '').trim() || null,
+        });
+        if (!staged.view) {
+          const noHeaderOnly =
+            staged.skipped.length > 0 &&
+            staged.skipped.every((row) => row.reason === 'no List-Unsubscribe header; nothing staged');
+          return fail(
+            noHeaderOnly
+              ? 'No unsubscribe header; nothing staged.'
+              : 'No supported unsubscribe target; nothing staged.',
+            'UNSUBSCRIBE',
+          );
+        }
+        const noHeaderCount = staged.skipped.filter(
+          (row) => row.reason === 'no List-Unsubscribe header; nothing staged',
+        ).length;
+        const otherSkipped = staged.skipped.length - noHeaderCount;
+        const skippedNote = [
+          noHeaderCount
+            ? `${noHeaderCount} thread${noHeaderCount === 1 ? '' : 's'} had no unsubscribe header and were not staged.`
+            : '',
+          otherSkipped
+            ? `${otherSkipped} thread${otherSkipped === 1 ? '' : 's'} had no supported unsubscribe target and were not staged.`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' ');
+        const payload = staged.view.payload as Record<string, unknown> | null | undefined;
+        return {
+          kind: 'cleanup',
+          item_id: staged.view.id,
+          action: 'UNSUBSCRIBE',
+          provider: 'this inbox',
+          count: staged.stagedThreadIds.length,
+          bytes: 0,
+          targets: staged.targets,
+          reason: typeof payload?.reason === 'string' ? payload.reason : null,
+          preview: `Unsubscribe from ${staged.stagedThreadIds.length} thread${staged.stagedThreadIds.length === 1 ? '' : 's'} in your inbox. Nothing changes until you approve.${skippedNote ? ` ${skippedNote}` : ''}`,
+        };
+      } catch {
+        return fail('Could not read unsubscribe headers; nothing was staged.', 'UNSUBSCRIBE');
+      }
     }
 
     try {
@@ -401,7 +444,7 @@ export class AssistantStreamController {
     if (!mapped) {
       return fail(
         rawAction === 'UNSUBSCRIBE'
-          ? 'Unsubscribe isn’t available yet — no mail was changed.'
+          ? 'Use the message thread IDs for native unsubscribe, or the connected-account sender-group action.'
           : `Can’t run “${rawAction}” from chat.`,
       );
     }

@@ -116,13 +116,16 @@ Each action object is one of:
 - Clean up mail in THIS inbox — move specific threads shown in the Inbox context to Archive or \
 Trash (this is the common case when the user says "clean up", "archive these", "trash that"):
   {"type": "cleanup", "action": "ARCHIVE" | "TRASH", "thread_ids": ["<thread_id from the Inbox context>", ...]}
+- Unsubscribe from specific threads shown in THIS inbox when the user explicitly asks for it:
+  {"type": "cleanup", "action": "UNSUBSCRIBE", "thread_ids": ["<thread_id from the Inbox context>", ...]}
 - Clean up a CONNECTED external Gmail/Microsoft account by rule (ONLY when the user explicitly \
 refers to such a connected account):
   {"type": "cleanup", "action": "TRASH" | "ARCHIVE", "criteria": { ... }}
 
 Rules: only use thread_id / thread_ids and email addresses that appear in the Inbox context — \
 never invent them. To clean the current inbox, ALWAYS list the specific thread_ids from the \
-context (never guess a rule). Write a complete, ready-to-send body (no placeholders). Propose at \
+context (never guess a rule). For UNSUBSCRIBE, use only the specific threads the user named or \
+the context identifies; the server reads List-Unsubscribe and stages only advertised targets. Write a complete, ready-to-send body (no placeholders). Propose at \
 most 3 actions. After the marker, output ONLY the JSON array, nothing else.
 """
 

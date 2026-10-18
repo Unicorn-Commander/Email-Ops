@@ -779,8 +779,11 @@ function CleanupSection() {
         <a className="text-accent hover:underline" href="#approvals">
           approval queue
         </a>{' '}
-        — the review panel shows every affected message before you run it. Permanent deletion
-        is always gated behind a human, whichever door it comes through.
+        — the review panel shows every affected message before you run it. In the native James
+        inbox, an explicit unsubscribe request is staged only when the selected message advertises
+        an RFC 2369 / RFC 8058 one-click or mailto target; no-header threads are reported and
+        skipped, and arbitrary GET links are never fetched. Permanent deletion is always gated
+        behind a human, whichever door it comes through.
       </P>
       <H3 id="connected-accounts">Connected accounts, insights &amp; privacy</H3>
       <P>
