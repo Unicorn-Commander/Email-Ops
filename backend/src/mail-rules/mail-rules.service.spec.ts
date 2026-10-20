@@ -67,6 +67,9 @@ describe('MailRulesService', () => {
       agentInboxItem: {
         create: jest.fn().mockResolvedValue({ id: 'notice-1' }),
       },
+      mailRuleForward: {
+        create: jest.fn().mockResolvedValue({ id: 'forward-1' }),
+      },
     };
     const systemClient = opts.systemClient ?? {
       mailRule: { findMany: jest.fn().mockResolvedValue([]) },
@@ -81,6 +84,19 @@ describe('MailRulesService', () => {
       moveThreadToMailbox: jest.fn().mockResolvedValue(true),
       moveThreadToFolder: jest.fn().mockResolvedValue(true),
       setThreadRead: jest.fn().mockResolvedValue(true),
+      getThreadDetail: jest.fn().mockResolvedValue([]),
+      downloadBlob: jest.fn().mockResolvedValue(null),
+      uploadBlob: jest.fn().mockResolvedValue({
+        blobId: 'uploaded-original',
+        type: 'message/rfc822',
+        size: 32,
+      }),
+      send: jest.fn().mockResolvedValue({
+        accepted: true,
+        providerMessageId: 'forwarded-1',
+        threadId: 'forward-thread-1',
+        lane: 'james',
+      }),
     } as unknown as StalwartPort;
     const mailProvider = {
       handles: jest.fn().mockReturnValue(false),
@@ -727,6 +743,133 @@ describe('MailRulesService', () => {
     expect(data.summary).toHaveLength(200);
     expect(data.payload).not.toHaveProperty('messageId');
     expect(data.payload).not.toHaveProperty('note');
+  });
+
+  it('builds and submits a FORWARD_COPY through James with the original content and headers', async () => {
+    const { service, tx, stalwart } = make();
+    const detail = {
+      id: 'jmap-message-1',
+      threadId: 'thr-1',
+      from: { address: 'sender@outside.test', name: 'Sender' },
+      to: [{ address: 'founder@acme.test', name: null }],
+      cc: [],
+      bcc: [],
+      subject: 'Original subject',
+      sentAt: '2026-10-20T11:00:00.000Z',
+      preview: 'Original text',
+      direction: 'received',
+      htmlBody: '<p>Original HTML</p>',
+      textBody: 'Original text',
+      messageIdHeader: '<original-1@outside.test>',
+      rawBlobId: 'raw-original-1',
+      size: 2048,
+      references: null,
+      headers: {},
+      isUnread: true,
+      flagged: false,
+      attachments: [],
+    };
+    (stalwart.getThreadDetail as jest.Mock).mockResolvedValue([detail]);
+    const rules = [
+      ruleRow({
+        id: 'rule-forward',
+        name: 'Forward important mail',
+        actions: [{ type: 'FORWARD_COPY', value: 'ops@acme.test' }],
+      }),
+    ];
+
+    const out = await service.applyInbound(
+      WS,
+      'mb-1',
+      'founder@acme.test',
+      {
+        ...inboundMsg,
+        messageId: 'jmap-message-1',
+        receivedAt: '2026-10-20T11:00:00.000Z',
+      },
+      rules as any,
+      { ...mailbox, emailAddress: 'founder@acme.test', workspaceId: WS } as any,
+    );
+
+    expect(out).toEqual({ matched: 1, applied: 1 });
+    expect(tx.mailRuleForward.create).toHaveBeenCalledWith({
+      data: { workspaceId: WS, ruleId: 'rule-forward', messageId: 'jmap-message-1' },
+    });
+    expect(stalwart.send).toHaveBeenCalledTimes(1);
+    expect(stalwart.send).toHaveBeenCalledWith(
+      'founder@acme.test',
+      {
+        fromAddress: 'founder@acme.test',
+        toAddress: 'ops@acme.test',
+        subject: 'Fwd: Original subject',
+        body: [
+          'From: sender@outside.test',
+          'Date: 2026-10-20T11:00:00.000Z',
+          'To: founder@acme.test',
+          'Subject: Original subject',
+          '',
+          'Original text',
+        ].join('\n'),
+        bodyHtml:
+          '<div><p><strong>From:</strong> sender@outside.test</p><p><strong>Date:</strong> 2026-10-20T11:00:00.000Z</p><p><strong>To:</strong> founder@acme.test</p><p><strong>Subject:</strong> Original subject</p></div><hr><p>Original HTML</p>',
+        replyTo: 'sender@outside.test',
+        headers: [
+          { name: 'X-Email-Ops-Rule', value: 'rule-forward' },
+          { name: 'X-Email-Ops-Forwarded-From', value: '<original-1@outside.test>' },
+        ],
+        attachments: [
+          { blobId: 'raw-original-1', name: 'original.eml', type: 'message/rfc822' },
+        ],
+      },
+      false,
+    );
+  });
+
+  it('claims a FORWARD_COPY once and skips repeated delivery and looped input', async () => {
+    const { service, tx, stalwart } = make();
+    const detail = {
+      id: 'jmap-message-2',
+      threadId: 'thr-2',
+      from: { address: 'sender@outside.test', name: null },
+      to: [{ address: 'founder@acme.test', name: null }],
+      cc: [],
+      bcc: [],
+      subject: 'Original',
+      sentAt: '2026-10-20T11:00:00.000Z',
+      preview: 'text',
+      direction: 'received',
+      htmlBody: null,
+      textBody: 'text',
+      messageIdHeader: '<original-2@outside.test>',
+      rawBlobId: 'raw-original-2',
+      size: 100,
+      references: null,
+      headers: {},
+      isUnread: true,
+      flagged: false,
+      attachments: [],
+    };
+    (stalwart.getThreadDetail as jest.Mock).mockResolvedValue([detail]);
+    (tx.mailRuleForward.create as jest.Mock)
+      .mockResolvedValueOnce({ id: 'forward-2' })
+      .mockRejectedValueOnce({ code: 'P2002' });
+    const rules = [ruleRow({ id: 'rule-once', actions: [{ type: 'FORWARD_COPY', value: 'ops@acme.test' }] })];
+    const inbound = { ...inboundMsg, messageId: 'jmap-message-2' };
+    const sovereign = { ...mailbox, emailAddress: 'founder@acme.test', workspaceId: WS } as any;
+
+    await service.applyInbound(WS, 'mb-1', 'founder@acme.test', inbound, rules as any, sovereign);
+    await service.applyInbound(WS, 'mb-1', 'founder@acme.test', inbound, rules as any, sovereign);
+    expect(stalwart.send).toHaveBeenCalledTimes(1);
+
+    await service.applyInbound(
+      WS,
+      'mb-1',
+      'founder@acme.test',
+      { ...inbound, messageId: 'jmap-message-3', forwardedFrom: '<original-2@outside.test>' },
+      rules as any,
+      sovereign,
+    );
+    expect(stalwart.send).toHaveBeenCalledTimes(1);
   });
 
   it('routes rule actions through the PROVIDER for an external mailbox (ARCHIVE/MARK_READ), skipping MOVE_TO_FOLDER', async () => {

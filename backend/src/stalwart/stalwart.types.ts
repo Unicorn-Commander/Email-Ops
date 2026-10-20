@@ -79,6 +79,10 @@ export interface StalwartMessageDetail extends StalwartMessage {
   textBody: string | null;
   /** The Message-ID header value (as returned by the engine; may or may not carry the surrounding <>). */
   messageIdHeader: string | null;
+  /** The JMAP blob containing the original RFC message, when the engine exposes it. */
+  rawBlobId?: string | null;
+  /** The original RFC message size in bytes, when the engine exposes it. */
+  size?: number | null;
   /** The References header, as a list of Message-IDs (oldest first), when available. */
   references: string[] | null;
   /** Selected RFC headers returned by the JMAP `header:<name>:asText` properties. */

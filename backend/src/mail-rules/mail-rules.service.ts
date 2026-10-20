@@ -3,6 +3,7 @@ import { AgentInboxApprovalTier, AgentInboxKind, MailRule, Prisma } from '@prism
 import { assertMailboxVisible } from '../common/mailbox/mailbox-scope';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
+import { StalwartMessageDetail } from '../stalwart/stalwart.types';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { MailboxAccount } from '@prisma/client';
 import {
@@ -38,6 +39,7 @@ const PRIORITY_MAX = 1_000_000_000;
 const MAX_MATCH_GROUPS = 5;
 const MAX_MATCH_CONDITIONS_PER_GROUP = 10;
 const MAX_NOTIFY_NOTE_LENGTH = 200;
+const MAX_FORWARD_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const EMAIL_ADDRESS_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
@@ -393,10 +395,209 @@ export class MailRulesService {
       case 'MARK_READ':
         return this.stalwart.setThreadRead(mailboxEmail, msg.threadId, true);
       case 'FORWARD_COPY':
-        return null;
+        return this.forwardCopy(
+          workspaceId,
+          mailboxEmail,
+          msg,
+          ruleId,
+          action.value,
+          mailbox,
+        );
       default:
         return null; // LABEL (not supported yet) or unknown — skipped with a debug log
     }
+  }
+
+  private async forwardCopy(
+    workspaceId: string,
+    mailboxEmail: string,
+    msg: InboundRuleMessage,
+    ruleId: string,
+    destinationValue: string | undefined,
+    mailbox?: MailboxAccount,
+  ): Promise<boolean | null> {
+    if (mailbox && mailbox.provider !== 'stalwart') return null;
+    const destination = destinationValue?.trim();
+    if (!destination) return null;
+    if (
+      msg.forwardedFrom?.trim() ||
+      this.sameAddress(msg.fromAddress, destination) ||
+      this.sameAddress(mailboxEmail, destination)
+    ) {
+      return false;
+    }
+
+    const detail = await this.findForwardDetail(mailboxEmail, msg);
+    if (!detail) return false;
+    if (this.forwardedHeader(detail.headers)) return false;
+
+    const originalFrom = detail.from?.address ?? msg.fromAddress;
+    if (!originalFrom || this.sameAddress(originalFrom, destination)) return false;
+    const originalSubject = detail.subject ?? msg.subject ?? '';
+    const originalDate = detail.sentAt ?? msg.receivedAt ?? '';
+    const originalTo = detail.to.length
+      ? detail.to.map((participant) => participant.address).join(', ')
+      : (msg.toAddresses ?? []).join(', ');
+    const originalMessageId = detail.messageIdHeader?.trim() || msg.messageIdHeader?.trim() || msg.threadId;
+    const attachment = await this.prepareForwardAttachment(mailboxEmail, detail);
+    if (attachment.unavailable) return false;
+
+    const bodyLines = [
+      `From: ${originalFrom}`,
+      `Date: ${originalDate}`,
+      `To: ${originalTo}`,
+      `Subject: ${originalSubject}`,
+      '',
+      detail.textBody ?? '',
+    ];
+    if (attachment.tooLarge) {
+      bodyLines.push('', 'The original message was too large to attach.');
+    }
+
+    const markerMessageId = msg.messageId?.trim() || msg.threadId;
+    if (!markerMessageId || !(await this.claimForward(workspaceId, ruleId, markerMessageId))) {
+      return false;
+    }
+
+    const htmlBody = detail.htmlBody
+      ? [
+          '<div>',
+          `<p><strong>From:</strong> ${this.escapeHtml(originalFrom)}</p>`,
+          `<p><strong>Date:</strong> ${this.escapeHtml(originalDate)}</p>`,
+          `<p><strong>To:</strong> ${this.escapeHtml(originalTo)}</p>`,
+          `<p><strong>Subject:</strong> ${this.escapeHtml(originalSubject)}</p>`,
+          '</div><hr>',
+          detail.htmlBody,
+          ...(attachment.tooLarge
+            ? ['<p>The original message was too large to attach.</p>']
+            : []),
+        ].join('')
+      : null;
+    const sent = await this.stalwart.send(
+      mailboxEmail,
+      {
+        fromAddress: mailboxEmail,
+        toAddress: destination,
+        subject: `Fwd: ${originalSubject}`,
+        body: bodyLines.join('\n'),
+        bodyHtml: htmlBody,
+        replyTo: originalFrom,
+        headers: [
+          { name: 'X-Email-Ops-Rule', value: ruleId },
+          { name: 'X-Email-Ops-Forwarded-From', value: originalMessageId },
+        ],
+        ...(attachment.blobId
+          ? {
+              attachments: [
+                { blobId: attachment.blobId, name: 'original.eml', type: 'message/rfc822' },
+              ],
+            }
+          : {}),
+      },
+      false,
+    );
+    return sent.accepted;
+  }
+
+  private async findForwardDetail(
+    mailboxEmail: string,
+    msg: InboundRuleMessage,
+  ): Promise<StalwartMessageDetail | null> {
+    const details = await this.stalwart.getThreadDetail(mailboxEmail, msg.threadId);
+    if (!details.length) return null;
+    if (msg.messageId) {
+      const exact = details.find((detail) => detail.id === msg.messageId);
+      if (exact) return exact;
+    }
+    if (msg.messageIdHeader) {
+      const header = msg.messageIdHeader.replace(/^<|>$/g, '').toLowerCase();
+      const exact = details.find(
+        (detail) => detail.messageIdHeader?.replace(/^<|>$/g, '').toLowerCase() === header,
+      );
+      if (exact) return exact;
+    }
+    const received = details.filter((detail) => detail.direction === 'received');
+    return received[received.length - 1] ?? details[details.length - 1] ?? null;
+  }
+
+  private async prepareForwardAttachment(
+    mailboxEmail: string,
+    detail: StalwartMessageDetail,
+  ): Promise<{ blobId: string | null; tooLarge: boolean; unavailable: boolean }> {
+    if (detail.rawBlobId) {
+      if (typeof detail.size === 'number') {
+        return {
+          blobId: detail.size <= MAX_FORWARD_ATTACHMENT_BYTES ? detail.rawBlobId : null,
+          tooLarge: detail.size > MAX_FORWARD_ATTACHMENT_BYTES,
+          unavailable: false,
+        };
+      }
+      const downloaded = await this.stalwart.downloadBlob(mailboxEmail, detail.rawBlobId);
+      if (!downloaded) return { blobId: null, tooLarge: false, unavailable: true };
+      return {
+        blobId: detail.rawBlobId,
+        tooLarge: downloaded.data.length > MAX_FORWARD_ATTACHMENT_BYTES,
+        unavailable: false,
+      };
+    }
+
+    const synthetic = Buffer.from(this.renderOriginalEml(detail), 'utf8');
+    if (synthetic.length > MAX_FORWARD_ATTACHMENT_BYTES) {
+      return { blobId: null, tooLarge: true, unavailable: false };
+    }
+    const uploaded = await this.stalwart.uploadBlob(
+      mailboxEmail,
+      synthetic,
+      'message/rfc822',
+      'original.eml',
+    );
+    return uploaded
+      ? { blobId: uploaded.blobId, tooLarge: false, unavailable: false }
+      : { blobId: null, tooLarge: false, unavailable: true };
+  }
+
+  private renderOriginalEml(detail: StalwartMessageDetail): string {
+    const from = detail.from?.address ?? '';
+    const to = detail.to.map((participant) => participant.address).join(', ');
+    const headers = [
+      `From: ${from}`,
+      `To: ${to}`,
+      `Date: ${detail.sentAt ?? ''}`,
+      `Subject: ${detail.subject ?? ''}`,
+      ...(detail.messageIdHeader ? [`Message-ID: ${detail.messageIdHeader}`] : []),
+    ];
+    return `${headers.join('\r\n')}\r\n\r\n${detail.textBody ?? detail.htmlBody ?? ''}`;
+  }
+
+  private claimForward(workspaceId: string, ruleId: string, messageId: string): Promise<boolean> {
+    return this.prisma
+      .withWorkspace(workspaceId, APPLICATOR_UC_UID, (tx) =>
+        tx.mailRuleForward.create({ data: { workspaceId, ruleId, messageId } }),
+      )
+      .then(() => true)
+      .catch((err: unknown) => {
+        if ((err as { code?: string }).code === 'P2002') return false;
+        throw err;
+      });
+  }
+
+  private forwardedHeader(headers?: Record<string, string>): boolean {
+    return Object.entries(headers ?? {}).some(
+      ([name, value]) =>
+        name.toLowerCase() === 'x-email-ops-forwarded-from' && Boolean(value.trim()),
+    );
+  }
+
+  private sameAddress(left: string | null | undefined, right: string): boolean {
+    return Boolean(left && left.trim().toLowerCase() === right.trim().toLowerCase());
+  }
+
+  private escapeHtml(value: string): string {
+    return value.replace(
+      /[&<>"']/g,
+      (character) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ?? character,
+    );
   }
 
   private async createNotice(

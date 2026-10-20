@@ -644,7 +644,7 @@ export class JamesClient extends StalwartPort {
         {
           '#ids': { resultOf: '0', name: 'Thread/get', path: '/list/*/emailIds' },
           properties: [
-            'id', 'threadId', 'from', 'to', 'cc', 'bcc', 'subject', 'receivedAt', 'preview', 'keywords',
+            'id', 'blobId', 'size', 'threadId', 'from', 'to', 'cc', 'bcc', 'subject', 'receivedAt', 'preview', 'keywords',
             'messageId', 'references', 'htmlBody', 'textBody', 'bodyValues', 'attachments',
             'header:List-Unsubscribe:asText', 'header:List-Unsubscribe-Post:asText',
           ],
@@ -681,7 +681,11 @@ export class JamesClient extends StalwartPort {
         ? referencesArr.filter((r): r is string => typeof r === 'string')
         : null;
       const headers: Record<string, string> = {};
-      for (const name of ['List-Unsubscribe', 'List-Unsubscribe-Post']) {
+      for (const name of [
+        'List-Unsubscribe',
+        'List-Unsubscribe-Post',
+        'X-Email-Ops-Forwarded-From',
+      ]) {
         const value = (m as any)[`header:${name}:asText`];
         if (typeof value === 'string' && value.trim()) headers[name] = value;
       }
@@ -710,6 +714,8 @@ export class JamesClient extends StalwartPort {
         htmlBody,
         textBody,
         messageIdHeader,
+        rawBlobId: typeof (m as any).blobId === 'string' ? (m as any).blobId : null,
+        size: typeof (m as any).size === 'number' ? (m as any).size : null,
         references,
         headers,
         isUnread: keywords['$seen'] !== true,
@@ -1268,6 +1274,7 @@ export class JamesClient extends StalwartPort {
       };
       outbound.htmlBody = [{ partId: 'html', type: 'text/html' }];
     }
+    if (request.replyTo) outbound.replyTo = [{ email: request.replyTo }];
     if (request.cc?.length) outbound.cc = request.cc.map((email) => ({ email }));
     if (request.bcc?.length) outbound.bcc = request.bcc.map((email) => ({ email }));
     if (request.inReplyTo) outbound.inReplyTo = [request.inReplyTo.replace(/^<|>$/g, '')];
@@ -1419,10 +1426,12 @@ export class JamesClient extends StalwartPort {
             properties: [
               'id',
               'threadId',
+              'messageId',
               'subject',
               'from',
               'to',
               'receivedAt',
+              'header:X-Email-Ops-Forwarded-From:asText',
               'header:X-UC-Agent-Autoreply:asText',
             ],
           },
@@ -1438,6 +1447,7 @@ export class JamesClient extends StalwartPort {
     const refs = list
       .map((m: any) => ({
         threadId: typeof m?.threadId === 'string' ? m.threadId : '',
+        messageId: typeof m?.id === 'string' ? m.id : null,
         fromAddress:
           Array.isArray(m?.from) && m.from[0]?.email ? String(m.from[0].email) : null,
         // The REAL To recipients — rules' 'to' conditions match against these.
@@ -1446,6 +1456,15 @@ export class JamesClient extends StalwartPort {
           : [],
         subject: typeof m?.subject === 'string' ? m.subject : null,
         receivedAt: typeof m?.receivedAt === 'string' ? m.receivedAt : '',
+        messageIdHeader:
+          Array.isArray(m?.messageId) && typeof m.messageId[0] === 'string'
+            ? m.messageId[0]
+            : null,
+        forwardedFrom:
+          typeof m?.['header:X-Email-Ops-Forwarded-From:asText'] === 'string' &&
+          m['header:X-Email-Ops-Forwarded-From:asText'].trim() !== ''
+            ? m['header:X-Email-Ops-Forwarded-From:asText'].trim()
+            : null,
         // Present + non-empty header value ⇒ an agent runtime auto-sent this.
         agentAutoreply:
           typeof m?.['header:X-UC-Agent-Autoreply:asText'] === 'string' &&
