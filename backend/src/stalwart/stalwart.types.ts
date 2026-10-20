@@ -181,6 +181,8 @@ export interface StalwartSendRequest {
   attachments?: { blobId?: string; name: string; type: string; contentBase64?: string }[];
   /** The Message-ID header of the message being replied to (for In-Reply-To). */
   inReplyTo?: string | null;
+  /** The Reply-To header on the outbound message, when it differs from From. */
+  replyTo?: string | null;
   /** The References header chain (oldest first), for correct thread linking. */
   references?: string[];
   /**
@@ -239,6 +241,8 @@ export interface StalwartDraftRequest {
 /** One newly-arrived inbound message the watcher must classify. */
 export interface InboundMessageRef {
   threadId: string;
+  /** The provider's internal message id, when available. */
+  messageId?: string | null;
   fromAddress: string | null;
   /** Every address on the To header (rules evaluate 'to' conditions against
    *  these — the REAL recipients, not the polled mailbox's own address).
@@ -246,6 +250,10 @@ export interface InboundMessageRef {
   toAddresses?: string[];
   subject: string | null;
   receivedAt: string; // ISO
+  /** The original RFC Message-ID, when available from the poll. */
+  messageIdHeader?: string | null;
+  /** The inbound X-Email-Ops-Forwarded-From value, when present. */
+  forwardedFrom?: string | null;
   /**
    * True when the message carries the X-UC-Agent-Autoreply header — it was
    * auto-sent by an Email-Ops agent runtime, so the agent-reply runtime must

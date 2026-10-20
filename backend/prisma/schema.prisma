@@ -196,6 +196,7 @@ enum AgentInboxState {
 enum AgentInboxKind {
   EMAIL
   CLEANUP
+  NOTICE
 }
 
 enum AgentInboxApprovalTier {
@@ -437,6 +438,7 @@ model Workspace {
   outboundAttachments OutboundAttachment[]
   agentSendKits     AgentSendKit[]
   mailRules          MailRule[]
+  mailRuleForwards   MailRuleForward[]
   trustedCorrespondents TrustedCorrespondent[]
   spaces             Space[]
   invitations        Invitation[]
@@ -1018,9 +1020,29 @@ model MailRule {
 
   workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   mailbox   MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+  forwards  MailRuleForward[]
 
   @@index([mailboxId, enabled])
   @@map("mail_rules")
+}
+
+// A durable claim that one rule has attempted a forward for one inbound
+// provider message. The unique pair prevents a repeated watcher poll from
+// submitting the same user-configured forward twice.
+model MailRuleForward {
+  id          String   @id @default(uuid())
+  workspaceId String
+  ruleId      String
+  messageId   String
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  rule      MailRule  @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleId, messageId])
+  @@index([workspaceId])
+  @@index([workspaceId, ruleId])
+  @@map("mail_rule_forwards")
 }
 
 // ============================================================

@@ -15,6 +15,8 @@ export type RuleActionType =
   | 'ARCHIVE'
   | 'TRASH'
   | 'MARK_READ'
+  | 'NOTIFY'
+  | 'FORWARD_COPY'
   | 'STOP';
 
 export interface RuleAction {
@@ -67,6 +69,8 @@ const ACTION_TYPES: readonly RuleActionType[] = [
   'ARCHIVE',
   'TRASH',
   'MARK_READ',
+  'NOTIFY',
+  'FORWARD_COPY',
   'STOP',
 ];
 
@@ -265,10 +269,7 @@ function parseMatchChild(raw: unknown): Condition | MatchNode | null {
 
 function isCondition(raw: unknown): raw is Condition {
   return (
-    isRecord(raw) &&
-    isMatchField(raw.field) &&
-    isMatchOp(raw.op) &&
-    typeof raw.value === 'string'
+    isRecord(raw) && isMatchField(raw.field) && isMatchOp(raw.op) && typeof raw.value === 'string'
   );
 }
 

@@ -37,6 +37,8 @@ const PRIORITY_MAX = 1_000_000_000;
 // legacy stored shapes beyond them — see the contract in mail-rules.types.ts).
 const MAX_MATCH_GROUPS = 5;
 const MAX_MATCH_CONDITIONS_PER_GROUP = 10;
+const MAX_NOTIFY_NOTE_LENGTH = 200;
+const EMAIL_ADDRESS_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
  * Mail-rules CRUD + the inbound APPLICATOR. CRUD is workspace-member surface:
@@ -55,7 +57,11 @@ export class MailRulesService {
     private readonly mailProvider: MailProviderPort,
   ) {}
 
-  async list(workspaceId: string, ucUid: string | null, mailboxId: string): Promise<MailRuleView[]> {
+  async list(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+  ): Promise<MailRuleView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       await this.assertMailbox(tx, workspaceId, ucUid, mailboxId);
       const rows = await tx.mailRule.findMany({
@@ -76,10 +82,13 @@ export class MailRulesService {
     const name = this.normalizeName(input.name);
     const match = this.compileMatch(input.match);
     const actions = this.compileActions(input.actions);
-    const explicitPriority = input.priority === undefined ? null : this.normalizePriority(input.priority);
+    const explicitPriority =
+      input.priority === undefined ? null : this.normalizePriority(input.priority);
 
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const mbx = await this.assertMailbox(tx, workspaceId, ucUid, mailboxId, { requireActive: true });
+      const mbx = await this.assertMailbox(tx, workspaceId, ucUid, mailboxId, {
+        requireActive: true,
+      });
       // External (Gmail/M365) mailboxes have no folder model, so a MOVE_TO_FOLDER
       // rule would never fire there — reject it at create so the rule isn't a
       // silent no-op. ARCHIVE / TRASH / MARK_READ all map to provider triage verbs.
@@ -88,6 +97,7 @@ export class MailRulesService {
           'Move-to-folder rules are not supported on connected Gmail/Microsoft mailboxes — use Archive, Trash, or Mark-read.',
         );
       }
+      await this.validateActionPolicy(tx, workspaceId, mbx, actions);
       const count = await tx.mailRule.count({ where: { workspaceId, mailboxId } });
       if (count >= MAX_RULES_PER_MAILBOX) {
         throw new BadRequestException(
@@ -132,6 +142,7 @@ export class MailRulesService {
     // an explicit null through, and a null must read as "not provided" — never
     // reach Prisma as a null write on a non-nullable column (500).
     const data: Prisma.MailRuleUpdateInput = {};
+    let compiledActions: RuleAction[] | null = null;
     if (input.name != null) data.name = this.normalizeName(input.name);
     if (input.enabled != null) data.enabled = input.enabled;
     if (input.priority != null) data.priority = this.normalizePriority(input.priority);
@@ -139,15 +150,22 @@ export class MailRulesService {
       data.match = this.compileMatch(input.match) as unknown as Prisma.InputJsonValue;
     }
     if (input.actions != null) {
-      data.actions = this.compileActions(input.actions) as unknown as Prisma.InputJsonValue;
+      compiledActions = this.compileActions(input.actions);
+      data.actions = compiledActions as unknown as Prisma.InputJsonValue;
     }
 
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      await this.assertMailbox(tx, workspaceId, ucUid, mailboxId);
+      const mbx = await this.assertMailbox(tx, workspaceId, ucUid, mailboxId);
       const existing = await tx.mailRule.findFirst({
         where: { id: ruleId, workspaceId, mailboxId },
       });
       if (!existing) return null;
+      await this.validateActionPolicy(
+        tx,
+        workspaceId,
+        mbx,
+        compiledActions ?? parseActions(existing.actions),
+      );
       if (Object.keys(data).length === 0) return this.view(existing); // empty PATCH = read-back
       const row = await tx.mailRule.update({ where: { id: ruleId }, data });
       return this.view(row);
@@ -250,12 +268,16 @@ export class MailRulesService {
         try {
           const ok = await this.executeAction(mailboxEmail, msg.threadId, action, mailbox);
           if (ok === null) {
-            this.logger.debug(`rules: skipping action ${action.type} (unsupported) mailbox=${mailboxId}`);
+            this.logger.debug(
+              `rules: skipping action ${action.type} (unsupported) mailbox=${mailboxId}`,
+            );
           } else if (ok) {
             applied += 1;
           } else {
             // Port degrade-clean (dormant engine / unknown thread): not an error.
-            this.logger.debug(`rules: ${action.type} not applied (engine declined) thread=${msg.threadId}`);
+            this.logger.debug(
+              `rules: ${action.type} not applied (engine declined) thread=${msg.threadId}`,
+            );
           }
         } catch (err) {
           this.logger.warn(
@@ -273,7 +295,9 @@ export class MailRulesService {
           }),
         );
       } catch (err) {
-        this.logger.warn(`rules: hit-counter bump failed mailbox=${mailboxId}: ${(err as Error).message}`);
+        this.logger.warn(
+          `rules: hit-counter bump failed mailbox=${mailboxId}: ${(err as Error).message}`,
+        );
       }
 
       return { matched: matchedIds.length, applied };
@@ -348,7 +372,9 @@ export class MailRulesService {
     // provider compatibility, e.g. MOVE_TO_FOLDER on external, is validated by
     // the caller which has the action list.) List/update/delete stay permissive.
     if (opts?.requireActive && !mailbox.active) {
-      throw new BadRequestException('Mail rules run only on active mailboxes — this mailbox is inactive.');
+      throw new BadRequestException(
+        'Mail rules run only on active mailboxes — this mailbox is inactive.',
+      );
     }
     return { id: mailbox.id, provider: mailbox.provider, active: mailbox.active };
   }
@@ -424,7 +450,12 @@ export class MailRulesService {
   }
 
   private compileActions(raw: unknown): RuleAction[] {
-    const actions = parseActions(raw);
+    const actions = parseActions(raw).map((action) => ({
+      ...action,
+      ...(action.value !== undefined && (action.type === 'NOTIFY' || action.type === 'FORWARD_COPY')
+        ? { value: action.value.trim() }
+        : {}),
+    }));
     if (actions.length === 0) {
       throw new BadRequestException('actions must contain at least one valid action');
     }
@@ -432,9 +463,76 @@ export class MailRulesService {
       throw new BadRequestException('LABEL is not supported yet');
     }
     if (actions.every((a) => a.type === 'STOP')) {
-      throw new BadRequestException('actions must include at least one effectful action (not only STOP)');
+      throw new BadRequestException(
+        'actions must include at least one effectful action (not only STOP)',
+      );
+    }
+    for (const action of actions) {
+      if (
+        action.type === 'NOTIFY' &&
+        action.value !== undefined &&
+        action.value.length > MAX_NOTIFY_NOTE_LENGTH
+      ) {
+        throw new BadRequestException(
+          `NOTIFY note must be at most ${MAX_NOTIFY_NOTE_LENGTH} characters.`,
+        );
+      }
+      if (action.type === 'FORWARD_COPY' && !action.value) {
+        throw new BadRequestException(
+          'FORWARD_COPY requires one destination email address in value.',
+        );
+      }
+      if (action.type === 'FORWARD_COPY' && action.value && !EMAIL_ADDRESS_RE.test(action.value)) {
+        throw new BadRequestException({
+          code: 'forward_destination_not_allowed',
+          message: 'FORWARD_COPY destination must be one syntactically valid email address.',
+        });
+      }
     }
     return actions;
+  }
+
+  /** Validate mailbox compatibility and the workspace-owned forward target. */
+  private async validateActionPolicy(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    mailbox: { provider: string },
+    actions: RuleAction[],
+  ): Promise<void> {
+    const forwards = actions.filter(
+      (action): action is RuleAction & { type: 'FORWARD_COPY'; value: string } =>
+        action.type === 'FORWARD_COPY' &&
+        typeof action.value === 'string' &&
+        action.value.length > 0,
+    );
+    if (forwards.length === 0) return;
+
+    if (mailbox.provider !== 'stalwart') {
+      throw new BadRequestException(
+        'FORWARD_COPY rules are not supported on connected Gmail/Microsoft mailboxes.',
+      );
+    }
+
+    const [mailboxes, domains] = await Promise.all([
+      tx.mailboxAccount.findMany({ where: { workspaceId }, select: { emailAddress: true } }),
+      tx.mailDomain.findMany({ where: { workspaceId }, select: { domain: true } }),
+    ]);
+    const allowedAddresses = new Set(mailboxes.map((row) => row.emailAddress.trim().toLowerCase()));
+    const allowedDomains = domains.map((row) => row.domain.trim().toLowerCase()).filter(Boolean);
+    for (const action of forwards) {
+      const destination = action.value.toLowerCase();
+      const at = destination.lastIndexOf('@');
+      const domain = at >= 0 ? destination.slice(at + 1) : '';
+      const allowed =
+        allowedAddresses.has(destination) ||
+        allowedDomains.some((bound) => domain === bound || domain.endsWith(`.${bound}`));
+      if (!allowed) {
+        throw new BadRequestException({
+          code: 'forward_destination_not_allowed',
+          message: `FORWARD_COPY destination ${action.value} is not a mailbox, connected account, or bound mail domain in this workspace.`,
+        });
+      }
+    }
   }
 
   /** Count Condition LEAVES recursively — {} and nested-empty groups are dead rules. */

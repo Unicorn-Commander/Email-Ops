@@ -34,23 +34,33 @@ describe('MailRulesService', () => {
     };
   }
 
-  function make(opts: {
-    tx?: Record<string, unknown>;
-    systemClient?: Record<string, unknown>;
-  } = {}) {
+  function make(
+    opts: {
+      tx?: Record<string, unknown>;
+      systemClient?: Record<string, unknown>;
+    } = {},
+  ) {
     const tx = opts.tx ?? {
-      mailboxAccount: { findFirst: jest.fn().mockResolvedValue(mailbox) },
+      mailboxAccount: {
+        findFirst: jest.fn().mockResolvedValue(mailbox),
+        findMany: jest.fn().mockResolvedValue([{ emailAddress: 'founder@acme.test' }]),
+      },
+      mailDomain: { findMany: jest.fn().mockResolvedValue([]) },
       mailRule: {
         findMany: jest.fn().mockResolvedValue([ruleRow()]),
         findFirst: jest.fn().mockResolvedValue(ruleRow()),
         count: jest.fn().mockResolvedValue(0),
         aggregate: jest.fn().mockResolvedValue({ _max: { priority: null } }),
-        create: jest.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) =>
-          ruleRow({ ...data }),
-        ),
-        update: jest.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) =>
-          ruleRow({ ...data }),
-        ),
+        create: jest
+          .fn()
+          .mockImplementation(async ({ data }: { data: Record<string, unknown> }) =>
+            ruleRow({ ...data }),
+          ),
+        update: jest
+          .fn()
+          .mockImplementation(async ({ data }: { data: Record<string, unknown> }) =>
+            ruleRow({ ...data }),
+          ),
         deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
@@ -60,7 +70,9 @@ describe('MailRulesService', () => {
     };
     const prisma = {
       systemClient,
-      withWorkspace: jest.fn((_ws: string, _uc: string | null, fn: (t: unknown) => unknown) => fn(tx)),
+      withWorkspace: jest.fn((_ws: string, _uc: string | null, fn: (t: unknown) => unknown) =>
+        fn(tx),
+      ),
     } as unknown as PrismaService;
     const stalwart = {
       moveThreadToMailbox: jest.fn().mockResolvedValue(true),
@@ -74,10 +86,21 @@ describe('MailRulesService', () => {
       setThreadRead: jest.fn().mockResolvedValue(true),
     } as unknown as MailProviderPort;
     const service = new MailRulesService(prisma, stalwart, mailProvider);
-    return { service, prisma, tx: tx as any, systemClient: systemClient as any, stalwart: stalwart as any, mailProvider: mailProvider as any };
+    return {
+      service,
+      prisma,
+      tx: tx as any,
+      systemClient: systemClient as any,
+      stalwart: stalwart as any,
+      mailProvider: mailProvider as any,
+    };
   }
 
-  const inboundMsg = { threadId: 'thr-1', fromAddress: 'digest@news.test', subject: 'Weekly digest' };
+  const inboundMsg = {
+    threadId: 'thr-1',
+    fromAddress: 'digest@news.test',
+    subject: 'Weekly digest',
+  };
 
   // ---------------------------------------------------------------- CRUD
 
@@ -99,7 +122,9 @@ describe('MailRulesService', () => {
       hit_count: 0,
       last_hit_at: null,
     });
-    expect(out[0].match).toEqual({ all: [{ field: 'fromDomain', op: 'equals', value: 'news.test' }] });
+    expect(out[0].match).toEqual({
+      all: [{ field: 'fromDomain', op: 'equals', value: 'news.test' }],
+    });
     expect(out[0].actions).toEqual([{ type: 'MOVE_TO_FOLDER', value: 'fld-9' }]);
   });
 
@@ -147,7 +172,11 @@ describe('MailRulesService', () => {
       service.create(WS, UC, 'mb-1', { name: 'x', match: {}, actions: [{ type: 'ARCHIVE' }] }),
     ).rejects.toThrow('match must contain at least one condition');
     await expect(
-      service.create(WS, UC, 'mb-1', { name: 'x', match: { all: [{ any: [] }] }, actions: [{ type: 'ARCHIVE' }] }),
+      service.create(WS, UC, 'mb-1', {
+        name: 'x',
+        match: { all: [{ any: [] }] },
+        actions: [{ type: 'ARCHIVE' }],
+      }),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(tx.mailRule.create).not.toHaveBeenCalled();
   });
@@ -170,7 +199,11 @@ describe('MailRulesService', () => {
         },
       ],
     };
-    await service.create(WS, UC, 'mb-1', { name: 'Grouped', match: grouped, actions: [{ type: 'ARCHIVE' }] });
+    await service.create(WS, UC, 'mb-1', {
+      name: 'Grouped',
+      match: grouped,
+      actions: [{ type: 'ARCHIVE' }],
+    });
     expect(tx.mailRule.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ match: grouped }),
     });
@@ -181,7 +214,9 @@ describe('MailRulesService', () => {
       actions: [{ type: 'ARCHIVE' }],
     });
     expect(tx.mailRule.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ match: { any: [{ field: 'from', op: 'equals', value: 'a@b.test' }] } }),
+      data: expect.objectContaining({
+        match: { any: [{ field: 'from', op: 'equals', value: 'a@b.test' }] },
+      }),
     });
   });
 
@@ -280,6 +315,81 @@ describe('MailRulesService', () => {
     ).rejects.toThrow('LABEL is not supported yet');
   });
 
+  it('accepts NOTIFY notes and FORWARD_COPY destinations owned by the workspace', async () => {
+    const { service, tx } = make();
+    (tx.mailboxAccount.findMany as jest.Mock).mockResolvedValue([
+      { emailAddress: 'owner@workspace.test' },
+      { emailAddress: 'connected@gmail.test' },
+    ]);
+    (tx.mailDomain.findMany as jest.Mock).mockResolvedValue([{ domain: 'bound.test' }]);
+
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'Notify and forward',
+        match: { all: [{ field: 'subject', op: 'contains', value: 'urgent' }] },
+        actions: [
+          { type: 'NOTIFY', value: 'Please review' },
+          { type: 'FORWARD_COPY', value: 'owner@workspace.test' },
+        ],
+      }),
+    ).resolves.toBeDefined();
+    expect(tx.mailRule.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        actions: [
+          { type: 'NOTIFY', value: 'Please review' },
+          { type: 'FORWARD_COPY', value: 'owner@workspace.test' },
+        ],
+      }),
+    });
+
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'Bound domain forward',
+        match: { all: [{ field: 'subject', op: 'contains', value: 'urgent' }] },
+        actions: [{ type: 'FORWARD_COPY', value: 'archive@sub.bound.test' }],
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it('rejects invalid, unowned, and overlong new action values', async () => {
+    const { service, tx } = make();
+    (tx.mailboxAccount.findMany as jest.Mock).mockResolvedValue([
+      { emailAddress: 'owner@workspace.test' },
+    ]);
+    (tx.mailDomain.findMany as jest.Mock).mockResolvedValue([{ domain: 'bound.test' }]);
+    const match = { all: [{ field: 'subject', op: 'contains', value: 'urgent' }] };
+
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'Bad format',
+        match,
+        actions: [{ type: 'FORWARD_COPY', value: 'not-an-address' }],
+      }),
+    ).rejects.toMatchObject({ response: { code: 'forward_destination_not_allowed' } });
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'Not owned',
+        match,
+        actions: [{ type: 'FORWARD_COPY', value: 'outside@other.test' }],
+      }),
+    ).rejects.toMatchObject({ response: { code: 'forward_destination_not_allowed' } });
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'Long note',
+        match,
+        actions: [{ type: 'NOTIFY', value: 'x'.repeat(201) }],
+      }),
+    ).rejects.toThrow('NOTIFY note must be at most 200 characters.');
+    await expect(
+      service.create(WS, UC, 'mb-1', {
+        name: 'Missing destination',
+        match,
+        actions: [{ type: 'FORWARD_COPY' }],
+      }),
+    ).rejects.toThrow('FORWARD_COPY requires one destination email address');
+    expect(tx.mailRule.create).not.toHaveBeenCalled();
+  });
+
   it('rejects STOP-only actions (must have at least one effectful action)', async () => {
     const { service } = make();
     await expect(
@@ -323,7 +433,9 @@ describe('MailRulesService', () => {
       match: { all: [{ field: 'from', op: 'equals', value: 'a@b.test' }] },
       actions: [{ type: 'ARCHIVE' }],
     });
-    expect(tx.mailRule.create).toHaveBeenCalledWith({ data: expect.objectContaining({ priority: 5 }) });
+    expect(tx.mailRule.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ priority: 5 }),
+    });
 
     for (const priority of [1.5, -1, Number.NaN]) {
       await expect(
@@ -362,7 +474,10 @@ describe('MailRulesService', () => {
   it('refuses a MOVE_TO_FOLDER rule on external (no folder model) and any rule on an INACTIVE mailbox', async () => {
     const { service, tx } = make();
     // External + MOVE_TO_FOLDER → rejected (would never fire there).
-    (tx.mailboxAccount.findFirst as jest.Mock).mockResolvedValue({ ...mailbox, provider: 'microsoft' });
+    (tx.mailboxAccount.findFirst as jest.Mock).mockResolvedValue({
+      ...mailbox,
+      provider: 'microsoft',
+    });
     await expect(
       service.create(WS, UC, 'mb-1', {
         name: 'Move rule',
@@ -383,6 +498,24 @@ describe('MailRulesService', () => {
     ).rejects.toThrow(BadRequestException);
   });
 
+  it('refuses FORWARD_COPY on external mailboxes at create and update', async () => {
+    const { service, tx } = make();
+    (tx.mailboxAccount.findFirst as jest.Mock).mockResolvedValue({ ...mailbox, provider: 'gmail' });
+    (tx.mailboxAccount.findMany as jest.Mock).mockResolvedValue([
+      { emailAddress: 'owner@workspace.test' },
+    ]);
+    (tx.mailDomain.findMany as jest.Mock).mockResolvedValue([{ domain: 'workspace.test' }]);
+    const action = { type: 'FORWARD_COPY', value: 'owner@workspace.test' };
+    const match = { all: [{ field: 'subject', op: 'contains', value: 'x' }] };
+
+    await expect(
+      service.create(WS, UC, 'mb-1', { name: 'external', match, actions: [action] }),
+    ).rejects.toThrow('FORWARD_COPY rules are not supported');
+    await expect(service.update(WS, UC, 'mb-1', 'rule-1', { actions: [action] })).rejects.toThrow(
+      'FORWARD_COPY rules are not supported',
+    );
+  });
+
   it('still lists/updates/deletes rules on a later-disconnected mailbox (manageable, not creatable)', async () => {
     const { service, tx } = make();
     (tx.mailboxAccount.findFirst as jest.Mock).mockResolvedValue({
@@ -390,7 +523,9 @@ describe('MailRulesService', () => {
       provider: 'gmail',
     });
     await expect(service.list(WS, UC, 'mb-1')).resolves.toHaveLength(1);
-    await expect(service.update(WS, UC, 'mb-1', 'rule-1', { enabled: false })).resolves.not.toBeNull();
+    await expect(
+      service.update(WS, UC, 'mb-1', 'rule-1', { enabled: false }),
+    ).resolves.not.toBeNull();
     await expect(service.remove(WS, UC, 'mb-1', 'rule-1')).resolves.toBe(true);
   });
 
@@ -427,7 +562,9 @@ describe('MailRulesService', () => {
     const { service, tx } = make({
       tx: {
         mailboxAccount: {
-          findFirst: jest.fn().mockResolvedValue({ id: 'mb-1', ownerKind: 'HUMAN', ownerKey: 'someone-else' }),
+          findFirst: jest
+            .fn()
+            .mockResolvedValue({ id: 'mb-1', ownerKind: 'HUMAN', ownerKey: 'someone-else' }),
         },
         mailRule: { findMany: jest.fn() },
         user: { findFirst: jest.fn().mockResolvedValue(null) },
@@ -488,10 +625,20 @@ describe('MailRulesService', () => {
       ruleRow({ actions: [{ type: 'MOVE_TO_FOLDER', value: 'fld-9' }, { type: 'MARK_READ' }] }),
     ];
 
-    const out = await service.applyInbound(WS, 'mb-1', 'founder@acme.test', inboundMsg, rules as any);
+    const out = await service.applyInbound(
+      WS,
+      'mb-1',
+      'founder@acme.test',
+      inboundMsg,
+      rules as any,
+    );
 
     // MOVE_TO_FOLDER value is a JMAP folder id → the custom-folder move primitive.
-    expect(stalwart.moveThreadToMailbox).toHaveBeenCalledWith('founder@acme.test', 'thr-1', 'fld-9');
+    expect(stalwart.moveThreadToMailbox).toHaveBeenCalledWith(
+      'founder@acme.test',
+      'thr-1',
+      'fld-9',
+    );
     expect(stalwart.setThreadRead).toHaveBeenCalledWith('founder@acme.test', 'thr-1', true);
     expect(out).toEqual({ matched: 1, applied: 2 });
     // Hit counters bumped through the fenced write path with the system sub.
@@ -506,11 +653,30 @@ describe('MailRulesService', () => {
     const { service, stalwart, mailProvider } = make();
     (mailProvider.handles as jest.Mock).mockReturnValue(true);
     const rules = [
-      ruleRow({ actions: [{ type: 'ARCHIVE' }, { type: 'MARK_READ' }, { type: 'MOVE_TO_FOLDER', value: 'fld-9' }] }),
+      ruleRow({
+        actions: [
+          { type: 'ARCHIVE' },
+          { type: 'MARK_READ' },
+          { type: 'MOVE_TO_FOLDER', value: 'fld-9' },
+        ],
+      }),
     ];
-    const extMailbox = { id: 'mb-1', provider: 'gmail', emailAddress: 'aaron@x.tech', ownerKey: 'kc', workspaceId: WS };
+    const extMailbox = {
+      id: 'mb-1',
+      provider: 'gmail',
+      emailAddress: 'aaron@x.tech',
+      ownerKey: 'kc',
+      workspaceId: WS,
+    };
 
-    const out = await service.applyInbound(WS, 'mb-1', 'aaron@x.tech', inboundMsg, rules as any, extMailbox as any);
+    const out = await service.applyInbound(
+      WS,
+      'mb-1',
+      'aaron@x.tech',
+      inboundMsg,
+      rules as any,
+      extMailbox as any,
+    );
 
     // Actions hit the provider triage verbs, NOT James.
     expect(mailProvider.archiveThread).toHaveBeenCalledWith(extMailbox, 'thr-1');
@@ -538,7 +704,11 @@ describe('MailRulesService', () => {
       rules as any,
     );
     expect(hit.matched).toBe(1);
-    expect(stalwart.moveThreadToFolder).toHaveBeenCalledWith('founder@acme.test', 'thr-1', 'archive');
+    expect(stalwart.moveThreadToFolder).toHaveBeenCalledWith(
+      'founder@acme.test',
+      'thr-1',
+      'archive',
+    );
 
     // Unknown To header (empty) — a 'to' rule must NOT fall back to matching
     // the mailbox's own address (the old constant-valued bug).
@@ -576,7 +746,13 @@ describe('MailRulesService', () => {
       ruleRow({ id: 'r-trash', priority: 20, actions: [{ type: 'TRASH' }] }),
     ];
 
-    const out = await service.applyInbound(WS, 'mb-1', 'founder@acme.test', inboundMsg, rules as any);
+    const out = await service.applyInbound(
+      WS,
+      'mb-1',
+      'founder@acme.test',
+      inboundMsg,
+      rules as any,
+    );
 
     expect(out).toEqual({ matched: 2, applied: 2 });
     expect(stalwart.moveThreadToFolder).toHaveBeenCalledWith('founder@acme.test', 'thr-1', 'trash');
@@ -590,7 +766,11 @@ describe('MailRulesService', () => {
     await service.applyInbound(WS, 'mb-1', 'founder@acme.test', inboundMsg, [
       ruleRow({ actions: [{ type: 'ARCHIVE' }] }),
     ] as any);
-    expect(stalwart.moveThreadToFolder).toHaveBeenCalledWith('founder@acme.test', 'thr-1', 'archive');
+    expect(stalwart.moveThreadToFolder).toHaveBeenCalledWith(
+      'founder@acme.test',
+      'thr-1',
+      'archive',
+    );
   });
 
   it('a failing action warns and CONTINUES; applyInbound never throws', async () => {
@@ -600,7 +780,13 @@ describe('MailRulesService', () => {
       ruleRow({ actions: [{ type: 'MOVE_TO_FOLDER', value: 'fld-9' }, { type: 'MARK_READ' }] }),
     ];
 
-    const out = await service.applyInbound(WS, 'mb-1', 'founder@acme.test', inboundMsg, rules as any);
+    const out = await service.applyInbound(
+      WS,
+      'mb-1',
+      'founder@acme.test',
+      inboundMsg,
+      rules as any,
+    );
 
     expect(stalwart.setThreadRead).toHaveBeenCalledWith('founder@acme.test', 'thr-1', true); // still ran
     expect(out).toEqual({ matched: 1, applied: 1 });
@@ -609,7 +795,9 @@ describe('MailRulesService', () => {
   it('a dormant engine (port returns false) counts as not-applied, still no throw', async () => {
     const { service, stalwart } = make();
     (stalwart.moveThreadToMailbox as jest.Mock).mockResolvedValue(false);
-    const out = await service.applyInbound(WS, 'mb-1', 'founder@acme.test', inboundMsg, [ruleRow()] as any);
+    const out = await service.applyInbound(WS, 'mb-1', 'founder@acme.test', inboundMsg, [
+      ruleRow(),
+    ] as any);
     expect(out).toEqual({ matched: 1, applied: 0 });
   });
 
@@ -620,9 +808,19 @@ describe('MailRulesService', () => {
       ruleRow({ id: 'r-late', priority: 20, actions: [{ type: 'MARK_READ' }] }),
     ];
 
-    const out = await service.applyInbound(WS, 'mb-1', 'founder@acme.test', inboundMsg, rules as any);
+    const out = await service.applyInbound(
+      WS,
+      'mb-1',
+      'founder@acme.test',
+      inboundMsg,
+      rules as any,
+    );
 
-    expect(stalwart.moveThreadToFolder).toHaveBeenCalledWith('founder@acme.test', 'thr-1', 'archive');
+    expect(stalwart.moveThreadToFolder).toHaveBeenCalledWith(
+      'founder@acme.test',
+      'thr-1',
+      'archive',
+    );
     expect(stalwart.setThreadRead).not.toHaveBeenCalled();
     expect(out).toEqual({ matched: 1, applied: 1 });
     expect(tx.mailRule.updateMany).toHaveBeenCalledWith(
@@ -641,7 +839,13 @@ describe('MailRulesService', () => {
         ],
       }),
     ];
-    const out = await service.applyInbound(WS, 'mb-1', 'founder@acme.test', inboundMsg, rules as any);
+    const out = await service.applyInbound(
+      WS,
+      'mb-1',
+      'founder@acme.test',
+      inboundMsg,
+      rules as any,
+    );
     expect(stalwart.setThreadRead).toHaveBeenCalled();
     expect(stalwart.moveThreadToMailbox).not.toHaveBeenCalled();
     expect(out).toEqual({ matched: 1, applied: 1 });
@@ -679,7 +883,9 @@ describe('MailRulesService', () => {
     const { service } = make({
       systemClient: { mailRule: { findMany: jest.fn().mockRejectedValue(new Error('db down')) } },
     });
-    await expect(service.applyInbound(WS, 'mb-1', 'founder@acme.test', inboundMsg)).resolves.toEqual({
+    await expect(
+      service.applyInbound(WS, 'mb-1', 'founder@acme.test', inboundMsg),
+    ).resolves.toEqual({
       matched: 0,
       applied: 0,
     });
@@ -688,7 +894,9 @@ describe('MailRulesService', () => {
   it('a hit-counter failure never voids the applied summary', async () => {
     const { service, tx } = make();
     (tx.mailRule.updateMany as jest.Mock).mockRejectedValue(new Error('rls hiccup'));
-    const out = await service.applyInbound(WS, 'mb-1', 'founder@acme.test', inboundMsg, [ruleRow()] as any);
+    const out = await service.applyInbound(WS, 'mb-1', 'founder@acme.test', inboundMsg, [
+      ruleRow(),
+    ] as any);
     expect(out).toEqual({ matched: 1, applied: 1 });
   });
 });
