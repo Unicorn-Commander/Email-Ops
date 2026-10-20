@@ -4,9 +4,9 @@
  * Data layer for the Agent-Inbox approval queue.
  *
  * This is the human-in-the-loop spine of the Agent Email Command Center: agents
- * stage outbound email (and mailbox-cleanup batches) into a per-workspace queue;
- * a human lists it here and approves (which SENDS / executes) or rejects (which
- * never sends). The backend owns the state machine + RLS + the entitlement gate
+ * stage outbound email, mailbox-cleanup batches, and notices into a per-workspace
+ * queue; a human lists it here and approves (which SENDS / executes / acknowledges)
+ * or rejects (which never sends / dismisses). The backend owns the state machine + RLS + the entitlement gate
  * on approve — this hook is the typed browser client over those routes.
  *
  * Shape mirrors `useInboxStats`: a `load` discriminator, an `error` string, and
@@ -66,12 +66,12 @@ export interface UseAgentInbox {
   /** Re-fetch the active slice + the pending count. */
   refresh: () => Promise<void>;
   /**
-   * Approve (EMAIL → sends; CLEANUP → executes the batch). Refreshes on
-   * success. `opts.trustRecipients` rides along when the review UI surfaced
+   * Approve (EMAIL → sends; CLEANUP → executes the batch; NOTICE → acknowledges).
+   * Refreshes on success. `opts.trustRecipients` rides along when the review UI surfaced
    * the first-contact trust choice.
    */
   approve: (itemId: string, note?: string, opts?: ApproveOptions) => Promise<ReviewOutcome>;
-  /** Reject (never sends / never executes). Refreshes on success. */
+  /** Reject (never sends / never executes; NOTICE → dismisses). Refreshes on success. */
   reject: (itemId: string, note?: string) => Promise<ReviewOutcome>;
 }
 

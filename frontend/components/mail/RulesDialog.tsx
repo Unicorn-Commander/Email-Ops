@@ -23,6 +23,7 @@ import { useRouter } from 'next/navigation';
 import { Button, Dialog, Input, Select, cn, useConfirm } from '@/components/ui';
 import { Tooltip } from '@/components/Tooltip';
 import { ApiError } from '@/lib/api';
+import type { MailboxProvider } from '@/lib/mailApi';
 import {
   MAX_MATCH_CONDITIONS_PER_GROUP,
   MAX_RULES_PER_MAILBOX,
@@ -47,6 +48,9 @@ type View = 'list' | 'editor';
 /** Where matching mail lands. 'inbox' = leave it be (no destination action). */
 type Destination = 'inbox' | 'move' | 'archive' | 'trash';
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const EXTERNAL_ACTION_NOTE = 'not available on connected mailboxes';
+
 /** A folder the "Move to folder…" destination can target. */
 export interface RuleFolderOption {
   id: string;
@@ -60,6 +64,8 @@ export interface RulesDialogProps {
   mailboxId: string;
   /** Display label for the mailbox the rules act on (address or name). */
   mailboxLabel: string;
+  /** Provider capability used to disable actions unsupported by connected mailboxes. */
+  mailboxProvider?: MailboxProvider;
   folders: RuleFolderOption[];
 }
 
@@ -102,7 +108,13 @@ const DESTINATIONS: { value: Destination; label: string }[] = [
 ];
 
 function messageOf(err: unknown, fallback: string): string {
-  if (err instanceof ApiError) return err.message;
+  if (err instanceof ApiError) {
+    const code = (err as ApiError & { code?: string }).code;
+    if (code === 'forward_destination_not_allowed' || err.message.includes('forward_destination_not_allowed')) {
+      return 'Forwarding is only available to an address in this workspace.';
+    }
+    return err.message;
+  }
   if (err instanceof Error) return err.message;
   return fallback;
 }
@@ -138,6 +150,12 @@ function summarizeActions(actions: RuleAction[], folders: RuleFolderOption[]): s
         break;
       case 'MARK_READ':
         parts.push('mark read');
+        break;
+      case 'NOTIFY':
+        parts.push('notify the agent inbox');
+        break;
+      case 'FORWARD_COPY':
+        parts.push(`forward a copy to ${action.value || 'an address'}`);
         break;
       case 'STOP':
         break;
@@ -317,6 +335,7 @@ export function RulesDialog({
   workspaceId,
   mailboxId,
   mailboxLabel,
+  mailboxProvider,
   folders,
 }: RulesDialogProps) {
   const router = useRouter();
@@ -337,6 +356,10 @@ export function RulesDialog({
   const [destination, setDestination] = useState<Destination>('inbox');
   const [folderId, setFolderId] = useState('');
   const [markRead, setMarkRead] = useState(false);
+  const [notifyAgent, setNotifyAgent] = useState(false);
+  const [notifyNote, setNotifyNote] = useState('');
+  const [forwardCopy, setForwardCopy] = useState(false);
+  const [forwardDestination, setForwardDestination] = useState('');
   const [stopAfter, setStopAfter] = useState(true);
   /** The rule being edited has a match the simple builder can't represent. */
   const [advanced, setAdvanced] = useState(false);
@@ -346,6 +369,7 @@ export function RulesDialog({
 
   const keyRef = useRef(0);
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const externalMailbox = mailboxProvider === 'gmail' || mailboxProvider === 'microsoft';
 
   const makeRow = useCallback(
     (): ConditionRow => ({ key: keyRef.current++, field: 'from', op: 'contains', value: '' }),
@@ -379,6 +403,10 @@ export function RulesDialog({
       setDestination('inbox');
       setFolderId('');
       setMarkRead(false);
+      setNotifyAgent(false);
+      setNotifyNote('');
+      setForwardCopy(false);
+      setForwardDestination('');
       setStopAfter(true);
       setAdvanced(false);
       setSubmitted(false);
@@ -476,6 +504,10 @@ export function RulesDialog({
     setDestination('inbox');
     setFolderId('');
     setMarkRead(false);
+    setNotifyAgent(false);
+    setNotifyNote('');
+    setForwardCopy(false);
+    setForwardDestination('');
     setStopAfter(true); // default ON — most rules should be terminal
     setAdvanced(false);
     setSubmitted(false);
@@ -496,6 +528,10 @@ export function RulesDialog({
     let dest: Destination = 'inbox';
     let folder = '';
     let mark = false;
+    let notify = false;
+    let note = '';
+    let forward = false;
+    let forwardTo = '';
     let stop = false;
     for (const action of rule.actions) {
       switch (action.type) {
@@ -514,6 +550,14 @@ export function RulesDialog({
         case 'MARK_READ':
           mark = true;
           break;
+        case 'NOTIFY':
+          notify = true;
+          note = action.value ?? '';
+          break;
+        case 'FORWARD_COPY':
+          forward = true;
+          forwardTo = action.value ?? '';
+          break;
         case 'STOP':
           stop = true;
           break;
@@ -525,6 +569,10 @@ export function RulesDialog({
     setDestination(dest);
     setFolderId(folder);
     setMarkRead(mark);
+    setNotifyAgent(notify);
+    setNotifyNote(note);
+    setForwardCopy(forward);
+    setForwardDestination(forwardTo);
     setStopAfter(stop);
     setEditing(rule);
     setSubmitted(false);
@@ -565,8 +613,21 @@ export function RulesDialog({
       setFormError('Choose a folder to move matching mail into.');
       return;
     }
-    if (destination === 'inbox' && !markRead) {
-      setFormError('Pick a destination or turn on “Mark as read” — otherwise this rule wouldn’t do anything.');
+    if (notifyNote.length > 200) {
+      setFormError('Keep the agent inbox note under 200 characters.');
+      return;
+    }
+    const trimmedForwardDestination = forwardDestination.trim();
+    if (forwardCopy && !trimmedForwardDestination) {
+      setFormError('Enter an email address to forward a copy to.');
+      return;
+    }
+    if (forwardCopy && !EMAIL_RE.test(trimmedForwardDestination)) {
+      setFormError('Enter a valid email address to forward a copy to.');
+      return;
+    }
+    if (destination === 'inbox' && !markRead && !notifyAgent && !forwardCopy) {
+      setFormError('Pick an action or turn on “Mark as read” so this rule does something.');
       return;
     }
     if (!editing && rules.length >= MAX_RULES_PER_MAILBOX) {
@@ -580,6 +641,11 @@ export function RulesDialog({
     else if (destination === 'archive') actions.push({ type: 'ARCHIVE' });
     else if (destination === 'trash') actions.push({ type: 'TRASH' });
     if (markRead) actions.push({ type: 'MARK_READ' });
+    if (notifyAgent) {
+      const trimmedNote = notifyNote.trim();
+      actions.push({ type: 'NOTIFY', ...(trimmedNote ? { value: trimmedNote } : {}) });
+    }
+    if (forwardCopy) actions.push({ type: 'FORWARD_COPY', value: trimmedForwardDestination });
     if (stopAfter) actions.push({ type: 'STOP' });
     // One flat single-mode group — the shape the mode toggle picks between.
     const match: MatchNode = matchMode === 'any' ? { any: conditions } : { all: conditions };
@@ -898,7 +964,9 @@ export function RulesDialog({
         </legend>
         <div className="space-y-1.5">
           {DESTINATIONS.map((d) => {
-            const moveDisabled = d.value === 'move' && folders.length === 0 && !folderId;
+            const moveDisabled =
+              d.value === 'move' &&
+              (externalMailbox || (folders.length === 0 && !folderId));
             return (
               <label
                 key={d.value}
@@ -918,7 +986,9 @@ export function RulesDialog({
                 />
                 {d.label}
                 {d.value === 'move' && moveDisabled && (
-                  <span className="text-[11px] text-muted">— no folders yet</span>
+                  <span className="text-[11px] text-muted">
+                    {externalMailbox ? EXTERNAL_ACTION_NOTE : 'no folders yet'}
+                  </span>
                 )}
               </label>
             );
@@ -954,6 +1024,59 @@ export function RulesDialog({
             />
             Mark as read
           </label>
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-secondary">
+            <input
+              type="checkbox"
+              checked={notifyAgent}
+              onChange={(e) => setNotifyAgent(e.target.checked)}
+              className="h-3.5 w-3.5 cursor-pointer accent-accent"
+            />
+            Notify the agent inbox
+          </label>
+          {notifyAgent && (
+            <div className="pl-[1.375rem] pt-0.5">
+              <Input
+                value={notifyNote}
+                onChange={(e) => setNotifyNote(e.target.value)}
+                maxLength={200}
+                placeholder="Optional note"
+                aria-label="Agent inbox note"
+                autoComplete="off"
+              />
+              <p className="mt-1 text-[11px] text-muted">Up to 200 characters.</p>
+            </div>
+          )}
+          <label
+            className={cn(
+              'flex items-center gap-2 text-sm',
+              externalMailbox ? 'cursor-not-allowed text-muted' : 'cursor-pointer text-secondary',
+            )}
+          >
+            <input
+              type="checkbox"
+              checked={forwardCopy}
+              onChange={(e) => setForwardCopy(e.target.checked)}
+              disabled={externalMailbox}
+              className="h-3.5 w-3.5 cursor-pointer accent-accent disabled:cursor-not-allowed"
+            />
+            Forward a copy to
+            {externalMailbox && <span className="text-[11px]">{EXTERNAL_ACTION_NOTE}</span>}
+          </label>
+          {forwardCopy && (
+            <div className="pl-[1.375rem] pt-0.5">
+              <Input
+                type="email"
+                value={forwardDestination}
+                onChange={(e) => setForwardDestination(e.target.value)}
+                placeholder="name@example.com"
+                aria-label="Forward copy destination"
+                invalid={submitted && (!forwardDestination.trim() || !EMAIL_RE.test(forwardDestination.trim()))}
+                autoComplete="email"
+                spellCheck={false}
+              />
+              <p className="mt-1 text-[11px] text-muted">an address in this workspace</p>
+            </div>
+          )}
           <label className="flex cursor-pointer items-center gap-2 text-sm text-secondary">
             <input
               type="checkbox"
