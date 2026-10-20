@@ -472,6 +472,7 @@ export default function MailPage() {
       if (!thread || pendingItems.length === 0) return null;
       // 1) explicit thread id in the item payload.
       for (const it of pendingItems) {
+        if (it.kind === 'NOTICE') continue;
         const p = it.payload ?? {};
         const tid = (p.thread_id ?? p.in_reply_to_thread_id ?? p.conversation_id) as
           | string
@@ -485,6 +486,7 @@ export default function MailPage() {
         thread.participants.map((p) => p.address?.toLowerCase()).filter(Boolean) as string[],
       );
       for (const it of pendingItems) {
+        if (it.kind === 'NOTICE') continue;
         // Subject-only fallback must still pin to a real participant — a
         // draft with no recipient must NOT paint onto every same-subject
         // thread, so require a concrete to_address that matches a participant.
@@ -807,6 +809,10 @@ export default function MailPage() {
       ? mail.selectedMailbox
       : null;
   const canSchedule = !!sovereignMailbox;
+  // Rules also run on connected accounts. Their provider-specific limits are
+  // enforced in the dialog, while Snoozed and Scheduled remain sovereign-only.
+  const rulesMailbox = !mail.unified ? mail.selectedMailbox : null;
+  const rulesEnabled = !!rulesMailbox;
   // Connected Gmail/Outlook (not unified): several list/compose ports are degraded —
   // gate search, load-more, empty-folder, and settings so the UI never silently lies.
   const externalMailbox =
@@ -964,10 +970,9 @@ export default function MailPage() {
     setEnabled: setNotificationsEnabled,
   } = desktopNotifications;
 
-  // The Rules dialog is only meaningful on a sovereign mailbox. If that context
-  // evaporates while (or after) it's open — mailbox switch, account refresh —
-  // drop the latched open state so it can't pop back unexpectedly later.
-  const rulesContextGone = !sovereignMailbox && rulesOpen;
+  // If the rules context evaporates while (or after) the dialog is open,
+  // including unified view, mailbox switch, or account refresh, drop the latched state.
+  const rulesContextGone = !rulesMailbox && rulesOpen;
   useEffect(() => {
     if (rulesContextGone) setRulesOpen(false);
   }, [rulesContextGone]);
@@ -1067,15 +1072,17 @@ export default function MailPage() {
           keywords: 'scheduled send later outbox queued pending',
           run: () => setScheduledOpen(true),
         },
-        {
-          id: 'view:rules',
-          label: 'Rules',
-          group: 'Actions',
-          icon: <FunnelIcon />,
-          keywords: 'rules filters automation file sort auto-archive',
-          run: () => setRulesOpen(true),
-        },
       );
+    }
+    if (rulesEnabled) {
+      list.push({
+        id: 'view:rules',
+        label: 'Rules',
+        group: 'Actions',
+        icon: <FunnelIcon />,
+        keywords: 'rules filters automation file sort auto-archive',
+        run: () => setRulesOpen(true),
+      });
     }
     list.push({
       id: 'view:mail-settings',
@@ -1235,6 +1242,7 @@ export default function MailPage() {
     cmdCustomFolders,
     cmdMoveToFolder,
     canSchedule,
+    rulesEnabled,
     notificationsSupported,
     notificationsPermission,
     notificationsEnabled,
@@ -1344,11 +1352,12 @@ export default function MailPage() {
     replies: pendingReplies.slice(0, 3),
     repliesTotal: pendingReplies.length,
     cleanups: pendingCleanups.slice(0, 3),
+    cleanupsTotal: pendingCleanups.length,
     pulseRecent: pulse.recent,
     paused: agentsPaused,
     onApproveItem: (it) => inbox.approve(it.id),
     onRejectItem: (it) => inbox.reject(it.id),
-    onOpenRules: sovereignMailbox ? () => setRulesOpen(true) : undefined,
+    onOpenRules: rulesMailbox ? () => setRulesOpen(true) : undefined,
   };
 
   return (
@@ -1408,6 +1417,7 @@ export default function MailPage() {
                 activeCustomFolderId={mail.activeCustomFolderId}
                 onSelectCustomFolder={mail.selectCustomFolder}
                 schedulingEnabled={canSchedule}
+                rulesEnabled={rulesEnabled}
                 onOpenSnoozed={() => setSnoozedOpen(true)}
                 onOpenScheduled={() => setScheduledOpen(true)}
                 onOpenRules={() => setRulesOpen(true)}
@@ -1445,6 +1455,7 @@ export default function MailPage() {
                 onRenameFolder={mail.renameFolder}
                 onDeleteFolder={mail.deleteFolder}
                 schedulingEnabled={canSchedule}
+                rulesEnabled={rulesEnabled}
                 onOpenSnoozed={() => setSnoozedOpen(true)}
                 onOpenScheduled={() => setScheduledOpen(true)}
                 onOpenRules={() => setRulesOpen(true)}
@@ -1663,13 +1674,14 @@ export default function MailPage() {
       />
 
       <RulesDialog
-        open={rulesOpen && !!sovereignMailbox}
+        open={rulesOpen && !!rulesMailbox}
         onClose={() => setRulesOpen(false)}
         workspaceId={mail.workspace?.workspace_id ?? ''}
-        mailboxId={sovereignMailbox?.id ?? ''}
+        mailboxId={rulesMailbox?.id ?? ''}
         mailboxLabel={
-          sovereignMailbox?.display_name || sovereignMailbox?.email_address || 'this mailbox'
+          rulesMailbox?.display_name || rulesMailbox?.email_address || 'this mailbox'
         }
+        mailboxProvider={rulesMailbox?.provider}
         folders={mail.customFolders.map((f) => ({ id: f.id, name: f.name }))}
       />
 
@@ -1948,6 +1960,7 @@ function FoldersColumn({
   onRenameFolder,
   onDeleteFolder,
   schedulingEnabled,
+  rulesEnabled,
   onOpenSnoozed,
   onOpenScheduled,
   onOpenRules,
@@ -1971,8 +1984,10 @@ function FoldersColumn({
   onCreateFolder: (name: string) => Promise<FolderActionResult>;
   onRenameFolder: (id: string, name: string) => Promise<FolderActionResult>;
   onDeleteFolder: (id: string) => Promise<FolderActionResult>;
-  /** Sovereign-mailbox only: gates the Snoozed / Scheduled / Rules entries. */
+  /** Sovereign-mailbox only: gates the Snoozed and Scheduled entries. */
   schedulingEnabled: boolean;
+  /** Any selected mailbox: rules also support connected accounts. */
+  rulesEnabled: boolean;
   onOpenSnoozed: () => void;
   onOpenScheduled: () => void;
   onOpenRules: () => void;
@@ -2097,20 +2112,23 @@ function FoldersColumn({
               <span className="flex-1 text-[13px]">Scheduled</span>
             </button>
           </Tooltip>
-          <Tooltip
-            content="Rules file mail as it arrives — conditions over sender/subject, actions like move or archive"
-            side="right"
-          >
-            <button
-              type="button"
-              onClick={onOpenRules}
-              className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 max-lg:py-2.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
-            >
-              <FunnelIcon className="h-4 w-4 shrink-0 text-tertiary" />
-              <span className="flex-1 text-[13px]">Rules</span>
-            </button>
-          </Tooltip>
         </>
+      )}
+
+      {rulesEnabled && (
+        <Tooltip
+          content="Rules file mail as it arrives, using sender or subject conditions and actions like move or archive"
+          side="right"
+        >
+          <button
+            type="button"
+            onClick={onOpenRules}
+            className="mx-2 my-px flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 max-lg:py-2.5 text-left text-secondary transition-colors hover:bg-surface-overlay"
+          >
+            <FunnelIcon className="h-4 w-4 shrink-0 text-tertiary" />
+            <span className="flex-1 text-[13px]">Rules</span>
+          </button>
+        </Tooltip>
       )}
 
       {foldersEnabled && (
@@ -2223,6 +2241,7 @@ function FoldersRail({
   activeCustomFolderId,
   onSelectCustomFolder,
   schedulingEnabled,
+  rulesEnabled,
   onOpenSnoozed,
   onOpenScheduled,
   onOpenRules,
@@ -2241,6 +2260,7 @@ function FoldersRail({
   activeCustomFolderId: string | null;
   onSelectCustomFolder: (id: string) => void;
   schedulingEnabled: boolean;
+  rulesEnabled: boolean;
   onOpenSnoozed: () => void;
   onOpenScheduled: () => void;
   onOpenRules: () => void;
@@ -2349,17 +2369,20 @@ function FoldersRail({
               <SendIcon className="h-[18px] w-[18px]" />
             </button>
           </Tooltip>
-          <Tooltip content="Rules — file mail automatically as it arrives" side="right">
-            <button
-              type="button"
-              onClick={onOpenRules}
-              aria-label="Rules"
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
-            >
-              <FunnelIcon className="h-[18px] w-[18px]" />
-            </button>
-          </Tooltip>
         </>
+      )}
+
+      {rulesEnabled && (
+        <Tooltip content="Rules, file mail automatically as it arrives" side="right">
+          <button
+            type="button"
+            onClick={onOpenRules}
+            aria-label="Rules"
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-[9px] text-tertiary transition-colors hover:bg-surface-overlay hover:text-secondary"
+          >
+            <FunnelIcon className="h-[18px] w-[18px]" />
+          </button>
+        </Tooltip>
       )}
 
       {/* Custom folders — icon-only mirror; human surface, neutral tokens. */}
@@ -3771,13 +3794,14 @@ export interface BriefData {
   repliesTotal: number;
   /** Pending CLEANUP batches, sliced — the "Waiting on you" list. */
   cleanups: AgentInboxItemView[];
+  cleanupsTotal: number;
   /** Recent agent activity lines ("Perry staged a reply · 2h ago"). */
   pulseRecent: AiPulseActivityLine[];
   /** The workspace agent kill-switch state (renders an honest Paused chip). */
   paused: boolean;
   onApproveItem: (item: AgentInboxItemView) => Promise<{ ok: boolean; error?: string }>;
   onRejectItem: (item: AgentInboxItemView) => Promise<{ ok: boolean; error?: string }>;
-  /** Present only when a sovereign mailbox is selected (rules are sovereign-only). */
+  /** Present when a single mailbox is selected. */
   onOpenRules?: () => void;
 }
 
@@ -3876,7 +3900,7 @@ function DailyBrief({ brief }: { brief: BriefData }) {
         <AiPulse
           agentsLive={brief.agentsLive}
           pendingDrafts={brief.repliesTotal}
-          pendingCleanups={brief.pendingCount - brief.repliesTotal}
+          pendingCleanups={brief.cleanupsTotal}
           rulesActive={null}
           lastAgentActivity={brief.pulseRecent}
           paused={brief.paused}

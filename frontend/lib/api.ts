@@ -83,23 +83,25 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    public readonly code?: string,
   ) {
     super(message);
     this.name = 'ApiError';
   }
 }
 
-/** Best-effort extraction of a backend error message ({ message } | string). */
-async function errorMessage(res: Response, fallback: string): Promise<string> {
+/** Best-effort extraction of a backend error ({ message, code } | string). */
+async function errorDetails(res: Response, fallback: string): Promise<{ message: string; code?: string }> {
   try {
     const data = await res.json();
-    if (typeof data?.message === 'string') return data.message;
-    if (Array.isArray(data?.message)) return data.message.join(', ');
-    if (typeof data === 'string') return data;
+    const code = typeof data?.code === 'string' ? data.code : undefined;
+    if (typeof data?.message === 'string') return { message: data.message, code };
+    if (Array.isArray(data?.message)) return { message: data.message.join(', '), code };
+    if (typeof data === 'string') return { message: data };
   } catch {
     /* non-JSON body */
   }
-  return fallback;
+  return { message: fallback };
 }
 
 /** Authenticated GET against the backend. Throws ApiError on non-2xx. */
@@ -110,7 +112,8 @@ export async function apiGet<T = unknown>(path: string, token?: string): Promise
     headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
   });
   if (!res.ok) {
-    throw new ApiError(res.status, await errorMessage(res, `GET ${path} failed: ${res.status}`));
+    const error = await errorDetails(res, `GET ${path} failed: ${res.status}`);
+    throw new ApiError(res.status, error.message, error.code);
   }
   return (await res.json()) as T;
 }
@@ -132,7 +135,8 @@ export async function apiPost<T = unknown>(
     body: JSON.stringify(body ?? {}),
   });
   if (!res.ok) {
-    throw new ApiError(res.status, await errorMessage(res, `POST ${path} failed: ${res.status}`));
+    const error = await errorDetails(res, `POST ${path} failed: ${res.status}`);
+    throw new ApiError(res.status, error.message, error.code);
   }
   // Tolerate an empty 200/204 body.
   const text = await res.text();
@@ -289,7 +293,8 @@ export async function apiPatch<T = unknown>(
     body: JSON.stringify(body ?? {}),
   });
   if (!res.ok) {
-    throw new ApiError(res.status, await errorMessage(res, `PATCH ${path} failed: ${res.status}`));
+    const error = await errorDetails(res, `PATCH ${path} failed: ${res.status}`);
+    throw new ApiError(res.status, error.message, error.code);
   }
   // Tolerate an empty 200/204 body.
   const text = await res.text();
@@ -309,7 +314,8 @@ export async function apiPut<T = unknown>(path: string, body?: unknown, token?: 
     body: JSON.stringify(body ?? {}),
   });
   if (!res.ok) {
-    throw new ApiError(res.status, await errorMessage(res, `PUT ${path} failed: ${res.status}`));
+    const error = await errorDetails(res, `PUT ${path} failed: ${res.status}`);
+    throw new ApiError(res.status, error.message, error.code);
   }
   const text = await res.text();
   return (text ? JSON.parse(text) : {}) as T;
@@ -324,7 +330,8 @@ export async function apiDelete<T = unknown>(path: string, token?: string): Prom
     headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
   });
   if (!res.ok) {
-    throw new ApiError(res.status, await errorMessage(res, `DELETE ${path} failed: ${res.status}`));
+    const error = await errorDetails(res, `DELETE ${path} failed: ${res.status}`);
+    throw new ApiError(res.status, error.message, error.code);
   }
   // Tolerate an empty 200/204 body.
   const text = await res.text();
@@ -363,11 +370,31 @@ export async function fetchMyWorkspaces(token?: string): Promise<MyWorkspace[]> 
 
 export type AgentInboxState = 'pending' | 'approved' | 'rejected';
 
+export type AgentInboxItemKind = 'EMAIL' | 'CLEANUP' | 'NOTICE';
+
+/** Payload for an inbound mail-rule notice shown in the agent inbox. */
+export interface AgentInboxNoticePayload {
+  [key: string]: unknown;
+  type: 'mail_rule_notice';
+  ruleId: string;
+  ruleName: string;
+  mailboxId: string;
+  mailboxAddress: string;
+  threadId: string;
+  messageId?: string;
+  from: string;
+  subject: string;
+  receivedAt: string;
+  note?: string;
+}
+
+export type AgentInboxItemPayload = Record<string, unknown> | AgentInboxNoticePayload;
+
 /** One agent-inbox item (mirrors the backend AgentInboxView wire shape). */
 export interface AgentInboxItemView {
   id: string;
   message_id: string | null;
-  kind?: string;
+  kind?: AgentInboxItemKind;
   approval_tier: 'owner_admin' | 'mailbox_owner';
   approval_reason: string | null;
   state: AgentInboxState;
@@ -389,7 +416,31 @@ export interface AgentInboxItemView {
   reviewed_at: string | null;
   review_note: string | null;
   created_at: string | null;
-  payload?: Record<string, unknown> | null;
+  payload?: AgentInboxItemPayload | null;
+}
+
+/** Return a validated mail-rule notice payload, or null for other item kinds. */
+export function agentInboxNoticePayload(
+  item: Pick<AgentInboxItemView, 'kind' | 'payload'>,
+): AgentInboxNoticePayload | null {
+  if (item.kind !== 'NOTICE' || !item.payload || item.payload.type !== 'mail_rule_notice') {
+    return null;
+  }
+  const payload = item.payload;
+  const required = [
+    'ruleId',
+    'ruleName',
+    'mailboxId',
+    'mailboxAddress',
+    'threadId',
+    'from',
+    'subject',
+    'receivedAt',
+  ] as const;
+  if (required.some((key) => typeof payload[key] !== 'string')) return null;
+  if (payload.messageId !== undefined && typeof payload.messageId !== 'string') return null;
+  if (payload.note !== undefined && typeof payload.note !== 'string') return null;
+  return payload as AgentInboxNoticePayload;
 }
 
 /** Compact "a, b; cc c; bcc d" line from an inbox item (falls back to to_address). */

@@ -52,13 +52,13 @@ export interface ProposedRepliesProps {
 }
 
 /**
- * The one EMAIL-vs-CLEANUP rule, mirroring the page's PendingTargetLine
- * discrimination: anything not explicitly a CLEANUP batch is a proposed reply
- * (older items predate the `kind` field). Includes the pending check so it can
- * be applied to `inbox.items` directly.
+ * The proposed-reply filter keeps NOTICE items out of send and compose
+ * surfaces. Older items predate the `kind` field, so an absent kind remains an
+ * email draft. Includes the pending check so it can be applied to `inbox.items`
+ * directly.
  */
 export function isProposedReply(item: AgentInboxItemView): boolean {
-  return item.state === 'pending' && item.kind !== 'CLEANUP';
+  return item.state === 'pending' && item.kind !== 'CLEANUP' && item.kind !== 'NOTICE';
 }
 
 // ── Self-contained display helpers (copied from the page's house rules) ───────

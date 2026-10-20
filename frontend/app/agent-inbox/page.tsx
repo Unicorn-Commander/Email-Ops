@@ -24,6 +24,7 @@ import Link from 'next/link';
 import { useCallback, useMemo, useState } from 'react';
 import { Badge, Button, Card, Skeleton, SkeletonText, cn, useConfirm } from '@/components/ui';
 import { Tooltip } from '@/components/Tooltip';
+import { useUiCommands } from '@/components/UiCommandProvider';
 import { useAgentInbox } from '@/components/useAgentInbox';
 import { useAgents, type UseAgents } from '@/components/useAgents';
 import { useAutoSent } from '@/components/agent-inbox/useAutoSent';
@@ -39,8 +40,10 @@ import { agentLabel } from '@/lib/agents';
 import { cleanupReason, deriveCleanupTargets } from '@/lib/cleanupTargets';
 import {
   agentInboxRecipientLine,
+  agentInboxNoticePayload,
   holdPolicyOf,
   type AgentInboxItemView,
+  type AgentInboxNoticePayload,
   type AgentSendKitView,
   type AgentView,
   type AutoSentItemView,
@@ -52,7 +55,7 @@ const TABS: Array<{ value: QueueTab; label: string; hint: string }> = [
   {
     value: 'pending',
     label: 'Pending',
-    hint: 'The queue — drafts and cleanup batches waiting for your approve/reject',
+    hint: 'The queue: drafts, cleanup batches, and notices waiting for approve or reject',
   },
   {
     value: 'auto-sent',
@@ -591,9 +594,9 @@ function Hero({
               </span>
             </h1>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-tertiary sm:text-base">
-              Open any item to see the full email — rendered exactly as the recipient will —
-              before it sends. Cleanup batches show every message they touch. Policy-auto-sent
-              mail lands in Auto-sent for after-the-fact review.
+              Open an email item to review the full message before it sends. Cleanup batches show
+              every message they touch. Rule notices show the flagged message and never send mail.
+              Policy-auto-sent mail lands in Auto-sent for after-the-fact review.
             </p>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row lg:items-center">
@@ -711,6 +714,19 @@ function ReviewCard({
 
   const pending = item.state === 'pending';
   const trimmedNote = note.trim() || undefined;
+  const notice = useMemo(() => agentInboxNoticePayload(item), [item]);
+
+  if (item.kind === 'NOTICE') {
+    return (
+      <NoticeCard
+        item={item}
+        notice={notice}
+        canReview={canReview}
+        onApprove={onApprove}
+        onReject={onReject}
+      />
+    );
+  }
 
   async function handleApprove() {
     const cleanupDesc = targets
@@ -880,6 +896,124 @@ function ReviewCard({
           />
         </div>
       )}
+    </Card>
+  );
+}
+
+function NoticeCard({
+  item,
+  notice,
+  canReview,
+  onApprove,
+  onReject,
+}: {
+  item: AgentInboxItemView;
+  notice: AgentInboxNoticePayload | null;
+  canReview: boolean;
+  onApprove: (note?: string) => Promise<{ ok: boolean; error?: string }>;
+  onReject: (note?: string) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const { enqueueLocal } = useUiCommands();
+  const [acting, setActing] = useState<null | 'approve' | 'reject'>(null);
+  const [cardError, setCardError] = useState<string | null>(null);
+  const receivedAt = notice?.receivedAt ?? item.created_at;
+  const receivedLabel = receivedAt ? formatWhen(receivedAt) ?? receivedAt : null;
+  const ruleName = notice?.ruleName ?? 'Mail rule notice';
+  const from = notice?.from ?? '(unknown sender)';
+  const subject = notice?.subject || '(no subject)';
+
+  function openThread() {
+    if (!notice) return;
+    enqueueLocal({
+      id: `agent-inbox-notice-${Date.now()}`,
+      created_at: new Date().toISOString(),
+      kind: 'open_thread',
+      payload: {
+        thread_id: notice.threadId,
+        mailbox_id: notice.mailboxId,
+      },
+    });
+  }
+
+  async function decide(kind: 'approve' | 'reject') {
+    if (!canReview || acting !== null) return;
+    setActing(kind);
+    setCardError(null);
+    const result = kind === 'approve' ? await onApprove() : await onReject();
+    if (!result.ok) {
+      setCardError(result.error ?? `Could not ${kind === 'approve' ? 'acknowledge' : 'dismiss'} the notice.`);
+      setActing(null);
+    }
+  }
+
+  return (
+    <Card className="overflow-hidden">
+      <div className="space-y-3 p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="info">Notice</Badge>
+          <StateBadge state={item.state} />
+          {receivedLabel && <span className="text-[11px] text-muted">Received {receivedLabel}</span>}
+        </div>
+
+        <div className="space-y-1.5">
+          <p className="text-sm font-semibold text-primary">{ruleName}</p>
+          <p className="text-xs text-secondary">
+            <span className="font-medium text-tertiary">From:</span> {from}
+          </p>
+          <p className="text-xs text-secondary">
+            <span className="font-medium text-tertiary">Subject:</span> {subject}
+          </p>
+          {notice?.mailboxAddress && (
+            <p className="font-mono text-[11px] text-muted">Mailbox: {notice.mailboxAddress}</p>
+          )}
+          {notice?.note && (
+            <p className="text-xs leading-5 text-tertiary">
+              <span className="font-medium text-secondary">Note:</span> {notice.note}
+            </p>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          {notice ? (
+            <Link
+              href="/mail"
+              onClick={openThread}
+              className="text-xs font-medium text-accent hover:underline"
+            >
+              Open thread
+            </Link>
+          ) : (
+            <span className="text-xs text-muted">Thread details unavailable.</span>
+          )}
+          {item.state !== 'pending' && (
+            <span className="text-[11px] text-muted">
+              {item.state === 'approved' ? 'Acknowledged' : 'Dismissed'}
+            </span>
+          )}
+        </div>
+
+        {item.state === 'pending' && canReview && (
+          <div className="flex flex-wrap items-center gap-2 border-t border-subtle pt-3">
+            <Button size="sm" disabled={acting !== null} onClick={() => void decide('approve')}>
+              {acting === 'approve' ? 'Acknowledging…' : 'Acknowledge'}
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              disabled={acting !== null}
+              onClick={() => void decide('reject')}
+            >
+              {acting === 'reject' ? 'Dismissing…' : 'Dismiss'}
+            </Button>
+            {cardError && <span className="text-xs text-danger">{cardError}</span>}
+          </div>
+        )}
+        {item.state === 'pending' && !canReview && (
+          <p className="border-t border-subtle pt-3 text-xs text-muted">
+            A member or owner must acknowledge or dismiss this notice.
+          </p>
+        )}
+      </div>
     </Card>
   );
 }
@@ -1055,8 +1189,8 @@ function EmptyState({ tab }: { tab: QueueTab }) {
           <div>
             <p className="text-base font-semibold text-primary">Nothing awaiting you.</p>
             <p className="mt-1 text-sm text-tertiary">
-              When an agent drafts an email or stages a cleanup, it lands here for your approval
-              before anything is sent.
+              When an agent drafts an email, stages a cleanup, or a rule flags a message, it lands
+              here for your review before anything is sent.
             </p>
             <Link
               href="/help#approvals"

@@ -3,7 +3,7 @@
  *
  * Rules are per-mailbox server-side filters: each carries a match tree
  * (conditions over from/to/subject/fromDomain), an ordered action list
- * (move / archive / trash / mark-read / stop), and a priority the engine
+ * (move / archive / trash / mark-read / notify / forward-copy / stop), and a priority the engine
  * evaluates them in as mail arrives. This module mirrors the pinned REST
  * contract verbatim — snake_case wire shapes, no remapping — and reuses the
  * shared verb helpers from `@/lib/api` (API_BASE, credentials: 'include',
@@ -45,14 +45,22 @@ export interface MatchNode {
 }
 
 /** The action verbs a rule may apply. */
-export type RuleActionType = 'MOVE_TO_FOLDER' | 'ARCHIVE' | 'TRASH' | 'MARK_READ' | 'STOP';
+export type RuleActionType =
+  | 'MOVE_TO_FOLDER'
+  | 'ARCHIVE'
+  | 'TRASH'
+  | 'MARK_READ'
+  | 'NOTIFY'
+  | 'FORWARD_COPY'
+  | 'STOP';
 
 /**
  * One effect a matching rule applies, in list order. `MOVE_TO_FOLDER` carries
- * the target folder id in `value`. `STOP` halts lower-priority rules and is
- * NOT effectful on its own — the server rejects an actions list that is only
- * STOP. A `LABEL` type exists server-side but is REJECTED on write; this
- * client never emits it.
+ * the target folder id in `value`; `NOTIFY` carries an optional short note;
+ * `FORWARD_COPY` carries the destination email address. `STOP` halts
+ * lower-priority rules and is NOT effectful on its own. The server rejects an
+ * actions list that is only STOP. A `LABEL` type exists server-side but is
+ * REJECTED on write; this client never emits it.
  */
 export interface RuleAction {
   type: RuleActionType;
