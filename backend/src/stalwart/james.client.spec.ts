@@ -455,6 +455,7 @@ describe('JamesClient', () => {
                     bodyValues: { html: { value: '<p>hi</p>' }, text: { value: 'hi' } },
                     'header:List-Unsubscribe:asText': '<https://example.test/unsubscribe>',
                     'header:List-Unsubscribe-Post:asText': 'List-Unsubscribe=One-Click',
+                    'header:X-Email-Ops-Forwarded-From:asText': '<source@outside.test>',
                     attachments: [
                       { blobId: 'blob-1', name: 'f.pdf', type: 'application/pdf', size: 123, cid: null },
                     ],
@@ -481,6 +482,7 @@ describe('JamesClient', () => {
         headers: {
           'List-Unsubscribe': '<https://example.test/unsubscribe>',
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+          'X-Email-Ops-Forwarded-From': '<source@outside.test>',
         },
         isUnread: false,
         cc: [{ address: 'c@x.test', name: null }],
@@ -497,6 +499,7 @@ describe('JamesClient', () => {
           'size',
           'header:List-Unsubscribe:asText',
           'header:List-Unsubscribe-Post:asText',
+          'header:X-Email-Ops-Forwarded-From:asText',
         ]),
       );
     });

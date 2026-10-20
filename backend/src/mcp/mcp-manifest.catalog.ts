@@ -1176,7 +1176,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "list_agent_inbox",
-      "description": "List the agent-inbox queue: agent-drafted messages awaiting human approval before send (mode=draft composes land here). Defaults to PENDING; pass state to filter. Returns { items: [...], count }.",
+      "description": "List the agent-inbox queue: agent-drafted messages awaiting human approval before send (mode=draft composes land here), plus NOTICE items from mail rules. Each item includes its kind and payload. Defaults to PENDING; pass state to filter. Returns { items: [...], count }.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1203,7 +1203,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "approve_agent_inbox_item",
-      "description": "Approve a PENDING agent-inbox draft: hand it to the send lane and advance the message to queued/sent. This is the human-in-the-loop SEND, so it requires the email-ops entitlement. By default the approval also TRUSTS the external recipients (Wave 7 learning) so future in-thread agent replies to them can send autonomously; pass trust_recipients:false to approve without learning. Returns the updated inbox item + message.",
+      "description": "Approve a PENDING agent-inbox draft: hand it to the send lane and advance the message to queued/sent. NOTICE items are acknowledged without sending or changing a message. EMAIL drafts are the human-in-the-loop SEND, so they require the email-ops entitlement. By default the approval also TRUSTS the external recipients (Wave 7 learning) so future in-thread agent replies to them can send autonomously; pass trust_recipients:false to approve without learning. Returns the updated inbox item + message.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2078,7 +2078,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "create_mail_rule",
-      "description": "Create an inbound rule on one mailbox: a name, a match tree ({ all / any } groups of { field, op, value } conditions over from/to/subject/fromDomain), and an ordered actions list (MOVE_TO_FOLDER/ARCHIVE/TRASH/MARK_READ/STOP). priority auto-assigns past the current max when omitted. The service validates match + actions exactly as on REST - a bad payload is refused, never stored raw. Member-level write; runs AS the calling user. Returns the created rule.",
+      "description": "Create an inbound rule on one mailbox: a name, a match tree ({ all / any } groups of { field, op, value } conditions over from/to/subject/fromDomain), and an ordered actions list (MOVE_TO_FOLDER, ARCHIVE, TRASH, MARK_READ, NOTIFY, FORWARD_COPY, STOP). priority auto-assigns past the current max when omitted. The service validates match + actions exactly as on REST - a bad payload is refused, never stored raw. Member-level write; runs AS the calling user. Returns the created rule.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2126,7 +2126,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "update_mail_rule",
-      "description": "Update any subset of an inbound rule's fields (name, enabled, priority, match, actions); provided fields are re-validated exactly as on create. Member-level write; runs AS the calling user. Returns the updated rule, or { status: not_found } when the rule is not in this workspace + mailbox.",
+      "description": "Update any subset of an inbound rule's fields (name, enabled, priority, match, actions); actions are MOVE_TO_FOLDER, ARCHIVE, TRASH, MARK_READ, NOTIFY, FORWARD_COPY, or STOP. Provided fields are re-validated exactly as on create. Member-level write; runs AS the calling user. Returns the updated rule, or { status: not_found } when the rule is not in this workspace + mailbox.",
       "input_schema": {
         "type": "object",
         "properties": {

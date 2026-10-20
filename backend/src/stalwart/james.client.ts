@@ -647,6 +647,7 @@ export class JamesClient extends StalwartPort {
             'id', 'blobId', 'size', 'threadId', 'from', 'to', 'cc', 'bcc', 'subject', 'receivedAt', 'preview', 'keywords',
             'messageId', 'references', 'htmlBody', 'textBody', 'bodyValues', 'attachments',
             'header:List-Unsubscribe:asText', 'header:List-Unsubscribe-Post:asText',
+            'header:X-Email-Ops-Forwarded-From:asText',
           ],
           fetchHTMLBodyValues: true,
           fetchTextBodyValues: true,

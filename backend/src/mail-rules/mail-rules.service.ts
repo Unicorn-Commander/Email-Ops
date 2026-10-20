@@ -395,14 +395,7 @@ export class MailRulesService {
       case 'MARK_READ':
         return this.stalwart.setThreadRead(mailboxEmail, msg.threadId, true);
       case 'FORWARD_COPY':
-        return this.forwardCopy(
-          workspaceId,
-          mailboxEmail,
-          msg,
-          ruleId,
-          action.value,
-          mailbox,
-        );
+        return this.forwardCopy(workspaceId, mailboxEmail, msg, ruleId, action.value, mailbox);
       default:
         return null; // LABEL (not supported yet) or unknown — skipped with a debug log
     }
@@ -438,7 +431,8 @@ export class MailRulesService {
     const originalTo = detail.to.length
       ? detail.to.map((participant) => participant.address).join(', ')
       : (msg.toAddresses ?? []).join(', ');
-    const originalMessageId = detail.messageIdHeader?.trim() || msg.messageIdHeader?.trim() || msg.threadId;
+    const originalMessageId =
+      detail.messageIdHeader?.trim() || msg.messageIdHeader?.trim() || msg.threadId;
     const attachment = await this.prepareForwardAttachment(mailboxEmail, detail);
     if (attachment.unavailable) return false;
 
@@ -468,9 +462,7 @@ export class MailRulesService {
           `<p><strong>Subject:</strong> ${this.escapeHtml(originalSubject)}</p>`,
           '</div><hr>',
           detail.htmlBody,
-          ...(attachment.tooLarge
-            ? ['<p>The original message was too large to attach.</p>']
-            : []),
+          ...(attachment.tooLarge ? ['<p>The original message was too large to attach.</p>'] : []),
         ].join('')
       : null;
     const sent = await this.stalwart.send(
@@ -596,7 +588,8 @@ export class MailRulesService {
     return value.replace(
       /[&<>"']/g,
       (character) =>
-        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ?? character,
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ??
+        character,
     );
   }
 
