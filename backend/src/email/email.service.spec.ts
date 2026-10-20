@@ -18,7 +18,12 @@ import {
   StalwartUploadResult,
 } from '../stalwart/stalwart.types';
 import { EmailService } from './email.service';
-import { AgentAutonomyLevel, MessageDisposition, WorkspaceRole } from '@prisma/client';
+import {
+  AgentAutonomyLevel,
+  AgentInboxKind,
+  MessageDisposition,
+  WorkspaceRole,
+} from '@prisma/client';
 import { TEST_DATABASE_URL } from '../../test/test-db';
 
 /**
@@ -839,6 +844,63 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
       expect(stalwart.sendCalls).toHaveLength(0);
       const msg = await prisma.emailMessage.findUnique({ where: { id: draft.id } });
       expect(msg?.status).toBe('REJECTED');
+    });
+
+    it('lists and approves a NOTICE without requiring a message or sending mail', async () => {
+      const item = await prisma.agentInboxItem.create({
+        data: {
+          workspaceId: WS,
+          kind: AgentInboxKind.NOTICE,
+          approvalTier: 'MAILBOX_OWNER',
+          draftedBy: 'mail-rule:notice-rule',
+          summary: 'Security rule: sender@acme.test · Important',
+          payload: {
+            type: 'mail_rule_notice',
+            ruleId: 'notice-rule',
+            ruleName: 'Security rule',
+            mailboxId: 'mailbox-1',
+            mailboxAddress: 'desk@magicunicorn.tech',
+            threadId: 'thread-1',
+            from: 'sender@acme.test',
+            subject: 'Important',
+            receivedAt: '2026-10-20T12:00:00.000Z',
+          },
+        },
+      });
+
+      const listed = await service.listAgentInbox(WS, UC_UID);
+      expect(listed.find((entry) => entry.id === item.id)).toMatchObject({
+        kind: 'NOTICE',
+        message_id: null,
+        payload: expect.objectContaining({ type: 'mail_rule_notice', ruleId: 'notice-rule' }),
+      });
+
+      const result = await service.approveAgentInboxItem(WS, UC_UID, item.id, 'seen');
+      expect(result).toMatchObject({ inbox: { kind: 'NOTICE', state: 'approved' }, message: null });
+      expect(stalwart.sendCalls).toHaveLength(0);
+      expect((await prisma.agentInboxItem.findUnique({ where: { id: item.id } }))?.state).toBe(
+        'APPROVED',
+      );
+    });
+
+    it('rejects a NOTICE by dismissing only the inbox row', async () => {
+      const item = await prisma.agentInboxItem.create({
+        data: {
+          workspaceId: WS,
+          kind: AgentInboxKind.NOTICE,
+          approvalTier: 'MAILBOX_OWNER',
+          draftedBy: 'mail-rule:notice-dismiss',
+          summary: 'Dismiss me',
+          payload: { type: 'mail_rule_notice', ruleId: 'dismiss-rule' },
+        },
+      });
+
+      const result = await service.rejectAgentInboxItem(WS, UC_UID, item.id, 'not needed');
+      expect(result).toMatchObject({ inbox: { kind: 'NOTICE', state: 'rejected' }, message: null });
+      expect(stalwart.sendCalls).toHaveLength(0);
+      expect((await prisma.agentInboxItem.findUnique({ where: { id: item.id } }))?.state).toBe(
+        'REJECTED',
+      );
     });
 
     it('listAgentInbox returns PENDING items by default (newest-first)', async () => {

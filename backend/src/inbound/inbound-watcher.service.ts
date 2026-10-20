@@ -8,7 +8,10 @@ import { MailTriageService } from '../mail-triage/mail-triage.service';
 import { MailRulesService } from '../mail-rules/mail-rules.service';
 import { MailRuleRow } from '../mail-rules/mail-rules.types';
 import { BUSINESS_TIME_ZONE } from '../common/business-time';
-import { inboundWatcherEnabled, inboundWatcherExternalEnabled } from '../common/workspace/feature-flags';
+import {
+  inboundWatcherEnabled,
+  inboundWatcherExternalEnabled,
+} from '../common/workspace/feature-flags';
 import { AgentReplyService } from '../agent-reply/agent-reply.service';
 import { MailboxAccount, MessageDisposition } from '@prisma/client';
 
@@ -84,6 +87,7 @@ export class InboundWatcherService {
           id: true,
           workspaceId: true,
           mailboxId: true,
+          name: true,
           enabled: true,
           priority: true,
           match: true,
@@ -111,10 +115,7 @@ export class InboundWatcherService {
     return total;
   }
 
-  private async pollOne(
-    mb: MailboxAccount,
-    mailboxRules?: MailRuleRow[],
-  ): Promise<number> {
+  private async pollOne(mb: MailboxAccount, mailboxRules?: MailRuleRow[]): Promise<number> {
     // Route the delta-poll by mailbox kind: external (Gmail/M365) via the
     // provider port, sovereign via James. Both return the same InboundPollResult.
     const result: InboundPollResult | null = this.mailProvider.handles(mb)
@@ -136,7 +137,14 @@ export class InboundWatcherService {
         // triage of the remaining messages or the cursor advance below.
         try {
           // Pass the full mailbox so external rule actions route to the provider.
-          await this.rules.applyInbound(mb.workspaceId, mb.id, mb.emailAddress, msg, mailboxRules, mb);
+          await this.rules.applyInbound(
+            mb.workspaceId,
+            mb.id,
+            mb.emailAddress,
+            msg,
+            mailboxRules,
+            mb,
+          );
         } catch (err) {
           this.logger.warn(`rules apply failed for ${mb.emailAddress}: ${(err as Error).message}`);
         }

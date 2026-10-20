@@ -64,6 +64,9 @@ describe('MailRulesService', () => {
         deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
+      agentInboxItem: {
+        create: jest.fn().mockResolvedValue({ id: 'notice-1' }),
+      },
     };
     const systemClient = opts.systemClient ?? {
       mailRule: { findMany: jest.fn().mockResolvedValue([]) },
@@ -647,6 +650,83 @@ describe('MailRulesService', () => {
       where: { id: { in: ['rule-1'] }, workspaceId: WS, mailboxId: 'mb-1' },
       data: { hitCount: { increment: 1 }, lastHitAt: expect.any(Date) },
     });
+  });
+
+  it('creates a mailbox-owner NOTICE for NOTIFY without touching the message', async () => {
+    const { service, tx, stalwart } = make();
+    const rules = [
+      ruleRow({
+        id: 'rule-notify',
+        name: 'Security alert',
+        actions: [{ type: 'NOTIFY', value: 'Review this message' }],
+      }),
+    ];
+
+    const out = await service.applyInbound(
+      WS,
+      'mb-1',
+      'founder@acme.test',
+      {
+        ...inboundMsg,
+        messageId: 'jmap-message-1',
+        receivedAt: '2026-10-20T12:00:00.000Z',
+      },
+      rules as any,
+    );
+
+    expect(out).toEqual({ matched: 1, applied: 1 });
+    expect(tx.agentInboxItem.create).toHaveBeenCalledWith({
+      data: {
+        workspaceId: WS,
+        messageId: null,
+        smsMessageId: null,
+        kind: 'NOTICE',
+        approvalTier: 'MAILBOX_OWNER',
+        draftedBy: 'mail-rule:rule-notify',
+        summary: 'Security alert: digest@news.test · Weekly digest',
+        payload: {
+          type: 'mail_rule_notice',
+          ruleId: 'rule-notify',
+          ruleName: 'Security alert',
+          mailboxId: 'mb-1',
+          mailboxAddress: 'founder@acme.test',
+          threadId: 'thr-1',
+          messageId: 'jmap-message-1',
+          from: 'digest@news.test',
+          subject: 'Weekly digest',
+          receivedAt: '2026-10-20T12:00:00.000Z',
+          note: 'Review this message',
+        },
+      },
+    });
+    expect(stalwart.moveThreadToMailbox).not.toHaveBeenCalled();
+    expect(stalwart.moveThreadToFolder).not.toHaveBeenCalled();
+    expect(stalwart.setThreadRead).not.toHaveBeenCalled();
+  });
+
+  it('truncates a NOTIFY summary to 200 characters and omits absent optional fields', async () => {
+    const { service, tx } = make();
+    const rules = [
+      ruleRow({
+        id: 'rule-short-notice',
+        name: 'n'.repeat(120),
+        actions: [{ type: 'NOTIFY' }],
+      }),
+    ];
+
+    await service.applyInbound(
+      WS,
+      'mb-1',
+      'f'.repeat(100) + '@news.test',
+      { threadId: 'thr-1', fromAddress: 'f'.repeat(100) + '@news.test', subject: 's'.repeat(100) },
+      rules as any,
+    );
+
+    const create = tx.agentInboxItem.create as jest.Mock;
+    const data = create.mock.calls[0][0].data;
+    expect(data.summary).toHaveLength(200);
+    expect(data.payload).not.toHaveProperty('messageId');
+    expect(data.payload).not.toHaveProperty('note');
   });
 
   it('routes rule actions through the PROVIDER for an external mailbox (ARCHIVE/MARK_READ), skipping MOVE_TO_FOLDER', async () => {

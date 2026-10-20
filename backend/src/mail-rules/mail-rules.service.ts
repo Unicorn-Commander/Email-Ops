@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { MailRule, Prisma } from '@prisma/client';
+import { AgentInboxApprovalTier, AgentInboxKind, MailRule, Prisma } from '@prisma/client';
 import { assertMailboxVisible } from '../common/mailbox/mailbox-scope';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
@@ -217,6 +217,7 @@ export class MailRulesService {
             id: true,
             workspaceId: true,
             mailboxId: true,
+            name: true,
             enabled: true,
             priority: true,
             match: true,
@@ -233,6 +234,7 @@ export class MailRulesService {
 
       const compiled: CompiledRule[] = usable.map((row) => ({
         id: row.id,
+        name: row.name,
         enabled: row.enabled,
         priority: row.priority,
         match: parseMatch(row.match),
@@ -262,27 +264,53 @@ export class MailRulesService {
       }
       if (matchedIds.length === 0) return none;
 
+      const actionPlans: { ruleId: string; ruleName: string; actionCount: number }[] = [];
+      for (const rule of sorted) {
+        const ruleActions = evaluateRules([rule], inbound);
+        if (ruleActions.length === 0) continue;
+        actionPlans.push({
+          ruleId: rule.id,
+          ruleName: rule.name ?? rule.id,
+          actionCount: ruleActions.length,
+        });
+        if (ruleActions.some((a) => a.type === 'STOP')) break;
+      }
+
       let applied = 0;
-      for (const action of actions) {
-        if (action.type === 'STOP') continue; // evaluation terminator — no engine effect
-        try {
-          const ok = await this.executeAction(mailboxEmail, msg.threadId, action, mailbox);
-          if (ok === null) {
-            this.logger.debug(
-              `rules: skipping action ${action.type} (unsupported) mailbox=${mailboxId}`,
+      let actionIndex = 0;
+      for (const plan of actionPlans) {
+        const ruleActions = actions.slice(actionIndex, actionIndex + plan.actionCount);
+        actionIndex += plan.actionCount;
+        for (const action of ruleActions) {
+          if (action.type === 'STOP') continue; // evaluation terminator - no engine effect
+          try {
+            const ok = await this.executeAction(
+              workspaceId,
+              mailboxId,
+              mailboxEmail,
+              msg,
+              plan.ruleId,
+              plan.ruleName,
+              action,
+              mailbox,
             );
-          } else if (ok) {
-            applied += 1;
-          } else {
-            // Port degrade-clean (dormant engine / unknown thread): not an error.
-            this.logger.debug(
-              `rules: ${action.type} not applied (engine declined) thread=${msg.threadId}`,
+            if (ok === null) {
+              this.logger.debug(
+                `rules: skipping action ${action.type} (unsupported) mailbox=${mailboxId}`,
+              );
+            } else if (ok) {
+              applied += 1;
+            } else {
+              // Port degrade-clean (dormant engine / unknown thread): not an error.
+              this.logger.debug(
+                `rules: ${action.type} not applied (engine declined) thread=${msg.threadId}`,
+              );
+            }
+          } catch (err) {
+            this.logger.warn(
+              `rules: ${action.type} failed thread=${msg.threadId} mailbox=${mailboxId}: ${(err as Error).message}`,
             );
           }
-        } catch (err) {
-          this.logger.warn(
-            `rules: ${action.type} failed thread=${msg.threadId} mailbox=${mailboxId}: ${(err as Error).message}`,
-          );
         }
       }
 
@@ -311,23 +339,40 @@ export class MailRulesService {
 
   /** True/false = engine outcome; null = unsupported here (LABEL / blank move target). */
   private async executeAction(
+    workspaceId: string,
+    mailboxId: string,
     mailboxEmail: string,
-    threadId: string,
+    msg: InboundRuleMessage,
+    ruleId: string,
+    ruleName: string,
     action: RuleAction,
     mailbox?: MailboxAccount,
   ): Promise<boolean | null> {
+    if (action.type === 'NOTIFY') {
+      return this.createNotice(
+        workspaceId,
+        mailboxId,
+        mailboxEmail,
+        msg,
+        ruleId,
+        ruleName,
+        action.value,
+      );
+    }
+
     // EXTERNAL (Gmail/M365): actions execute through the provider triage verbs.
     // MOVE_TO_FOLDER has no external equivalent (Gmail/Graph folders aren't
     // modelled here), so it's an honest skip (null) rather than a silent no-op.
     if (mailbox && this.mailProvider.handles(mailbox)) {
       switch (action.type) {
         case 'ARCHIVE':
-          return this.mailProvider.archiveThread(mailbox, threadId);
+          return this.mailProvider.archiveThread(mailbox, msg.threadId);
         case 'TRASH':
-          return this.mailProvider.trashThread(mailbox, threadId);
+          return this.mailProvider.trashThread(mailbox, msg.threadId);
         case 'MARK_READ':
-          return this.mailProvider.setThreadRead(mailbox, threadId, true);
+          return this.mailProvider.setThreadRead(mailbox, msg.threadId, true);
         case 'MOVE_TO_FOLDER':
+        case 'FORWARD_COPY':
         default:
           return null; // MOVE_TO_FOLDER / LABEL unsupported on external — honest skip
       }
@@ -339,17 +384,64 @@ export class MailRulesService {
         // GET .../folders; the engine validates it belongs to this account.
         const folderId = (action.value ?? '').trim();
         if (!folderId) return null;
-        return this.stalwart.moveThreadToMailbox(mailboxEmail, threadId, folderId);
+        return this.stalwart.moveThreadToMailbox(mailboxEmail, msg.threadId, folderId);
       }
       case 'ARCHIVE':
-        return this.stalwart.moveThreadToFolder(mailboxEmail, threadId, 'archive');
+        return this.stalwart.moveThreadToFolder(mailboxEmail, msg.threadId, 'archive');
       case 'TRASH':
-        return this.stalwart.moveThreadToFolder(mailboxEmail, threadId, 'trash');
+        return this.stalwart.moveThreadToFolder(mailboxEmail, msg.threadId, 'trash');
       case 'MARK_READ':
-        return this.stalwart.setThreadRead(mailboxEmail, threadId, true);
+        return this.stalwart.setThreadRead(mailboxEmail, msg.threadId, true);
+      case 'FORWARD_COPY':
+        return null;
       default:
         return null; // LABEL (not supported yet) or unknown — skipped with a debug log
     }
+  }
+
+  private async createNotice(
+    workspaceId: string,
+    mailboxId: string,
+    mailboxEmail: string,
+    msg: InboundRuleMessage,
+    ruleId: string,
+    ruleName: string,
+    note?: string,
+  ): Promise<boolean> {
+    const from = msg.fromAddress ?? '';
+    const subject = msg.subject ?? '';
+    const payload: Record<string, unknown> = {
+      type: 'mail_rule_notice',
+      ruleId,
+      ruleName,
+      mailboxId,
+      mailboxAddress: mailboxEmail,
+      threadId: msg.threadId,
+      ...(msg.messageId ? { messageId: msg.messageId } : {}),
+      from,
+      subject,
+      receivedAt: msg.receivedAt ?? null,
+      ...(note !== undefined ? { note } : {}),
+    };
+    await this.prisma.withWorkspace(workspaceId, APPLICATOR_UC_UID, (tx) =>
+      tx.agentInboxItem.create({
+        data: {
+          workspaceId,
+          messageId: null,
+          smsMessageId: null,
+          kind: AgentInboxKind.NOTICE,
+          approvalTier: AgentInboxApprovalTier.MAILBOX_OWNER,
+          draftedBy: `mail-rule:${ruleId}`,
+          summary: this.truncate(`${ruleName}: ${from} · ${subject}`, 200),
+          payload: payload as Prisma.InputJsonValue,
+        },
+      }),
+    );
+    return true;
+  }
+
+  private truncate(value: string, maxLength: number): string {
+    return value.length <= maxLength ? value : value.slice(0, maxLength);
   }
 
   /** Mailbox must exist in THIS workspace (404) and be actionable by the caller. */

@@ -44,7 +44,10 @@ describe('AgentInboxController (delegation)', () => {
 
   // Build a controller over a mocked EmailService.
   function make(mock: Partial<jest.Mocked<EmailService>>) {
-    return new AgentInboxController(mock as unknown as EmailService, { assertCanReviewInbox: jest.fn().mockResolvedValue(WS) } as unknown as MembershipService);
+    return new AgentInboxController(
+      mock as unknown as EmailService,
+      { assertCanReviewInbox: jest.fn().mockResolvedValue(WS) } as unknown as MembershipService,
+    );
   }
 
   // Force enforce-mode so the entitlement gate is real (not open-bootstrap).
@@ -81,7 +84,13 @@ describe('AgentInboxController (delegation)', () => {
     const out = await ctrl.approve(WS, userWith(bothSkus), 'item-9', { note: 'lgtm' });
 
     expect(peekAgentInboxKind).toHaveBeenCalledWith(WS, 'kc-sub-aaron', 'item-9');
-    expect(approveAgentInboxItem).toHaveBeenCalledWith(WS, 'kc-sub-aaron', 'item-9', 'lgtm', undefined);
+    expect(approveAgentInboxItem).toHaveBeenCalledWith(
+      WS,
+      'kc-sub-aaron',
+      'item-9',
+      'lgtm',
+      undefined,
+    );
     expect(out).toMatchObject({ inbox: { state: 'approved' }, message: { status: 'sent' } });
   });
 
@@ -98,11 +107,15 @@ describe('AgentInboxController (delegation)', () => {
   it('GET auto-sent delegates to listAutoSentFeed and returns { items } (Wave 7 pinned shape)', async () => {
     const listAutoSentFeed = jest
       .fn()
-      .mockResolvedValue([{ id: 'ev1', agentKey: 'bot', createdAt: 'now', detail: 'd', message: null }]);
+      .mockResolvedValue([
+        { id: 'ev1', agentKey: 'bot', createdAt: 'now', detail: 'd', message: null },
+      ]);
     const ctrl = make({ listAutoSentFeed });
     const out = await ctrl.autoSent(WS, userWith(bothSkus), '25');
     expect(listAutoSentFeed).toHaveBeenCalledWith(WS, 'kc-sub-aaron', 25);
-    expect(out).toEqual({ items: [{ id: 'ev1', agentKey: 'bot', createdAt: 'now', detail: 'd', message: null }] });
+    expect(out).toEqual({
+      items: [{ id: 'ev1', agentKey: 'bot', createdAt: 'now', detail: 'd', message: null }],
+    });
   });
 
   it('GET :id delegates to getAgentInboxItemDetail; unknown/foreign id 404s (Wave 7 detail read)', async () => {
@@ -142,9 +155,9 @@ describe('AgentInboxController (delegation)', () => {
     const peekAgentInboxKind = jest.fn().mockResolvedValue(AgentInboxKind.EMAIL);
     const approveAgentInboxItem = jest.fn();
     const ctrl = make({ peekAgentInboxKind, approveAgentInboxItem });
-    await expect(
-      ctrl.approve(WS, userWith(['customer-ops']), 'item-9', {}),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(ctrl.approve(WS, userWith(['customer-ops']), 'item-9', {})).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
     // The send delegate is never reached when the gate denies.
     expect(approveAgentInboxItem).not.toHaveBeenCalled();
   });
@@ -159,7 +172,13 @@ describe('AgentInboxController (delegation)', () => {
     // against was routing a CLEANUP approval through the dual-SKU compose gate.
     const out = await ctrl.approve(WS, userWith(['email-ops']), 'item-c1', { note: 'run it' });
 
-    expect(approveAgentInboxItem).toHaveBeenCalledWith(WS, 'kc-sub-aaron', 'item-c1', 'run it', undefined);
+    expect(approveAgentInboxItem).toHaveBeenCalledWith(
+      WS,
+      'kc-sub-aaron',
+      'item-c1',
+      'run it',
+      undefined,
+    );
     expect(out).toMatchObject({ inbox: { state: 'approved' } });
   });
 
@@ -170,7 +189,32 @@ describe('AgentInboxController (delegation)', () => {
       .mockResolvedValue({ inbox: { state: 'approved' }, message: null });
     const ctrl = make({ peekAgentInboxKind, approveAgentInboxItem });
     await ctrl.approve(WS, userWith(bothSkus), 'item-c2', {});
-    expect(approveAgentInboxItem).toHaveBeenCalledWith(WS, 'kc-sub-aaron', 'item-c2', null, undefined);
+    expect(approveAgentInboxItem).toHaveBeenCalledWith(
+      WS,
+      'kc-sub-aaron',
+      'item-c2',
+      null,
+      undefined,
+    );
+  });
+
+  it('POST approve of a NOTICE item needs no send entitlement', async () => {
+    const peekAgentInboxKind = jest.fn().mockResolvedValue(AgentInboxKind.NOTICE);
+    const approveAgentInboxItem = jest
+      .fn()
+      .mockResolvedValue({ inbox: { kind: 'NOTICE', state: 'approved' }, message: null });
+    const ctrl = make({ peekAgentInboxKind, approveAgentInboxItem });
+
+    const out = await ctrl.approve(WS, userWith([]), 'item-n1', { note: 'acknowledged' });
+
+    expect(approveAgentInboxItem).toHaveBeenCalledWith(
+      WS,
+      'kc-sub-aaron',
+      'item-n1',
+      'acknowledged',
+      undefined,
+    );
+    expect(out).toMatchObject({ inbox: { kind: 'NOTICE', state: 'approved' }, message: null });
   });
 
   it('POST approve of an unknown id is 404 from the kind peek — never an entitlement error', async () => {

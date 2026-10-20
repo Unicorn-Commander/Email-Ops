@@ -92,5 +92,5 @@ export interface ApplyInboundSummary {
  */
 export type MailRuleRow = Pick<
   MailRule,
-  'id' | 'workspaceId' | 'mailboxId' | 'enabled' | 'priority' | 'match' | 'actions'
+  'id' | 'workspaceId' | 'mailboxId' | 'name' | 'enabled' | 'priority' | 'match' | 'actions'
 >;

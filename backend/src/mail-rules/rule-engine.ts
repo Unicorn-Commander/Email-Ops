@@ -57,6 +57,7 @@ export interface MatchNode {
 
 export interface CompiledRule {
   id: string;
+  name?: string;
   enabled: boolean;
   priority: number;
   match: MatchNode;

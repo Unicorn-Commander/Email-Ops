@@ -862,7 +862,9 @@ export class EmailOpsTools {
     const gate =
       kind === AgentInboxKind.CLEANUP
         ? checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId)
-        : checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+        : kind === AgentInboxKind.NOTICE
+          ? { allowed: true as const, reason: '' }
+          : checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
@@ -1026,25 +1028,27 @@ export class EmailOpsTools {
     const owned = new Map(
       bindings.map((binding) => [this.mailDomains.canonicalDomain(binding.domain), binding]),
     );
-    const domains = (await this.admin.listDomains()).filter((item) => {
-      try {
-        return owned.has(this.mailDomains.canonicalDomain(item.domain));
-      } catch {
-        return false;
-      }
-    }).map((item) => {
-      const binding = owned.get(this.mailDomains.canonicalDomain(item.domain));
-      return {
-        ...item,
-        // The binding id is what get_mail_domain_verification (and the
-        // verification REST routes) take as domain_id; without it an agent
-        // can list a domain but never look up or start its verification.
-        id: binding?.id ?? null,
-        verified: binding?.verified ?? false,
-        verifiedAt: binding?.verifiedAt?.toISOString() ?? null,
-        lastVerificationCheckAt: binding?.lastVerificationCheckAt?.toISOString() ?? null,
-      };
-    });
+    const domains = (await this.admin.listDomains())
+      .filter((item) => {
+        try {
+          return owned.has(this.mailDomains.canonicalDomain(item.domain));
+        } catch {
+          return false;
+        }
+      })
+      .map((item) => {
+        const binding = owned.get(this.mailDomains.canonicalDomain(item.domain));
+        return {
+          ...item,
+          // The binding id is what get_mail_domain_verification (and the
+          // verification REST routes) take as domain_id; without it an agent
+          // can list a domain but never look up or start its verification.
+          id: binding?.id ?? null,
+          verified: binding?.verified ?? false,
+          verifiedAt: binding?.verifiedAt?.toISOString() ?? null,
+          lastVerificationCheckAt: binding?.lastVerificationCheckAt?.toISOString() ?? null,
+        };
+      });
     return { domains };
   }
 

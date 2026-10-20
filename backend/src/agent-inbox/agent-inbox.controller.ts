@@ -392,7 +392,9 @@ export class AgentInboxController {
     const gate =
       kind === AgentInboxKind.CLEANUP
         ? checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId)
-        : checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+        : kind === AgentInboxKind.NOTICE
+          ? { allowed: true as const, reason: '' }
+          : checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
