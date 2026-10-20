@@ -342,7 +342,10 @@
           "workspace_id": {
             "type": "string"
           },
-          "mailbox_id": { "type": "string", "minLength": 1 },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1
+          },
           "thread_id": {
             "type": "string"
           }
@@ -448,18 +451,54 @@
             "items": {
               "type": "object",
               "properties": {
-                "documentId": { "type": "string", "minLength": 1 },
-                "document_id": { "type": "string", "minLength": 1 },
-                "blobId": { "type": "string", "minLength": 1 },
-                "blob_id": { "type": "string", "minLength": 1 },
-                "filename": { "type": "string", "minLength": 1 },
-                "name": { "type": "string", "minLength": 1 },
-                "contentType": { "type": "string", "minLength": 1 },
-                "content_type": { "type": "string", "minLength": 1 },
-                "type": { "type": "string", "minLength": 1 },
-                "contentBase64": { "type": "string", "minLength": 1 },
-                "content_base64": { "type": "string", "minLength": 1 },
-                "size": { "type": "integer", "minimum": 0 }
+                "documentId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "document_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "blobId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "blob_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "filename": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "contentType": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "content_type": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "type": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "contentBase64": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "content_base64": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 0
+                }
               },
               "additionalProperties": false
             },
@@ -1161,7 +1200,7 @@
     },
     {
       "name": "list_agent_inbox",
-      "description": "List the agent-inbox queue: agent-drafted messages awaiting human approval before send (mode=draft composes land here). Defaults to PENDING; pass state to filter. Returns { items: [...], count }.",
+      "description": "List the agent-inbox queue: agent-drafted messages awaiting human approval before send (mode=draft composes land here), plus NOTICE items from mail rules. Each item includes its kind and payload. Defaults to PENDING; pass state to filter. Returns { items: [...], count }.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1188,7 +1227,7 @@
     },
     {
       "name": "approve_agent_inbox_item",
-      "description": "Approve a PENDING agent-inbox draft: hand it to the send lane and advance the message to queued/sent. This is the human-in-the-loop SEND, so it requires the email-ops entitlement. By default the approval also TRUSTS the external recipients (Wave 7 learning) so future in-thread agent replies to them can send autonomously; pass trust_recipients:false to approve without learning. Returns the updated inbox item + message.",
+      "description": "Approve a PENDING agent-inbox draft: hand it to the send lane and advance the message to queued/sent. NOTICE items are acknowledged without sending or changing a message. EMAIL drafts are the human-in-the-loop SEND, so they require the email-ops entitlement. By default the approval also TRUSTS the external recipients (Wave 7 learning) so future in-thread agent replies to them can send autonomously; pass trust_recipients:false to approve without learning. Returns the updated inbox item + message.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1253,24 +1292,90 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "workspace_id": { "type": "string" },
-          "kit_id": { "type": "string", "minLength": 1, "maxLength": 200 },
-          "title": { "type": "string", "minLength": 1, "maxLength": 200 },
-          "body_template": { "type": "string", "maxLength": 100000 },
-          "placeholder_rules": { "type": "object", "additionalProperties": { "type": "string" } },
-          "optional_lines": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "maxItems": 100 },
-          "subjects": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 500 }, "minItems": 1, "maxItems": 100 },
-          "recipients": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 320 }, "minItems": 1, "maxItems": 1000 },
-          "from_address": { "type": "string", "minLength": 1, "maxLength": 320 },
-          "cap_per_day": { "type": "integer", "minimum": 0 },
-          "expires_at": { "type": "string" },
-          "note": { "type": "string", "maxLength": 2000 }
+          "workspace_id": {
+            "type": "string"
+          },
+          "kit_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "body_template": {
+            "type": "string",
+            "maxLength": 100000
+          },
+          "placeholder_rules": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "optional_lines": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "maxItems": 100
+          },
+          "subjects": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "minItems": 1,
+            "maxItems": 100
+          },
+          "recipients": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 320
+            },
+            "minItems": 1,
+            "maxItems": 1000
+          },
+          "from_address": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 320
+          },
+          "cap_per_day": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          }
         },
-        "required": ["kit_id", "title", "body_template", "subjects", "recipients", "from_address", "cap_per_day", "expires_at"],
+        "required": [
+          "kit_id",
+          "title",
+          "body_template",
+          "subjects",
+          "recipients",
+          "from_address",
+          "cap_per_day",
+          "expires_at"
+        ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
-      "scopes_required": ["write:mail"],
+      "scopes_required": [
+        "write:mail"
+      ],
       "tier_required": "pro",
       "read_only": false
     },
@@ -1280,13 +1385,24 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "workspace_id": { "type": "string" },
-          "state": { "type": "string", "enum": ["PROPOSED", "APPROVED", "REJECTED"] }
+          "workspace_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "PROPOSED",
+              "APPROVED",
+              "REJECTED"
+            ]
+          }
         },
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
-      "scopes_required": ["read:agent_inbox"],
+      "scopes_required": [
+        "read:agent_inbox"
+      ],
       "tier_required": "free",
       "read_only": true
     },
@@ -1296,14 +1412,24 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "workspace_id": { "type": "string" },
-          "kit_id": { "type": "string", "minLength": 1, "maxLength": 200 }
+          "workspace_id": {
+            "type": "string"
+          },
+          "kit_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
         },
-        "required": ["kit_id"],
+        "required": [
+          "kit_id"
+        ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
-      "scopes_required": ["read:agent_inbox"],
+      "scopes_required": [
+        "read:agent_inbox"
+      ],
       "tier_required": "free",
       "read_only": true
     },
@@ -1313,23 +1439,80 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "workspace_id": { "type": "string" },
-          "kit_id": { "type": "string", "minLength": 1, "maxLength": 200 },
-          "template_sha256": { "type": "string", "minLength": 64, "maxLength": 64 },
-          "body_template": { "type": "string", "maxLength": 100000 },
-          "placeholder_rules": { "type": "object", "additionalProperties": { "type": "string" } },
-          "optional_lines": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "maxItems": 100 },
-          "subjects": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 500 }, "minItems": 1, "maxItems": 100 },
-          "recipients": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 320 }, "minItems": 1, "maxItems": 1000 },
-          "from_address": { "type": "string", "minLength": 1, "maxLength": 320 },
-          "cap_per_day": { "type": "integer", "minimum": 0 },
-          "expires_at": { "type": "string" }
+          "workspace_id": {
+            "type": "string"
+          },
+          "kit_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "template_sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "body_template": {
+            "type": "string",
+            "maxLength": 100000
+          },
+          "placeholder_rules": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "optional_lines": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "maxItems": 100
+          },
+          "subjects": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "minItems": 1,
+            "maxItems": 100
+          },
+          "recipients": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 320
+            },
+            "minItems": 1,
+            "maxItems": 1000
+          },
+          "from_address": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 320
+          },
+          "cap_per_day": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expires_at": {
+            "type": "string"
+          }
         },
-        "required": ["kit_id", "template_sha256"],
+        "required": [
+          "kit_id",
+          "template_sha256"
+        ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
-      "scopes_required": ["write:agent_inbox"],
+      "scopes_required": [
+        "write:agent_inbox"
+      ],
       "tier_required": "pro",
       "read_only": false
     },
@@ -1339,15 +1522,28 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "workspace_id": { "type": "string" },
-          "kit_id": { "type": "string", "minLength": 1, "maxLength": 200 },
-          "note": { "type": "string", "maxLength": 2000 }
+          "workspace_id": {
+            "type": "string"
+          },
+          "kit_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          }
         },
-        "required": ["kit_id"],
+        "required": [
+          "kit_id"
+        ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
-      "scopes_required": ["write:agent_inbox"],
+      "scopes_required": [
+        "write:agent_inbox"
+      ],
       "tier_required": "pro",
       "read_only": false
     },
@@ -2063,7 +2259,7 @@
     },
     {
       "name": "create_mail_rule",
-      "description": "Create an inbound rule on one mailbox: a name, a match tree ({ all / any } groups of { field, op, value } conditions over from/to/subject/fromDomain), and an ordered actions list (MOVE_TO_FOLDER/ARCHIVE/TRASH/MARK_READ/STOP). priority auto-assigns past the current max when omitted. The service validates match + actions exactly as on REST - a bad payload is refused, never stored raw. Member-level write; runs AS the calling user. Returns the created rule.",
+      "description": "Create an inbound rule on one mailbox: a name, a match tree ({ all / any } groups of { field, op, value } conditions over from/to/subject/fromDomain), and an ordered actions list (MOVE_TO_FOLDER, ARCHIVE, TRASH, MARK_READ, NOTIFY, FORWARD_COPY, STOP). priority auto-assigns past the current max when omitted. The service validates match + actions exactly as on REST - a bad payload is refused, never stored raw. Member-level write; runs AS the calling user. Returns the created rule.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2111,7 +2307,7 @@
     },
     {
       "name": "update_mail_rule",
-      "description": "Update any subset of an inbound rule's fields (name, enabled, priority, match, actions); provided fields are re-validated exactly as on create. Member-level write; runs AS the calling user. Returns the updated rule, or { status: not_found } when the rule is not in this workspace + mailbox.",
+      "description": "Update any subset of an inbound rule's fields (name, enabled, priority, match, actions); actions are MOVE_TO_FOLDER, ARCHIVE, TRASH, MARK_READ, NOTIFY, FORWARD_COPY, or STOP. Provided fields are re-validated exactly as on create. Member-level write; runs AS the calling user. Returns the updated rule, or { status: not_found } when the rule is not in this workspace + mailbox.",
       "input_schema": {
         "type": "object",
         "properties": {
