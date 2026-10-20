@@ -873,6 +873,53 @@ describe('MailRulesService', () => {
     expect(stalwart.send).toHaveBeenCalledTimes(1);
   });
 
+  it('explains and omits an original larger than 10 MB', async () => {
+    const { service, stalwart } = make();
+    (stalwart.getThreadDetail as jest.Mock).mockResolvedValue([
+      {
+        id: 'jmap-message-large',
+        threadId: 'thr-large',
+        from: { address: 'sender@outside.test', name: null },
+        to: [{ address: 'founder@acme.test', name: null }],
+        cc: [],
+        bcc: [],
+        subject: 'Large original',
+        sentAt: '2026-10-20T11:00:00.000Z',
+        preview: 'text',
+        direction: 'received',
+        htmlBody: null,
+        textBody: 'text',
+        messageIdHeader: '<large@outside.test>',
+        rawBlobId: 'raw-large',
+        size: 10 * 1024 * 1024 + 1,
+        references: null,
+        headers: {},
+        isUnread: true,
+        flagged: false,
+        attachments: [],
+      },
+    ]);
+    const rules = [
+      ruleRow({
+        id: 'rule-large-forward',
+        actions: [{ type: 'FORWARD_COPY', value: 'ops@acme.test' }],
+      }),
+    ];
+
+    await service.applyInbound(
+      WS,
+      'mb-1',
+      'founder@acme.test',
+      { ...inboundMsg, threadId: 'thr-large', messageId: 'jmap-message-large' },
+      rules as any,
+      { ...mailbox, emailAddress: 'founder@acme.test', workspaceId: WS } as any,
+    );
+
+    const request = (stalwart.send as jest.Mock).mock.calls[0][1];
+    expect(request.attachments).toBeUndefined();
+    expect(request.body).toContain('The original message was too large to attach.');
+  });
+
   it('routes rule actions through the PROVIDER for an external mailbox (ARCHIVE/MARK_READ), skipping MOVE_TO_FOLDER', async () => {
     const { service, stalwart, mailProvider } = make();
     (mailProvider.handles as jest.Mock).mockReturnValue(true);
