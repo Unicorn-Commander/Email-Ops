@@ -698,6 +698,7 @@ describe('MailRulesService', () => {
         smsMessageId: null,
         kind: 'NOTICE',
         approvalTier: 'MAILBOX_OWNER',
+        state: 'PENDING',
         draftedBy: 'mail-rule:rule-notify',
         summary: 'Security alert: digest@news.test · Weekly digest',
         payload: {

@@ -1,5 +1,11 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { AgentInboxApprovalTier, AgentInboxKind, MailRule, Prisma } from '@prisma/client';
+import {
+  AgentInboxApprovalTier,
+  AgentInboxKind,
+  AgentInboxState,
+  MailRule,
+  Prisma,
+} from '@prisma/client';
 import { assertMailboxVisible } from '../common/mailbox/mailbox-scope';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
@@ -625,6 +631,7 @@ export class MailRulesService {
           smsMessageId: null,
           kind: AgentInboxKind.NOTICE,
           approvalTier: AgentInboxApprovalTier.MAILBOX_OWNER,
+          state: AgentInboxState.PENDING,
           draftedBy: `mail-rule:${ruleId}`,
           summary: this.truncate(`${ruleName}: ${from} · ${subject}`, 200),
           payload: payload as Prisma.InputJsonValue,
