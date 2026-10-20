@@ -82,6 +82,17 @@ export abstract class StalwartPort {
   abstract getThreadDetail(mailbox: string, threadId: string): Promise<StalwartMessageDetail[]>;
 
   /**
+   * The FULL detail of ONE message by the engine's own message id, without
+   * going through its thread. Default null for engines that cannot (the legacy
+   * adapter, test fakes). James needs this: it can report a threadId whose
+   * Thread/get answers notFound (measured 2026-10-20 for a message that
+   * carried no Message-ID header), while Email/get by id still works.
+   */
+  async getMessageDetail(_mailbox: string, _messageId: string): Promise<StalwartMessageDetail | null> {
+    return null;
+  }
+
+  /**
    * Set (read=true) or clear (read=false) the read state on every message in a
    * thread. Returns true on success, false when not configured / unknown / the
    * call fails (degrade-clean; never throws).

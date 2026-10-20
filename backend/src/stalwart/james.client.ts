@@ -643,12 +643,7 @@ export class JamesClient extends StalwartPort {
         'Email/get',
         {
           '#ids': { resultOf: '0', name: 'Thread/get', path: '/list/*/emailIds' },
-          properties: [
-            'id', 'blobId', 'size', 'threadId', 'from', 'to', 'cc', 'bcc', 'subject', 'receivedAt', 'preview', 'keywords',
-            'messageId', 'references', 'htmlBody', 'textBody', 'bodyValues', 'attachments',
-            'header:List-Unsubscribe:asText', 'header:List-Unsubscribe-Post:asText',
-            'header:X-Email-Ops-Forwarded-From:asText',
-          ],
+          properties: JamesClient.DETAIL_PROPERTIES,
           fetchHTMLBodyValues: true,
           fetchTextBodyValues: true,
         },
@@ -660,71 +655,111 @@ export class JamesClient extends StalwartPort {
     if (!Array.isArray(list)) return [];
     const out: StalwartMessageDetail[] = [];
     for (const m of list) {
-      if (!m || typeof m !== 'object') continue;
-      const id = (m as any).id;
-      if (typeof id !== 'string' || !id) continue;
-      const keywords = (m as any).keywords ?? {};
-      const direction: StalwartMessage['direction'] = keywords['$draft']
-        ? 'draft'
-        : keywords['$sent']
-          ? 'sent'
-          : 'received';
-      const bodyValues = (m as any).bodyValues && typeof (m as any).bodyValues === 'object'
-        ? ((m as any).bodyValues as Record<string, { value?: unknown }>)
-        : {};
-      const htmlBody = this.bodyText((m as any).htmlBody, bodyValues);
-      const textBody = this.bodyText((m as any).textBody, bodyValues);
-      const messageIdArr = (m as any).messageId;
-      const messageIdHeader =
-        Array.isArray(messageIdArr) && typeof messageIdArr[0] === 'string' ? messageIdArr[0] : null;
-      const referencesArr = (m as any).references;
-      const references = Array.isArray(referencesArr)
-        ? referencesArr.filter((r): r is string => typeof r === 'string')
-        : null;
-      const headers: Record<string, string> = {};
-      for (const name of [
-        'List-Unsubscribe',
-        'List-Unsubscribe-Post',
-        'X-Email-Ops-Forwarded-From',
-      ]) {
-        const value = (m as any)[`header:${name}:asText`];
-        if (typeof value === 'string' && value.trim()) headers[name] = value;
-      }
-      const attachments: StalwartAttachment[] = Array.isArray((m as any).attachments)
-        ? (m as any).attachments
-            .filter((a: unknown) => a && typeof a === 'object' && typeof (a as any).blobId === 'string')
-            .map((a: any) => ({
-              blobId: a.blobId,
-              name: typeof a.name === 'string' ? a.name : null,
-              type: typeof a.type === 'string' ? a.type : null,
-              size: typeof a.size === 'number' ? a.size : null,
-              cid: typeof a.cid === 'string' ? a.cid : null,
-            }))
-        : [];
-      out.push({
-        id,
-        threadId: typeof (m as any).threadId === 'string' ? (m as any).threadId : threadId,
-        from: this.toParticipant(Array.isArray((m as any).from) ? (m as any).from[0] : null),
-        to: this.toParticipants((m as any).to),
-        cc: this.toParticipants((m as any).cc),
-        bcc: this.toParticipants((m as any).bcc),
-        subject: typeof (m as any).subject === 'string' ? (m as any).subject : null,
-        sentAt: typeof (m as any).receivedAt === 'string' ? (m as any).receivedAt : null,
-        preview: typeof (m as any).preview === 'string' ? (m as any).preview : null,
-        direction,
-        htmlBody,
-        textBody,
-        messageIdHeader,
-        rawBlobId: typeof (m as any).blobId === 'string' ? (m as any).blobId : null,
-        size: typeof (m as any).size === 'number' ? (m as any).size : null,
-        references,
-        headers,
-        isUnread: keywords['$seen'] !== true,
-        flagged: keywords['$flagged'] === true,
-        attachments,
-      });
+      const mapped = this.mapMessageDetail(m, threadId);
+      if (mapped) out.push(mapped);
     }
     return out;
+  }
+
+  /**
+   * One message's full detail by its JMAP id (Email/get by id). James can hand
+   * out a threadId that its own Thread/get does not resolve (seen 2026-10-20
+   * for a message without a Message-ID header); the forward path asks for the
+   * message directly first. Null on any gap (degrade-clean).
+   */
+  async getMessageDetail(mailbox: string, messageId: string): Promise<StalwartMessageDetail | null> {
+    if (!this.jmapUrl || !messageId) return null;
+    const responses = await this.jmap([
+      [
+        'Email/get',
+        {
+          ids: [messageId],
+          properties: JamesClient.DETAIL_PROPERTIES,
+          fetchHTMLBodyValues: true,
+          fetchTextBodyValues: true,
+        },
+        '0',
+      ],
+    ], mailbox);
+    if (!responses) return null;
+    const list = this.named(responses, 'Email/get')?.list;
+    if (!Array.isArray(list) || !list.length) return null;
+    return this.mapMessageDetail(list[0], messageId);
+  }
+
+  /** The Email/get properties both detail readers request (bodies fetched by value). */
+  private static readonly DETAIL_PROPERTIES: readonly string[] = [
+    'id', 'blobId', 'size', 'threadId', 'from', 'to', 'cc', 'bcc', 'subject', 'receivedAt', 'preview', 'keywords',
+    'messageId', 'references', 'htmlBody', 'textBody', 'bodyValues', 'attachments',
+    'header:List-Unsubscribe:asText', 'header:List-Unsubscribe-Post:asText',
+    'header:X-Email-Ops-Forwarded-From:asText',
+  ];
+
+  /** Map one JMAP Email object (DETAIL_PROPERTIES) to a StalwartMessageDetail; null when it carries no id. */
+  private mapMessageDetail(m: unknown, fallbackThreadId: string): StalwartMessageDetail | null {
+    if (!m || typeof m !== 'object') return null;
+    const id = (m as any).id;
+    if (typeof id !== 'string' || !id) return null;
+    const keywords = (m as any).keywords ?? {};
+    const direction: StalwartMessage['direction'] = keywords['$draft']
+      ? 'draft'
+      : keywords['$sent']
+        ? 'sent'
+        : 'received';
+    const bodyValues = (m as any).bodyValues && typeof (m as any).bodyValues === 'object'
+      ? ((m as any).bodyValues as Record<string, { value?: unknown }>)
+      : {};
+    const htmlBody = this.bodyText((m as any).htmlBody, bodyValues);
+    const textBody = this.bodyText((m as any).textBody, bodyValues);
+    const messageIdArr = (m as any).messageId;
+    const messageIdHeader =
+      Array.isArray(messageIdArr) && typeof messageIdArr[0] === 'string' ? messageIdArr[0] : null;
+    const referencesArr = (m as any).references;
+    const references = Array.isArray(referencesArr)
+      ? referencesArr.filter((r): r is string => typeof r === 'string')
+      : null;
+    const headers: Record<string, string> = {};
+    for (const name of [
+      'List-Unsubscribe',
+      'List-Unsubscribe-Post',
+      'X-Email-Ops-Forwarded-From',
+    ]) {
+      const value = (m as any)[`header:${name}:asText`];
+      if (typeof value === 'string' && value.trim()) headers[name] = value;
+    }
+    const attachments: StalwartAttachment[] = Array.isArray((m as any).attachments)
+      ? (m as any).attachments
+          .filter((a: unknown) => a && typeof a === 'object' && typeof (a as any).blobId === 'string')
+          .map((a: any) => ({
+            blobId: a.blobId,
+            name: typeof a.name === 'string' ? a.name : null,
+            type: typeof a.type === 'string' ? a.type : null,
+            size: typeof a.size === 'number' ? a.size : null,
+            cid: typeof a.cid === 'string' ? a.cid : null,
+          }))
+      : [];
+    return {
+      id,
+      threadId: typeof (m as any).threadId === 'string' ? (m as any).threadId : fallbackThreadId,
+      from: this.toParticipant(Array.isArray((m as any).from) ? (m as any).from[0] : null),
+      to: this.toParticipants((m as any).to),
+      cc: this.toParticipants((m as any).cc),
+      bcc: this.toParticipants((m as any).bcc),
+      subject: typeof (m as any).subject === 'string' ? (m as any).subject : null,
+      sentAt: typeof (m as any).receivedAt === 'string' ? (m as any).receivedAt : null,
+      preview: typeof (m as any).preview === 'string' ? (m as any).preview : null,
+      direction,
+      htmlBody,
+      textBody,
+      messageIdHeader,
+      rawBlobId: typeof (m as any).blobId === 'string' ? (m as any).blobId : null,
+      size: typeof (m as any).size === 'number' ? (m as any).size : null,
+      references,
+      headers,
+      isUnread: keywords['$seen'] !== true,
+      flagged: keywords['$flagged'] === true,
+      attachments,
+    };
   }
 
   /** Resolve a JMAP `htmlBody`/`textBody` EmailBodyPart list to its bodyValues text. */

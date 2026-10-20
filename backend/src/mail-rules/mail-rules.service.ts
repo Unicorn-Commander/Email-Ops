@@ -427,7 +427,12 @@ export class MailRulesService {
     }
 
     const detail = await this.findForwardDetail(mailboxEmail, msg);
-    if (!detail) return false;
+    if (!detail) {
+      this.logger.warn(
+        `rules: FORWARD_COPY skipped, original not readable from the engine rule=${ruleId} thread=${msg.threadId} message=${msg.messageId ?? '?'}`,
+      );
+      return false;
+    }
     if (this.forwardedHeader(detail.headers)) return false;
 
     const originalFrom = detail.from?.address ?? msg.fromAddress;
@@ -494,6 +499,11 @@ export class MailRulesService {
       },
       false,
     );
+    if (!sent.accepted) {
+      this.logger.warn(
+        `rules: FORWARD_COPY declined by the engine (${sent.reason ?? 'no reason given'}) rule=${ruleId} thread=${msg.threadId} lane=${sent.lane ?? '?'}`,
+      );
+    }
     return sent.accepted;
   }
 
@@ -501,6 +511,13 @@ export class MailRulesService {
     mailboxEmail: string,
     msg: InboundRuleMessage,
   ): Promise<StalwartMessageDetail | null> {
+    // By message id first: James can report a threadId that its Thread/get
+    // does not resolve (a message without a Message-ID header, 2026-10-20),
+    // while Email/get by id still answers.
+    if (msg.messageId) {
+      const direct = await this.stalwart.getMessageDetail(mailboxEmail, msg.messageId);
+      if (direct) return direct;
+    }
     const details = await this.stalwart.getThreadDetail(mailboxEmail, msg.threadId);
     if (!details.length) return null;
     if (msg.messageId) {
