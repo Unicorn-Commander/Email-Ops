@@ -77,9 +77,7 @@ import {
   AGENT_REPLY_RUNTIME_SOURCE,
   AgentInboxDetailView,
   AgentInboxView,
-  AttachmentView,
   AutoSentItemView,
-  BulkActionResult,
   ComposeInput,
   ComposeAttachmentInput,
   EngagementCaptureInput,
@@ -89,7 +87,6 @@ import {
   MessageComposeView,
   MessageFullView,
   MessageView,
-  ParticipantView,
   ThreadView,
 } from './email.types';
 import {
@@ -444,7 +441,8 @@ export class EmailService {
     const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
     const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
     if (!mailbox) return null;
-    if (scope.governed && !scope.ids.includes(mailbox.id)) throw new NotFoundException('Mailbox not found.');
+    if (scope.governed && !scope.ids.includes(mailbox.id))
+      throw new NotFoundException('Mailbox not found.');
     if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return null;
     return mailbox;
   }
@@ -1919,7 +1917,9 @@ export class EmailService {
         // workspace default. Same authorization gate applies to both forms.
         const mailboxScope = await resolveMailboxScope(tx, workspaceId, ucUid);
         const requestedMailbox = input.fromMailboxAccountId
-          ? await tx.mailboxAccount.findFirst({ where: { id: input.fromMailboxAccountId, workspaceId } })
+          ? await tx.mailboxAccount.findFirst({
+              where: { id: input.fromMailboxAccountId, workspaceId },
+            })
           : null;
         const explicitFrom = input.fromMailboxAccountId
           ? requestedMailbox
@@ -1930,13 +1930,21 @@ export class EmailService {
             // nonexistent. Legacy direct callers keep the old send-as error for
             // an existing private mailbox, but never fall back to the default.
             if (mailboxScope.governed) throw new NotFoundException('Mailbox not found.');
-            if (requestedMailbox) throw new ForbiddenException('You are not allowed to send as that mailbox.');
+            if (requestedMailbox)
+              throw new ForbiddenException('You are not allowed to send as that mailbox.');
             throw new NotFoundException('Mailbox not found.');
           }
-          if (!mailboxScope.governed && !(await this.mayActThroughMailbox(requestedMailbox, ucUid))) {
+          if (
+            !mailboxScope.governed &&
+            !(await this.mayActThroughMailbox(requestedMailbox, ucUid))
+          ) {
             throw new ForbiddenException('You are not allowed to send as that mailbox.');
           }
-        } else if (explicitFrom && mailboxScope.governed && !mailboxScope.ids.includes(explicitFrom.id)) {
+        } else if (
+          explicitFrom &&
+          mailboxScope.governed &&
+          !mailboxScope.ids.includes(explicitFrom.id)
+        ) {
           // Address routing is also a mailbox selection and must not bypass the
           // same 404 fence as the mailbox-id form.
           throw new NotFoundException('Mailbox not found.');
@@ -1961,7 +1969,8 @@ export class EmailService {
             throw new ForbiddenException('You are not allowed to send as that mailbox.');
           }
         }
-        const mailbox = explicitFrom ?? (await this.resolveSendMailbox(tx, workspaceId, agent, ucUid));
+        const mailbox =
+          explicitFrom ?? (await this.resolveSendMailbox(tx, workspaceId, agent, ucUid));
         if (mailboxScope.governed && !mailbox) {
           throw new NotFoundException('Mailbox not found.');
         }
@@ -2335,10 +2344,7 @@ export class EmailService {
     // Cleanup/SMS items have no email mailbox and remain visible to the normal
     // workspace queue; only email drafts inherit the mailbox scope.
     return {
-      OR: [
-        { messageId: null },
-        { message: { is: { mailboxAccountId: { in: scope.ids } } } },
-      ],
+      OR: [{ messageId: null }, { message: { is: { mailboxAccountId: { in: scope.ids } } } }],
     };
   }
 
@@ -2366,12 +2372,17 @@ export class EmailService {
     if (addresses === null) return {};
     if (addresses.length === 0) return { fromAddress: { in: [] } };
     return {
-      OR: addresses.map((address) => ({ fromAddress: { equals: address, mode: 'insensitive' as const } })),
+      OR: addresses.map((address) => ({
+        fromAddress: { equals: address, mode: 'insensitive' as const },
+      })),
     };
   }
 
   private sendKitAddressVisible(address: string, addresses: string[] | null): boolean {
-    return addresses === null || addresses.some((visible) => normalizeAddress(visible) === normalizeAddress(address));
+    return (
+      addresses === null ||
+      addresses.some((visible) => normalizeAddress(visible) === normalizeAddress(address))
+    );
   }
 
   /** The agent-inbox queue (PENDING by default), newest-first. */
@@ -2412,7 +2423,11 @@ export class EmailService {
       const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, ucUid);
       const [drafts, kits] = await Promise.all([
         tx.agentInboxItem.count({
-          where: { workspaceId, ...this.agentInboxScopeWhere(scope), state: AgentInboxState.PENDING },
+          where: {
+            workspaceId,
+            ...this.agentInboxScopeWhere(scope),
+            state: AgentInboxState.PENDING,
+          },
         }),
         tx.agentSendKit.count({
           where: {
@@ -2482,7 +2497,9 @@ export class EmailService {
       if (!this.sendKitAddressVisible(definition.fromAddress, sendKitAddresses)) {
         throw new NotFoundException('Mailbox not found.');
       }
-      const existing = await tx.agentSendKit.findFirst({ where: { kitId: input.kitId, workspaceId } });
+      const existing = await tx.agentSendKit.findFirst({
+        where: { kitId: input.kitId, workspaceId },
+      });
       if (existing) {
         const state = existing.state ?? AgentSendKitState.APPROVED;
         const identical =
@@ -2794,9 +2811,10 @@ export class EmailService {
       truncated: boolean;
     } | null;
   }> {
-    const ids = Array.from(
-      new Set(threadIds.map((id) => String(id).trim()).filter(Boolean)),
-    ).slice(0, 50);
+    const ids = Array.from(new Set(threadIds.map((id) => String(id).trim()).filter(Boolean))).slice(
+      0,
+      50,
+    );
     if (ids.length === 0) return { view: null, stagedThreadIds: [], skipped: [], targets: null };
     const draftedBy = opts?.agentKey ?? 'email-ops-assistant';
     await this.assertAgentWriteAllowed(workspaceId, ucUid, draftedBy);
@@ -3083,6 +3101,27 @@ export class EmailService {
           );
         }
 
+        if (item.kind === AgentInboxKind.NOTICE) {
+          const updated = await tx.agentInboxItem.update({
+            where: { id: itemId },
+            data: {
+              state: AgentInboxState.APPROVED,
+              reviewedByUcUid: ucUid,
+              reviewedAt: new Date(),
+              reviewNote: note ?? null,
+            },
+            include: { message: true },
+          });
+          await this.recordAction(tx, workspaceId, {
+            kind: AgentActionKind.APPROVED,
+            agentKey: item.draftedBy,
+            messageId: null,
+            actorUcUid: ucUid,
+            detail: item.summary,
+          });
+          return { kind: 'result', value: { inbox: this.inboxView(updated, null), message: null } };
+        }
+
         if (item.message?.sendAt && item.message.sendAt.getTime() > Date.now()) {
           return {
             kind: 'result',
@@ -3105,9 +3144,14 @@ export class EmailService {
               : [item.message.toAddress ?? '']),
             ...(item.message.ccAddresses ?? []),
             ...(item.message.bccAddresses ?? []),
-          ].map((r) => normalizeAddress(r)).filter(Boolean);
+          ]
+            .map((r) => normalizeAddress(r))
+            .filter(Boolean);
           const domains = await verifiedInternalDomains(tx, workspaceId);
-          const trusted = await tx.trustedCorrespondent.findMany({ where: { workspaceId }, select: { address: true, scope: true } });
+          const trusted = await tx.trustedCorrespondent.findMany({
+            where: { workspaceId },
+            select: { address: true, scope: true },
+          });
           const external = recipients.filter((r) => {
             const domain = r.split('@')[1] ?? '';
             return (
@@ -3429,11 +3473,14 @@ export class EmailService {
     // Do this visibility probe before reconciling any provider-side mirror. A
     // foreign OWNED draft must be indistinguishable from an unknown id and must
     // not trigger an external mailbox lookup or delete attempt.
-    if ((await this.peekAgentInboxKind(workspaceId, ucUid, itemId)) === null) return null;
+    const kind = await this.peekAgentInboxKind(workspaceId, ucUid, itemId);
+    if (kind === null) return null;
     // A rejected draft must not survive as a mirrored copy in the user's real
     // Drafts folder. Run BEFORE the tx (external call), best-effort; a no-op when
     // there was no mirror (every sovereign/James draft).
-    await this.reconcileMirroredDraft(workspaceId, ucUid, itemId, 'rejected');
+    if (kind !== AgentInboxKind.NOTICE) {
+      await this.reconcileMirroredDraft(workspaceId, ucUid, itemId, 'rejected');
+    }
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       // Tenant fence: scope by workspaceId so a foreign item id resolves to null
@@ -3453,8 +3500,27 @@ export class EmailService {
               : null,
         };
       }
+      if (item.kind === AgentInboxKind.NOTICE) {
+        const updated = await tx.agentInboxItem.update({
+          where: { id: itemId },
+          data: {
+            state: AgentInboxState.REJECTED,
+            reviewedByUcUid: ucUid,
+            reviewedAt: new Date(),
+            reviewNote: note ?? null,
+          },
+          include: { message: true },
+        });
+        await this.recordAction(tx, workspaceId, {
+          kind: AgentActionKind.REJECTED,
+          agentKey: item.draftedBy,
+          messageId: null,
+          actorUcUid: ucUid,
+          detail: item.summary,
+        });
+        return { inbox: this.inboxView(updated, null), message: null };
+      }
       if (item.kind === AgentInboxKind.CLEANUP) {
-        const payload = this.cleanupPayload(item.payload);
         const updated = await tx.agentInboxItem.update({
           where: { id: itemId },
           data: {
@@ -3553,7 +3619,9 @@ export class EmailService {
 
     return this.prisma.withWorkspace(workspaceId, approvedBy, async (tx) => {
       const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, approvedBy);
-      const existing = await tx.agentSendKit.findFirst({ where: { kitId: input.kitId, workspaceId } });
+      const existing = await tx.agentSendKit.findFirst({
+        where: { kitId: input.kitId, workspaceId },
+      });
       if (existing && !this.sendKitAddressVisible(existing.fromAddress, sendKitAddresses)) {
         throw new NotFoundException('The send kit was not found in this workspace.');
       }
@@ -3932,11 +4000,11 @@ export class EmailService {
       return events
         .filter((e) => !e.messageId || byId.has(e.messageId))
         .map((e) => ({
-        id: e.id,
-        agentKey: e.agentKey ?? null,
-        createdAt: e.createdAt ? e.createdAt.toISOString() : null,
-        detail: e.detail ?? null,
-        message: e.messageId ? this.messageFullView(byId.get(e.messageId) ?? null) : null,
+          id: e.id,
+          agentKey: e.agentKey ?? null,
+          createdAt: e.createdAt ? e.createdAt.toISOString() : null,
+          detail: e.detail ?? null,
+          message: e.messageId ? this.messageFullView(byId.get(e.messageId) ?? null) : null,
         }));
     });
   }
@@ -4861,11 +4929,7 @@ export class EmailService {
   /** The workspace's default mailbox account, or null. Explicitly tenant-scoped
    * (RLS is inert under the owner role) so a mailbox-less workspace can NEVER fall
    * back to another tenant's mailbox as its send identity. */
-  private async defaultMailbox(
-    tx: WorkspaceTxClient,
-    workspaceId: string,
-    ucUid?: string | null,
-  ) {
+  private async defaultMailbox(tx: WorkspaceTxClient, workspaceId: string, ucUid?: string | null) {
     const scope = ucUid === undefined ? null : await resolveMailboxScope(tx, workspaceId, ucUid);
     const visible = scope?.governed ? { id: { in: scope.ids } } : {};
     const def = await tx.mailboxAccount.findFirst({
@@ -5205,7 +5269,8 @@ export class EmailService {
 
   private cleanupSubject(payload: Record<string, unknown>): string | null {
     if (this.nativeCleanupThreadIds(payload)) {
-      if (String(payload.action ?? '').toUpperCase() === 'UNSUBSCRIBE') return 'Unsubscribe threads';
+      if (String(payload.action ?? '').toUpperCase() === 'UNSUBSCRIBE')
+        return 'Unsubscribe threads';
       return payload.action === MessageDisposition.TRASH ? 'Trash threads' : 'Archive threads';
     }
     const action = typeof payload.action === 'string' ? payload.action : 'Cleanup';

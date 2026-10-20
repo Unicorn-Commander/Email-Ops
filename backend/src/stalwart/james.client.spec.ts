@@ -162,6 +162,8 @@ describe('JamesClient', () => {
           toAddress: 'jane@acme.test',
           subject: 's',
           body: 'b',
+          replyTo: 'sender@outside.test',
+          headers: [{ name: 'X-Email-Ops-Rule', value: 'rule-1' }],
         },
         false,
       );
@@ -175,6 +177,8 @@ describe('JamesClient', () => {
         fetchSpy.mock.calls.find(([, i]: any) => i?.body && JSON.parse(i.body).methodCalls.some((c: any[]) => c[0] === 'Email/set'))[1].body,
       ).methodCalls.find((c: any[]) => c[0] === 'Email/set')[1];
       expect(emailSet.create.outbound.mailboxIds).toEqual({ 'mbx-sent-1': true });
+      expect(emailSet.create.outbound.replyTo).toEqual([{ email: 'sender@outside.test' }]);
+      expect(emailSet.create.outbound['header:X-Email-Ops-Rule:asText']).toBe('rule-1');
     });
 
   });
@@ -203,6 +207,8 @@ describe('JamesClient', () => {
                 list: [
                   {
                     id: 'em-1',
+                    blobId: 'raw-em-1',
+                    size: 2048,
                     threadId: 'th-1',
                     subject: 'Hi',
                     from: [{ email: 'a@x.test' }],
@@ -331,12 +337,15 @@ describe('JamesClient', () => {
       expect(res?.newMessages.map((m) => m.threadId)).toEqual(['th-2', 'th-3']); // oldest-first, excludes the cursor msg
       expect(res?.newMessages[0]).toEqual({
         threadId: 'th-2',
+        messageId: 'e2',
         fromAddress: 'b@x.test',
         // The REAL To header rides along — the rules engine's 'to' conditions
         // match these, never the polled mailbox's own address as a stand-in.
         toAddresses: ['sales@unicorncommander.ai', 'ops+lists@unicorncommander.ai'],
         subject: 'B',
         receivedAt: '2026-02-02T00:00:00Z',
+        messageIdHeader: null,
+        forwardedFrom: null,
         // Wave 7: no X-UC-Agent-Autoreply header on the fixture → not an
         // agent auto-reply (the runtime's loop guard reads this flag).
         agentAutoreply: false,
@@ -429,6 +438,8 @@ describe('JamesClient', () => {
                 list: [
                   {
                     id: 'em-1',
+                    blobId: 'raw-em-1',
+                    size: 2048,
                     threadId: 'th-1',
                     from: [{ email: 'a@x.test', name: 'A' }],
                     to: [{ email: 'b@x.test' }],
@@ -444,6 +455,7 @@ describe('JamesClient', () => {
                     bodyValues: { html: { value: '<p>hi</p>' }, text: { value: 'hi' } },
                     'header:List-Unsubscribe:asText': '<https://example.test/unsubscribe>',
                     'header:List-Unsubscribe-Post:asText': 'List-Unsubscribe=One-Click',
+                    'header:X-Email-Ops-Forwarded-From:asText': '<source@outside.test>',
                     attachments: [
                       { blobId: 'blob-1', name: 'f.pdf', type: 'application/pdf', size: 123, cid: null },
                     ],
@@ -464,10 +476,13 @@ describe('JamesClient', () => {
         htmlBody: '<p>hi</p>',
         textBody: 'hi',
         messageIdHeader: 'abc@x.test',
+        rawBlobId: 'raw-em-1',
+        size: 2048,
         references: ['zzz@x.test'],
         headers: {
           'List-Unsubscribe': '<https://example.test/unsubscribe>',
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+          'X-Email-Ops-Forwarded-From': '<source@outside.test>',
         },
         isUnread: false,
         cc: [{ address: 'c@x.test', name: null }],
@@ -479,7 +494,13 @@ describe('JamesClient', () => {
         .flatMap((body) => body.methodCalls as any[])
         .find((call) => call[0] === 'Email/get');
       expect(emailGet[1].properties).toEqual(
-        expect.arrayContaining(['header:List-Unsubscribe:asText', 'header:List-Unsubscribe-Post:asText']),
+        expect.arrayContaining([
+          'blobId',
+          'size',
+          'header:List-Unsubscribe:asText',
+          'header:List-Unsubscribe-Post:asText',
+          'header:X-Email-Ops-Forwarded-From:asText',
+        ]),
       );
     });
 

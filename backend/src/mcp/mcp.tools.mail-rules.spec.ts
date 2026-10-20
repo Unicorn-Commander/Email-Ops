@@ -86,6 +86,29 @@ describe('MailRulesTools', () => {
     });
   });
 
+  it('passes NOTIFY and FORWARD_COPY actions through unchanged', async () => {
+    (mailRules.create as jest.Mock).mockResolvedValue(ruleView);
+    const actions = [
+      { type: 'NOTIFY', value: 'Review this message' },
+      { type: 'FORWARD_COPY', value: 'ops@acme.test' },
+    ];
+
+    await tools().createMailRule(user, {
+      mailbox_id: 'mb-1',
+      name: 'Alert and forward',
+      match: { all: [{ field: 'subject', op: 'contains', value: 'urgent' }] },
+      actions,
+    });
+
+    expect(mailRules.create).toHaveBeenCalledWith('ws-1', 'uc-user-1', 'mb-1', {
+      name: 'Alert and forward',
+      enabled: undefined,
+      priority: undefined,
+      match: { all: [{ field: 'subject', op: 'contains', value: 'urgent' }] },
+      actions,
+    });
+  });
+
   it('surfaces the service’s validation error on create (never swallowed)', async () => {
     (mailRules.create as jest.Mock).mockRejectedValue(
       new BadRequestException('actions must contain at least one valid action'),

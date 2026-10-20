@@ -67,9 +67,7 @@ const COMPOSE_ATTACHMENT = z
     const filename = attachment.filename ?? attachment.name;
     const contentType = attachment.contentType ?? attachment.content_type ?? attachment.type;
     const contentBase64 = attachment.contentBase64 ?? attachment.content_base64;
-    const hasInline = Boolean(
-      filename || contentType || contentBase64,
-    );
+    const hasInline = Boolean(filename || contentType || contentBase64);
     const sourceCount = Number(Boolean(documentId)) + Number(Boolean(blobId)) + Number(hasInline);
 
     if (sourceCount !== 1) {
@@ -855,8 +853,9 @@ export class McpService {
         title: 'List the agent inbox',
         description:
           'List the agent-inbox queue: agent-drafted messages awaiting human approval ' +
-          'before send (mode=draft composes land here). Defaults to PENDING; pass state ' +
-          'to filter. Returns { items: [...], count }.',
+          'before send (mode=draft composes land here), plus NOTICE items from mail rules. ' +
+          'Each item includes its kind and payload. Defaults to PENDING; pass state to ' +
+          'filter. Returns { items: [...], count }.',
         inputSchema: {
           workspace_id: z.string().optional(),
           state: INBOX_STATE.optional(),
@@ -871,7 +870,8 @@ export class McpService {
         title: 'Approve an agent-inbox draft (sends it)',
         description:
           'Approve a PENDING agent-inbox draft: hand it to the send lane and advance the ' +
-          'message to queued/sent. This is the human-in-the-loop SEND, so it requires the ' +
+          'message to queued/sent. NOTICE items are acknowledged without sending or changing ' +
+          'a message. EMAIL drafts are the human-in-the-loop SEND, so they require the ' +
           'email-ops entitlement. trust_recipients defaults to false for external recipients; ' +
           'only explicit true learns them for future autonomous replies. Agents cannot approve ' +
           'their own external drafts without a human-approved send kit. Returns the updated inbox item + message.',
@@ -1462,9 +1462,10 @@ export class McpService {
         description:
           'Create an inbound rule on one mailbox: a name, a match tree ({ all / any } ' +
           'groups of { field, op, value } conditions over from/to/subject/fromDomain), ' +
-          'and an ordered actions list (MOVE_TO_FOLDER/ARCHIVE/TRASH/MARK_READ/STOP). ' +
+          'and an ordered actions list (MOVE_TO_FOLDER, ARCHIVE, TRASH, MARK_READ, ' +
+          'NOTIFY, FORWARD_COPY, STOP). ' +
           'priority auto-assigns past the current max when omitted. The service validates ' +
-          'match + actions exactly as on REST — a bad payload is refused, never stored ' +
+          'match + actions exactly as on REST: a bad payload is refused, never stored ' +
           'raw. Member-level write; runs AS the calling user. Returns the created rule.',
         inputSchema: {
           workspace_id: z.string().optional(),
@@ -1488,7 +1489,8 @@ export class McpService {
         title: 'Update a mail rule',
         description:
           'Update any subset of an inbound rule’s fields (name, enabled, priority, ' +
-          'match, actions); provided fields are re-validated exactly as on create. ' +
+          'match, actions); actions are MOVE_TO_FOLDER, ARCHIVE, TRASH, MARK_READ, ' +
+          'NOTIFY, FORWARD_COPY, or STOP. Provided fields are re-validated exactly as on create. ' +
           'Member-level write; runs AS the calling user. Returns the updated rule, or ' +
           '{ status:"not_found" } when the rule is not in this workspace + mailbox.',
         inputSchema: {

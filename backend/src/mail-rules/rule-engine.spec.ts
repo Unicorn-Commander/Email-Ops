@@ -62,7 +62,10 @@ describe('rule engine', () => {
       const condition: Condition = { field, op, value };
 
       expect(
-        evaluateRules([rule('r1', 1, { all: [condition] }, [action('LABEL', `${field}-${op}`)])], msg),
+        evaluateRules(
+          [rule('r1', 1, { all: [condition] }, [action('LABEL', `${field}-${op}`)])],
+          msg,
+        ),
       ).toEqual([action('LABEL', `${field}-${op}`)]);
     });
   });
@@ -215,21 +218,22 @@ describe('rule engine', () => {
       evaluateRules([rule('r1', 1, both('alice', 'invoice'), [action('MARK_READ')])], msg),
     ).toEqual([action('MARK_READ')]);
     // The any-side fails → no match (it is never silently ignored).
-    expect(evaluateRules([rule('r2', 1, both('alice', 'missing'), [action('MARK_READ')])], msg)).toEqual([]);
+    expect(
+      evaluateRules([rule('r2', 1, both('alice', 'missing'), [action('MARK_READ')])], msg),
+    ).toEqual([]);
     // The all-side fails → no match.
-    expect(evaluateRules([rule('r3', 1, both('nobody', 'invoice'), [action('MARK_READ')])], msg)).toEqual([]);
+    expect(
+      evaluateRules([rule('r3', 1, both('nobody', 'invoice'), [action('MARK_READ')])], msg),
+    ).toEqual([]);
   });
 
   it('an EMPTY group matches NOTHING — it sinks its parent ALL and adds nothing to a parent ANY', () => {
     // A valid condition alongside an empty ANY group: the group contributes
     // false, so the enclosing ALL can never hold.
     const sunkAll = [
-      rule(
-        'sunk',
-        1,
-        { all: [{ field: 'from', op: 'contains', value: 'alice' }, { any: [] }] },
-        [action('TRASH')],
-      ),
+      rule('sunk', 1, { all: [{ field: 'from', op: 'contains', value: 'alice' }, { any: [] }] }, [
+        action('TRASH'),
+      ]),
     ];
     expect(evaluateRules(sunkAll, msg)).toEqual([]);
 
@@ -413,9 +417,11 @@ describe('rule engine', () => {
 
   it('parseMatch tolerates unknown input into a safe empty match', () => {
     expect(parseMatch(null)).toEqual({});
-    expect(parseMatch({ all: [{ field: 'from', op: 'equals', value: 'alice@acme.com' }] })).toEqual({
-      all: [{ field: 'from', op: 'equals', value: 'alice@acme.com' }],
-    });
+    expect(parseMatch({ all: [{ field: 'from', op: 'equals', value: 'alice@acme.com' }] })).toEqual(
+      {
+        all: [{ field: 'from', op: 'equals', value: 'alice@acme.com' }],
+      },
+    );
   });
 
   it('parseActions tolerates unknown input and keeps only valid actions', () => {
@@ -425,8 +431,16 @@ describe('rule engine', () => {
         { type: 'LABEL', value: 'Finance' },
         { type: 'NOPE', value: 'Ignored' },
         { type: 'STOP' },
+        { type: 'NOTIFY', value: 'Review this' },
+        { type: 'FORWARD_COPY', value: 'archive@workspace.test' },
         { type: 'MOVE_TO_FOLDER', value: 123 },
       ]),
-    ).toEqual([{ type: 'LABEL', value: 'Finance' }, { type: 'STOP' }, { type: 'MOVE_TO_FOLDER' }]);
+    ).toEqual([
+      { type: 'LABEL', value: 'Finance' },
+      { type: 'STOP' },
+      { type: 'NOTIFY', value: 'Review this' },
+      { type: 'FORWARD_COPY', value: 'archive@workspace.test' },
+      { type: 'MOVE_TO_FOLDER' },
+    ]);
   });
 });

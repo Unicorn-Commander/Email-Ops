@@ -3,6 +3,11 @@
 All notable changes to Email-Ops. Dates are the deploy date to the internal line
 of record (`email-ops.magicunicorn.dev`).
 
+## Unreleased
+
+### Added
+- Mail rules support NOTICE and FORWARD_COPY actions. NOTICE items are acknowledged in the agent inbox, and sovereign forwards use James with loop and duplicate-delivery guards.
+
 ## [0.6.0] — 2026-07-17
 
 Wave 1 - Truth & safety: copy-truth documentation sweep + login copy updates.

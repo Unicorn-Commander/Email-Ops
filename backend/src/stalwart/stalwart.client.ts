@@ -458,6 +458,7 @@ export class StalwartClient extends StalwartPort {
           To: request.toAddresses?.length ? request.toAddresses.join(', ') : request.toAddress,
           Subject: request.subject,
           TextBody: request.body,
+          ...(request.replyTo ? { ReplyTo: request.replyTo } : {}),
           ...(request.bodyHtml ? { HtmlBody: request.bodyHtml } : {}),
           MessageStream: 'outbound',
           ...(request.attachments?.length
@@ -531,6 +532,7 @@ export class StalwartClient extends StalwartPort {
                 : { body: { value: request.body } },
               textBody: [{ partId: 'body', type: 'text/plain' }],
               ...(request.bodyHtml ? { htmlBody: [{ partId: 'html', type: 'text/html' }] } : {}),
+              ...(request.replyTo ? { replyTo: [{ email: request.replyTo }] } : {}),
               // Wave 7: custom headers via the RFC 8621 header:{name} form.
               ...Object.fromEntries(
                 (request.headers ?? []).map((h) => [`header:${h.name}:asText`, h.value]),

@@ -70,6 +70,14 @@ export interface InboundRuleMessage {
    *  nothing (never the mailbox's own address as a stand-in). */
   toAddresses?: string[];
   subject: string | null;
+  /** The provider's internal message id, when the inbound poll supplied it. */
+  messageId?: string | null;
+  /** The original RFC Message-ID, when the engine supplied it. */
+  messageIdHeader?: string | null;
+  /** The inbound X-Email-Ops-Forwarded-From value, when present. */
+  forwardedFrom?: string | null;
+  /** ISO received time from the inbound poll. */
+  receivedAt?: string | null;
 }
 
 /** Tiny logging summary applyInbound returns (it NEVER throws). */
@@ -84,5 +92,5 @@ export interface ApplyInboundSummary {
  */
 export type MailRuleRow = Pick<
   MailRule,
-  'id' | 'workspaceId' | 'mailboxId' | 'enabled' | 'priority' | 'match' | 'actions'
+  'id' | 'workspaceId' | 'mailboxId' | 'name' | 'enabled' | 'priority' | 'match' | 'actions'
 >;

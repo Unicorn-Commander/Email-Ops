@@ -1,8 +1,15 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { MailRule, Prisma } from '@prisma/client';
+import {
+  AgentInboxApprovalTier,
+  AgentInboxKind,
+  AgentInboxState,
+  MailRule,
+  Prisma,
+} from '@prisma/client';
 import { assertMailboxVisible } from '../common/mailbox/mailbox-scope';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { StalwartPort } from '../stalwart/stalwart.port';
+import { StalwartMessageDetail } from '../stalwart/stalwart.types';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { MailboxAccount } from '@prisma/client';
 import {
@@ -37,6 +44,9 @@ const PRIORITY_MAX = 1_000_000_000;
 // legacy stored shapes beyond them — see the contract in mail-rules.types.ts).
 const MAX_MATCH_GROUPS = 5;
 const MAX_MATCH_CONDITIONS_PER_GROUP = 10;
+const MAX_NOTIFY_NOTE_LENGTH = 200;
+const MAX_FORWARD_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const EMAIL_ADDRESS_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
  * Mail-rules CRUD + the inbound APPLICATOR. CRUD is workspace-member surface:
@@ -55,7 +65,11 @@ export class MailRulesService {
     private readonly mailProvider: MailProviderPort,
   ) {}
 
-  async list(workspaceId: string, ucUid: string | null, mailboxId: string): Promise<MailRuleView[]> {
+  async list(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId: string,
+  ): Promise<MailRuleView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       await this.assertMailbox(tx, workspaceId, ucUid, mailboxId);
       const rows = await tx.mailRule.findMany({
@@ -76,10 +90,13 @@ export class MailRulesService {
     const name = this.normalizeName(input.name);
     const match = this.compileMatch(input.match);
     const actions = this.compileActions(input.actions);
-    const explicitPriority = input.priority === undefined ? null : this.normalizePriority(input.priority);
+    const explicitPriority =
+      input.priority === undefined ? null : this.normalizePriority(input.priority);
 
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      const mbx = await this.assertMailbox(tx, workspaceId, ucUid, mailboxId, { requireActive: true });
+      const mbx = await this.assertMailbox(tx, workspaceId, ucUid, mailboxId, {
+        requireActive: true,
+      });
       // External (Gmail/M365) mailboxes have no folder model, so a MOVE_TO_FOLDER
       // rule would never fire there — reject it at create so the rule isn't a
       // silent no-op. ARCHIVE / TRASH / MARK_READ all map to provider triage verbs.
@@ -88,6 +105,7 @@ export class MailRulesService {
           'Move-to-folder rules are not supported on connected Gmail/Microsoft mailboxes — use Archive, Trash, or Mark-read.',
         );
       }
+      await this.validateActionPolicy(tx, workspaceId, mbx, actions);
       const count = await tx.mailRule.count({ where: { workspaceId, mailboxId } });
       if (count >= MAX_RULES_PER_MAILBOX) {
         throw new BadRequestException(
@@ -132,6 +150,7 @@ export class MailRulesService {
     // an explicit null through, and a null must read as "not provided" — never
     // reach Prisma as a null write on a non-nullable column (500).
     const data: Prisma.MailRuleUpdateInput = {};
+    let compiledActions: RuleAction[] | null = null;
     if (input.name != null) data.name = this.normalizeName(input.name);
     if (input.enabled != null) data.enabled = input.enabled;
     if (input.priority != null) data.priority = this.normalizePriority(input.priority);
@@ -139,15 +158,22 @@ export class MailRulesService {
       data.match = this.compileMatch(input.match) as unknown as Prisma.InputJsonValue;
     }
     if (input.actions != null) {
-      data.actions = this.compileActions(input.actions) as unknown as Prisma.InputJsonValue;
+      compiledActions = this.compileActions(input.actions);
+      data.actions = compiledActions as unknown as Prisma.InputJsonValue;
     }
 
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
-      await this.assertMailbox(tx, workspaceId, ucUid, mailboxId);
+      const mbx = await this.assertMailbox(tx, workspaceId, ucUid, mailboxId);
       const existing = await tx.mailRule.findFirst({
         where: { id: ruleId, workspaceId, mailboxId },
       });
       if (!existing) return null;
+      await this.validateActionPolicy(
+        tx,
+        workspaceId,
+        mbx,
+        compiledActions ?? parseActions(existing.actions),
+      );
       if (Object.keys(data).length === 0) return this.view(existing); // empty PATCH = read-back
       const row = await tx.mailRule.update({ where: { id: ruleId }, data });
       return this.view(row);
@@ -199,6 +225,7 @@ export class MailRulesService {
             id: true,
             workspaceId: true,
             mailboxId: true,
+            name: true,
             enabled: true,
             priority: true,
             match: true,
@@ -215,6 +242,7 @@ export class MailRulesService {
 
       const compiled: CompiledRule[] = usable.map((row) => ({
         id: row.id,
+        name: row.name,
         enabled: row.enabled,
         priority: row.priority,
         match: parseMatch(row.match),
@@ -244,23 +272,53 @@ export class MailRulesService {
       }
       if (matchedIds.length === 0) return none;
 
+      const actionPlans: { ruleId: string; ruleName: string; actionCount: number }[] = [];
+      for (const rule of sorted) {
+        const ruleActions = evaluateRules([rule], inbound);
+        if (ruleActions.length === 0) continue;
+        actionPlans.push({
+          ruleId: rule.id,
+          ruleName: rule.name ?? rule.id,
+          actionCount: ruleActions.length,
+        });
+        if (ruleActions.some((a) => a.type === 'STOP')) break;
+      }
+
       let applied = 0;
-      for (const action of actions) {
-        if (action.type === 'STOP') continue; // evaluation terminator — no engine effect
-        try {
-          const ok = await this.executeAction(mailboxEmail, msg.threadId, action, mailbox);
-          if (ok === null) {
-            this.logger.debug(`rules: skipping action ${action.type} (unsupported) mailbox=${mailboxId}`);
-          } else if (ok) {
-            applied += 1;
-          } else {
-            // Port degrade-clean (dormant engine / unknown thread): not an error.
-            this.logger.debug(`rules: ${action.type} not applied (engine declined) thread=${msg.threadId}`);
+      let actionIndex = 0;
+      for (const plan of actionPlans) {
+        const ruleActions = actions.slice(actionIndex, actionIndex + plan.actionCount);
+        actionIndex += plan.actionCount;
+        for (const action of ruleActions) {
+          if (action.type === 'STOP') continue; // evaluation terminator - no engine effect
+          try {
+            const ok = await this.executeAction(
+              workspaceId,
+              mailboxId,
+              mailboxEmail,
+              msg,
+              plan.ruleId,
+              plan.ruleName,
+              action,
+              mailbox,
+            );
+            if (ok === null) {
+              this.logger.debug(
+                `rules: skipping action ${action.type} (unsupported) mailbox=${mailboxId}`,
+              );
+            } else if (ok) {
+              applied += 1;
+            } else {
+              // Port degrade-clean (dormant engine / unknown thread): not an error.
+              this.logger.debug(
+                `rules: ${action.type} not applied (engine declined) thread=${msg.threadId}`,
+              );
+            }
+          } catch (err) {
+            this.logger.warn(
+              `rules: ${action.type} failed thread=${msg.threadId} mailbox=${mailboxId}: ${(err as Error).message}`,
+            );
           }
-        } catch (err) {
-          this.logger.warn(
-            `rules: ${action.type} failed thread=${msg.threadId} mailbox=${mailboxId}: ${(err as Error).message}`,
-          );
         }
       }
 
@@ -273,7 +331,9 @@ export class MailRulesService {
           }),
         );
       } catch (err) {
-        this.logger.warn(`rules: hit-counter bump failed mailbox=${mailboxId}: ${(err as Error).message}`);
+        this.logger.warn(
+          `rules: hit-counter bump failed mailbox=${mailboxId}: ${(err as Error).message}`,
+        );
       }
 
       return { matched: matchedIds.length, applied };
@@ -287,23 +347,40 @@ export class MailRulesService {
 
   /** True/false = engine outcome; null = unsupported here (LABEL / blank move target). */
   private async executeAction(
+    workspaceId: string,
+    mailboxId: string,
     mailboxEmail: string,
-    threadId: string,
+    msg: InboundRuleMessage,
+    ruleId: string,
+    ruleName: string,
     action: RuleAction,
     mailbox?: MailboxAccount,
   ): Promise<boolean | null> {
+    if (action.type === 'NOTIFY') {
+      return this.createNotice(
+        workspaceId,
+        mailboxId,
+        mailboxEmail,
+        msg,
+        ruleId,
+        ruleName,
+        action.value,
+      );
+    }
+
     // EXTERNAL (Gmail/M365): actions execute through the provider triage verbs.
     // MOVE_TO_FOLDER has no external equivalent (Gmail/Graph folders aren't
     // modelled here), so it's an honest skip (null) rather than a silent no-op.
     if (mailbox && this.mailProvider.handles(mailbox)) {
       switch (action.type) {
         case 'ARCHIVE':
-          return this.mailProvider.archiveThread(mailbox, threadId);
+          return this.mailProvider.archiveThread(mailbox, msg.threadId);
         case 'TRASH':
-          return this.mailProvider.trashThread(mailbox, threadId);
+          return this.mailProvider.trashThread(mailbox, msg.threadId);
         case 'MARK_READ':
-          return this.mailProvider.setThreadRead(mailbox, threadId, true);
+          return this.mailProvider.setThreadRead(mailbox, msg.threadId, true);
         case 'MOVE_TO_FOLDER':
+        case 'FORWARD_COPY':
         default:
           return null; // MOVE_TO_FOLDER / LABEL unsupported on external — honest skip
       }
@@ -315,17 +392,257 @@ export class MailRulesService {
         // GET .../folders; the engine validates it belongs to this account.
         const folderId = (action.value ?? '').trim();
         if (!folderId) return null;
-        return this.stalwart.moveThreadToMailbox(mailboxEmail, threadId, folderId);
+        return this.stalwart.moveThreadToMailbox(mailboxEmail, msg.threadId, folderId);
       }
       case 'ARCHIVE':
-        return this.stalwart.moveThreadToFolder(mailboxEmail, threadId, 'archive');
+        return this.stalwart.moveThreadToFolder(mailboxEmail, msg.threadId, 'archive');
       case 'TRASH':
-        return this.stalwart.moveThreadToFolder(mailboxEmail, threadId, 'trash');
+        return this.stalwart.moveThreadToFolder(mailboxEmail, msg.threadId, 'trash');
       case 'MARK_READ':
-        return this.stalwart.setThreadRead(mailboxEmail, threadId, true);
+        return this.stalwart.setThreadRead(mailboxEmail, msg.threadId, true);
+      case 'FORWARD_COPY':
+        return this.forwardCopy(workspaceId, mailboxEmail, msg, ruleId, action.value, mailbox);
       default:
         return null; // LABEL (not supported yet) or unknown — skipped with a debug log
     }
+  }
+
+  private async forwardCopy(
+    workspaceId: string,
+    mailboxEmail: string,
+    msg: InboundRuleMessage,
+    ruleId: string,
+    destinationValue: string | undefined,
+    mailbox?: MailboxAccount,
+  ): Promise<boolean | null> {
+    if (mailbox && mailbox.provider !== 'stalwart') return null;
+    const destination = destinationValue?.trim();
+    if (!destination) return null;
+    if (
+      msg.forwardedFrom?.trim() ||
+      this.sameAddress(msg.fromAddress, destination) ||
+      this.sameAddress(mailboxEmail, destination)
+    ) {
+      return false;
+    }
+
+    const detail = await this.findForwardDetail(mailboxEmail, msg);
+    if (!detail) return false;
+    if (this.forwardedHeader(detail.headers)) return false;
+
+    const originalFrom = detail.from?.address ?? msg.fromAddress;
+    if (!originalFrom || this.sameAddress(originalFrom, destination)) return false;
+    const originalSubject = detail.subject ?? msg.subject ?? '';
+    const originalDate = detail.sentAt ?? msg.receivedAt ?? '';
+    const originalTo = detail.to.length
+      ? detail.to.map((participant) => participant.address).join(', ')
+      : (msg.toAddresses ?? []).join(', ');
+    const originalMessageId =
+      detail.messageIdHeader?.trim() || msg.messageIdHeader?.trim() || msg.threadId;
+    const attachment = await this.prepareForwardAttachment(mailboxEmail, detail);
+    if (attachment.unavailable) return false;
+
+    const bodyLines = [
+      `From: ${originalFrom}`,
+      `Date: ${originalDate}`,
+      `To: ${originalTo}`,
+      `Subject: ${originalSubject}`,
+      '',
+      detail.textBody ?? '',
+    ];
+    if (attachment.tooLarge) {
+      bodyLines.push('', 'The original message was too large to attach.');
+    }
+
+    const markerMessageId = msg.messageId?.trim() || msg.threadId;
+    if (!markerMessageId || !(await this.claimForward(workspaceId, ruleId, markerMessageId))) {
+      return false;
+    }
+
+    const htmlBody = detail.htmlBody
+      ? [
+          '<div>',
+          `<p><strong>From:</strong> ${this.escapeHtml(originalFrom)}</p>`,
+          `<p><strong>Date:</strong> ${this.escapeHtml(originalDate)}</p>`,
+          `<p><strong>To:</strong> ${this.escapeHtml(originalTo)}</p>`,
+          `<p><strong>Subject:</strong> ${this.escapeHtml(originalSubject)}</p>`,
+          '</div><hr>',
+          detail.htmlBody,
+          ...(attachment.tooLarge ? ['<p>The original message was too large to attach.</p>'] : []),
+        ].join('')
+      : null;
+    const sent = await this.stalwart.send(
+      mailboxEmail,
+      {
+        fromAddress: mailboxEmail,
+        toAddress: destination,
+        subject: `Fwd: ${originalSubject}`,
+        body: bodyLines.join('\n'),
+        bodyHtml: htmlBody,
+        replyTo: originalFrom,
+        headers: [
+          { name: 'X-Email-Ops-Rule', value: ruleId },
+          { name: 'X-Email-Ops-Forwarded-From', value: originalMessageId },
+        ],
+        ...(attachment.blobId
+          ? {
+              attachments: [
+                { blobId: attachment.blobId, name: 'original.eml', type: 'message/rfc822' },
+              ],
+            }
+          : {}),
+      },
+      false,
+    );
+    return sent.accepted;
+  }
+
+  private async findForwardDetail(
+    mailboxEmail: string,
+    msg: InboundRuleMessage,
+  ): Promise<StalwartMessageDetail | null> {
+    const details = await this.stalwart.getThreadDetail(mailboxEmail, msg.threadId);
+    if (!details.length) return null;
+    if (msg.messageId) {
+      const exact = details.find((detail) => detail.id === msg.messageId);
+      if (exact) return exact;
+    }
+    if (msg.messageIdHeader) {
+      const header = msg.messageIdHeader.replace(/^<|>$/g, '').toLowerCase();
+      const exact = details.find(
+        (detail) => detail.messageIdHeader?.replace(/^<|>$/g, '').toLowerCase() === header,
+      );
+      if (exact) return exact;
+    }
+    const received = details.filter((detail) => detail.direction === 'received');
+    return received[received.length - 1] ?? details[details.length - 1] ?? null;
+  }
+
+  private async prepareForwardAttachment(
+    mailboxEmail: string,
+    detail: StalwartMessageDetail,
+  ): Promise<{ blobId: string | null; tooLarge: boolean; unavailable: boolean }> {
+    if (detail.rawBlobId) {
+      if (typeof detail.size === 'number') {
+        return {
+          blobId: detail.size <= MAX_FORWARD_ATTACHMENT_BYTES ? detail.rawBlobId : null,
+          tooLarge: detail.size > MAX_FORWARD_ATTACHMENT_BYTES,
+          unavailable: false,
+        };
+      }
+      const downloaded = await this.stalwart.downloadBlob(mailboxEmail, detail.rawBlobId);
+      if (!downloaded) return { blobId: null, tooLarge: false, unavailable: true };
+      return {
+        blobId: detail.rawBlobId,
+        tooLarge: downloaded.data.length > MAX_FORWARD_ATTACHMENT_BYTES,
+        unavailable: false,
+      };
+    }
+
+    const synthetic = Buffer.from(this.renderOriginalEml(detail), 'utf8');
+    if (synthetic.length > MAX_FORWARD_ATTACHMENT_BYTES) {
+      return { blobId: null, tooLarge: true, unavailable: false };
+    }
+    const uploaded = await this.stalwart.uploadBlob(
+      mailboxEmail,
+      synthetic,
+      'message/rfc822',
+      'original.eml',
+    );
+    return uploaded
+      ? { blobId: uploaded.blobId, tooLarge: false, unavailable: false }
+      : { blobId: null, tooLarge: false, unavailable: true };
+  }
+
+  private renderOriginalEml(detail: StalwartMessageDetail): string {
+    const from = detail.from?.address ?? '';
+    const to = detail.to.map((participant) => participant.address).join(', ');
+    const headers = [
+      `From: ${from}`,
+      `To: ${to}`,
+      `Date: ${detail.sentAt ?? ''}`,
+      `Subject: ${detail.subject ?? ''}`,
+      ...(detail.messageIdHeader ? [`Message-ID: ${detail.messageIdHeader}`] : []),
+    ];
+    return `${headers.join('\r\n')}\r\n\r\n${detail.textBody ?? detail.htmlBody ?? ''}`;
+  }
+
+  private claimForward(workspaceId: string, ruleId: string, messageId: string): Promise<boolean> {
+    return this.prisma
+      .withWorkspace(workspaceId, APPLICATOR_UC_UID, (tx) =>
+        tx.mailRuleForward.create({ data: { workspaceId, ruleId, messageId } }),
+      )
+      .then(() => true)
+      .catch((err: unknown) => {
+        if ((err as { code?: string }).code === 'P2002') return false;
+        throw err;
+      });
+  }
+
+  private forwardedHeader(headers?: Record<string, string>): boolean {
+    return Object.entries(headers ?? {}).some(
+      ([name, value]) =>
+        name.toLowerCase() === 'x-email-ops-forwarded-from' && Boolean(value.trim()),
+    );
+  }
+
+  private sameAddress(left: string | null | undefined, right: string): boolean {
+    return Boolean(left && left.trim().toLowerCase() === right.trim().toLowerCase());
+  }
+
+  private escapeHtml(value: string): string {
+    return value.replace(
+      /[&<>"']/g,
+      (character) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character] ??
+        character,
+    );
+  }
+
+  private async createNotice(
+    workspaceId: string,
+    mailboxId: string,
+    mailboxEmail: string,
+    msg: InboundRuleMessage,
+    ruleId: string,
+    ruleName: string,
+    note?: string,
+  ): Promise<boolean> {
+    const from = msg.fromAddress ?? '';
+    const subject = msg.subject ?? '';
+    const payload: Record<string, unknown> = {
+      type: 'mail_rule_notice',
+      ruleId,
+      ruleName,
+      mailboxId,
+      mailboxAddress: mailboxEmail,
+      threadId: msg.threadId,
+      ...(msg.messageId ? { messageId: msg.messageId } : {}),
+      from,
+      subject,
+      receivedAt: msg.receivedAt ?? null,
+      ...(note !== undefined ? { note } : {}),
+    };
+    await this.prisma.withWorkspace(workspaceId, APPLICATOR_UC_UID, (tx) =>
+      tx.agentInboxItem.create({
+        data: {
+          workspaceId,
+          messageId: null,
+          smsMessageId: null,
+          kind: AgentInboxKind.NOTICE,
+          approvalTier: AgentInboxApprovalTier.MAILBOX_OWNER,
+          state: AgentInboxState.PENDING,
+          draftedBy: `mail-rule:${ruleId}`,
+          summary: this.truncate(`${ruleName}: ${from} · ${subject}`, 200),
+          payload: payload as Prisma.InputJsonValue,
+        },
+      }),
+    );
+    return true;
+  }
+
+  private truncate(value: string, maxLength: number): string {
+    return value.length <= maxLength ? value : value.slice(0, maxLength);
   }
 
   /** Mailbox must exist in THIS workspace (404) and be actionable by the caller. */
@@ -348,7 +665,9 @@ export class MailRulesService {
     // provider compatibility, e.g. MOVE_TO_FOLDER on external, is validated by
     // the caller which has the action list.) List/update/delete stay permissive.
     if (opts?.requireActive && !mailbox.active) {
-      throw new BadRequestException('Mail rules run only on active mailboxes — this mailbox is inactive.');
+      throw new BadRequestException(
+        'Mail rules run only on active mailboxes — this mailbox is inactive.',
+      );
     }
     return { id: mailbox.id, provider: mailbox.provider, active: mailbox.active };
   }
@@ -424,7 +743,12 @@ export class MailRulesService {
   }
 
   private compileActions(raw: unknown): RuleAction[] {
-    const actions = parseActions(raw);
+    const actions = parseActions(raw).map((action) => ({
+      ...action,
+      ...(action.value !== undefined && (action.type === 'NOTIFY' || action.type === 'FORWARD_COPY')
+        ? { value: action.value.trim() }
+        : {}),
+    }));
     if (actions.length === 0) {
       throw new BadRequestException('actions must contain at least one valid action');
     }
@@ -432,9 +756,76 @@ export class MailRulesService {
       throw new BadRequestException('LABEL is not supported yet');
     }
     if (actions.every((a) => a.type === 'STOP')) {
-      throw new BadRequestException('actions must include at least one effectful action (not only STOP)');
+      throw new BadRequestException(
+        'actions must include at least one effectful action (not only STOP)',
+      );
+    }
+    for (const action of actions) {
+      if (
+        action.type === 'NOTIFY' &&
+        action.value !== undefined &&
+        action.value.length > MAX_NOTIFY_NOTE_LENGTH
+      ) {
+        throw new BadRequestException(
+          `NOTIFY note must be at most ${MAX_NOTIFY_NOTE_LENGTH} characters.`,
+        );
+      }
+      if (action.type === 'FORWARD_COPY' && !action.value) {
+        throw new BadRequestException(
+          'FORWARD_COPY requires one destination email address in value.',
+        );
+      }
+      if (action.type === 'FORWARD_COPY' && action.value && !EMAIL_ADDRESS_RE.test(action.value)) {
+        throw new BadRequestException({
+          code: 'forward_destination_not_allowed',
+          message: 'FORWARD_COPY destination must be one syntactically valid email address.',
+        });
+      }
     }
     return actions;
+  }
+
+  /** Validate mailbox compatibility and the workspace-owned forward target. */
+  private async validateActionPolicy(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    mailbox: { provider: string },
+    actions: RuleAction[],
+  ): Promise<void> {
+    const forwards = actions.filter(
+      (action): action is RuleAction & { type: 'FORWARD_COPY'; value: string } =>
+        action.type === 'FORWARD_COPY' &&
+        typeof action.value === 'string' &&
+        action.value.length > 0,
+    );
+    if (forwards.length === 0) return;
+
+    if (mailbox.provider !== 'stalwart') {
+      throw new BadRequestException(
+        'FORWARD_COPY rules are not supported on connected Gmail/Microsoft mailboxes.',
+      );
+    }
+
+    const [mailboxes, domains] = await Promise.all([
+      tx.mailboxAccount.findMany({ where: { workspaceId }, select: { emailAddress: true } }),
+      tx.mailDomain.findMany({ where: { workspaceId }, select: { domain: true } }),
+    ]);
+    const allowedAddresses = new Set(mailboxes.map((row) => row.emailAddress.trim().toLowerCase()));
+    const allowedDomains = domains.map((row) => row.domain.trim().toLowerCase()).filter(Boolean);
+    for (const action of forwards) {
+      const destination = action.value.toLowerCase();
+      const at = destination.lastIndexOf('@');
+      const domain = at >= 0 ? destination.slice(at + 1) : '';
+      const allowed =
+        allowedAddresses.has(destination) ||
+        allowedDomains.some((bound) => domain === bound || domain.endsWith(`.${bound}`));
+      if (!allowed) {
+        throw new BadRequestException({
+          code: 'forward_destination_not_allowed',
+          message: `FORWARD_COPY destination ${action.value} is not a mailbox, connected account, or bound mail domain in this workspace.`,
+        });
+      }
+    }
   }
 
   /** Count Condition LEAVES recursively — {} and nested-empty groups are dead rules. */
