@@ -67,9 +67,7 @@ const COMPOSE_ATTACHMENT = z
     const filename = attachment.filename ?? attachment.name;
     const contentType = attachment.contentType ?? attachment.content_type ?? attachment.type;
     const contentBase64 = attachment.contentBase64 ?? attachment.content_base64;
-    const hasInline = Boolean(
-      filename || contentType || contentBase64,
-    );
+    const hasInline = Boolean(filename || contentType || contentBase64);
     const sourceCount = Number(Boolean(documentId)) + Number(Boolean(blobId)) + Number(hasInline);
 
     if (sourceCount !== 1) {
