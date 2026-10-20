@@ -85,6 +85,7 @@ describe('MailRulesService', () => {
       moveThreadToFolder: jest.fn().mockResolvedValue(true),
       setThreadRead: jest.fn().mockResolvedValue(true),
       getThreadDetail: jest.fn().mockResolvedValue([]),
+      getMessageDetail: jest.fn().mockResolvedValue(null),
       downloadBlob: jest.fn().mockResolvedValue(null),
       uploadBlob: jest.fn().mockResolvedValue({
         blobId: 'uploaded-original',
@@ -1169,5 +1170,116 @@ describe('MailRulesService', () => {
       ruleRow(),
     ] as any);
     expect(out).toEqual({ matched: 1, applied: 1 });
+  });
+
+  it('forwards from the direct message detail when the thread lookup comes back empty (James Thread/get miss)', async () => {
+    const { service, tx, stalwart } = make();
+    const detail = {
+      id: 'jmap-message-2',
+      threadId: 'thr-2',
+      from: { address: 'sender@outside.test', name: 'Sender' },
+      to: [{ address: 'founder@acme.test', name: null }],
+      cc: [],
+      bcc: [],
+      subject: 'No Message-ID here',
+      sentAt: '2026-10-20T20:36:41.000Z',
+      preview: 'Original text',
+      direction: 'received',
+      htmlBody: null,
+      textBody: 'Original text',
+      messageIdHeader: null,
+      rawBlobId: 'raw-original-2',
+      size: 926,
+      references: null,
+      headers: {},
+      isUnread: true,
+      flagged: false,
+      attachments: [],
+    };
+    (stalwart.getThreadDetail as jest.Mock).mockResolvedValue([]);
+    (stalwart.getMessageDetail as jest.Mock).mockResolvedValue(detail);
+    const rules = [
+      ruleRow({
+        id: 'rule-forward',
+        name: 'Forward important mail',
+        actions: [{ type: 'FORWARD_COPY', value: 'ops@acme.test' }],
+      }),
+    ];
+
+    const out = await service.applyInbound(
+      WS,
+      'mb-1',
+      'founder@acme.test',
+      {
+        ...inboundMsg,
+        threadId: 'thr-2',
+        messageId: 'jmap-message-2',
+        receivedAt: '2026-10-20T20:36:41.000Z',
+      },
+      rules as any,
+      { ...mailbox, emailAddress: 'founder@acme.test', workspaceId: WS } as any,
+    );
+
+    expect(out).toEqual({ matched: 1, applied: 1 });
+    expect(stalwart.getMessageDetail).toHaveBeenCalledWith('founder@acme.test', 'jmap-message-2');
+    expect(tx.mailRuleForward.create).toHaveBeenCalledWith({
+      data: { workspaceId: WS, ruleId: 'rule-forward', messageId: 'jmap-message-2' },
+    });
+    expect(stalwart.send).toHaveBeenCalledTimes(1);
+    expect(stalwart.send).toHaveBeenCalledWith(
+      'founder@acme.test',
+      expect.objectContaining({
+        fromAddress: 'founder@acme.test',
+        toAddress: 'ops@acme.test',
+        subject: 'Fwd: No Message-ID here',
+        replyTo: 'sender@outside.test',
+        attachments: [{ blobId: 'raw-original-2', name: 'original.eml', type: 'message/rfc822' }],
+      }),
+      false,
+    );
+  });
+
+  it('logs the engine reason when a FORWARD_COPY submission is declined', async () => {
+    const { service, stalwart } = make();
+    (stalwart.getMessageDetail as jest.Mock).mockResolvedValue({
+      id: 'jmap-message-3',
+      threadId: 'thr-3',
+      from: { address: 'sender@outside.test', name: null },
+      to: [],
+      cc: [],
+      bcc: [],
+      subject: 'Declined',
+      sentAt: null,
+      preview: null,
+      direction: 'received',
+      htmlBody: null,
+      textBody: 'x',
+      messageIdHeader: null,
+      rawBlobId: null,
+      size: null,
+      references: null,
+      headers: {},
+      isUnread: true,
+      flagged: false,
+      attachments: [],
+    });
+    (stalwart.send as jest.Mock).mockResolvedValue({
+      accepted: false,
+      providerMessageId: null,
+      threadId: null,
+      lane: 'james',
+      reason: 'no James sending identity for from-address',
+    });
+    const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+    const out = await service.applyInbound(
+      WS,
+      'mb-1',
+      'founder@acme.test',
+      { ...inboundMsg, threadId: 'thr-3', messageId: 'jmap-message-3' },
+      [ruleRow({ id: 'rule-forward', actions: [{ type: 'FORWARD_COPY', value: 'ops@acme.test' }] })] as any,
+      { ...mailbox, emailAddress: 'founder@acme.test', workspaceId: WS } as any,
+    );
+    expect(out).toEqual({ matched: 1, applied: 0 });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no James sending identity for from-address'));
   });
 });
