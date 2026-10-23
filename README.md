@@ -8,6 +8,29 @@ Email-Ops is the app that **fronts the Apache James mail server** (JMAP) for mai
 
 **Golden rule:** *federate the engine, don't reinvent a mail server.* A cockpit (e.g. Customer-Ops) federates Email-Ops over MCP **by `workspace_id`** — it never runs a mail server, never stores a message body, never copies a thread.
 
+## Self-host quickstart
+
+```bash
+git clone https://github.com/Unicorn-Commander/email-ops-community.git
+cd email-ops-community
+cp .env.selfhost.example .env.selfhost
+export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+export APP_DB_PASSWORD="$(openssl rand -hex 24)"
+export JWT_SECRET="$(openssl rand -hex 32)"
+export BOOTSTRAP_ADMIN_EMAIL=admin@example.test
+export BOOTSTRAP_ADMIN_PASSWORD="$(openssl rand -hex 24)"
+docker compose --env-file .env.selfhost -f docker-compose.selfhost.yml up -d --build
+curl -fsS http://127.0.0.1:3231/api/v1/health/ready
+curl -fsS -X POST http://127.0.0.1:3231/api/v1/auth/local/login \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"${BOOTSTRAP_ADMIN_EMAIL}\",\"password\":\"${BOOTSTRAP_ADMIN_PASSWORD}\"}"
+read -r -p 'Paste access_token: ' BOOTSTRAP_ADMIN_JWT
+curl -fsS -X POST http://127.0.0.1:3231/api/v1/auth/pats \
+  -H "Authorization: Bearer ${BOOTSTRAP_ADMIN_JWT}" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"selfhost-agent","scopes":["mail:read"]}'
+```
+
 ## Agent Email Command Center
 
 The `/mail` surface is a full webmail client run **with a human in the loop over an agent fleet**:
@@ -49,7 +72,7 @@ Copied verbatim-in-spirit from the proven Customer-Ops / Project-Ops tenancy pat
 - **Prisma Migrate** (versioned SQL is the source of truth) — single linear head: `…_suite_tenancy_foundation` → `…_suite_tenancy_rls_roles`.
 - **RLS**: `ENABLE` + `FORCE` + a `workspace_isolation` policy on every scoped table (`mailbox_accounts`, `email_messages`, `agent_inbox_items`), the `current_workspace_id()` GUC (`app.current_workspace`), and `PrismaService.withWorkspace()` as the GUC chokepoint.
 - **4-role split**: `email_ops_owner` (BYPASSRLS, DDL), `email_ops_app` (NOBYPASSRLS runtime — the fence goes live when `DATABASE_URL` flips to it), `email_ops_audit`, `email_ops_ro`.
-- **Keycloak auth** (uchub realm, RS256), `aud=email-ops`, membership-gated, behind `EMAIL_OPS_TENANCY_ENABLED` (default **off** — current behavior).
+- **Hosted Keycloak auth** (RS256), `aud=email-ops`, membership-gated, behind `EMAIL_OPS_TENANCY_ENABLED`; the self-host profile uses a local bootstrap admin instead.
 - **StalwartPort + client** (mockable, degrade-clean): unset `STALWART_*` ⇒ reads return empty, sends record FAILED, agent-inbox + SoR still work — no hard mail-server dependency.
 - **MCP server** exposing the EmailOpsPort contract + the agent-inbox tools.
 

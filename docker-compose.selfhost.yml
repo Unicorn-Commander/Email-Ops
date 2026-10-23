@@ -1,0 +1,111 @@
+name: email-ops-selfhost
+
+services:
+  email-ops-postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: email_ops_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.selfhost}
+      POSTGRES_DB: emailops
+    volumes:
+      - email-ops-selfhost-pgdata:/var/lib/postgresql/data
+      - ./infrastructure/database/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:55444:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U email_ops_admin -d emailops"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  email-ops-db-bootstrap:
+    image: postgres:16-bookworm
+    restart: "no"
+    depends_on:
+      email-ops-postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.selfhost}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env.selfhost}
+    entrypoint: ["/bin/sh", "-ec"]
+    command: |
+      PGPASSWORD="$${POSTGRES_PASSWORD}" psql \
+        --host email-ops-postgres \
+        --username email_ops_admin \
+        --dbname emailops \
+        --set=app_password="$${APP_DB_PASSWORD}" \
+        --command "ALTER ROLE email_ops_app PASSWORD :'app_password';"
+
+  email-ops-backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    depends_on:
+      email-ops-db-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql://email_ops_app:${APP_DB_PASSWORD}@email-ops-postgres:5432/emailops?schema=public
+      ADMIN_DATABASE_URL: postgresql://email_ops_admin:${POSTGRES_PASSWORD}@email-ops-postgres:5432/emailops?schema=public
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env.selfhost}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1d}
+      NODE_ENV: production
+      PORT: "3231"
+      API_PREFIX: api/v1
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://127.0.0.1:3000}
+      FRONTEND_URL: ${FRONTEND_URL:-http://127.0.0.1:3000}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      EMAIL_OPS_TENANCY_ENABLED: "true"
+      DEFAULT_WORKSPACE_ID: ${DEFAULT_WORKSPACE_ID:?set DEFAULT_WORKSPACE_ID in .env.selfhost}
+      EMAIL_OPS_ACCESS_LIST: ${EMAIL_OPS_ACCESS_LIST-}
+      UC_ENTITLEMENT_MODE: ${UC_ENTITLEMENT_MODE:-open}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:?set BOOTSTRAP_ADMIN_EMAIL in .env.selfhost}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set BOOTSTRAP_ADMIN_PASSWORD in .env.selfhost}
+      BOOTSTRAP_WORKSPACE_SLUG: ${BOOTSTRAP_WORKSPACE_SLUG:-email-ops-selfhost}
+      BOOTSTRAP_WORKSPACE_NAME: ${BOOTSTRAP_WORKSPACE_NAME:-Email-Ops}
+      # Empty values disable these hosted-only verification paths. Local auth
+      # is the only identity required by this profile.
+      KEYCLOAK_URL: ${KEYCLOAK_URL-}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM-}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID-}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET-}
+      KEYCLOAK_CALLBACK_URL: ${KEYCLOAK_CALLBACK_URL-}
+      BRIGADE_TRUSTED_ISSUERS: ${BRIGADE_TRUSTED_ISSUERS-}
+      BRIGADE_EXPECTED_AUDIENCE: ${BRIGADE_EXPECTED_AUDIENCE:-email-ops}
+      # MAIL_ENGINE, James, Postmark, and cleaner-engine variables are
+      # intentionally absent: the agent inbox remains usable degrade-clean.
+    ports:
+      - "127.0.0.1:3231:3231"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://localhost:3231/api/v1/health/ready >/dev/null",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+
+  email-ops-frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      email-ops-backend:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --max-http-header-size=32768
+      BACKEND_ORIGIN: http://email-ops-backend:3231
+    ports:
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  email-ops-selfhost-pgdata:

@@ -10,7 +10,7 @@ reach a workspace you aren't a member of.
 ## Endpoint
 
 ```
-https://email-ops.magicunicorn.dev/api/v1/mcp
+https://email-ops.unicorncommander.ai/api/v1/mcp
 ```
 
 - **Transport:** Streamable HTTP (`@modelcontextprotocol/sdk`). The route accepts
@@ -23,10 +23,12 @@ https://email-ops.magicunicorn.dev/api/v1/mcp
 ## Authentication
 
 The MCP endpoint is guarded by `JwtAuthGuard`. Send a **Bearer token** in the
-`Authorization` header. Two token types are accepted:
+`Authorization` header. Three token types are accepted:
 
-- A **uchub Keycloak** access token (realm RS256, `aud=email-ops`) — the same
-  identity the web app uses.
+- A **hosted Keycloak** access token (realm RS256, `aud=email-ops`) — the same
+  identity the hosted web app uses.
+- A locally signed HS256 session JWT returned by `/api/v1/auth/local/login` in
+  the self-host profile.
 - An **`eo_pat_…` personal access token** (SUITE-IDENTITY §D9) — a long-lived
   token you mint for an agent/CLI. Recommended for Claude Code.
 
@@ -35,7 +37,7 @@ The MCP endpoint is guarded by `JwtAuthGuard`. Send a **Bearer token** in the
 PATs are managed under `/api/v1/auth/pats`, guarded so that **a PAT can never
 mint, list, or revoke another PAT** (no self-perpetuating credential chain — a
 PAT-authenticated call to these routes gets `403`). Authenticate these calls with
-a real uchub login token:
+a hosted session JWT or a self-host local-admin session JWT:
 
 `scopes` is **required** — omitting it is a `400`, never an implicit `*`. You may
 still ask for `"*"` or a `prefix:*` wildcard deliberately. `expires_in_days` is
@@ -44,18 +46,40 @@ be minted.
 
 ```bash
 # Mint (the plaintext token is returned exactly ONCE — store it now):
-curl -sX POST https://email-ops.magicunicorn.dev/api/v1/auth/pats \
-  -H "Authorization: Bearer <uchub-jwt>" \
+curl -sX POST https://email-ops.unicorncommander.ai/api/v1/auth/pats \
+  -H "Authorization: Bearer <hosted-session-jwt>" \
   -H "Content-Type: application/json" \
   -d '{"name":"claude-code","scopes":["mail:read","mail:write"],"expires_in_days":90}'
 # -> { "id": "...", "name": "claude-code", "token": "eo_pat_...", "token_prefix": "eo_pat_...",
 #      "scopes": ["mail:read","mail:write"], "expires_at": "...", "created_at": "..." }
 
 # List your tokens (non-secret fields only):
-curl -s https://email-ops.magicunicorn.dev/api/v1/auth/pats -H "Authorization: Bearer <uchub-jwt>"
+curl -s https://email-ops.unicorncommander.ai/api/v1/auth/pats -H "Authorization: Bearer <hosted-session-jwt>"
 
 # Revoke one (soft-revoke; 204):
-curl -sX DELETE https://email-ops.magicunicorn.dev/api/v1/auth/pats/<id> -H "Authorization: Bearer <uchub-jwt>"
+curl -sX DELETE https://email-ops.unicorncommander.ai/api/v1/auth/pats/<id> -H "Authorization: Bearer <hosted-session-jwt>"
+```
+
+### Self-host local admin
+
+The self-host profile creates the configured bootstrap admin and one OWNER
+membership. It does not require Keycloak, a suite URL, or a mail engine. Login
+first, then use the returned local session JWT to mint an `eo_pat_` token. The
+scope list is required; omitting `expires_in_days` keeps the existing 90-day
+default.
+
+```bash
+export EMAIL_OPS_SELFHOST_ADMIN_EMAIL=admin@example.test
+read -r -s EMAIL_OPS_SELFHOST_ADMIN_PASSWORD
+curl -fsS -X POST http://127.0.0.1:3231/api/v1/auth/local/login \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"${EMAIL_OPS_SELFHOST_ADMIN_EMAIL}\",\"password\":\"${EMAIL_OPS_SELFHOST_ADMIN_PASSWORD}\"}"
+
+read -r -p 'Paste access_token: ' EMAIL_OPS_SELFHOST_ADMIN_JWT
+curl -fsS -X POST http://127.0.0.1:3231/api/v1/auth/pats \
+  -H "Authorization: Bearer ${EMAIL_OPS_SELFHOST_ADMIN_JWT}" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"selfhost-agent","scopes":["mail:read"]}'
 ```
 
 ## Quickstart
