@@ -78,6 +78,14 @@ export function ssoLoginUrl(): string {
   return `${API_BASE}/auth/keycloak`;
 }
 
+/** Sign in with the local bootstrap admin used by the self-host profile. */
+export function localLogin(
+  email: string,
+  password: string,
+): Promise<{ access_token: string; user: unknown }> {
+  return apiPost('/auth/local/login', { email, password });
+}
+
 /** An HTTP error that carries the status code so the UI can branch (401/403/404). */
 export class ApiError extends Error {
   constructor(
