@@ -528,6 +528,7 @@ model User {
   lastName    String    @default("")
   picture     String?   // avatar URL from the Keycloak `picture` claim (suite avatar spine)
   keycloakId  String?   @unique // == uchub sub once SSO-linked; the Membership.userKey
+  passwordHash String?  // scrypt hash for the optional self-host local admin
   kcRefreshTokenEnc String?
   kcRefreshUpdatedAt DateTime?
   isActive    Boolean   @default(true)

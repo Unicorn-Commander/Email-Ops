@@ -1,7 +1,8 @@
-import { Controller, Get, Post, UseGuards, Req, Res } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
+import { Body, Controller, Get, Post, UseGuards, Req, Res } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiProperty } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { AuthGuard } from '@nestjs/passport';
+import { IsEmail, IsString, MinLength } from 'class-validator';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -10,6 +11,17 @@ import { MembershipService } from '../common/workspace/membership.service';
 import { listMyWorkspaces } from '../common/workspace/list-my-workspaces';
 import { KeycloakBrokerService } from './keycloak-broker.service';
 import { PrismaService } from '../prisma/prisma.service';
+
+export class LocalLoginDto {
+  @ApiProperty({ example: 'admin@example.test' })
+  @IsEmail()
+  email!: string;
+
+  @ApiProperty({ minLength: 12, writeOnly: true })
+  @IsString()
+  @MinLength(12)
+  password!: string;
+}
 
 @ApiTags('auth')
 @Controller('auth')
@@ -45,14 +57,28 @@ export class AuthController {
     // logs / referrers the way `?token=` was. SameSite=Lax still sends it on the
     // top-level nav back from Keycloak and on same-origin API calls. The Bearer
     // header path stays intact for MCP / PAT (see JwtStrategy).
-    res.cookie('access_token', tokenData.access_token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: this.sessionCookieMaxAgeMs(),
-    });
+    this.setSessionCookie(res, tokenData.access_token);
     return res.redirect(`${frontendUrl}/auth/sso-callback`);
+  }
+
+  @Get('local/enabled')
+  @ApiOperation({ summary: 'Report whether self-host local login is configured' })
+  @ApiResponse({ status: 200, description: '{ enabled: boolean }' })
+  localLoginEnabled() {
+    return { enabled: this.authService.isLocalLoginEnabled() };
+  }
+
+  @Post('local/login')
+  @ApiOperation({ summary: 'Sign in with the self-host bootstrap admin' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns a local session JWT and sets the session cookie',
+  })
+  @ApiResponse({ status: 401, description: 'Invalid local admin credentials' })
+  async localLogin(@Body() body: LocalLoginDto, @Res() res: any) {
+    const tokenData = await this.authService.localLogin(body.email, body.password);
+    this.setSessionCookie(res, tokenData.access_token);
+    return res.json(tokenData);
   }
 
   @Post('logout')
@@ -76,6 +102,21 @@ export class AuthController {
     const unit = (m[2] || 's').toLowerCase();
     const mult = unit === 'd' ? 86400 : unit === 'h' ? 3600 : unit === 'm' ? 60 : 1;
     return n * mult * 1000;
+  }
+
+  private setSessionCookie(res: any, token: string): void {
+    const configured = this.configService.get<string>('AUTH_COOKIE_SECURE');
+    const secure =
+      configured === undefined
+        ? this.configService.get<string>('FRONTEND_URL', '').startsWith('https://')
+        : configured === 'true' || configured === '1';
+    res.cookie('access_token', token, {
+      httpOnly: true,
+      secure,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: this.sessionCookieMaxAgeMs(),
+    });
   }
 
   @Get('profile')

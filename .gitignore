@@ -7,3 +7,7 @@ cleaner-engine/*.egg-info/
 
 # your-prod-host prod runtime env (values live only on the host)
 infrastructure/.env.your-prod-host.prod
+
+# self-host runtime values and local cookie jar
+.env.selfhost
+.selfhost.cookies

@@ -1,9 +1,71 @@
-import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger, OnModuleInit } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import { User, InvitationStatus } from '@prisma/client';
 import { resolveUserAccess, describeAccessList } from './access-list';
 import { encrypt, isEncryptionConfigured } from '../connected-accounts/crypto';
+import { DEFAULT_WORKSPACE_FALLBACK } from '../common/workspace/workspace.util';
+import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+
+const LOCAL_PASSWORD_SCHEME = 'scrypt';
+const LOCAL_PASSWORD_KEY_LENGTH = 64;
+const LOCAL_PASSWORD_SALT_LENGTH = 16;
+const LOCAL_PASSWORD_SCRYPT_OPTIONS = { N: 16_384, r: 8, p: 1 } as const;
+
+function encodeLocalPasswordHash(password: string, salt: Buffer): string {
+  const digest = scryptSync(
+    password,
+    salt,
+    LOCAL_PASSWORD_KEY_LENGTH,
+    LOCAL_PASSWORD_SCRYPT_OPTIONS,
+  );
+  return `${LOCAL_PASSWORD_SCHEME}$${salt.toString('base64')}$${digest.toString('base64')}`;
+}
+
+function hashLocalPassword(password: string): string {
+  return encodeLocalPasswordHash(password, randomBytes(LOCAL_PASSWORD_SALT_LENGTH));
+}
+
+function verifyLocalPassword(password: string, encoded: unknown): boolean {
+  if (typeof encoded !== 'string') return false;
+  const [scheme, saltEncoded, digestEncoded] = encoded.split('$');
+  if (scheme !== LOCAL_PASSWORD_SCHEME || !saltEncoded || !digestEncoded) return false;
+
+  try {
+    const salt = Buffer.from(saltEncoded, 'base64');
+    const expected = Buffer.from(digestEncoded, 'base64');
+    if (
+      salt.length !== LOCAL_PASSWORD_SALT_LENGTH ||
+      expected.length !== LOCAL_PASSWORD_KEY_LENGTH
+    ) {
+      return false;
+    }
+    const actual = scryptSync(password, salt, expected.length, LOCAL_PASSWORD_SCRYPT_OPTIONS);
+    return timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
+}
+
+// Always perform a real scrypt check for an email that is not the configured
+// bootstrap address. The salt and digest are fixed, but the password is not a
+// configured credential and is never accepted by a real login.
+const DUMMY_LOCAL_PASSWORD_HASH = encodeLocalPasswordHash(
+  'email-ops-invalid-local-password',
+  Buffer.alloc(LOCAL_PASSWORD_SALT_LENGTH, 0x5a),
+);
+
+interface BootstrapAdminConfig {
+  email: string;
+  password: string;
+  workspaceId: string;
+  workspaceSlug: string;
+  workspaceName: string;
+}
+
+interface EnsureBootstrapAdminOptions {
+  refreshExisting?: boolean;
+}
 
 export interface JwtPayload {
   sub: string;
@@ -16,16 +78,16 @@ export interface JwtPayload {
 /**
  * Email-Ops authentication.
  *
- * Greenfield + SSO-only: there is no local password flow. Identity comes from
- * the uchub Keycloak realm (RS256), either via the OIDC browser callback or a
- * forwarded realm/Brigade token. Every entry point JIT-provisions the User row
- * through the SAME access-list gate (SUITE-IDENTITY §D5) so no path bypasses
- * policy, and resolves by `keycloakId`/`sub` FIRST (email is a linking fallback
- * only). A valid token still grants ZERO workspace access until a Membership
- * row exists — that gate lives in MembershipService.
+ * Hosted installs may use the uchub Keycloak realm (RS256), either through the
+ * OIDC browser callback or a forwarded realm/Brigade token. A self-host install
+ * can instead set the bootstrap-admin variables: the idempotent local bootstrap
+ * creates one OWNER membership and the local password route issues the same
+ * HS256 session JWT used after OIDC. Every entry point still resolves by
+ * `keycloakId`/`sub` FIRST (email is a linking fallback only). A valid token
+ * grants ZERO workspace access until a Membership row exists.
  */
 @Injectable()
-export class AuthService {
+export class AuthService implements OnModuleInit {
   private readonly logger = new Logger(AuthService.name);
 
   constructor(
@@ -36,6 +98,138 @@ export class AuthService {
     this.logger.log(
       `SSO access list: ${meta.ruleCount} rule${meta.ruleCount === 1 ? '' : 's'} (source: ${meta.source})`,
     );
+  }
+
+  /**
+   * Create the one local bootstrap identity after Prisma migrations have run.
+   * The self-host entrypoint invokes migrations before starting Nest, while
+   * hosted deployments leave these variables unset and retain SSO-only boot.
+   */
+  async onModuleInit(): Promise<void> {
+    await this.ensureBootstrapAdmin();
+  }
+
+  /**
+   * Idempotently provision the self-host admin and its workspace membership.
+   * Passwords are stored only as scrypt hashes; the plaintext is read from the
+   * process environment and is never logged or returned by this method. An
+   * existing user's password and active state are preserved during startup;
+   * `refreshExisting` is used only after a successful local password check.
+   */
+  async ensureBootstrapAdmin(options: EnsureBootstrapAdminOptions = {}): Promise<User | null> {
+    const config = AuthService.bootstrapAdminConfig();
+    if (!config) return null;
+
+    if (config.password.length < 12) {
+      throw new Error('BOOTSTRAP_ADMIN_PASSWORD must contain at least 12 characters');
+    }
+
+    // The checked-in Prisma client predates the optional passwordHash field;
+    // the self-host Docker build regenerates it from schema.prisma. Keeping the
+    // boundary `any` here lets the existing unit-test client remain usable until
+    // the host performs that normal image-build generation step.
+    const prisma = this.prisma as any;
+    let user = await prisma.user.findUnique({ where: { email: config.email } });
+
+    if (!user) {
+      const passwordHash = hashLocalPassword(config.password);
+      user = await prisma.user.create({
+        data: {
+          email: config.email,
+          username: config.email,
+          firstName: 'Local',
+          lastName: 'Admin',
+          passwordHash,
+          keycloakId: null,
+          isActive: true,
+        },
+      });
+    } else if (options.refreshExisting && !user.keycloakId) {
+      const passwordHash = hashLocalPassword(config.password);
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash, isActive: true },
+      });
+    }
+
+    await prisma.workspace.upsert({
+      where: { id: config.workspaceId },
+      update: { slug: config.workspaceSlug, displayName: config.workspaceName, status: 'active' },
+      create: {
+        id: config.workspaceId,
+        slug: config.workspaceSlug,
+        displayName: config.workspaceName,
+        status: 'active',
+      },
+    });
+
+    await prisma.membership.upsert({
+      where: {
+        userKey_workspaceId: {
+          userKey: user.keycloakId ?? user.id,
+          workspaceId: config.workspaceId,
+        },
+      },
+      update: { role: 'OWNER', status: 'ACTIVE', isDefault: true },
+      create: {
+        userKey: user.keycloakId ?? user.id,
+        workspaceId: config.workspaceId,
+        role: 'OWNER',
+        status: 'ACTIVE',
+        isDefault: true,
+      },
+    });
+
+    this.logger.log('Local bootstrap admin and OWNER workspace membership are ready');
+    return user;
+  }
+
+  /** Whether both bootstrap credentials are configured for the self-host login. */
+  isLocalLoginEnabled(): boolean {
+    return Boolean(
+      process.env.BOOTSTRAP_ADMIN_EMAIL?.trim() && process.env.BOOTSTRAP_ADMIN_PASSWORD,
+    );
+  }
+
+  /** Authenticate the self-host bootstrap admin and issue the normal session JWT. */
+  async localLogin(email: string, password: string) {
+    const config = AuthService.bootstrapAdminConfig();
+    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const candidatePassword = typeof password === 'string' ? password : '';
+
+    if (!config || normalizedEmail !== config.email) {
+      verifyLocalPassword(candidatePassword, DUMMY_LOCAL_PASSWORD_HASH);
+      throw new UnauthorizedException('Invalid local admin credentials');
+    }
+
+    const prisma = this.prisma as any;
+    const user = await prisma.user.findUnique({ where: { email: config.email } });
+    const passwordMatches = user
+      ? verifyLocalPassword(candidatePassword, user.passwordHash ?? DUMMY_LOCAL_PASSWORD_HASH)
+      : verifyLocalPassword(candidatePassword, hashLocalPassword(config.password));
+
+    if (user?.keycloakId) {
+      this.logger.warn('Refusing local password login for a Keycloak-linked user');
+      throw new UnauthorizedException('Invalid local admin credentials');
+    }
+
+    if (!passwordMatches) {
+      throw new UnauthorizedException('Invalid local admin credentials');
+    }
+
+    const ensured = await this.ensureBootstrapAdmin({ refreshExisting: true });
+    if (!ensured || ensured.keycloakId) {
+      if (ensured?.keycloakId) {
+        this.logger.warn('Refusing local password login for a Keycloak-linked user');
+      }
+      throw new UnauthorizedException('Invalid local admin credentials');
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id: ensured.id },
+      data: { lastLoginAt: new Date() },
+    });
+    return this.generateTokenForUser(updated);
   }
 
   /**
@@ -106,11 +300,15 @@ export class AuthService {
     // this does not add an access-list rule or seed the bootstrap workspace.
     if (!user) {
       const access = resolveUserAccess(email);
-      const invited = !access.allowed && profile?.email_verified === true &&
-        typeof email === 'string' && !!email.trim() &&
+      const invited =
+        !access.allowed &&
+        profile?.email_verified === true &&
+        typeof email === 'string' &&
+        !!email.trim() &&
         !!(await this.prisma.invitation.findFirst({
           where: {
-            email: email.trim().toLowerCase(), status: InvitationStatus.PENDING,
+            email: email.trim().toLowerCase(),
+            status: InvitationStatus.PENDING,
             workspace: { status: 'active' },
             expiresAt: { gt: new Date() },
           },
@@ -199,6 +397,22 @@ export class AuthService {
     });
   }
 
+  private static bootstrapAdminConfig(): BootstrapAdminConfig | null {
+    const email = process.env.BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase();
+    const password = process.env.BOOTSTRAP_ADMIN_PASSWORD;
+    if (!email && !password) return null;
+    if (!email || !password) {
+      throw new Error('BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD must be set together');
+    }
+    return {
+      email,
+      password,
+      workspaceId: process.env.DEFAULT_WORKSPACE_ID?.trim() || DEFAULT_WORKSPACE_FALLBACK,
+      workspaceSlug: process.env.BOOTSTRAP_WORKSPACE_SLUG?.trim() || 'email-ops-selfhost',
+      workspaceName: process.env.BOOTSTRAP_WORKSPACE_NAME?.trim() || 'Email-Ops',
+    };
+  }
+
   /**
    * Disambiguate a verified JWT payload by its `iss` claim and resolve the
    * Email-Ops User (SUITE-IDENTITY §D6):
@@ -247,8 +461,11 @@ export class AuthService {
         email: payload.email ?? (subLooksLikeEmail ? payload.sub : undefined),
         // Only the verified human realm claim can unlock invitation JIT.
         // Federation/service callers retain their existing allow-list behavior.
-        email_verified: isKeycloakRealmToken && !payload.act &&
-          !payload.client_id && !payload.clientId &&
+        email_verified:
+          isKeycloakRealmToken &&
+          !payload.act &&
+          !payload.client_id &&
+          !payload.clientId &&
           payload.email_verified === true,
         preferred_username: payload.preferred_username,
         given_name: payload.given_name,
