@@ -23,6 +23,7 @@ describe('MailController (webmail wave)', () => {
       lastName: 'S',
       picture: null,
       keycloakId: 'kc-aaron',
+      passwordHash: null,
       kcRefreshTokenEnc: null,
       kcRefreshUpdatedAt: null,
       isActive: true,

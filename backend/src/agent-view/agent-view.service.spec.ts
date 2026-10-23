@@ -16,6 +16,7 @@ describe('AgentViewService', () => {
       lastName: 'Stransky',
       picture: null,
       keycloakId: UID,
+      passwordHash: null,
       kcRefreshTokenEnc: null,
       kcRefreshUpdatedAt: null,
       isActive: true,
