@@ -12,8 +12,7 @@ const LOCAL_PASSWORD_KEY_LENGTH = 64;
 const LOCAL_PASSWORD_SALT_LENGTH = 16;
 const LOCAL_PASSWORD_SCRYPT_OPTIONS = { N: 16_384, r: 8, p: 1 } as const;
 
-function hashLocalPassword(password: string): string {
-  const salt = randomBytes(LOCAL_PASSWORD_SALT_LENGTH);
+function encodeLocalPasswordHash(password: string, salt: Buffer): string {
   const digest = scryptSync(
     password,
     salt,
@@ -21,6 +20,10 @@ function hashLocalPassword(password: string): string {
     LOCAL_PASSWORD_SCRYPT_OPTIONS,
   );
   return `${LOCAL_PASSWORD_SCHEME}$${salt.toString('base64')}$${digest.toString('base64')}`;
+}
+
+function hashLocalPassword(password: string): string {
+  return encodeLocalPasswordHash(password, randomBytes(LOCAL_PASSWORD_SALT_LENGTH));
 }
 
 function verifyLocalPassword(password: string, encoded: unknown): boolean {
@@ -44,12 +47,24 @@ function verifyLocalPassword(password: string, encoded: unknown): boolean {
   }
 }
 
+// Always perform a real scrypt check for an email that is not the configured
+// bootstrap address. The salt and digest are fixed, but the password is not a
+// configured credential and is never accepted by a real login.
+const DUMMY_LOCAL_PASSWORD_HASH = encodeLocalPasswordHash(
+  'email-ops-invalid-local-password',
+  Buffer.alloc(LOCAL_PASSWORD_SALT_LENGTH, 0x5a),
+);
+
 interface BootstrapAdminConfig {
   email: string;
   password: string;
   workspaceId: string;
   workspaceSlug: string;
   workspaceName: string;
+}
+
+interface EnsureBootstrapAdminOptions {
+  refreshExisting?: boolean;
 }
 
 export interface JwtPayload {
@@ -97,9 +112,11 @@ export class AuthService implements OnModuleInit {
   /**
    * Idempotently provision the self-host admin and its workspace membership.
    * Passwords are stored only as scrypt hashes; the plaintext is read from the
-   * process environment and is never logged or returned by this method.
+   * process environment and is never logged or returned by this method. An
+   * existing user's password and active state are preserved during startup;
+   * `refreshExisting` is used only after a successful local password check.
    */
-  async ensureBootstrapAdmin(): Promise<User | null> {
+  async ensureBootstrapAdmin(options: EnsureBootstrapAdminOptions = {}): Promise<User | null> {
     const config = AuthService.bootstrapAdminConfig();
     if (!config) return null;
 
@@ -112,10 +129,10 @@ export class AuthService implements OnModuleInit {
     // boundary `any` here lets the existing unit-test client remain usable until
     // the host performs that normal image-build generation step.
     const prisma = this.prisma as any;
-    const passwordHash = hashLocalPassword(config.password);
     let user = await prisma.user.findUnique({ where: { email: config.email } });
 
     if (!user) {
+      const passwordHash = hashLocalPassword(config.password);
       user = await prisma.user.create({
         data: {
           email: config.email,
@@ -127,7 +144,8 @@ export class AuthService implements OnModuleInit {
           isActive: true,
         },
       });
-    } else {
+    } else if (options.refreshExisting && !user.keycloakId) {
+      const passwordHash = hashLocalPassword(config.password);
       user = await prisma.user.update({
         where: { id: user.id },
         data: { passwordHash, isActive: true },
@@ -166,20 +184,49 @@ export class AuthService implements OnModuleInit {
     return user;
   }
 
+  /** Whether both bootstrap credentials are configured for the self-host login. */
+  isLocalLoginEnabled(): boolean {
+    return Boolean(
+      process.env.BOOTSTRAP_ADMIN_EMAIL?.trim() && process.env.BOOTSTRAP_ADMIN_PASSWORD,
+    );
+  }
+
   /** Authenticate the self-host bootstrap admin and issue the normal session JWT. */
   async localLogin(email: string, password: string) {
     const config = AuthService.bootstrapAdminConfig();
-    if (!config || email.trim().toLowerCase() !== config.email || !password) {
+    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const candidatePassword = typeof password === 'string' ? password : '';
+
+    if (!config || normalizedEmail !== config.email) {
+      verifyLocalPassword(candidatePassword, DUMMY_LOCAL_PASSWORD_HASH);
       throw new UnauthorizedException('Invalid local admin credentials');
     }
 
-    const user = await this.ensureBootstrapAdmin();
-    if (!user || !verifyLocalPassword(password, (user as any).passwordHash)) {
+    const prisma = this.prisma as any;
+    const user = await prisma.user.findUnique({ where: { email: config.email } });
+    const passwordMatches = user
+      ? verifyLocalPassword(candidatePassword, user.passwordHash ?? DUMMY_LOCAL_PASSWORD_HASH)
+      : verifyLocalPassword(candidatePassword, hashLocalPassword(config.password));
+
+    if (user?.keycloakId) {
+      this.logger.warn('Refusing local password login for a Keycloak-linked user');
+      throw new UnauthorizedException('Invalid local admin credentials');
+    }
+
+    if (!passwordMatches) {
+      throw new UnauthorizedException('Invalid local admin credentials');
+    }
+
+    const ensured = await this.ensureBootstrapAdmin({ refreshExisting: true });
+    if (!ensured || ensured.keycloakId) {
+      if (ensured?.keycloakId) {
+        this.logger.warn('Refusing local password login for a Keycloak-linked user');
+      }
       throw new UnauthorizedException('Invalid local admin credentials');
     }
 
     const updated = await this.prisma.user.update({
-      where: { id: user.id },
+      where: { id: ensured.id },
       data: { lastLoginAt: new Date() },
     });
     return this.generateTokenForUser(updated);

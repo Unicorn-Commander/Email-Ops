@@ -19,16 +19,21 @@ export APP_DB_PASSWORD="$(openssl rand -hex 24)"
 export JWT_SECRET="$(openssl rand -hex 32)"
 export BOOTSTRAP_ADMIN_EMAIL=admin@example.test
 export BOOTSTRAP_ADMIN_PASSWORD="$(openssl rand -hex 24)"
+# The example file keeps this false for loopback HTTP. Set it true for any TLS host.
+# export AUTH_COOKIE_SECURE=true
 docker compose --env-file .env.selfhost -f docker-compose.selfhost.yml up -d --build
 curl -fsS http://127.0.0.1:3231/api/v1/health/ready
-curl -fsS -X POST http://127.0.0.1:3231/api/v1/auth/local/login \
-  -H 'Content-Type: application/json' \
-  -d "{\"email\":\"${BOOTSTRAP_ADMIN_EMAIL}\",\"password\":\"${BOOTSTRAP_ADMIN_PASSWORD}\"}"
-read -r -p 'Paste access_token: ' BOOTSTRAP_ADMIN_JWT
+BOOTSTRAP_ADMIN_JWT="$(
+  curl -fsS -X POST http://127.0.0.1:3231/api/v1/auth/local/login \
+    -H 'Content-Type: application/json' \
+    -d "{\"email\":\"${BOOTSTRAP_ADMIN_EMAIL}\",\"password\":\"${BOOTSTRAP_ADMIN_PASSWORD}\"}" \
+    | jq -er '.access_token'
+)"
 curl -fsS -X POST http://127.0.0.1:3231/api/v1/auth/pats \
   -H "Authorization: Bearer ${BOOTSTRAP_ADMIN_JWT}" \
   -H 'Content-Type: application/json' \
   -d '{"name":"selfhost-agent","scopes":["mail:read"]}'
+unset BOOTSTRAP_ADMIN_JWT
 ```
 
 ## Agent Email Command Center

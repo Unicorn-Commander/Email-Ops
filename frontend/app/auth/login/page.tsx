@@ -1,8 +1,14 @@
 'use client';
 
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ApiError, localLogin, setStoredUser, ssoLoginUrl } from '@/lib/api';
+import {
+  ApiError,
+  fetchLocalLoginEnabled,
+  localLogin,
+  setStoredUser,
+  ssoLoginUrl,
+} from '@/lib/api';
 import { Badge, Button, Card, Input } from '@/components/ui';
 
 export default function Login() {
@@ -11,6 +17,21 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [localEnabled, setLocalEnabled] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    fetchLocalLoginEnabled()
+      .then(({ enabled }) => {
+        if (mounted) setLocalEnabled(enabled === true);
+      })
+      .catch(() => {
+        if (mounted) setLocalEnabled(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   async function submitLocalLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -50,40 +71,44 @@ export default function Login() {
         <Button block className="mt-6" onClick={() => (window.location.href = ssoLoginUrl())}>
           Sign in with Unicorn Commander SSO
         </Button>
-        <div className="my-6 flex items-center gap-3 text-xs text-muted">
-          <span className="h-px flex-1 bg-border" />
-          <span>or self-host</span>
-          <span className="h-px flex-1 bg-border" />
-        </div>
-        <form className="space-y-3" onSubmit={submitLocalLogin}>
-          <label className="block text-sm text-secondary" htmlFor="local-email">
-            Admin email
-          </label>
-          <Input
-            id="local-email"
-            type="email"
-            autoComplete="username"
-            required
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-          />
-          <label className="block text-sm text-secondary" htmlFor="local-password">
-            Admin password
-          </label>
-          <Input
-            id="local-password"
-            type="password"
-            autoComplete="current-password"
-            required
-            minLength={12}
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-          />
-          {error ? <p className="text-sm text-danger">{error}</p> : null}
-          <Button block type="submit" variant="secondary" disabled={pending}>
-            {pending ? 'Signing in...' : 'Sign in with local admin'}
-          </Button>
-        </form>
+        {localEnabled ? (
+          <>
+            <div className="my-6 flex items-center gap-3 text-xs text-muted">
+              <span className="h-px flex-1 bg-border" />
+              <span>or self-host</span>
+              <span className="h-px flex-1 bg-border" />
+            </div>
+            <form className="space-y-3" onSubmit={submitLocalLogin}>
+              <label className="block text-sm text-secondary" htmlFor="local-email">
+                Admin email
+              </label>
+              <Input
+                id="local-email"
+                type="email"
+                autoComplete="username"
+                required
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+              />
+              <label className="block text-sm text-secondary" htmlFor="local-password">
+                Admin password
+              </label>
+              <Input
+                id="local-password"
+                type="password"
+                autoComplete="current-password"
+                required
+                minLength={12}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+              {error ? <p className="text-sm text-danger">{error}</p> : null}
+              <Button block type="submit" variant="secondary" disabled={pending}>
+                {pending ? 'Signing in...' : 'Sign in with local admin'}
+              </Button>
+            </form>
+          </>
+        ) : null}
       </Card>
     </div>
   );

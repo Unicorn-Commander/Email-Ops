@@ -71,15 +71,17 @@ default.
 ```bash
 export EMAIL_OPS_SELFHOST_ADMIN_EMAIL=admin@example.test
 read -r -s EMAIL_OPS_SELFHOST_ADMIN_PASSWORD
-curl -fsS -X POST http://127.0.0.1:3231/api/v1/auth/local/login \
-  -H 'Content-Type: application/json' \
-  -d "{\"email\":\"${EMAIL_OPS_SELFHOST_ADMIN_EMAIL}\",\"password\":\"${EMAIL_OPS_SELFHOST_ADMIN_PASSWORD}\"}"
-
-read -r -p 'Paste access_token: ' EMAIL_OPS_SELFHOST_ADMIN_JWT
+EMAIL_OPS_SELFHOST_ADMIN_JWT="$(
+  curl -fsS -X POST http://127.0.0.1:3231/api/v1/auth/local/login \
+    -H 'Content-Type: application/json' \
+    -d "{\"email\":\"${EMAIL_OPS_SELFHOST_ADMIN_EMAIL}\",\"password\":\"${EMAIL_OPS_SELFHOST_ADMIN_PASSWORD}\"}" \
+    | jq -er '.access_token'
+)"
 curl -fsS -X POST http://127.0.0.1:3231/api/v1/auth/pats \
   -H "Authorization: Bearer ${EMAIL_OPS_SELFHOST_ADMIN_JWT}" \
   -H 'Content-Type: application/json' \
   -d '{"name":"selfhost-agent","scopes":["mail:read"]}'
+unset EMAIL_OPS_SELFHOST_ADMIN_JWT
 ```
 
 ## Quickstart

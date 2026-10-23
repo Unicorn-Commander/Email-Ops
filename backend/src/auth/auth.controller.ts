@@ -61,6 +61,13 @@ export class AuthController {
     return res.redirect(`${frontendUrl}/auth/sso-callback`);
   }
 
+  @Get('local/enabled')
+  @ApiOperation({ summary: 'Report whether self-host local login is configured' })
+  @ApiResponse({ status: 200, description: '{ enabled: boolean }' })
+  localLoginEnabled() {
+    return { enabled: this.authService.isLocalLoginEnabled() };
+  }
+
   @Post('local/login')
   @ApiOperation({ summary: 'Sign in with the self-host bootstrap admin' })
   @ApiResponse({

@@ -8,6 +8,7 @@ describe('AuthController local login', () => {
         access_token: 'local-session',
         user: { id: 'user-1', email: 'admin@example.test' },
       }),
+      isLocalLoginEnabled: jest.fn().mockReturnValue(true),
     } as unknown as AuthService;
     const config = {
       get: jest.fn((key: string, fallback?: string) => {
@@ -36,5 +37,24 @@ describe('AuthController local login', () => {
       'local-session',
       expect.objectContaining({ httpOnly: true, secure: false, sameSite: 'lax' }),
     );
+  });
+
+  it('reports whether local login is enabled without exposing credentials', () => {
+    const authService = {
+      isLocalLoginEnabled: jest.fn().mockReturnValue(true),
+    } as unknown as AuthService;
+    const controller = new AuthController(authService, {} as any, {} as any, {} as any, {} as any);
+
+    expect(controller.localLoginEnabled()).toEqual({ enabled: true });
+    expect(authService.isLocalLoginEnabled).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports disabled when the backend has no local bootstrap credentials', () => {
+    const authService = {
+      isLocalLoginEnabled: jest.fn().mockReturnValue(false),
+    } as unknown as AuthService;
+    const controller = new AuthController(authService, {} as any, {} as any, {} as any, {} as any);
+
+    expect(controller.localLoginEnabled()).toEqual({ enabled: false });
   });
 });

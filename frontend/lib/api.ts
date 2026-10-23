@@ -78,6 +78,11 @@ export function ssoLoginUrl(): string {
   return `${API_BASE}/auth/keycloak`;
 }
 
+/** Report whether the backend has configured self-host local credentials. */
+export function fetchLocalLoginEnabled(): Promise<{ enabled: boolean }> {
+  return apiGet<{ enabled: boolean }>('/auth/local/enabled');
+}
+
 /** Sign in with the local bootstrap admin used by the self-host profile. */
 export function localLogin(
   email: string,

@@ -95,6 +95,62 @@ describe('AuthService local bootstrap admin', () => {
     expect(jwt.sign).not.toHaveBeenCalled();
   });
 
+  it('does not reactivate a disabled admin or rewrite its hash on a wrong password', async () => {
+    const { prisma, user } = makePrisma();
+    const jwt = { sign: jest.fn().mockReturnValue('local-session') } as any;
+    const service = new AuthService(jwt, prisma);
+
+    await service.localLogin(EMAIL, PASSWORD);
+    const originalHash = user()!.passwordHash;
+    user()!.isActive = false;
+    (prisma as any).user.update.mockClear();
+
+    await expect(service.localLogin(EMAIL, 'wrong password')).rejects.toThrow(
+      'Invalid local admin credentials',
+    );
+
+    expect(user()!.isActive).toBe(false);
+    expect(user()!.passwordHash).toBe(originalHash);
+    expect((prisma as any).user.update).not.toHaveBeenCalled();
+  });
+
+  it('refuses a local password for a Keycloak-linked row without changing it', async () => {
+    const { prisma, user } = makePrisma();
+    const jwt = { sign: jest.fn().mockReturnValue('local-session') } as any;
+    const service = new AuthService(jwt, prisma);
+
+    await service.localLogin(EMAIL, PASSWORD);
+    user()!.keycloakId = 'keycloak-sub';
+    user()!.isActive = false;
+    const originalHash = user()!.passwordHash;
+    (prisma as any).user.update.mockClear();
+    const warning = jest.spyOn((service as any).logger, 'warn').mockImplementation();
+
+    await expect(service.localLogin(EMAIL, PASSWORD)).rejects.toThrow(
+      'Invalid local admin credentials',
+    );
+
+    expect(user()!.isActive).toBe(false);
+    expect(user()!.passwordHash).toBe(originalHash);
+    expect((prisma as any).user.update).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(warning.mock.calls[0][0]).not.toContain(EMAIL);
+    warning.mockRestore();
+  });
+
+  it('runs the same rejected local-login outcome for an email mismatch', async () => {
+    const { prisma } = makePrisma();
+    const jwt = { sign: jest.fn() } as any;
+    const service = new AuthService(jwt, prisma);
+
+    await expect(service.localLogin('different@selfhost.example.test', PASSWORD)).rejects.toThrow(
+      'Invalid local admin credentials',
+    );
+
+    expect((prisma as any).user.findUnique).not.toHaveBeenCalled();
+    expect(jwt.sign).not.toHaveBeenCalled();
+  });
+
   it('does not expose the stored password hash in the session projection', async () => {
     const { prisma } = makePrisma();
     const jwt = { sign: jest.fn().mockReturnValue('local-session') } as any;
