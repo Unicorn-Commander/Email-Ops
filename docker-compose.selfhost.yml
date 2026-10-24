@@ -19,23 +19,49 @@ services:
       timeout: 5s
       retries: 12
 
-  email-ops-db-bootstrap:
-    image: postgres:16-bookworm
+  # One-shot schema migration as the owner. It must finish before the role
+  # bootstrap: the RLS-roles migration pins a development password on the
+  # runtime roles, so the generated password is applied after it.
+  email-ops-migrate:
+    build:
+      context: ./backend
     restart: "no"
     depends_on:
       email-ops-postgres:
         condition: service_healthy
     environment:
+      DATABASE_URL: postgresql://email_ops_admin:${POSTGRES_PASSWORD}@email-ops-postgres:5432/emailops?schema=public
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["npx --no-install prisma migrate deploy"]
+
+  email-ops-db-bootstrap:
+    image: postgres:16-bookworm
+    restart: "no"
+    depends_on:
+      email-ops-migrate:
+        condition: service_completed_successfully
+    environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.selfhost}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env.selfhost}
     entrypoint: ["/bin/sh", "-ec"]
-    command: |
-      PGPASSWORD="$${POSTGRES_PASSWORD}" psql \
-        --host email-ops-postgres \
-        --username email_ops_admin \
-        --dbname emailops \
-        --set=app_password="$${APP_DB_PASSWORD}" \
-        --command "ALTER ROLE email_ops_app PASSWORD :'app_password';"
+    # psql interpolates :'app_password' only in script input, never in --command.
+    # The audit and read-only roles are unused here and keep no login.
+    # A list, so Compose hands the whole script to sh -c as one argument (a bare
+    # string is word-split, and sh then ran only its first word: exit 0, no-op).
+    command:
+      - |
+        printf '%s\n' \
+          "ALTER ROLE email_ops_app PASSWORD :'app_password';" \
+          "ALTER ROLE email_ops_audit NOLOGIN PASSWORD NULL;" \
+          "ALTER ROLE email_ops_ro NOLOGIN PASSWORD NULL;" \
+        | PGPASSWORD="$${POSTGRES_PASSWORD}" psql \
+          --host email-ops-postgres \
+          --username email_ops_admin \
+          --dbname emailops \
+          --set=ON_ERROR_STOP=1 \
+          --set=app_password="$${APP_DB_PASSWORD}" \
+          --quiet
+        echo "email-ops-db-bootstrap: runtime role password applied"
 
   email-ops-backend:
     build:

@@ -28,7 +28,10 @@ export class KeycloakStrategy extends PassportStrategy(Strategy, 'keycloak') {
     super({
       authorizationURL: `${keycloakUrl}/realms/${realm}/protocol/openid-connect/auth`,
       tokenURL: `${keycloakUrl}/realms/${realm}/protocol/openid-connect/token`,
-      clientID: configService.get('KEYCLOAK_CLIENT_ID', 'email-ops'),
+      // `|| default`, not a get() default: the self-host compose passes the
+      // variable as an empty string when hosted SSO is unconfigured, and an
+      // empty clientID makes passport-oauth2 throw at boot.
+      clientID: configService.get<string>('KEYCLOAK_CLIENT_ID') || 'email-ops',
       clientSecret: configService.get('KEYCLOAK_CLIENT_SECRET', ''),
       callbackURL,
       // Behind Traefik, TLS terminates at the proxy and the app sees plain http.

@@ -34,9 +34,9 @@ describe('KeycloakStrategy.validate', () => {
     (authService.validateKeycloakUser as jest.Mock).mockResolvedValue({ id: 'u1' });
 
     const strategy = new KeycloakStrategy(config, authService);
-    await expect(strategy.validate('access-token', 'refresh-token', { sub: 'ignored' })).resolves.toEqual(
-      { id: 'u1' },
-    );
+    await expect(
+      strategy.validate('access-token', 'refresh-token', { sub: 'ignored' }),
+    ).resolves.toEqual({ id: 'u1' });
 
     expect(authService.validateKeycloakUser).toHaveBeenCalledWith('kc-sub', {
       sub: 'kc-sub',
@@ -44,5 +44,11 @@ describe('KeycloakStrategy.validate', () => {
       email_verified: true,
     });
     expect(authService.storeKcRefreshToken).toHaveBeenCalledWith({ id: 'u1' }, 'refresh-token');
+  });
+
+  it('boots when the self-host compose passes blank SSO settings', () => {
+    // ConfigService.get returns '' (not the default) for a variable set to empty.
+    const blank = { get: () => '' } as unknown as ConfigService;
+    expect(() => new KeycloakStrategy(blank, authService)).not.toThrow();
   });
 });
