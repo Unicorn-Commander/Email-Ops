@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Magic Unicorn Unconventional Technology & Stuff Inc.
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: Apache-2.0
 
 // First-party Umami beacon proxy — POST /api/analytics/api/send
 //

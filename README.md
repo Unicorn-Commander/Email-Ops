@@ -5,7 +5,7 @@
   <h1>Email-Ops</h1>
   <p><strong>Agent-drafted email with a human approval inbox.</strong></p>
   <p>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-2ea44f" alt="License: AGPL-3.0-or-later"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-2ea44f" alt="License: Apache-2.0"></a>
     <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/release-0.6.0-7c3aed" alt="Release: 0.6.0"></a>
     <img src="https://img.shields.io/badge/stack-NestJS%2010%20%2B%20Next.js%2015-111827" alt="Stack: NestJS 10 and Next.js 15">
     <img src="https://img.shields.io/badge/deployment-Docker%20self--hosted-2496ed" alt="Docker self-hosted">
@@ -325,6 +325,6 @@ The API applies Helmet and request throttling, while the frontend configures CSP
 
 ## Licence
 
-Email-Ops is licensed under **AGPL-3.0-or-later**. See [LICENSE](LICENSE) for the full GNU Affero General Public License text.
+Email-Ops is licensed under the [Apache License 2.0](LICENSE). You can use, change and redistribute it, including commercially, under its terms. Our names and logos are covered by [TRADEMARKS.md](TRADEMARKS.md).
 
 Built by [Magic Unicorn](https://magicunicorn.tech) · part of [Unicorn Commander](https://unicorncommander.ai)
