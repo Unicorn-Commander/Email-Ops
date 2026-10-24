@@ -5,6 +5,9 @@ of record (`email-ops.magicunicorn.dev`).
 
 ## Unreleased
 
+### Changed
+- Licence: Apache-2.0 (was AGPL-3.0-or-later).
+
 ### Added
 - Mail rules support NOTICE and FORWARD_COPY actions. NOTICE items are acknowledged in the agent inbox, and sovereign forwards use James with loop and duplicate-delivery guards.
 
