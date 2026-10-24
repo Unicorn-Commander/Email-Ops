@@ -74,10 +74,6 @@ Mailboxes are first-class workspace records for people, agents, and shared addre
 
 ### Agent fleet and permissions
 
-<p align="center">
-  <img src="docs/screenshots/agents.webp" width="1000" alt="Email-Ops agents and the actions each is allowed to take">
-</p>
-
 The Agents view makes each agent’s mailbox, autonomy level, active state, and pending work visible. The pause controls and send-path policy are designed to be understandable before an agent acts.
 
 ### Insights
@@ -132,8 +128,8 @@ This profile starts PostgreSQL 16, a one-shot role bootstrap, the NestJS API, an
 Requirements: Docker with Compose, `curl`, and `openssl`. The PAT example also uses `jq`.
 
 ```bash
-git clone https://github.com/Unicorn-Commander/email-ops-community.git
-cd email-ops-community
+git clone https://github.com/Unicorn-Commander/Email-Ops.git
+cd Email-Ops
 cp .env.selfhost.example .env.selfhost
 
 export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
@@ -275,13 +271,13 @@ The main components are:
 | App | What it does |
 |---|---|
 | [Unicorn Commander](https://github.com/Unicorn-Commander/Unicorn-Commander) | Self-hosted infrastructure and multi-agent orchestration |
-| [Unicorn Stable](https://github.com/Unicorn-Commander/unicorn-stable-oss) | Humans and agents in the same room |
-| [Accounting-Ops](https://github.com/Unicorn-Commander/accounting-ops-community) | Open-core community edition of the accounting app |
-| [Contact-Ops](https://github.com/Unicorn-Commander/contact-ops-community) | Shared contact and identity layer |
-| [Customer-Ops](https://github.com/Unicorn-Commander/customer-ops-community) | Customer relationship and pipeline layer |
-| [**Email-Ops**](https://github.com/Unicorn-Commander/email-ops-community) | **Agent-drafted email with a human approval inbox** |
-| [Project-Ops](https://github.com/Unicorn-Commander/project-ops-community) | Projects and tasks, with status and context |
-| [Meeting-Ops](https://github.com/Unicorn-Commander/Meeting-Ops-OSS) | In-browser recording, transcription, and meeting search |
+| [Unicorn Stable](https://github.com/Unicorn-Commander/Unicorn-Stable) | Humans and agents in the same room |
+| [Accounting-Ops](https://github.com/Unicorn-Commander/Accounting-Ops) | Agent-native accounting and books |
+| [Contact-Ops](https://github.com/Unicorn-Commander/Contact-Ops) | Shared contact and identity layer |
+| [Customer-Ops](https://github.com/Unicorn-Commander/Customer-Ops) | Customer relationship and pipeline layer |
+| [**Email-Ops**](https://github.com/Unicorn-Commander/Email-Ops) | **Agent-drafted email with a human approval inbox** |
+| [Project-Ops](https://github.com/Unicorn-Commander/Project-Ops) | Projects and tasks, with status and context |
+| [Meeting-Ops](https://github.com/Unicorn-Commander/Meeting-Ops) | In-browser recording, transcription, and meeting search |
 
 Email-Ops connects to the suite through shared workspace identity and its authenticated MCP contract, so Customer-Ops and other suite agents can work with mail inside the caller’s permitted workspace.
 
