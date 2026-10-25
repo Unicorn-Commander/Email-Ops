@@ -7,7 +7,7 @@ x-logging: &default-logging
 services:
   davis:
     container_name: davis
-    image: ghcr.io/tchapi/davis:v5.6.2
+    image: ghcr.io/tchapi/davis:5.6.2@sha256:bb1060b14aba57efe4b4900bb2d29a927aea08e374d0637f63538a1f3ca14668
     restart: unless-stopped
     init: true
     env_file:

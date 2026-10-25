@@ -44,7 +44,7 @@ docker run --rm --network "$TEST_NETWORK" \
   -e APP_SECRET=phase1-only \
   -e DATABASE_DRIVER=postgresql \
   -e DATABASE_URL="postgresql://${TEST_USER}:${TEST_PASSWORD}@${TEST_POSTGRES}:5432/${TEST_DB}?serverVersion=16&charset=utf8" \
-  ghcr.io/tchapi/davis:v5.6.2 \
+  ghcr.io/tchapi/davis:5.6.2 \
   sh -lc 'composer install --no-interaction --prefer-dist && bin/phpunit'
 ```
 

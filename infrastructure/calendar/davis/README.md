@@ -2,7 +2,7 @@
 
 This directory is the Phase-1 deployment lane for the Unicorn Commander suite
 calendar. It pins the bare PHP-FPM Davis image to
-`ghcr.io/tchapi/davis:v5.6.2` and keeps the calendar database separate from
+`ghcr.io/tchapi/davis:5.6.2` and keeps the calendar database separate from
 James. No deployment, DNS change, certificate issuance, SSH, or secret
 creation is performed by this repository lane.
 
