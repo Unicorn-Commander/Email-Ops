@@ -1,0 +1,32 @@
+# PostgreSQL is the default. Use this file only when the Phase-1 PostgreSQL
+# gate fails and the operator has explicitly accepted the MariaDB fallback:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mariadb.yml up -d
+#
+# The database service keeps the name davis-postgres so the application and
+# backup/restore procedures remain otherwise unchanged.
+services:
+  davis:
+    environment:
+      DATABASE_DRIVER: mysql
+      DATABASE_URL: "mysql://${DAVIS_MARIADB_USER:?set DAVIS_MARIADB_USER in .env}:${DAVIS_MARIADB_PASSWORD_URLENCODED:?set DAVIS_MARIADB_PASSWORD_URLENCODED in .env}@davis-postgres:3306/${DAVIS_MARIADB_DATABASE:?set DAVIS_MARIADB_DATABASE in .env}?serverVersion=11.0.0-MariaDB&charset=utf8mb4"
+
+  davis-postgres:
+    image: mariadb:11
+    environment: !override
+      MARIADB_DATABASE: ${DAVIS_MARIADB_DATABASE:?set DAVIS_MARIADB_DATABASE in .env}
+      MARIADB_USER: ${DAVIS_MARIADB_USER:?set DAVIS_MARIADB_USER in .env}
+      MARIADB_PASSWORD: ${DAVIS_MARIADB_PASSWORD:?set DAVIS_MARIADB_PASSWORD in .env}
+      MARIADB_ROOT_PASSWORD: ${DAVIS_MARIADB_ROOT_PASSWORD:?set DAVIS_MARIADB_ROOT_PASSWORD in .env}
+    volumes: !override
+      - davis_mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u$${MARIADB_USER} -p$${MARIADB_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  davis_mariadb_data:
+    name: mail_calendar_davis_mariadb_data
