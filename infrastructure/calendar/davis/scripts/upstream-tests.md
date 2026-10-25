@@ -51,3 +51,9 @@ docker run --rm --network "$TEST_NETWORK" \
 Pass criteria are a zero exit status and no test process left running. Record
 the image digest, source tag, database image, and test output in the phase gate;
 a successful `docker compose config -q` is not a substitute for this suite.
+
+## Result 2026-10-25 (Persephone, your-mail-host, --cpus 1)
+
+- Source `v5.6.2` (641f1db), image `ghcr.io/tchapi/davis:5.6.2@sha256:bb1060b14aba57efe4b4900bb2d29a927aea08e374d0637f63538a1f3ca14668`, `postgres:16-alpine`.
+- `vendor/bin/phpunit --process-isolation` (as upstream CI runs it; `bin/phpunit` is a stale wrapper that fails with PHPUnit 10): **290 tests, 1342 assertions, 1 skipped, exit 0**, 9 min 20 s.
+- Image tags on ghcr have no `v` prefix (`5.6.2`, not `v5.6.2`).
