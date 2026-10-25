@@ -1,0 +1,9 @@
+# Host runtime configuration and other local-only values.
+.env
+.env.*
+!.env.example
+
+# Credentials or client state accidentally staged beside the scripts.
+*.secret
+*.password
+*.netrc

@@ -1,0 +1,111 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  davis:
+    container_name: davis
+    image: ghcr.io/tchapi/davis:5.6.2@sha256:bb1060b14aba57efe4b4900bb2d29a927aea08e374d0637f63538a1f3ca14668
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${DAVIS_ENV_FILE:-.env}
+    depends_on:
+      davis-postgres:
+        condition: service_healthy
+    networks:
+      davis_internal:
+      james_network:
+        aliases:
+          - davis
+    volumes:
+      - davis_www:/var/www/davis
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          php -r '$$s = @fsockopen("127.0.0.1", 9000); if (!$$s) { exit(1); }
+          fclose($$s);'
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    logging: *default-logging
+
+  davis-web:
+    container_name: davis-web
+    image: nginx:alpine
+    restart: unless-stopped
+    init: true
+    depends_on:
+      davis:
+        condition: service_healthy
+    networks:
+      davis_internal:
+      james_network:
+        aliases:
+          - davis-web
+    volumes:
+      - davis_www:/var/www/davis:ro
+      - type: bind
+        source: ./nginx/davis-web.conf
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    logging: *default-logging
+
+  davis-postgres:
+    container_name: davis-postgres
+    image: postgres:16-alpine
+    restart: unless-stopped
+    init: true
+    environment:
+      POSTGRES_DB: ${DAVIS_POSTGRES_DB:?set DAVIS_POSTGRES_DB in .env}
+      POSTGRES_USER: ${DAVIS_POSTGRES_USER:?set DAVIS_POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${DAVIS_POSTGRES_PASSWORD:?set DAVIS_POSTGRES_PASSWORD in .env}
+    networks:
+      davis_internal:
+        aliases:
+          - davis-postgres
+    volumes:
+      - davis_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    logging: *default-logging
+
+networks:
+  davis_internal:
+    name: davis_internal
+    internal: true
+  james_network:
+    name: ${JAMES_COMPOSE_NETWORK:?set JAMES_COMPOSE_NETWORK in .env}
+    external: true
+
+volumes:
+  davis_www:
+    name: mail_calendar_davis_www
+  davis_postgres_data:
+    name: mail_calendar_davis_postgres_data

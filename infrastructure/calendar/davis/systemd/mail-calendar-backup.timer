@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly James and Davis mail/calendar database backup
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+RandomizedDelaySec=15min
+Unit=mail-calendar-backup.service
+
+[Install]
+WantedBy=timers.target
