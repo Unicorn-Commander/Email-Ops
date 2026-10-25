@@ -86,7 +86,7 @@ http_status() {
 log 'checking CalDAV well-known redirect'
 STATUS="$(http_status /dev/null "${CURL_COMMON[@]}" --max-redirs 0 -D "${HEADERS_FILE}" "${BASE_URL}/.well-known/caldav")"
 require_code 'well-known CalDAV redirect' "${STATUS}" '301' /dev/null
-grep -Eiq '^location:[[:space:]]*/dav/[[:space:]]*$' "${HEADERS_FILE}" ||
+grep -Eiq '^location:[[:space:]]*(https?://[^/]+)?/dav/[[:space:]]*$' "${HEADERS_FILE}" ||  # nginx makes relative redirects absolute
   { printf '[calendar-smoke] ERROR: redirect did not point to /dav/\n' >&2; exit 1; }
 
 log 'checking anonymous PROPFIND is rejected'
@@ -100,7 +100,8 @@ STATUS="$(http_status "${BODY_FILE}" "${CURL_AUTH[@]}" -X PROPFIND \
 require_code 'authenticated PROPFIND' "${STATUS}" '207' "${BODY_FILE}"
 
 USER_PATH="$(printf '%s' "${USER_NAME}" | sed 's/%/%25/g; s/@/%40/g; s/+/%2B/g; s/ /%20/g')"
-CALENDAR_BASE_PATH="${DAVIS_CALENDAR_BASE_PATH:-/dav/calendars/user}"
+# Davis 5.6.2 calendar-home-set is /dav/calendars/<login>/ (measured 2026-10-25).
+CALENDAR_BASE_PATH="${DAVIS_CALENDAR_BASE_PATH:-/dav/calendars}"
 CALENDAR_PATH="${CALENDAR_BASE_PATH%/}/${USER_PATH}/${SCRATCH_NAME}/"
 CALENDAR_URL="${BASE_URL}${CALENDAR_PATH}"
 EVENT_ID="${SCRATCH_NAME}.ics"

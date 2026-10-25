@@ -256,3 +256,13 @@ IMAP-backed login.
   extensively tested; the MariaDB override is the documented fallback.
 - The existing James HTTPS proxy, certificate renewal, DNS, and mailbox
   lifecycle remain external approval/deployment responsibilities.
+
+## As deployed (2026-10-25, Persephone)
+
+- Live at https://calendar.unicorncommander.ai on your-mail-host (DNS-only A record → 203.0.113.10, overriding the `*.unicorncommander.ai` wildcard). Deployed copy: `/home/deploy/mail-calendar/davis` (files from Email-Ops `d74958b`, stamped in `DEPLOYED_FROM`); the box holds no Forgejo credentials, so updates are copied from a commit, not pulled.
+- Gate: Davis `5.6.2` PHPUnit on Postgres 16 passed (see `scripts/upstream-tests.md`); schema migrated (25 migrations).
+- Certificate: issued with the same dockerised certbot the James renewal uses (`docker run --rm -p 80:80 -v …/letsencrypt:/etc/letsencrypt certbot/certbot certonly --standalone -d calendar.unicorncommander.ai`); there is no host certbot. `renew-cert.sh` renews every cert in that directory and now reloads `jmap-proxy` afterwards (before this, renewed certs never reached nginx).
+- Proxy: the server block resolves `davis-web` at request time (`resolver 127.0.0.11` + a variable), so a Davis outage cannot stop the proxy that also fronts mail.
+- Login: IMAP against James works; the first login auto-creates the principal. A user's calendar home is `/dav/calendars/<full-email>/`.
+- Invite sender mailbox: `calendar@unicorncommander.ai` (Vaultwarden `761d81f8`). Dashboard `calendar-admin` (`999513ba`). Davis DB (`4b70f007`).
+- Backups: `mail-calendar-backup.timer` (02:30 UTC) dumps James AND Davis to `/home/deploy/backups/mail-calendar` (14 kept); your-host `pull-your-mail-host-backups.timer` (03:30 UTC) rsyncs them into `/tank/backups/your-mail-host-mail-calendar`. First dumps verified with `pg_restore --list` (James 29 tables, Davis 17). A full restore rehearsal is still to do.
