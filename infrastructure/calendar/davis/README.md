@@ -70,6 +70,31 @@ Invitations use James submission through `MAILER_DSN` and are sent from
 `calendar@unicorncommander.ai`. The James mailbox/password in that DSN must be
 provisioned and URL-encoded by the operator; no value belongs in this repo.
 
+## Phase 2 Email-Ops integration
+
+Email-Ops now contains the reviewable Phase-2 integration pieces:
+
+- `/calendar` provides responsive month, week, day, and agenda views, event
+  create/edit/cancel, UTC-backed ranges, and America/New_York display.
+- The backend CalDAV client uses Davis `PROPFIND`/`REPORT`/`PUT`/`DELETE`,
+  expands daily and weekly recurrence, handles all-day events and time zones,
+  and reuses Email-Ops workspace/mailbox visibility and human-owner fences.
+- The MCP registry exposes `list_calendars`, `list_events`, `find_free_time`,
+  `create_event`, `update_event`, and `cancel_event`. Agent writes are drafts by
+  default and enter the existing agent-inbox approval path before a remote
+  mutation; read tools remain viewer-level.
+- The Email-Ops production credential binding is intentionally fail-closed
+  until a private app-key bridge can issue/revoke Davis native keys and release
+  an ephemeral credential safely. The design and deployment checklist are in
+  [docs/calendar-app-passwords.md](../../../docs/calendar-app-passwords.md).
+
+The phone setup is documented in
+[docs/calendar-phone-guide.md](../../../docs/calendar-phone-guide.md). Until
+the bridge gate is complete, use a Davis administrator-issued native app key;
+do not treat Email-Ops's existing mailbox-password reset as a per-device key.
+No Davis compose, proxy, database, or secret changes are implied by the
+Email-Ops code in this phase.
+
 ## Deploy on your-mail-host
 
 The commands below are an operator handoff. Resolve all `CHANGE_ME` values and
