@@ -339,3 +339,17 @@ IMAP-backed login.
 - Login: IMAP against James works; the first login auto-creates the principal. A user's calendar home is `/dav/calendars/<full-email>/`.
 - Invite sender mailbox: `calendar@unicorncommander.ai` (Vaultwarden `761d81f8`). Dashboard `calendar-admin` (`999513ba`). Davis DB (`4b70f007`).
 - Backups: `mail-calendar-backup.timer` (02:30 UTC) dumps James AND Davis to `/home/deploy/backups/mail-calendar` (14 kept); your-host `pull-your-mail-host-backups.timer` (03:30 UTC) rsyncs them into `/tank/backups/your-mail-host-mail-calendar`. First dumps verified with `pg_restore --list` (James 29 tables, Davis 17). A full restore rehearsal is still to do.
+
+## As deployed on the mail host (2026-10-26)
+
+- **Bind:** the bridge listens on the mail host's tailnet address, port 8891 only. The public address refuses the port.
+- **Allowed domains** start narrow: magicunicorn.dev, magicunicorn.tech, unicorncommander.ai and majiks.studio. Customer domains are added when the calendar reaches customers.
+- **`BRIDGE_ALLOWED_SOURCES` is empty.** Docker's port proxy rewrites every caller to the edge network's gateway, so a source list inside the container can never match. The controls are the tailnet-only bind and the bearer token (the bridge holds only its SHA-256). If a source restriction is wanted, it belongs at the host firewall or in the tailnet ACL.
+- **`BRIDGE_AUTOCREATE_USERS=false`.** Auto-create does not work on Davis 5.6.2: the `Utils` helper is a private service in the compiled container, and an in-process boot lacks Davis's own `.env` (LOG_FILE_PATH). A mailbox must sign in to Davis once before it can get a device key; until then the bridge answers 409 with that instruction.
+- **Smoke test** (from the Email-Ops dogfood host, with the calendar service account and five-minute keys, all revoked):
+  - create returned 201;
+  - CalDAV PROPFIND with the key returned 207;
+  - list returned 200;
+  - revoke returned 200, confirmed;
+  - the same PROPFIND after revoke returned 401;
+  - a wrong token got 401, a foreign domain 400, and a mailbox with no Davis user 409.

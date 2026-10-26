@@ -283,23 +283,26 @@ final class DavisUserProvisioner
         } catch (Throwable) {
             return false;
         } finally {
+            // Shutdown can throw too (on Davis 5.6.2 an in-process boot lacks Davis's own .env, so resolving the
+            // logger failed with LOG_FILE_PATH missing); an escape here turned a clean 409 into a 502.
             if ($kernel !== null && method_exists($kernel, 'shutdown')) {
-                $kernel->shutdown();
+                try {
+                    $kernel->shutdown();
+                } catch (Throwable) {
+                }
             }
         }
     }
 
     private function bootKernel(): object
     {
-        $runtimeAutoload = $this->root.'/vendor/autoload_runtime.php';
+        // Only the plain Composer autoloader: Symfony Runtime's autoload_runtime.php re-includes the running script
+        // (server.php) to find the app, which redeclared the bridge's classes and killed the request (2026-10-26).
         $autoload = $this->root.'/vendor/autoload.php';
-        if (is_file($runtimeAutoload)) {
-            require_once $runtimeAutoload;
-        } elseif (is_file($autoload)) {
-            require_once $autoload;
-        } else {
+        if (!is_file($autoload)) {
             throw new RuntimeException('Davis autoloader is unavailable.');
         }
+        require_once $autoload;
 
         if (!class_exists(\App\Kernel::class)) {
             throw new RuntimeException('Davis kernel is unavailable.');
