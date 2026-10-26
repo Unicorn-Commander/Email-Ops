@@ -1,4 +1,5 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { CalendarCredential, CalendarCredentialMailbox } from './calendar.types';
 import { CalendarBridgeClient } from './calendar-bridge.client';
 import { CalendarCredentialsPort } from './calendar-credentials.port';
@@ -91,9 +92,7 @@ export class BridgeCalendarCredentials extends CalendarCredentialsPort implement
 }
 
 function shortDigest(value: string): string {
-  // Node's built-in crypto is not needed for the credential itself; this
-  // deterministic idempotency suffix only prevents workspace/login collisions.
-  let hash = 2166136261;
-  for (const byte of Buffer.from(value, 'utf8')) hash = Math.imul(hash ^ byte, 16777619);
-  return (hash >>> 0).toString(16).padStart(8, '0');
+  // This is only a deterministic bridge idempotency suffix. It is not stored
+  // as a credential verifier and never contains the bridge secret.
+  return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 16);
 }
