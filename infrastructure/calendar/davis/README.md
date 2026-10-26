@@ -98,17 +98,21 @@ Email-Ops now contains the reviewable Phase-2 integration pieces:
   `create_event`, `update_event`, and `cancel_event`. Agent writes are drafts by
   default and enter the existing agent-inbox approval path before a remote
   mutation; read tools remain viewer-level.
-- The Email-Ops production credential binding is intentionally fail-closed
-  until a private app-key bridge can issue/revoke Davis native keys and release
-  an ephemeral credential safely. The design and deployment checklist are in
+- The `/calendar` Devices panel and workspace REST routes issue named native
+  Davis keys for human-owned phone/desktop clients, show the secret once, and
+  confirm Davis revocation before marking local metadata revoked. The backend
+  credential binding switches from its fail-closed provider only when both
+  `CALENDAR_BRIDGE_URL` and `CALENDAR_BRIDGE_TOKEN` are injected; otherwise
+  calendar access stays unavailable. The as-built contract and rollout
+  checklist are in
   [docs/calendar-app-passwords.md](../../../docs/calendar-app-passwords.md).
 
 The phone setup is documented in
-[docs/calendar-phone-guide.md](../../../docs/calendar-phone-guide.md). Until
-the bridge gate is complete, use a Davis administrator-issued native app key;
-do not treat Email-Ops's existing mailbox-password reset as a per-device key.
-No Davis compose, proxy, database, or secret changes are implied by the
-Email-Ops code in this phase.
+[docs/calendar-phone-guide.md](../../../docs/calendar-phone-guide.md). Use the
+bridge-backed Devices panel after the rollout checklist is approved; until
+then, use a Davis administrator-issued native app key. Do not treat
+Email-Ops's existing mailbox-password reset as a per-device key. No live Davis
+compose, proxy, database, or secret change is implied by this repository lane.
 
 ## Deploy the app-key bridge
 
