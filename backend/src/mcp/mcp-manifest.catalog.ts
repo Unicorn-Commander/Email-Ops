@@ -2204,6 +2204,156 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
       ],
       "tier_required": "pro",
       "read_only": false
+    },
+    {
+      "name": "list_calendars",
+      "description": "List the Davis calendars visible through one mailbox. Read-only; mailbox ownership and workspace scope are enforced.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "mailbox_id": { "type": "string", "minLength": 1 }
+        },
+        "required": ["mailbox_id"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["read:email"],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "list_events",
+      "description": "List expanded VEVENTs in a UTC range, including recurrence and all-day normalization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "mailbox_id": { "type": "string", "minLength": 1 },
+          "calendar_id": { "type": "string", "minLength": 1 },
+          "start": { "type": "string", "minLength": 1 },
+          "end": { "type": "string", "minLength": 1 },
+          "timezone": { "type": "string" }
+        },
+        "required": ["mailbox_id", "calendar_id", "start", "end"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["read:email"],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "find_free_time",
+      "description": "Return workday slots that do not overlap Davis free/busy data.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "mailbox_id": { "type": "string", "minLength": 1 },
+          "calendar_id": { "type": "string", "minLength": 1 },
+          "start": { "type": "string", "minLength": 1 },
+          "end": { "type": "string", "minLength": 1 },
+          "duration_minutes": { "type": "integer", "minimum": 5, "maximum": 1440 },
+          "timezone": { "type": "string" },
+          "workday_start": { "type": "string" },
+          "workday_end": { "type": "string" },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 20 }
+        },
+        "required": ["mailbox_id", "calendar_id", "start", "end", "duration_minutes"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["read:email"],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "create_event",
+      "description": "Create a Davis event; agent calls are drafts by default and require agent-inbox approval before the CalDAV write.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "mailbox_id": { "type": "string", "minLength": 1 },
+          "calendar_id": { "type": "string", "minLength": 1 },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "description": { "type": ["string", "null"], "maxLength": 100000 },
+          "location": { "type": ["string", "null"], "maxLength": 2000 },
+          "start": { "type": "string", "minLength": 1 },
+          "end": { "type": "string", "minLength": 1 },
+          "all_day": { "type": "boolean" },
+          "timezone": { "type": "string" },
+          "recurrence_rule": { "type": ["string", "null"], "maxLength": 1000 },
+          "attendees": { "type": "array", "items": { "type": "string", "minLength": 3, "maxLength": 320 }, "maxItems": 100 },
+          "organizer": { "type": ["string", "null"], "maxLength": 320 },
+          "status": { "type": ["string", "null"], "maxLength": 40 },
+          "url": { "type": ["string", "null"], "maxLength": 2000 },
+          "uid": { "type": "string" },
+          "approved": { "type": "boolean" }
+        },
+        "required": ["mailbox_id", "calendar_id", "summary", "start", "end"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["write:mail"],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "update_event",
+      "description": "Replace a Davis event; agent calls are drafts by default and require agent-inbox approval before the CalDAV write.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "mailbox_id": { "type": "string", "minLength": 1 },
+          "calendar_id": { "type": "string", "minLength": 1 },
+          "event_id": { "type": "string", "minLength": 1 },
+          "etag": { "type": ["string", "null"] },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "description": { "type": ["string", "null"], "maxLength": 100000 },
+          "location": { "type": ["string", "null"], "maxLength": 2000 },
+          "start": { "type": "string", "minLength": 1 },
+          "end": { "type": "string", "minLength": 1 },
+          "all_day": { "type": "boolean" },
+          "timezone": { "type": "string" },
+          "recurrence_rule": { "type": ["string", "null"], "maxLength": 1000 },
+          "attendees": { "type": "array", "items": { "type": "string", "minLength": 3, "maxLength": 320 }, "maxItems": 100 },
+          "organizer": { "type": ["string", "null"], "maxLength": 320 },
+          "status": { "type": ["string", "null"], "maxLength": 40 },
+          "url": { "type": ["string", "null"], "maxLength": 2000 },
+          "uid": { "type": "string" },
+          "approved": { "type": "boolean" }
+        },
+        "required": ["mailbox_id", "calendar_id", "event_id", "summary", "start", "end"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["write:mail"],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "cancel_event",
+      "description": "Cancel a Davis event; agent calls are drafts by default and require agent-inbox approval before the CalDAV write.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "mailbox_id": { "type": "string", "minLength": 1 },
+          "calendar_id": { "type": "string", "minLength": 1 },
+          "event_id": { "type": "string", "minLength": 1 },
+          "etag": { "type": ["string", "null"] },
+          "approved": { "type": "boolean" }
+        },
+        "required": ["mailbox_id", "calendar_id", "event_id"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["write:mail"],
+      "tier_required": "pro",
+      "read_only": false
     }
   ],
   "resources": [],
