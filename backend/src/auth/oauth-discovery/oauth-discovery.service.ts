@@ -6,15 +6,9 @@ export const MCP_PATH = '/api/v1/mcp';
 export const PROTECTED_RESOURCE_PATH = '/.well-known/oauth-protected-resource';
 export const RESOURCE_DOCUMENTATION_URL = 'https://unicorncommander.ai/platform/bring-your-own-ai';
 
-export const EMAIL_OPS_MCP_SCOPES = [
-  'mail:read',
-  'mail:write',
-  'agent-inbox:read',
-  'agent-inbox:approve',
-  'cleaner:run',
-  'admin:provision',
-  'ui:control',
-] as const;
+// Exactly what Keycloak's anonymous-DCR policy allows; the realm scope `mcp` carries this app's audience + uc_uid.
+// PAT scopes (mail:read, …) are NOT OAuth scopes: advertising them makes DCR registration fail (403).
+export const EMAIL_OPS_MCP_SCOPES = ['openid', 'profile', 'email', 'offline_access', 'mcp'];
 
 export interface ConfigReader {
   get<T = any>(propertyPath: string, defaultValue?: T): T;
@@ -47,7 +41,7 @@ export class OAuthDiscoveryService {
       resource: `${publicOrigin}${MCP_PATH}`,
       authorization_servers: [this.getAuthorizationServer()],
       bearer_methods_supported: ['header'],
-      scopes_supported: ['openid', 'profile', ...EMAIL_OPS_MCP_SCOPES],
+      scopes_supported: [...EMAIL_OPS_MCP_SCOPES],
       resource_name: 'Email-Ops MCP',
       resource_documentation: RESOURCE_DOCUMENTATION_URL,
     };
