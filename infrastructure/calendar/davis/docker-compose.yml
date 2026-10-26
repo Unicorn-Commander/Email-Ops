@@ -38,6 +38,54 @@ services:
           memory: 512M
     logging: *default-logging
 
+  # Same Davis image, different command: console and Doctrine code cannot drift
+  # from the instance that serves CalDAV. The published host address must be the
+  # mail host's tailnet address; this service is not added to jmap-proxy.
+  davis-bridge:
+    container_name: davis-bridge
+    image: ghcr.io/tchapi/davis:5.6.2@sha256:bb1060b14aba57efe4b4900bb2d29a927aea08e374d0637f63538a1f3ca14668
+    restart: unless-stopped
+    init: true
+    read_only: true
+    working_dir: /var/www/davis
+    env_file:
+      - ${DAVIS_ENV_FILE:-.env}
+    environment:
+      BRIDGE_DAVIS_ROOT: /var/www/davis
+      BRIDGE_CONSOLE: /var/www/davis/bin/console
+      BRIDGE_PHP_BIN: php
+    depends_on:
+      davis-postgres:
+        condition: service_healthy
+    ports:
+      - "${BRIDGE_BIND_ADDRESS:?set BRIDGE_BIND_ADDRESS to the mail host tailnet address}:${BRIDGE_HOST_PORT:-8891}:8080"
+    networks:
+      - davis_internal
+    volumes:
+      - davis_www:/var/www/davis:ro
+      - type: bind
+        source: ./bridge
+        target: /var/www/davis/bridge
+        read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          php -r '$$body = @file_get_contents("http://127.0.0.1:8080/v1/health");
+          if ($$body === false || $$body !== "{\"status\":\"ok\"}\n") { exit(1); }'
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    command: ["php", "-S", "0.0.0.0:8080", "/var/www/davis/bridge/server.php"]
+    logging: *default-logging
+
   davis-web:
     container_name: davis-web
     image: nginx:alpine

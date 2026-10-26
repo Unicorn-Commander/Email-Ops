@@ -22,6 +22,8 @@ existing jmap-proxy (nginx, TLS termination, James compose network)
           |       +--> davis-postgres (postgres:16-alpine)
           |
           +--> davis_internal (private application/database network)
+          |
+          +--> davis-bridge (same Davis image, private tailnet host port)
 
 davis also joins the James compose network for:
   IMAP  -> james-prod-app:143 (plain internal IMAP)
@@ -45,6 +47,9 @@ Files in this lane:
 - `scripts/backup.sh`, `scripts/restore.md`, and the systemd units cover the
   database backup/restore path.
 - `scripts/smoke.sh` is the post-deploy wire-level check.
+- `bridge/` is the dependency-free app-key sidecar. It uses the pinned Davis
+  image's own `bin/console`, never the public proxy, and keeps the bridge token
+  as a SHA-256 digest on the Davis side.
 
 ## Authentication and app keys
 
@@ -65,6 +70,16 @@ client.
 The dashboard is at `/dashboard` and uses `ADMIN_LOGIN` / `ADMIN_PASSWORD`,
 which are separate from mailbox authentication. `AUTH_REALM` should not be
 changed after installation if legacy Davis password hashes exist.
+
+The private bridge exposes `GET /v1/health` plus authenticated create/list/
+revoke routes under `/v1/keys`. It publishes a host port bound only to
+`BRIDGE_BIND_ADDRESS`, which must be the mail host's tailnet address. It is not
+joined to `jmap-proxy`, and no public DNS or proxy route should be added for it.
+The bridge stores only `BRIDGE_TOKEN_SHA256`; Email-Ops receives the raw token
+from the orchestrator's vault injection. Set `BRIDGE_ALLOWED_SOURCES` to the
+Email-Ops dogfood host's tailnet address or CIDR. Leave
+`BRIDGE_AUTOCREATE_USERS=false` unless the operator has approved Davis's
+passwordless-user bootstrap path.
 
 Invitations use James submission through `MAILER_DSN` and are sent from
 `calendar@unicorncommander.ai`. The James mailbox/password in that DSN must be
@@ -94,6 +109,35 @@ the bridge gate is complete, use a Davis administrator-issued native app key;
 do not treat Email-Ops's existing mailbox-password reset as a per-device key.
 No Davis compose, proxy, database, or secret changes are implied by the
 Email-Ops code in this phase.
+
+## Deploy the app-key bridge
+
+This is an operator handoff; this repository lane does not mint tokens, start
+containers, or change the live host.
+
+1. Copy the Davis env example to the ignored runtime env and set the real
+   `BRIDGE_BIND_ADDRESS` to the mail host's tailnet IP. Do not use `0.0.0.0`, a
+   public proxy address, or a public DNS name for the published host binding.
+2. The orchestrator mints one high-entropy bridge token, stores the raw value in
+   the approved vault, and supplies only its SHA-256 digest as
+   `BRIDGE_TOKEN_SHA256` to the Davis env. Email-Ops receives the raw value as
+   `CALENDAR_BRIDGE_TOKEN`; neither value belongs in this repository.
+3. Set `BRIDGE_ALLOWED_DOMAINS` to the hosted mailbox domains and
+   `BRIDGE_ALLOWED_SOURCES` to the Email-Ops tailnet source. Keep
+   `BRIDGE_AUTOCREATE_USERS=false` for the first rollout unless the disposable
+   mailbox smoke test explicitly requires the approved bootstrap path.
+4. Validate and start only the Davis stack on `your-mail-host`:
+
+   ```sh
+   docker compose --env-file .env config -q
+   docker compose up -d davis-postgres davis davis-bridge davis-web
+   ```
+
+5. Check the bridge health endpoint from the allowed tailnet source. Then let
+   Email-Ops create a device key through the authenticated bridge contract. The
+   bridge's command timeout, read-only filesystem, internal database network,
+   and `restart: unless-stopped` are part of the service posture; do not expose
+   the bridge through the existing calendar proxy.
 
 ## Deploy on your-mail-host
 
