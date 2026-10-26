@@ -40,6 +40,7 @@ import {
   Logger,
   NotFoundException,
   Optional,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   AgentActionKind,
@@ -133,6 +134,8 @@ import {
   resolveNativeUnsubscribeTargets,
 } from './native-unsubscribe';
 import { NativeUnsubscribeHttpPort } from './native-unsubscribe-http';
+import { CalendarService, getCalendarDraftPayload } from '../calendar/calendar.service';
+import { CalendarDraftPayload } from '../calendar/calendar.types';
 
 /**
  * Fan-out bounds for the multi-mailbox webmail endpoints (unified inbox +
@@ -285,6 +288,12 @@ type ApprovePrep =
       draftedBy: string | null;
     }
   | {
+      kind: 'calendar';
+      itemId: string;
+      payload: CalendarDraftPayload;
+      draftedBy: string | null;
+    }
+  | {
       kind: 'send';
       itemId: string;
       messageId: string;
@@ -380,6 +389,10 @@ export class EmailService {
     // Native RFC 8058 HTTP is a separate injectable seam so approval tests never
     // need to make a real network request. Kept last for positional test fakes.
     @Optional() private readonly nativeUnsubscribeHttp?: NativeUnsubscribeHttpPort,
+    // Calendar approval is additive and optional for positional unit-test
+    // constructors. When absent, a calendar draft remains pending rather than
+    // being marked approved without applying the remote change.
+    @Optional() private readonly calendar?: CalendarService,
   ) {}
 
   /**
@@ -3102,6 +3115,15 @@ export class EmailService {
         }
 
         if (item.kind === AgentInboxKind.NOTICE) {
+          const calendarPayload = getCalendarDraftPayload(item.payload);
+          if (calendarPayload) {
+            return {
+              kind: 'calendar',
+              itemId,
+              payload: calendarPayload,
+              draftedBy: item.draftedBy,
+            };
+          }
           const updated = await tx.agentInboxItem.update({
             where: { id: itemId },
             data: {
@@ -3387,6 +3409,35 @@ export class EmailService {
         this.logger.log(
           `agent-inbox native unsubscribe item ${prep.itemId} APPROVED by ${ucUid ?? '(unknown)'} — ${result.completed}/${result.total_attempted} threads succeeded`,
         );
+        return { inbox: this.inboxView(updated, null), message: null };
+      });
+    }
+
+    if (prep.kind === 'calendar') {
+      if (!this.calendar) {
+        throw new ServiceUnavailableException(
+          'Calendar approval is not configured; the calendar draft remains pending.',
+        );
+      }
+      const result = await this.calendar.applyCalendarDraft(workspaceId, ucUid, prep.payload);
+      return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+        const updated = await tx.agentInboxItem.update({
+          where: { id: prep.itemId },
+          data: {
+            state: AgentInboxState.APPROVED,
+            reviewedByUcUid: ucUid,
+            reviewedAt: new Date(),
+            reviewNote: note ?? null,
+            payload: { ...prep.payload, result } as unknown as Prisma.InputJsonValue,
+          },
+        });
+        await this.recordAction(tx, workspaceId, {
+          kind: AgentActionKind.APPROVED,
+          agentKey: prep.draftedBy,
+          messageId: null,
+          actorUcUid: ucUid,
+          detail: `calendar ${prep.payload.operation}`,
+        });
         return { inbox: this.inboxView(updated, null), message: null };
       });
     }

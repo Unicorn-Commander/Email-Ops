@@ -5,6 +5,7 @@ import { ConnectedAccountsModule } from '../connected-accounts/connected-account
 import { MailProviderModule } from '../mail-provider/mail-provider.module';
 import { NotifyModule } from '../notify/notify.module';
 import { NativeUnsubscribeHttpClient, NativeUnsubscribeHttpPort } from './native-unsubscribe-http';
+import { CalendarModule } from '../calendar/calendar.module';
 
 /**
  * The Email-Ops core domain: the SoR + the EmailOpsPort contract logic + the
@@ -13,7 +14,7 @@ import { NativeUnsubscribeHttpClient, NativeUnsubscribeHttpPort } from './native
  * to the SAME implementation — one set of rules, one RLS path.
  */
 @Module({
-  imports: [StalwartModule, ConnectedAccountsModule, MailProviderModule, NotifyModule],
+  imports: [StalwartModule, ConnectedAccountsModule, MailProviderModule, NotifyModule, CalendarModule],
   providers: [
     NativeUnsubscribeHttpClient,
     { provide: NativeUnsubscribeHttpPort, useExisting: NativeUnsubscribeHttpClient },

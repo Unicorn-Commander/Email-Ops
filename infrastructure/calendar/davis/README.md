@@ -22,6 +22,8 @@ existing jmap-proxy (nginx, TLS termination, James compose network)
           |       +--> davis-postgres (postgres:16-alpine)
           |
           +--> davis_internal (private application/database network)
+          |
+          +--> davis-bridge (same Davis image, private tailnet host port)
 
 davis also joins the James compose network for:
   IMAP  -> james-prod-app:143 (plain internal IMAP)
@@ -45,6 +47,9 @@ Files in this lane:
 - `scripts/backup.sh`, `scripts/restore.md`, and the systemd units cover the
   database backup/restore path.
 - `scripts/smoke.sh` is the post-deploy wire-level check.
+- `bridge/` is the dependency-free app-key sidecar. It uses the pinned Davis
+  image's own `bin/console`, never the public proxy, and keeps the bridge token
+  as a SHA-256 digest on the Davis side.
 
 ## Authentication and app keys
 
@@ -66,9 +71,77 @@ The dashboard is at `/dashboard` and uses `ADMIN_LOGIN` / `ADMIN_PASSWORD`,
 which are separate from mailbox authentication. `AUTH_REALM` should not be
 changed after installation if legacy Davis password hashes exist.
 
+The private bridge exposes `GET /v1/health` plus authenticated create/list/
+revoke routes under `/v1/keys`. It publishes a host port bound only to
+`BRIDGE_BIND_ADDRESS`, which must be the mail host's tailnet address. It is not
+joined to `jmap-proxy`, and no public DNS or proxy route should be added for it.
+The bridge stores only `BRIDGE_TOKEN_SHA256`; Email-Ops receives the raw token
+from the orchestrator's vault injection. Set `BRIDGE_ALLOWED_SOURCES` to the
+Email-Ops dogfood host's tailnet address or CIDR. Leave
+`BRIDGE_AUTOCREATE_USERS=false` unless the operator has approved Davis's
+passwordless-user bootstrap path.
+
 Invitations use James submission through `MAILER_DSN` and are sent from
 `calendar@unicorncommander.ai`. The James mailbox/password in that DSN must be
 provisioned and URL-encoded by the operator; no value belongs in this repo.
+
+## Phase 2 Email-Ops integration
+
+Email-Ops now contains the reviewable Phase-2 integration pieces:
+
+- `/calendar` provides responsive month, week, day, and agenda views, event
+  create/edit/cancel, UTC-backed ranges, and America/New_York display.
+- The backend CalDAV client uses Davis `PROPFIND`/`REPORT`/`PUT`/`DELETE`,
+  expands daily and weekly recurrence, handles all-day events and time zones,
+  and reuses Email-Ops workspace/mailbox visibility and human-owner fences.
+- The MCP registry exposes `list_calendars`, `list_events`, `find_free_time`,
+  `create_event`, `update_event`, and `cancel_event`. Agent writes are drafts by
+  default and enter the existing agent-inbox approval path before a remote
+  mutation; read tools remain viewer-level.
+- The `/calendar` Devices panel and workspace REST routes issue named native
+  Davis keys for human-owned phone/desktop clients, show the secret once, and
+  confirm Davis revocation before marking local metadata revoked. The backend
+  credential binding switches from its fail-closed provider only when both
+  `CALENDAR_BRIDGE_URL` and `CALENDAR_BRIDGE_TOKEN` are injected; otherwise
+  calendar access stays unavailable. The as-built contract and rollout
+  checklist are in
+  [docs/calendar-app-passwords.md](../../../docs/calendar-app-passwords.md).
+
+The phone setup is documented in
+[docs/calendar-phone-guide.md](../../../docs/calendar-phone-guide.md). Use the
+bridge-backed Devices panel after the rollout checklist is approved; until
+then, use a Davis administrator-issued native app key. Do not treat
+Email-Ops's existing mailbox-password reset as a per-device key. No live Davis
+compose, proxy, database, or secret change is implied by this repository lane.
+
+## Deploy the app-key bridge
+
+This is an operator handoff; this repository lane does not mint tokens, start
+containers, or change the live host.
+
+1. Copy the Davis env example to the ignored runtime env and set the real
+   `BRIDGE_BIND_ADDRESS` to the mail host's tailnet IP. Do not use `0.0.0.0`, a
+   public proxy address, or a public DNS name for the published host binding.
+2. The orchestrator mints one high-entropy bridge token, stores the raw value in
+   the approved vault, and supplies only its SHA-256 digest as
+   `BRIDGE_TOKEN_SHA256` to the Davis env. Email-Ops receives the raw value as
+   `CALENDAR_BRIDGE_TOKEN`; neither value belongs in this repository.
+3. Set `BRIDGE_ALLOWED_DOMAINS` to the hosted mailbox domains and
+   `BRIDGE_ALLOWED_SOURCES` to the Email-Ops tailnet source. Keep
+   `BRIDGE_AUTOCREATE_USERS=false` for the first rollout unless the disposable
+   mailbox smoke test explicitly requires the approved bootstrap path.
+4. Validate and start only the Davis stack on `your-mail-host`:
+
+   ```sh
+   docker compose --env-file .env config -q
+   docker compose up -d davis-postgres davis davis-bridge davis-web
+   ```
+
+5. Check the bridge health endpoint from the allowed tailnet source. Then let
+   Email-Ops create a device key through the authenticated bridge contract. The
+   bridge's command timeout, read-only filesystem, internal database network,
+   and `restart: unless-stopped` are part of the service posture; do not expose
+   the bridge through the existing calendar proxy.
 
 ## Deploy on your-mail-host
 
@@ -266,3 +339,17 @@ IMAP-backed login.
 - Login: IMAP against James works; the first login auto-creates the principal. A user's calendar home is `/dav/calendars/<full-email>/`.
 - Invite sender mailbox: `calendar@unicorncommander.ai` (Vaultwarden `761d81f8`). Dashboard `calendar-admin` (`999513ba`). Davis DB (`4b70f007`).
 - Backups: `mail-calendar-backup.timer` (02:30 UTC) dumps James AND Davis to `/home/deploy/backups/mail-calendar` (14 kept); your-host `pull-your-mail-host-backups.timer` (03:30 UTC) rsyncs them into `/tank/backups/your-mail-host-mail-calendar`. First dumps verified with `pg_restore --list` (James 29 tables, Davis 17). A full restore rehearsal is still to do.
+
+## As deployed on the mail host (2026-10-26)
+
+- **Bind:** the bridge listens on the mail host's tailnet address, port 8891 only. The public address refuses the port.
+- **Allowed domains** start narrow: magicunicorn.dev, magicunicorn.tech, unicorncommander.ai and majiks.studio. Customer domains are added when the calendar reaches customers.
+- **`BRIDGE_ALLOWED_SOURCES` is empty.** Docker's port proxy rewrites every caller to the edge network's gateway, so a source list inside the container can never match. The controls are the tailnet-only bind and the bearer token (the bridge holds only its SHA-256). If a source restriction is wanted, it belongs at the host firewall or in the tailnet ACL.
+- **`BRIDGE_AUTOCREATE_USERS=false`.** Auto-create does not work on Davis 5.6.2: the `Utils` helper is a private service in the compiled container, and an in-process boot lacks Davis's own `.env` (LOG_FILE_PATH). A mailbox must sign in to Davis once before it can get a device key; until then the bridge answers 409 with that instruction.
+- **Smoke test** (from the Email-Ops dogfood host, with the calendar service account and five-minute keys, all revoked):
+  - create returned 201;
+  - CalDAV PROPFIND with the key returned 207;
+  - list returned 200;
+  - revoke returned 200, confirmed;
+  - the same PROPFIND after revoke returned 401;
+  - a wrong token got 401, a foreign domain 400, and a mailbox with no Davis user 409.

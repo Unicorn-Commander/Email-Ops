@@ -47,7 +47,7 @@ describe('MCP PAT scope enforcement', () => {
     const toolNames = Object.keys(MCP_TOOL_SCOPES) as McpToolName[];
     // Send-kit proposals: +4 lifecycle/read tools alongside approve_send_kit,
     // plus read-only mail-domain verification, plus agent pause/resume → 68.
-    expect(toolNames).toHaveLength(68);
+    expect(toolNames).toHaveLength(74);
     for (const toolName of toolNames) {
       expect(() => enforceMcpToolScope(pat(['*']), toolName, NOW)).not.toThrow();
     }

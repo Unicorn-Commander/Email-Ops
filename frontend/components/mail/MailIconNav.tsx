@@ -33,6 +33,7 @@ import {
   GearIcon,
   DeviceIcon,
   BarChartIcon,
+  CalendarIcon,
   ChevronRightIcon,
   QuestionIcon,
 } from './icons';
@@ -52,6 +53,7 @@ const TOP: NavItem[] = [
   { href: '/mailboxes', label: 'Mailboxes', icon: InboxTrayIcon },
   { href: '/domains', label: 'Domains', icon: GlobeIcon },
   { href: '/insights', label: 'Insights', icon: BarChartIcon },
+  { href: '/calendar', label: 'Calendar', icon: CalendarIcon },
 ];
 
 const BOTTOM: NavItem[] = [

@@ -33,6 +33,7 @@ import { SchedulingModule } from './scheduling/scheduling.module';
 import { MailRulesModule } from './mail-rules/mail-rules.module';
 import { TrustedCorrespondentsModule } from './trusted-correspondents/trusted-correspondents.module';
 import { NotifyModule } from './notify/notify.module';
+import { CalendarModule } from './calendar/calendar.module';
 
 @Module({
   imports: [
@@ -122,6 +123,7 @@ import { NotifyModule } from './notify/notify.module';
     // the compose/cleanup staging paths fire, plus the hourly stale-approval
     // escalation sweep. Dormant unless the notify env is wired.
     NotifyModule,
+    CalendarModule,
     // MCP last so it can consume the contract + agent-inbox + ui_* tools.
     McpModule,
   ],

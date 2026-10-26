@@ -136,6 +136,7 @@ export async function apiPost<T = unknown>(
   path: string,
   body?: unknown,
   token?: string,
+  requestHeaders?: Record<string, string>,
 ): Promise<T> {
   const bearer = token ?? getToken();
   const res = await fetch(`${API_BASE}${path}`, {
@@ -143,6 +144,7 @@ export async function apiPost<T = unknown>(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...(requestHeaders ?? {}),
       ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
     },
     body: JSON.stringify(body ?? {}),

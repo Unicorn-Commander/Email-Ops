@@ -77,6 +77,12 @@ export const MCP_TOOL_SCOPES = {
   ui_compose: 'ui:control',
   ui_switch_space: 'ui:control',
   ui_notify: 'ui:control',
+  list_calendars: 'mail:read',
+  list_events: 'mail:read',
+  find_free_time: 'mail:read',
+  create_event: 'mail:write',
+  update_event: 'mail:write',
+  cancel_event: 'mail:write',
 } as const satisfies Record<string, PatScope>;
 
 export type McpToolName = keyof typeof MCP_TOOL_SCOPES;

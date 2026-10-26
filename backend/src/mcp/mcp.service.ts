@@ -31,6 +31,8 @@ import {
   TrustedCorrespondentTools,
   UiControlTools,
 } from './mcp.tools';
+import { CalendarTools } from '../calendar/calendar.tools';
+import { CalendarService } from '../calendar/calendar.service';
 import { AgentsService } from '../agents/agents.service';
 import { EmailHealthService } from '../email-health/email-health.service';
 import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
@@ -109,6 +111,7 @@ export class McpService {
     private readonly agentView: AgentViewService,
     private readonly mailRules: MailRulesService,
     private readonly trustedCorrespondents: TrustedCorrespondentsService,
+    private readonly calendar: CalendarService,
   ) {}
 
   /**
@@ -184,6 +187,7 @@ export class McpService {
     const agentViewTools = new AgentViewTools(this.membership, this.agentView);
     const mailRulesTools = new MailRulesTools(this.membership, this.mailRules);
     const trustedTools = new TrustedCorrespondentTools(this.membership, this.trustedCorrespondents);
+    const calendarTools = new CalendarTools(this.membership, this.calendar);
 
     // ── Foundation tools ──
 
@@ -1522,6 +1526,116 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await mailRulesTools.deleteMailRule(user, args)),
+    );
+
+    // ── Calendar (CalDAV / Davis) ────────────────────────────────────────
+
+    registerTool(
+      'list_calendars',
+      {
+        title: 'List calendars',
+        description: 'List the Davis calendars visible through one mailbox. Read-only; mailbox ownership and workspace scope are enforced.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+        },
+      },
+      async (args: any) => wrap(await calendarTools.listCalendars(user, args)),
+    );
+
+    registerTool(
+      'list_events',
+      {
+        title: 'List calendar events',
+        description: 'List expanded VEVENTs in a UTC range. Daily/weekly recurrence, all-day events, and America/New_York display are normalized by Email-Ops.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          calendar_id: z.string().min(1),
+          start: z.string().min(1),
+          end: z.string().min(1),
+          timezone: z.string().optional(),
+        },
+      },
+      async (args: any) => wrap(await calendarTools.listEvents(user, args)),
+    );
+
+    registerTool(
+      'find_free_time',
+      {
+        title: 'Find free calendar time',
+        description: 'Return workday slots that do not overlap Davis free/busy data. Read-only.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          calendar_id: z.string().min(1),
+          start: z.string().min(1),
+          end: z.string().min(1),
+          duration_minutes: z.number().int().min(5).max(1440),
+          timezone: z.string().optional(),
+          workday_start: z.string().optional(),
+          workday_end: z.string().optional(),
+          limit: z.number().int().min(1).max(20).optional(),
+        },
+      },
+      async (args: any) => wrap(await calendarTools.findFreeTime(user, args)),
+    );
+
+    const calendarEventFields = {
+      workspace_id: z.string().optional(),
+      mailbox_id: z.string().min(1),
+      calendar_id: z.string().min(1),
+      uid: z.string().optional(),
+      summary: z.string().min(1).max(500),
+      description: z.string().max(100000).nullable().optional(),
+      location: z.string().max(2000).nullable().optional(),
+      start: z.string().min(1),
+      end: z.string().min(1),
+      all_day: z.boolean().optional(),
+      timezone: z.string().optional(),
+      recurrence_rule: z.string().max(1000).nullable().optional(),
+      attendees: z.array(z.string().min(3).max(320)).max(100).optional(),
+      organizer: z.string().max(320).nullable().optional(),
+      status: z.string().max(40).nullable().optional(),
+      url: z.string().max(2000).nullable().optional(),
+      approved: z.boolean().optional(),
+    };
+
+    registerTool(
+      'create_event',
+      {
+        title: 'Create a calendar event',
+        description: 'Create an event in Davis. Agent calls are drafts by default and land in agent-inbox; approved=true requires agent-inbox:approve and applies the CalDAV write.',
+        inputSchema: calendarEventFields,
+      },
+      async (args: any) => wrap(await calendarTools.createEvent(user, args)),
+    );
+
+    registerTool(
+      'update_event',
+      {
+        title: 'Update a calendar event',
+        description: 'Replace an event in Davis. Agent calls are drafts by default; approved=true requires agent-inbox:approve and honors the optional ETag.',
+        inputSchema: { ...calendarEventFields, event_id: z.string().min(1), etag: z.string().nullable().optional() },
+      },
+      async (args: any) => wrap(await calendarTools.updateEvent(user, args)),
+    );
+
+    registerTool(
+      'cancel_event',
+      {
+        title: 'Cancel a calendar event',
+        description: 'Cancel an event in Davis. Agent calls are drafts by default; approved=true requires agent-inbox:approve.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1),
+          calendar_id: z.string().min(1),
+          event_id: z.string().min(1),
+          etag: z.string().nullable().optional(),
+          approved: z.boolean().optional(),
+        },
+      },
+      async (args: any) => wrap(await calendarTools.cancelEvent(user, args)),
     );
 
     return server;
