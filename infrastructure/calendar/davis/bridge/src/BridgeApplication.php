@@ -655,14 +655,20 @@ final class BridgeApplication
         if (!preg_match('/\A[a-f0-9]{64}\z/', $fields['Secret'])) {
             throw new BridgeProtocolException('Davis returned an invalid secret.');
         }
-        if ($fields['Basic username'] !== $login.'*'.$fields['App id']) {
+        // Davis 5.6.2 prints the login placeholder literally in this
+        // definition-list field. The HTTP contract returns the concrete Basic
+        // username because the requested scope is already known here. Accept
+        // the concrete spelling too so a patched Davis build cannot silently
+        // break a valid key response.
+        $basicUsername = $login.'*'.$fields['App id'];
+        if ($fields['Basic username'] !== '<login>*'.$fields['App id'] && $fields['Basic username'] !== $basicUsername) {
             throw new BridgeProtocolException('Davis returned an invalid basic username.');
         }
 
         return [
             'app_id' => $fields['App id'],
             'secret' => $fields['Secret'],
-            'username' => $fields['Basic username'],
+            'username' => $basicUsername,
             'expires_at' => $expires->format(DateTimeInterface::ATOM),
         ];
     }

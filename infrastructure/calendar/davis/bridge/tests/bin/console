@@ -61,7 +61,7 @@ if ($command === 'davis:app-key:create') {
     echo " App id          {$appId}\n";
     echo " Secret          {$secret}\n";
     echo " Scope           {$login}\n";
-    echo " Basic username  {$login}*{$appId}\n";
+    echo " Basic username  <login>*{$appId}\n";
     echo "------------------------------\n";
     echo " ! [WARNING] The secret is not stored and will not be shown again.\n";
     exit(0);
