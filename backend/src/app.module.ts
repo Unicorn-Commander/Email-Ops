@@ -7,6 +7,7 @@ import { credentialTracker, ipTracker } from './auth/identity-throttle';
 import { PrismaModule } from './prisma/prisma.module';
 import { WorkspaceModule } from './common/workspace/workspace.module';
 import { AuthModule } from './auth/auth.module';
+import { OAuthDiscoveryModule } from './auth/oauth-discovery/oauth-discovery.module';
 import { HealthModule } from './health/health.module';
 import { StalwartModule } from './stalwart/stalwart.module';
 import { EmailModule } from './email/email.module';
@@ -57,6 +58,7 @@ import { CalendarModule } from './calendar/calendar.module';
     PrismaModule,
     WorkspaceModule,
     AuthModule,
+    OAuthDiscoveryModule,
     HealthModule,
     // The mail engine seam (Stalwart IMAP/JMAP + Postmark lane; degrade-clean).
     StalwartModule,

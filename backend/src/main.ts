@@ -7,6 +7,7 @@ import compression from 'compression';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { tenancyEnabled } from './common/workspace/feature-flags';
+import { createMcpCorsMiddleware } from './auth/oauth-discovery/mcp-cors';
 
 async function bootstrap() {
   // Register the body parsers ourselves so we can lift the default ~100 KB JSON cap:
@@ -47,7 +48,13 @@ async function bootstrap() {
   app.use(helmet());
   app.use(compression());
 
-  // CORS
+  // MCP is a bearer-only browser surface. This middleware runs after the
+  // body/security middleware but before the general CORS handler and Nest
+  // routing/guards so it can reject disallowed Origins and answer MCP/PRM
+  // OPTIONS first. Non-MCP preflights retain the existing CORS behavior.
+  app.use(createMcpCorsMiddleware(configService));
+
+  // CORS for the existing REST/UI surface.
   app.enableCors({
     origin: configService.get('CORS_ORIGIN', 'http://localhost:3001'),
     credentials: true,
@@ -60,6 +67,8 @@ async function bootstrap() {
       { path: '.well-known/autoconfig/mail/config-v1.1.xml', method: RequestMethod.GET },
       { path: 'mail/config-v1.1.xml', method: RequestMethod.GET },
       { path: 'autodiscover/autodiscover.xml', method: RequestMethod.POST },
+      '.well-known/oauth-protected-resource',
+      '.well-known/oauth-protected-resource/api/v1/mcp',
     ],
   });
 

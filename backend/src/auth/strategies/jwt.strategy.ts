@@ -6,6 +6,7 @@ import * as jsonwebtoken from 'jsonwebtoken';
 import jwksClient, { JwksClient } from 'jwks-rsa';
 import { AuthService, JwtPayload } from '../auth.service';
 import { User } from '@prisma/client';
+import { isMcpRequest } from '../oauth-discovery/mcp-auth-header';
 
 /**
  * Extract the local session JWT from the HttpOnly `access_token` cookie — the
@@ -33,6 +34,14 @@ function cookieTokenExtractor(req: any): string | null {
   return null;
 }
 
+const bearerTokenExtractor = ExtractJwt.fromAuthHeaderAsBearerToken();
+
+/** Cookie sessions serve the UI; MCP must use an Authorization bearer only. */
+function sessionOrBearerExtractor(req: any): string | null {
+  if (isMcpRequest(req)) return bearerTokenExtractor(req);
+  return cookieTokenExtractor(req) || bearerTokenExtractor(req);
+}
+
 /**
  * Multi-token JWT strategy (SUITE-IDENTITY §D6).
  *
@@ -56,8 +65,11 @@ function cookieTokenExtractor(req: any): string | null {
 export class JwtStrategy extends PassportStrategy(Strategy) {
   private readonly logger = new Logger(JwtStrategy.name);
   private readonly jwks?: JwksClient;
+  private readonly realmIssuer: string | null;
   private readonly brigadeTrustedIssuers: Set<string>;
   private readonly brigadeExpectedAudience: string;
+  private readonly keycloakEnforceAudience: boolean;
+  private readonly keycloakExpectedAudiences: Set<string>;
 
   constructor(
     configService: ConfigService,
@@ -65,11 +77,17 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   ) {
     const localSecret = configService.get<string>('JWT_SECRET') || '';
     const realmJwksUri = JwtStrategy.buildJwksUri(configService);
+    const realmIssuer = JwtStrategy.buildRealmIssuer(configService);
     const brigadeJwksByIss = JwtStrategy.buildBrigadeJwksClients(configService);
     // Audience-binding input: Email-Ops only accepts a federation token minted
     // FOR email-ops. (SUITE-IDENTITY §1: aud=email-ops.)
     const brigadeExpectedAudience =
       configService.get<string>('BRIGADE_EXPECTED_AUDIENCE') || 'email-ops';
+    const keycloakEnforceAudience = JwtStrategy.readBoolEnv(
+      configService.get<string>('KEYCLOAK_ENFORCE_AUDIENCE'),
+      false,
+    );
+    const keycloakExpectedAudiences = JwtStrategy.buildKeycloakExpectedAudiences(configService);
 
     let jwks: JwksClient | undefined;
     if (realmJwksUri) {
@@ -83,14 +101,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     }
 
     super({
-      // Cookie first (the web session's HttpOnly transport), then the Bearer
-      // header (MCP / PAT / Brigade federation). Same secretOrKeyProvider
-      // validates whichever token is found, so all three token types still work.
-      jwtFromRequest: ExtractJwt.fromExtractors([
-        cookieTokenExtractor,
-        ExtractJwt.fromAuthHeaderAsBearerToken(),
-      ]),
+      jwtFromRequest: sessionOrBearerExtractor,
       ignoreExpiration: false,
+      algorithms: ['HS256', 'RS256'],
       // secretOrKeyProvider runs per-request; inspect the JWT header + payload
       // and resolve the right key on the fly. Provider must call done(err, key).
       secretOrKeyProvider: (
@@ -106,6 +119,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
           const kid = decoded?.header?.kid;
           const iss = AuthService.normalizeIssuer(decoded?.payload?.iss);
 
+          // A token claiming the configured Keycloak issuer must be the
+          // asymmetric realm token; never allow the local HS256 secret to
+          // validate a forged realm-shaped payload.
+          if (realmIssuer && iss === realmIssuer && alg !== 'RS256') {
+            done(new Error('Keycloak tokens must use RS256'));
+            return;
+          }
+
           // RS256 + Brigade-trusted-issuer -> per-issuer Brigade JWKS
           if (alg === 'RS256' && kid && iss && brigadeJwksByIss.has(iss)) {
             const client = brigadeJwksByIss.get(iss)!;
@@ -119,8 +140,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
             return;
           }
 
-          // RS256 + valid kid -> Keycloak realm JWKS (default RS256 branch)
-          if (alg === 'RS256' && kid && jwks) {
+          // RS256 + valid kid + the configured issuer -> Keycloak realm JWKS.
+          if (alg === 'RS256' && kid && iss === realmIssuer && jwks) {
             jwks.getSigningKey(kid, (err, key) => {
               if (err || !key) {
                 done(err || new Error('signing key not found'));
@@ -130,7 +151,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
             });
             return;
           }
-          // Default: locally-signed HS256 JWT
+          if (alg === 'RS256') {
+            done(new Error('Untrusted RS256 issuer or missing signing key'));
+            return;
+          }
+          if (alg !== 'HS256') {
+            done(new Error('Unsupported JWT algorithm'));
+            return;
+          }
+          // Local sessions are the only HS256 branch.
           done(null, localSecret);
         } catch (err) {
           done(err);
@@ -139,8 +168,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
 
     this.jwks = jwks;
+    this.realmIssuer = realmIssuer;
     this.brigadeTrustedIssuers = new Set(brigadeJwksByIss.keys());
     this.brigadeExpectedAudience = brigadeExpectedAudience;
+    this.keycloakEnforceAudience = keycloakEnforceAudience;
+    this.keycloakExpectedAudiences = keycloakExpectedAudiences;
 
     if (realmJwksUri) {
       this.logger.log(`Keycloak realm JWT validation enabled via ${realmJwksUri}`);
@@ -163,6 +195,35 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     const realm = config.get<string>('KEYCLOAK_REALM');
     if (!base || !realm) return null;
     return `${base}/realms/${encodeURIComponent(realm)}/protocol/openid-connect/certs`;
+  }
+
+  private static buildRealmIssuer(config: ConfigService): string | null {
+    const base = (config.get<string>('KEYCLOAK_URL') || '').replace(/\/+$/, '');
+    const realm = config.get<string>('KEYCLOAK_REALM');
+    if (!base || !realm) return null;
+    return AuthService.normalizeIssuer(`${base}/realms/${encodeURIComponent(realm)}`);
+  }
+
+  private static readBoolEnv(value: string | undefined, fallback: boolean): boolean {
+    if (value == null || value.trim() === '') return fallback;
+    const normalized = value.trim().toLowerCase();
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    return fallback;
+  }
+
+  /** Accepted Keycloak audiences are the app client plus configured extras. */
+  private static buildKeycloakExpectedAudiences(config: ConfigService): Set<string> {
+    const clientId = (config.get<string>('KEYCLOAK_CLIENT_ID') || 'email-ops').trim();
+    const raw = config.get<string>('KEYCLOAK_EXPECTED_AUDIENCES');
+    const set = new Set<string>([clientId || 'email-ops']);
+    for (const audience of (raw || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean)) {
+      set.add(audience);
+    }
+    return set;
   }
 
   /**
@@ -204,6 +265,26 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   static audienceMatches(aud: unknown, expected: string): boolean {
     if (Array.isArray(aud)) return aud.includes(expected);
     return aud === expected;
+  }
+
+  /** Match Keycloak's client identity in either `azp` or `aud`. */
+  static keycloakAudienceMatches(aud: unknown, azp: unknown, expected: Set<string>): boolean {
+    if (typeof azp === 'string' && expected.has(azp)) return true;
+    if (typeof aud === 'string' && expected.has(aud)) return true;
+    if (Array.isArray(aud)) {
+      return aud.some((value) => typeof value === 'string' && expected.has(value));
+    }
+    return false;
+  }
+
+  private static hasValidExpiration(exp: unknown): boolean {
+    return typeof exp === 'number' && Number.isFinite(exp) && exp > Math.floor(Date.now() / 1000);
+  }
+
+  private static claimForLog(value: unknown): string {
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value)) return value.filter((item) => typeof item === 'string').join(',');
+    return '';
   }
 
   /**
@@ -265,6 +346,30 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
           );
           throw new UnauthorizedException('Token audience is not email-ops');
         }
+      } else if (issuer && issuer.includes('/realms/')) {
+        if (!this.realmIssuer || issuer !== this.realmIssuer) {
+          this.logger.warn('Rejected Keycloak realm token: issuer is not the configured realm');
+          throw new UnauthorizedException('Token issuer is not authorized');
+        }
+        if (!JwtStrategy.hasValidExpiration(payload?.exp)) {
+          throw new UnauthorizedException('Keycloak token is expired or missing exp');
+        }
+        const audienceMatches = JwtStrategy.keycloakAudienceMatches(
+          payload?.aud,
+          payload?.azp,
+          this.keycloakExpectedAudiences,
+        );
+        if (this.keycloakEnforceAudience && !audienceMatches) {
+          this.logger.warn(
+            `Rejected Keycloak token audience: azp=${JwtStrategy.claimForLog(payload?.azp)} aud=${JwtStrategy.claimForLog(payload?.aud)}`,
+          );
+          throw new UnauthorizedException('Token is not authorized for email-ops');
+        }
+        // Keep this log limited to the client/audience names. It is the
+        // evidence stream for the temporary log-only migration period.
+        this.logger.log(
+          `Accepted Keycloak token: azp=${JwtStrategy.claimForLog(payload?.azp)} aud=${JwtStrategy.claimForLog(payload?.aud)}`,
+        );
       }
 
       const user = await this.authService.validateJwtPayload(payload as JwtPayload);
@@ -282,9 +387,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       // carry that subject explicitly; for older local tokens, the resolved
       // user supplies the same key before falling back to the token subject.
       augmented.__ucUid =
-        (typeof payload?.uc_uid === 'string' && payload.uc_uid.trim()
-          ? payload.uc_uid
-          : null) ??
+        (typeof payload?.uc_uid === 'string' && payload.uc_uid.trim() ? payload.uc_uid : null) ??
         user.keycloakId ??
         (typeof payload?.sub === 'string' ? payload.sub : null);
       // The verified entitlement SKUs (the compose dual-SKU gate reads these).

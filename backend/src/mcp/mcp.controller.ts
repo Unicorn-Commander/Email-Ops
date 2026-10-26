@@ -13,6 +13,8 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Request, Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { setMcpUnauthorizedHeader } from '../auth/oauth-discovery/mcp-auth-header';
+import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
 import { McpService } from './mcp.service';
 import { User } from '@prisma/client';
 
@@ -31,13 +33,14 @@ export class McpController {
   constructor(private readonly mcp: McpService) {}
 
   @All()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, WorkspaceMembershipGuard)
   @ApiOperation({
     summary: 'MCP Streamable HTTP endpoint. Auth as an Email-Ops user; agent acts on their behalf.',
   })
   async handle(@Req() req: Request, @Res() res: Response) {
     const user = req.user as User | undefined;
     if (!user) {
+      setMcpUnauthorizedHeader(req, res);
       res.status(401).json({ error: 'unauthenticated' });
       return;
     }
