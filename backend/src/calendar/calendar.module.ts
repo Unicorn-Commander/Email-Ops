@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { WorkspaceModule } from '../common/workspace/workspace.module';
 import { CalDavPort } from './caldav.port';
@@ -13,6 +13,19 @@ import { CalendarBridgeClient } from './calendar-bridge.client';
 import { CalendarService } from './calendar.service';
 import { CalendarDevicesController } from './calendar-devices.controller';
 import { CalendarDevicesService } from './calendar-devices.service';
+
+export function selectCalendarCredentialsProvider(
+  bridge: Pick<CalendarBridgeClient, 'isConfigured'>,
+  configured: CalendarCredentialsPort,
+  unavailable: CalendarCredentialsPort,
+  logger: Pick<Logger, 'log'> = new Logger('CalendarModule'),
+): CalendarCredentialsPort {
+  const provider = bridge.isConfigured() ? configured : unavailable;
+  logger.log(
+    `Calendar credentials provider: ${provider === configured ? 'bridge' : 'fail-closed'}`,
+  );
+  return provider;
+}
 
 @Module({
   imports: [AuthModule, WorkspaceModule],
@@ -30,7 +43,7 @@ import { CalendarDevicesService } from './calendar-devices.service';
         bridge: CalendarBridgeClient,
         configured: BridgeCalendarCredentials,
         unavailable: UnavailableCalendarCredentials,
-      ) => (bridge.isConfigured() ? configured : unavailable),
+      ) => selectCalendarCredentialsProvider(bridge, configured, unavailable),
     },
     CalendarService,
     CalendarDevicesService,

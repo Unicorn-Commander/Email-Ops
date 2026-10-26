@@ -40,8 +40,15 @@ The implemented contract is:
 - Device keys default to 365 days and are capped at 400 days. Backend keys
   default to and are capped at 24 hours. Labels are printable ASCII and at
   most 64 characters. The response contains `app_id`, `secret`, `username`,
-  and `expires_at`; the secret is held only in the in-memory idempotency cache
-  for ten minutes and is never written to disk.
+  and `expires_at`; the secret is held only in the ten-minute idempotency store
+  and is never written to the repository, logs, or a persistent volume. The
+  store lives at `BRIDGE_IDEMPOTENCY_DIR` (default
+  `/tmp/email-ops-bridge-idempotency`), which must be memory-backed. Each
+  entry is keyed by a SHA-256 digest of the authenticated caller identity and
+  `Idempotency-Key`, contains the request fingerprint, response, and creation
+  timestamp, and is written with a 0600 mode inside a 0700 directory. A
+  per-entry `flock` makes concurrent retries wait; entries older than ten
+  minutes are purged on access.
 - If Davis does not know the login, the bridge returns a clear 409 unless
   `BRIDGE_AUTOCREATE_USERS=true`. When autocreation is enabled, it boots the
   Davis kernel and calls the same `Utils::createPasswordlessUserWithDefaultObjects`
@@ -54,7 +61,10 @@ The implemented contract is:
   Repeating a revoke is safe; a human-created Davis key is never touched.
 - `Idempotency-Key` is required on create. A matching retry within ten minutes
   returns the original result without creating another Davis key; reusing the
-  key for different request data is a 409.
+  key for different request data is a 409. The bridge compose service already
+  mounts both `/tmp` and `/var/www/davis/var` as tmpfs, so the default is
+  ephemeral; deployments may set `BRIDGE_IDEMPOTENCY_DIR` to a subdirectory of
+  either mount.
 
 The fake `bin/console` under the bridge tests emits the Davis 5.6.2 formats
 from `davis-src/`. Its definition-list output includes Davis's literal
@@ -68,6 +78,10 @@ mailbox's Davis login, caches the usable username and secret in process memory
 until five minutes before Davis expiry, and returns `null` on bridge failure so
 the calendar remains fail-closed. Cached bridge app ids are revoked best-effort
 on graceful shutdown; Davis's expiry remains the backstop.
+
+At backend boot, `CalendarModule` emits one line naming the selected calendar
+credential provider (`bridge` or `fail-closed`). The line never includes bridge
+URLs, tokens, or credentials.
 
 The additive Prisma model is `CalendarDeviceKey` (`calendar_device_keys`) with
 `workspaceId`, `mailboxId`, `label`, `davisAppId`, `createdById`, `createdAt`,
