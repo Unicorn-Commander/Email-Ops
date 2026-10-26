@@ -146,6 +146,23 @@ $autocreated = $autoCreate->handle('POST', '/v1/keys', [
 checkSame(201, $autocreated->status, 'autocreate status');
 checkSame('2026-10-26T12:00:00+00:00', $autocreated->body['expires_at'], 'backend default expiry');
 
+$state = json_decode(file_get_contents($statePath) ?: '', true, 16, JSON_THROW_ON_ERROR);
+$humanAppId = 'app_'.substr(hash('sha256', 'dashboard-key'), 0, 24);
+$state['keys'][] = [
+    'name' => 'human-dashboard-key',
+    'app_id' => $humanAppId,
+    'scope' => ['person@calendar.test'],
+    'created' => '2026-10-25 12:00',
+    'last_used' => 'never',
+    'used_as' => 'nobody',
+    'status' => 'active',
+];
+file_put_contents($statePath, json_encode($state, JSON_THROW_ON_ERROR));
+$humanRevoke = $application->handle('DELETE', '/v1/keys/'.rawurlencode($humanAppId), [
+    'authorization' => 'Bearer '.$token,
+], '', '127.0.0.1');
+checkSame(404, $humanRevoke->status, 'human-created key was protected');
+
 $revoked = $application->handle('DELETE', '/v1/keys/'.rawurlencode($create->body['app_id']), [
     'authorization' => 'Bearer '.$token,
 ], '', '127.0.0.1');
@@ -162,4 +179,4 @@ check(!str_contains($logsText, $token), 'audit log contained the token');
 check(str_contains($logsText, 'BRIDGE_AUDIT'), 'audit log was not emitted');
 
 unlink($statePath);
-echo "bridge tests passed: 15 assertions\n";
+echo "bridge tests passed: 16 assertions\n";
