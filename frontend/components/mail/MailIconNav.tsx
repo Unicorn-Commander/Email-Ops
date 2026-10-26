@@ -31,6 +31,7 @@ import {
   GlobeIcon,
   TrashIcon,
   GearIcon,
+  SlidersIcon,
   DeviceIcon,
   BarChartIcon,
   CalendarIcon,
@@ -60,6 +61,7 @@ const BOTTOM: NavItem[] = [
   { href: '/cleanup', label: 'Cleanup', icon: TrashIcon },
   { href: '/connect-device', label: 'Connect device', icon: DeviceIcon },
   { href: '/accounts', label: 'Accounts', icon: GearIcon },
+  { href: '/settings', label: 'Settings', icon: SlidersIcon },
   { href: '/help', label: 'Help', icon: QuestionIcon },
 ];
 
