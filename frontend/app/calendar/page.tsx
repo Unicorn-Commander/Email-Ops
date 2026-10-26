@@ -14,6 +14,7 @@ import {
 } from '@/components/ui';
 import { ApiError } from '@/lib/api';
 import { listMailboxes, type MailboxView } from '@/lib/mailboxApi';
+import { CalendarDevicesPanel } from '@/components/calendar/CalendarDevicesPanel';
 import {
   createEvent,
   deleteEvent,
@@ -503,6 +504,10 @@ export default function CalendarPage() {
           </Card>
           {load === 'empty' && <p className="text-center text-sm text-muted" role="status">No events in this range. Select a day or create the first event.</p>}
         </>
+      )}
+
+      {activeWorkspace && load !== 'loading' && (
+        <CalendarDevicesPanel workspaceId={workspaceId} mailboxes={mailboxes} unavailable={demoMode} />
       )}
 
       <Dialog

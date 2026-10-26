@@ -58,6 +58,23 @@ export interface CalendarEventInput {
   url?: string | null;
 }
 
+export interface CalendarDevice {
+  id: string;
+  mailbox_id: string;
+  label: string;
+  davis_app_id: string;
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  status: 'active' | 'expired' | 'revoked';
+}
+
+export interface CalendarDeviceSecret extends CalendarDevice {
+  server_url: string;
+  username: string;
+  secret: string;
+}
+
 const base = (workspaceId: string) => `/workspaces/${encodeURIComponent(workspaceId)}/calendar`;
 
 function query(values: Record<string, string | number | undefined | null>): string {
@@ -116,4 +133,31 @@ export async function deleteEvent(
       etag: event.etag,
     })}`,
   );
+}
+
+export async function listCalendarDevices(
+  workspaceId: string,
+  mailboxId: string,
+): Promise<{ items: CalendarDevice[]; count: number }> {
+  return apiGet(`${base(workspaceId)}/devices?${query({ mailboxId })}`);
+}
+
+export async function createCalendarDevice(
+  workspaceId: string,
+  body: { mailboxId: string; label: string },
+): Promise<CalendarDeviceSecret> {
+  const idempotencyKey = `calendar-device-${randomId()}`;
+  return apiPost(`${base(workspaceId)}/devices`, body, undefined, { 'Idempotency-Key': idempotencyKey });
+}
+
+export async function revokeCalendarDevice(
+  workspaceId: string,
+  id: string,
+): Promise<{ device: CalendarDevice; confirmed: boolean }> {
+  return apiDelete(`${base(workspaceId)}/devices/${encodeURIComponent(id)}`);
+}
+
+function randomId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
