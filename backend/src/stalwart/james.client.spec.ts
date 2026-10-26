@@ -150,7 +150,10 @@ describe('JamesClient', () => {
           return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-sent-1'] }, '0']] });
         }
         return jsonResponse({
-          methodResponses: [['Email/set', { created: { outbound: { id: 'em-1', threadId: 'th-1' } } }, '0']],
+          methodResponses: [
+            ['Email/set', { created: { outbound: { id: 'em-1', threadId: 'th-1' } } }, '0'],
+            ['EmailSubmission/set', { created: { sub: { id: 'sub-1' } } }, '1'],
+          ],
         });
       });
       global.fetch = fetchSpy as any;
@@ -669,7 +672,10 @@ describe('JamesClient', () => {
           return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-sent-1'] }, '0']] });
         }
         return jsonResponse({
-          methodResponses: [['Email/set', { created: { outbound: { id: 'em-att-1', threadId: 'th-att-1' } } }, '0']],
+          methodResponses: [
+            ['Email/set', { created: { outbound: { id: 'em-att-1', threadId: 'th-att-1' } } }, '0'],
+            ['EmailSubmission/set', { created: { sub: { id: 'sub-1' } } }, '1'],
+          ],
         });
       });
       global.fetch = fetchSpy as any;
@@ -775,7 +781,10 @@ describe('JamesClient', () => {
           return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-sent-1'] }, '0']] });
         }
         return jsonResponse({
-          methodResponses: [['Email/set', { created: { outbound: { id: 'em-cold-1', threadId: 'th-cold-1' } } }, '0']],
+          methodResponses: [
+            ['Email/set', { created: { outbound: { id: 'em-cold-1', threadId: 'th-cold-1' } } }, '0'],
+            ['EmailSubmission/set', { created: { sub: { id: 'sub-1' } } }, '1'],
+          ],
         });
       });
       global.fetch = fetchSpy as any;
@@ -842,7 +851,10 @@ describe('JamesClient', () => {
           return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-sent-1'] }, '0']] });
         }
         return jsonResponse({
-          methodResponses: [['Email/set', { created: { outbound: { id: 'em-multi', threadId: 'th-multi' } } }, '0']],
+          methodResponses: [
+            ['Email/set', { created: { outbound: { id: 'em-multi', threadId: 'th-multi' } } }, '0'],
+            ['EmailSubmission/set', { created: { sub: { id: 'sub-1' } } }, '1'],
+          ],
         });
       });
       global.fetch = jmapFetch as any;

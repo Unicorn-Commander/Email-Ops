@@ -430,10 +430,50 @@ export class JamesClient extends StalwartPort {
 
   /** Resolve the JMAP mailbox id for a folder's role, under `forAddress`'s account. Null when absent. */
   private async resolveMailboxIdForRole(forAddress: string, role: string): Promise<string | null> {
-    const responses = await this.jmap([['Mailbox/query', { filter: { role } }, '0']], forAddress);
-    if (!responses) return null;
-    const ids = this.named(responses, 'Mailbox/query')?.ids;
-    return Array.isArray(ids) && typeof ids[0] === 'string' ? ids[0] : null;
+    // Older James releases reject the `role` filter for some system folders
+    // (notably Sent and Drafts), while still exposing the role on Mailbox/get.
+    // Keep the query fast path for engines that support it, then use the full
+    // mailbox list when the query returns a JMAP error or no id.
+    const queryResponses = await this.jmap(
+      [['Mailbox/query', { filter: { role } }, '0']],
+      forAddress,
+    );
+    const queryResult = queryResponses ? this.named(queryResponses, 'Mailbox/query') : undefined;
+    if (queryResult && typeof queryResult === 'object' && typeof queryResult.type !== 'string') {
+      const ids = queryResult.ids;
+      if (Array.isArray(ids) && typeof ids[0] === 'string') return ids[0];
+    }
+
+    const getResponses = await this.jmap(
+      [['Mailbox/get', { ids: null, properties: ['id', 'name', 'role'] }, '0']],
+      forAddress,
+    );
+    const list = getResponses ? this.named(getResponses, 'Mailbox/get')?.list : undefined;
+    if (!Array.isArray(list)) return null;
+
+    const normalizedRole = role.trim().toLowerCase();
+    const roleMatch = list.find(
+      (mailbox: any) =>
+        typeof mailbox?.id === 'string' &&
+        typeof mailbox?.role === 'string' &&
+        mailbox.role.trim().toLowerCase() === normalizedRole,
+    );
+    if (typeof roleMatch?.id === 'string') return roleMatch.id;
+
+    const fallbackNames =
+      normalizedRole === 'sent'
+        ? new Set(['sent', 'sent items'])
+        : normalizedRole === 'drafts'
+          ? new Set(['drafts'])
+          : null;
+    if (!fallbackNames) return null;
+    const nameMatch = list.find(
+      (mailbox: any) =>
+        typeof mailbox?.id === 'string' &&
+        typeof mailbox?.name === 'string' &&
+        fallbackNames.has(mailbox.name.trim().toLowerCase()),
+    );
+    return typeof nameMatch?.id === 'string' ? nameMatch.id : null;
   }
 
   // --- StalwartPort implementation ----------------------------------------
@@ -519,7 +559,19 @@ export class JamesClient extends StalwartPort {
       ],
     ], mailbox);
     if (!responses) return [];
-    const list = this.named(responses, 'Email/get')?.list;
+    let list = this.named(responses, 'Email/get')?.list;
+    if (this.threadGetNotFound(responses, threadId)) {
+      list = await this.getEmailListById(mailbox, threadId, [
+        'id',
+        'threadId',
+        'from',
+        'to',
+        'subject',
+        'receivedAt',
+        'preview',
+        'keywords',
+      ]);
+    }
     if (!Array.isArray(list)) return [];
     const out: StalwartMessage[] = [];
     for (const m of list) {
@@ -651,7 +703,10 @@ export class JamesClient extends StalwartPort {
       ],
     ], mailbox);
     if (!responses) return [];
-    const list = this.named(responses, 'Email/get')?.list;
+    let list = this.named(responses, 'Email/get')?.list;
+    if (this.threadGetNotFound(responses, threadId)) {
+      list = await this.getEmailListById(mailbox, threadId, JamesClient.DETAIL_PROPERTIES, true);
+    }
     if (!Array.isArray(list)) return [];
     const out: StalwartMessageDetail[] = [];
     for (const m of list) {
@@ -694,6 +749,54 @@ export class JamesClient extends StalwartPort {
     'header:List-Unsubscribe:asText', 'header:List-Unsubscribe-Post:asText',
     'header:X-Email-Ops-Forwarded-From:asText',
   ];
+
+  /** Return the requested Email/get list, or null when the JMAP call failed. */
+  private async getEmailListById(
+    mailbox: string,
+    messageId: string,
+    properties: readonly string[],
+    fetchBodies = false,
+  ): Promise<any[] | null> {
+    const args: Record<string, unknown> = { ids: [messageId], properties: [...properties] };
+    if (fetchBodies) {
+      args.fetchHTMLBodyValues = true;
+      args.fetchTextBodyValues = true;
+    }
+    const responses = await this.jmap([['Email/get', args, '0']], mailbox);
+    if (!responses) return null;
+    const list = this.named(responses, 'Email/get')?.list;
+    return Array.isArray(list) ? list : null;
+  }
+
+  /** James may report a message id as its thread id without a resolvable thread. */
+  private threadGetNotFound(responses: any[], threadId: string): boolean {
+    const response = responses.find(
+      (entry) => Array.isArray(entry) && (entry[0] === 'Thread/get' || entry[0] === 'error'),
+    );
+    if (!response) return false;
+    const result = response[1];
+    if (!result || typeof result !== 'object') return false;
+    if ((result as any).type === 'notFound') return true;
+    const notFound = (result as any).notFound;
+    return Array.isArray(notFound) && notFound.includes(threadId);
+  }
+
+  /** Resolve a thread to concrete email ids, including James' message-id fallback. */
+  private async resolveThreadEmailIds(mailbox: string, threadId: string): Promise<string[]> {
+    const responses = await this.jmap([['Thread/get', { ids: [threadId] }, '0']], mailbox);
+    if (!responses) return [];
+    const rawIds = this.named(responses, 'Thread/get')?.list?.[0]?.emailIds;
+    const emailIds = Array.isArray(rawIds)
+      ? rawIds.filter((id): id is string => typeof id === 'string')
+      : [];
+    const notFound = this.threadGetNotFound(responses, threadId);
+    if (emailIds.length > 0 || !notFound) return emailIds;
+
+    const fallback = await this.getEmailListById(mailbox, threadId, ['id']);
+    return fallback
+      ? fallback.filter((message) => typeof message?.id === 'string').map((message) => message.id)
+      : [];
+  }
 
   /** Map one JMAP Email object (DETAIL_PROPERTIES) to a StalwartMessageDetail; null when it carries no id. */
   private mapMessageDetail(m: unknown, fallbackThreadId: string): StalwartMessageDetail | null {
@@ -778,10 +881,8 @@ export class JamesClient extends StalwartPort {
    */
   async setThreadRead(mailbox: string, threadId: string, read: boolean): Promise<boolean> {
     if (!this.jmapUrl) return false;
-    const idsResp = await this.jmap([['Thread/get', { ids: [threadId] }, '0']], mailbox);
-    if (!idsResp) return false;
-    const emailIds = this.named(idsResp, 'Thread/get')?.list?.[0]?.emailIds;
-    if (!Array.isArray(emailIds) || emailIds.length === 0) return false;
+    const emailIds = await this.resolveThreadEmailIds(mailbox, threadId);
+    if (emailIds.length === 0) return false;
     const update: Record<string, Record<string, boolean>> = {};
     for (const id of emailIds) {
       if (typeof id === 'string') update[id] = { 'keywords/$seen': read };
@@ -801,10 +902,8 @@ export class JamesClient extends StalwartPort {
     flags: { seen?: boolean; flagged?: boolean },
   ): Promise<boolean> {
     if (!this.jmapUrl) return false;
-    const idsResp = await this.jmap([['Thread/get', { ids: [threadId] }, '0']], mailbox);
-    if (!idsResp) return false;
-    const emailIds = this.named(idsResp, 'Thread/get')?.list?.[0]?.emailIds;
-    if (!Array.isArray(emailIds) || emailIds.length === 0) return false;
+    const emailIds = await this.resolveThreadEmailIds(mailbox, threadId);
+    if (emailIds.length === 0) return false;
     const patch: Record<string, boolean> = {};
     if (flags.seen !== undefined) patch['keywords/$seen'] = flags.seen;
     if (flags.flagged !== undefined) patch['keywords/$flagged'] = flags.flagged;
@@ -839,10 +938,8 @@ export class JamesClient extends StalwartPort {
     const role = FOLDER_ROLE[folder];
     const targetMailboxId = await this.resolveMailboxIdForRole(mailbox, role);
     if (!targetMailboxId) return false;
-    const idsResp = await this.jmap([['Thread/get', { ids: [threadId] }, '0']], mailbox);
-    if (!idsResp) return false;
-    const emailIds = this.named(idsResp, 'Thread/get')?.list?.[0]?.emailIds;
-    if (!Array.isArray(emailIds) || emailIds.length === 0) return false;
+    const emailIds = await this.resolveThreadEmailIds(mailbox, threadId);
+    if (emailIds.length === 0) return false;
     // Setting the whole `mailboxIds` map (not a `mailboxIds/<id>` patch) moves the
     // message OUT of its current folder into exactly the target — the move we want.
     const update: Record<string, Record<string, unknown>> = {};
@@ -868,10 +965,8 @@ export class JamesClient extends StalwartPort {
     if (!probe) return false;
     const exists = this.named(probe, 'Mailbox/get')?.list?.[0]?.id === targetMailboxId;
     if (!exists) return false;
-    const idsResp = await this.jmap([['Thread/get', { ids: [threadId] }, '0']], mailbox);
-    if (!idsResp) return false;
-    const emailIds = this.named(idsResp, 'Thread/get')?.list?.[0]?.emailIds;
-    if (!Array.isArray(emailIds) || emailIds.length === 0) return false;
+    const emailIds = await this.resolveThreadEmailIds(mailbox, threadId);
+    if (emailIds.length === 0) return false;
     // Set the whole mailboxIds map (not a patch) → the message leaves its current
     // folder for exactly the target, mirroring moveThreadToFolder's mechanics.
     const update: Record<string, Record<string, unknown>> = {};
@@ -1335,15 +1430,15 @@ export class JamesClient extends StalwartPort {
     const submissionArgs: Record<string, unknown> = {
       create: { sub: { emailId: '#outbound', identityId: identity.id } },
     };
-    if (stagedInDrafts && sentMailboxId && sentMailboxId !== stageMailboxId) {
-      submissionArgs.onSuccessUpdateEmail = {
-        '#sub': {
-          'keywords/$draft': null,
-          [`mailboxIds/${stageMailboxId}`]: null,
-          [`mailboxIds/${sentMailboxId}`]: true,
-        },
-      };
-    }
+    const sentPatch: Record<string, unknown> | null =
+      stagedInDrafts && sentMailboxId && sentMailboxId !== stageMailboxId
+        ? {
+            'keywords/$draft': null,
+            [`mailboxIds/${stageMailboxId}`]: null,
+            [`mailboxIds/${sentMailboxId}`]: true,
+          }
+        : null;
+    if (sentPatch) submissionArgs.onSuccessUpdateEmail = { '#sub': sentPatch };
     const responses = await this.jmap([
       ['Email/set', { create: { outbound } }, '0'],
       ['EmailSubmission/set', submissionArgs, '1'],
@@ -1360,13 +1455,70 @@ export class JamesClient extends StalwartPort {
     const created = this.named(responses, 'Email/set')?.created?.outbound;
     const providerMessageId = created?.id ?? null;
     const threadId = created?.threadId ?? request.inReplyToThreadId ?? null;
+    if (providerMessageId == null) {
+      return {
+        accepted: false,
+        providerMessageId: null,
+        threadId,
+        lane: 'james',
+        reason: 'james submission returned no id',
+      };
+    }
+    // The staged Email can be created while the submission itself is refused
+    // (notCreated, or a method-level error). Then nothing left the server: report
+    // it, and the staged copy stays in its staging folder for the sender to retry.
+    const submission = this.named(responses, 'EmailSubmission/set');
+    if (!submission?.created?.sub) {
+      const failure = submission?.notCreated?.sub ?? this.named(responses, 'error');
+      const why = typeof failure?.type === 'string' ? failure.type : 'no submission created';
+      return {
+        accepted: false,
+        providerMessageId: null,
+        threadId,
+        lane: 'james',
+        reason: `james submission not created: ${why}`,
+      };
+    }
+    if (sentPatch)
+      await this.ensureFiledInSent(request.fromAddress, providerMessageId, responses, sentPatch);
     return {
-      accepted: providerMessageId != null,
+      accepted: true,
       providerMessageId,
       threadId,
       lane: 'james',
-      reason: providerMessageId == null ? 'james submission returned no id' : null,
+      reason: null,
     };
+  }
+
+  /**
+   * RFC 8621 §7.5: a server that applies onSuccessUpdateEmail answers with an
+   * implicit Email/set under the submission's call id. When that answer is
+   * missing or did not update the sent message, apply the same patch directly so
+   * the sent copy still leaves Drafts for Sent. Best effort: the send succeeded.
+   */
+  private async ensureFiledInSent(
+    mailbox: string,
+    emailId: string,
+    responses: any[],
+    patch: Record<string, unknown>,
+  ): Promise<void> {
+    const implicit = responses.find(
+      (r) => Array.isArray(r) && r[0] === 'Email/set' && r[2] === '1',
+    );
+    const updated = implicit?.[1]?.updated;
+    if (
+      updated &&
+      typeof updated === 'object' &&
+      Object.prototype.hasOwnProperty.call(updated, emailId)
+    )
+      return;
+    const direct = await this.jmap([['Email/set', { update: { [emailId]: patch } }, '0']], mailbox);
+    const directUpdated = direct ? this.named(direct, 'Email/set')?.updated : undefined;
+    if (!directUpdated || !Object.prototype.hasOwnProperty.call(directUpdated, emailId)) {
+      this.logger.warn(
+        `james: sent message ${emailId} could not be filed into Sent; it stays in Drafts`,
+      );
+    }
   }
 
   /** Every folder under the mailbox's account (JMAP `Mailbox/get` all ids). */
