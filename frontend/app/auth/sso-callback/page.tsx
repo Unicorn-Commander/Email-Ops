@@ -1,24 +1,32 @@
-'use client';
+"use client";
 
-import { Suspense, useEffect } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
-import { setSession, setStoredUser, fetchProfile } from '@/lib/api';
-import { Skeleton } from '@/components/ui';
+import { Suspense, useEffect } from "react";
+import { approvalReturnPath } from "@/lib/approvalsApi";
+import { useRouter, useSearchParams } from "next/navigation";
+import { setSession, setStoredUser, fetchProfile } from "@/lib/api";
+import { Skeleton } from "@/components/ui";
 
 function Callback() {
   const router = useRouter();
   const params = useSearchParams();
   useEffect(() => {
+    let cancelled = false;
     // Back-compat: an older backend redirected with the JWT as `?token=`. If it's
     // there, keep the legacy localStorage flow.
-    const token = params.get('token');
+    const token = params.get("token");
     if (token) {
       setSession(token, null);
       fetchProfile(token)
-        .then((u) => setSession(token, u))
+        .then((u) => {
+          if (!cancelled) setSession(token, u);
+        })
         .catch(() => {})
-        .finally(() => router.replace('/dashboard'));
-      return;
+        .finally(() => {
+          if (!cancelled) router.replace(approvalReturnPath());
+        });
+      return () => {
+        cancelled = true;
+      };
     }
     // Cookie flow: the backend already set the HttpOnly session cookie on the
     // callback. Hydrate the profile (authed by that cookie) as the client-side
@@ -26,10 +34,16 @@ function Callback() {
     // session — send them to login rather than a broken shell.
     fetchProfile()
       .then((u) => {
+        if (cancelled) return;
         setStoredUser(u);
-        router.replace('/dashboard');
+        router.replace(approvalReturnPath());
       })
-      .catch(() => router.replace('/auth/login'));
+      .catch(() => {
+        if (!cancelled) router.replace("/auth/login");
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [params, router]);
   return (
     <div className="grid min-h-screen place-items-center bg-surface-base">

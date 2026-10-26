@@ -46,6 +46,7 @@ export interface ApprovalPendingNotice {
   reasons?: { code: string; message: string }[];
   toAddress?: string | null;
   subject?: string | null;
+  approvalUrl?: string | null;
 }
 
 @Injectable()
@@ -130,7 +131,7 @@ export class StableNotifierService {
     const reason = item.reasons?.[0]?.message?.trim();
     if (reason) lines.push(`Hold: ${reason}`);
 
-    lines.push(AGENT_INBOX_DEEP_LINK);
+    lines.push(item.approvalUrl || AGENT_INBOX_DEEP_LINK);
     return lines.join('\n');
   }
 

@@ -86,6 +86,7 @@ export class AuthController {
   @ApiResponse({ status: 200, description: '{ ok: true } — the access_token cookie is cleared.' })
   logout(@Res() res: any) {
     res.clearCookie('access_token', { path: '/' });
+    res.clearCookie('eo_approval_session', { path: '/api/v1/approvals', httpOnly: true, secure: true, sameSite: 'strict' });
     return res.json({ ok: true });
   }
 

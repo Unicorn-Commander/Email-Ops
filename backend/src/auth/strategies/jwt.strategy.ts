@@ -376,6 +376,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       // Surface the suite-canonical workspace/tenant claim + acting sub on the
       // resolved user so the tenancy seam (WorkspaceContextService /
       // @CurrentWorkspace) can scope rows without trusting an HTTP header.
+      if ((issuer && this.brigadeTrustedIssuers.has(issuer)) || payload?.act) {
+        (user as User & { __isFederationAuth?: boolean }).__isFederationAuth = true;
+      }
       const augmented = user as User & {
         __workspaceClaim?: string | null;
         __ucUid?: string | null;

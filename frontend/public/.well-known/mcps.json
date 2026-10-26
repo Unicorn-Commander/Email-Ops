@@ -2535,6 +2535,156 @@
       "scopes_required": ["write:mail"],
       "tier_required": "pro",
       "read_only": false
+    },
+    {
+      "name": "request_standing_approval",
+      "description": "Human-only campaign request; agents cannot create, renew or widen standing approvals.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "campaign_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "mailbox_id": {
+            "type": "string"
+          },
+          "body_template": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "placeholder_rules": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "optional_lines": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "cap_per_day": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "recipient_rules": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "blockedDomains": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "allowedDomains": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "campaign_key",
+          "mailbox_id",
+          "body_template",
+          "subject",
+          "cap_per_day",
+          "expires_at"
+        ]
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "list_standing_approvals",
+      "description": "Human-only campaign approval list and review links.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": []
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "pro",
+      "read_only": true
+    },
+    {
+      "name": "approve_standing_approval",
+      "description": "Human-only grant bound to the reviewed definition hash.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "definition_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "id",
+          "definition_sha256"
+        ]
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "revoke_standing_approval",
+      "description": "Human-only immediate revocation of subsequent campaign send reservations.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "pro",
+      "read_only": false
     }
   ],
   "resources": [],

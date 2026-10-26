@@ -8,6 +8,7 @@ import { PatsController } from './pats.controller';
 import { PatService } from './pat.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { KeycloakStrategy } from './strategies/keycloak.strategy';
+import { ExplicitCredentialGuard } from './guards/explicit-credential.guard';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { WorkspaceModule } from '../common/workspace/workspace.module';
 import { KeycloakBrokerService } from './keycloak-broker.service';
@@ -35,7 +36,8 @@ import { KeycloakBrokerService } from './keycloak-broker.service';
     KeycloakBrokerService,
     PatService,
     JwtAuthGuard,
+    ExplicitCredentialGuard,
   ],
-  exports: [AuthService, JwtModule, JwtAuthGuard, KeycloakBrokerService, PatService],
+  exports: [AuthService, JwtModule, JwtAuthGuard, ExplicitCredentialGuard, KeycloakBrokerService, PatService],
 })
 export class AuthModule {}

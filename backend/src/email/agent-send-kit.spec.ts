@@ -149,7 +149,7 @@ describe('approve_send_kit and agent-inbox projections', () => {
 
   function serviceWithTx(tx: Record<string, unknown>): EmailService {
     const prisma = {
-      withWorkspace: jest.fn((_workspace: string, _uid: string, fn: (value: unknown) => unknown) => fn(tx)),
+      withWorkspace: jest.fn((_workspace: string, _uid: string, fn: (value: unknown) => unknown) => fn({ $queryRaw: jest.fn().mockResolvedValue([]), ...tx })),
     } as any;
     return new EmailService(prisma, {} as never, {} as never, {} as never);
   }

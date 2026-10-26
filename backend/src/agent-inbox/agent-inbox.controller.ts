@@ -48,6 +48,7 @@ import {
   Min,
 } from 'class-validator';
 import { AgentInboxKind, AgentInboxState, User, WorkspaceRole } from '@prisma/client';
+import { ExplicitCredentialGuard } from '../auth/guards/explicit-credential.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { MembershipService } from '../common/workspace/membership.service';
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
@@ -166,13 +167,14 @@ export class AgentInboxController {
   ) {}
 
   @Post('send-kits/approve')
+  @UseGuards(ExplicitCredentialGuard)
   @ApiOperation({ summary: 'Human-only approval of an agent send kit template.' })
   async approveSendKit(
     @ResolvedWorkspace() workspaceId: string,
     @CurrentUser() user: User,
     @Body() body: ApproveSendKitDto,
   ) {
-    if ((user as any).__patAuth || (user as any).__isFederationActor) {
+    if ((user as any).__patAuth || (user as any).__isFederationActor || (user as any).__isFederationAuth) {
       throw new ForbiddenException('Only a signed-in human may approve a send kit.');
     }
     await this.membership.assertCanReviewInbox(user, workspaceId);
@@ -247,6 +249,7 @@ export class AgentInboxController {
   }
 
   @Post('send-kits/:kitId/approve')
+  @UseGuards(ExplicitCredentialGuard)
   @ApiOperation({ summary: 'Human-only approval of a proposed send kit by its displayed hash.' })
   async approveSendKitProposal(
     @ResolvedWorkspace() workspaceId: string,
@@ -254,7 +257,7 @@ export class AgentInboxController {
     @Param('kitId') kitId: string,
     @Body() body: ApproveSendKitHashDto,
   ) {
-    if ((user as any).__patAuth || (user as any).__isFederationActor) {
+    if ((user as any).__patAuth || (user as any).__isFederationActor || (user as any).__isFederationAuth) {
       throw new ForbiddenException('Only a signed-in human may approve a send kit.');
     }
     await this.membership.assertCanReviewInbox(user, workspaceId);
@@ -265,6 +268,7 @@ export class AgentInboxController {
   }
 
   @Post('send-kits/:kitId/reject')
+  @UseGuards(ExplicitCredentialGuard)
   @ApiOperation({ summary: 'Human-only rejection of a proposed send kit.' })
   async rejectSendKit(
     @ResolvedWorkspace() workspaceId: string,
@@ -272,7 +276,7 @@ export class AgentInboxController {
     @Param('kitId') kitId: string,
     @Body() body: RejectSendKitDto,
   ) {
-    if ((user as any).__patAuth || (user as any).__isFederationActor) {
+    if ((user as any).__patAuth || (user as any).__isFederationActor || (user as any).__isFederationAuth) {
       throw new ForbiddenException('Only a signed-in human may reject a send kit.');
     }
     await this.membership.assertCanReviewInbox(user, workspaceId);

@@ -16,9 +16,10 @@
  * cleanly.
  */
 
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { User } from '@prisma/client';
 import { z } from 'zod';
+import { StandingApprovalsService } from '../approvals/standing-approvals.service';
 import { MembershipService } from '../common/workspace/membership.service';
 import { EmailService } from '../email/email.service';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
@@ -112,6 +113,7 @@ export class McpService {
     private readonly mailRules: MailRulesService,
     private readonly trustedCorrespondents: TrustedCorrespondentsService,
     private readonly calendar: CalendarService,
+    @Optional() private readonly standing?: StandingApprovalsService,
   ) {}
 
   /**
@@ -180,6 +182,7 @@ export class McpService {
       this.senderPolicy,
       this.admin,
       this.mailDomains,
+      this.standing,
     );
     const connectedTools = new ConnectedAccountsTools(this.membership, this.connectedAccounts);
     const uiTools = new UiControlTools(this.membership, this.uiCommands);
@@ -905,6 +908,41 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await tools.rejectAgentInboxItem(user, args)),
+    );
+
+    registerTool(
+      'request_standing_approval',
+      {
+        title: 'Request standing campaign approval',
+        description: 'Human session only. Stage an immutable campaign request for review; renewal or widening requires a new request and human approval.',
+        inputSchema: {
+          workspace_id: z.string().optional(), campaign_key: z.string().min(1).max(200),
+          mailbox_id: z.string().min(1).max(200), body_template: z.string().min(1).max(100000),
+          subject: z.string().min(1).max(500), placeholder_rules: z.record(z.string()).optional(),
+          optional_lines: z.array(z.number().int().nonnegative()).max(100).optional(),
+          cap_per_day: z.number().int().min(1).max(100000), expires_at: z.string().datetime(),
+          recipient_rules: z.object({ blockedDomains: z.array(z.string()).max(200).optional(), allowedDomains: z.array(z.string()).max(200).optional() }).strict().optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.requestStandingApproval(user, args)),
+    );
+    registerTool(
+      'list_standing_approvals',
+      { title: 'List standing campaign approvals', description: 'Human session only. Review campaign limits, expiry, reservations and approval links.',
+        inputSchema: { workspace_id: z.string().optional() } },
+      async (args: any) => wrap(await tools.listStandingApprovals(user, args ?? {})),
+    );
+    registerTool(
+      'approve_standing_approval',
+      { title: 'Approve a standing campaign request', description: 'Human session only. Bind the grant to the reviewed definition hash. PAT and federation callers are refused.',
+        inputSchema: { workspace_id: z.string().optional(), id: z.string(), definition_sha256: z.string().regex(/^[0-9a-f]{64}$/) } },
+      async (args: any) => wrap(await tools.approveStandingApproval(user, args)),
+    );
+    registerTool(
+      'revoke_standing_approval',
+      { title: 'Revoke standing campaign approval', description: 'Human session only. Immediately stop subsequent campaign send reservations.',
+        inputSchema: { workspace_id: z.string().optional(), id: z.string() } },
+      async (args: any) => wrap(await tools.revokeStandingApproval(user, args)),
     );
 
     registerTool(

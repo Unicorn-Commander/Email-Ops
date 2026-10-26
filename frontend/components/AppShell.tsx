@@ -40,7 +40,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   // The root "/" is the public front door: page.tsx decides landing-vs-dashboard.
   // Treat it (and the /auth pages) as public so the shell's login guard doesn't
   // bounce a logged-out visitor to /auth/login before the landing redirect runs.
-  const isPublicRoute = isAuthRoute || pathname === '/';
+  const isPublicRoute = isAuthRoute || pathname === '/' || pathname === '/approve';
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
