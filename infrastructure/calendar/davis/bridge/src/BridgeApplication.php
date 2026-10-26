@@ -466,6 +466,12 @@ final class BridgeApplication
                 throw new BridgeHttpException(404, 'Bridge-managed key not found.');
             }
 
+            $login = $key['scope'][0] ?? null;
+            $purpose = null;
+            if (preg_match('/\A'.preg_quote(self::PREFIX, '/').'([^:]+):/', $key['name'], $match)) {
+                $purpose = $match[1];
+            }
+
             $this->runRevokeCommand($appId);
             $after = $this->listDavisKeys();
             $confirmed = false;
@@ -479,7 +485,7 @@ final class BridgeApplication
                 throw new BridgeHttpException(502, 'Davis did not confirm key revocation.');
             }
 
-            $this->audit('revoke', null, $appId, null, $callerIp, 'revoked');
+            $this->audit('revoke', $login, $appId, $purpose, $callerIp, 'revoked');
             return new BridgeHttpResponse(200, ['app_id' => $appId, 'revoked' => true, 'confirmed' => true]);
         } catch (BridgeHttpException $error) {
             $this->audit('revoke', null, $appId, null, $callerIp, $error->status >= 500 ? 'error' : 'rejected');

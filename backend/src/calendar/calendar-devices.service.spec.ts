@@ -116,6 +116,25 @@ describe('CalendarDevicesService', () => {
     expect(result[0]).not.toHaveProperty('secret_hash');
   });
 
+  it('reuses a local row when a retried bridge request already committed it', async () => {
+    const { service, tx, bridge } = harness();
+    tx.calendarDeviceKey.create.mockRejectedValue(new Error('response lost after commit'));
+
+    const result = await service.create(
+      'workspace-1',
+      'human-1',
+      'human-1',
+      { mailboxId: 'mailbox-1', label: 'Phone' },
+      'retry-key',
+    );
+
+    expect(result.secret).toBe(secret());
+    expect(bridge.revokeKey).not.toHaveBeenCalled();
+    expect(tx.calendarDeviceKey.findFirst).toHaveBeenCalledWith({
+      where: { workspaceId: 'workspace-1', davisAppId: appId() },
+    });
+  });
+
   it('leaves the local row visible when Davis does not confirm revoke', async () => {
     const { service, tx, bridge } = harness();
     bridge.revokeKey.mockRejectedValue(new Error('bridge unavailable'));

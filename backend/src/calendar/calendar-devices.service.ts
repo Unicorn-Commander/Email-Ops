@@ -50,7 +50,7 @@ export class CalendarDevicesService {
     private readonly bridge: CalendarBridgeClient,
     config: ConfigService,
   ) {
-    this.serverUrl = (
+    const configuredServerUrl = (
       config.get<string>(
         'CALENDAR_SERVER_URL',
         config.get<string>('DAVIS_CALDAV_URL', DEFAULT_SERVER_URL),
@@ -58,6 +58,7 @@ export class CalendarDevicesService {
     )
       .trim()
       .replace(/\/+$/, '');
+    this.serverUrl = configuredServerUrl || DEFAULT_SERVER_URL;
   }
 
   async list(
@@ -112,7 +113,7 @@ export class CalendarDevicesService {
       );
     }
 
-    let row;
+    let row: CalendarDeviceKey;
     try {
       row = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
         tx.calendarDeviceKey.create({
@@ -127,6 +128,26 @@ export class CalendarDevicesService {
         }),
       );
     } catch {
+      // A client can lose the response after the transaction commits and then
+      // retry with the same bridge idempotency key. The bridge returns the same
+      // secret; reuse the existing local row instead of revoking a valid key.
+      try {
+        const existing = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+          tx.calendarDeviceKey.findFirst({
+            where: { workspaceId, davisAppId: remote.app_id },
+          }),
+        );
+        if (existing && existing.mailboxId === mailbox.id && existing.label === label) {
+          return {
+            ...this.toView(existing),
+            server_url: this.serverUrl,
+            username: remote.username,
+            secret: remote.secret,
+          };
+        }
+      } catch {
+        // Fall through to the cleanup attempt below.
+      }
       // Davis is authoritative, but an orphaned bridge key would be invisible
       // to the Email-Ops device list. Remove it before returning an error.
       await this.revokeBestEffort(remote.app_id);

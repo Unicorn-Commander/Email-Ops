@@ -51,7 +51,14 @@ export class BridgeCalendarCredentials extends CalendarCredentialsPort implement
         `calendar-backend-${shortDigest(`${workspaceId}:${login}`)}`,
       );
       const expiresAt = Date.parse(created.expires_at);
-      if (!Number.isFinite(expiresAt) || expiresAt <= now + REFRESH_MARGIN_MS) return null;
+      if (!Number.isFinite(expiresAt) || expiresAt <= now + REFRESH_MARGIN_MS) {
+        try {
+          await this.bridge.revokeKey(created.app_id);
+        } catch {
+          // Davis expiry remains the backstop for an unusable short-lived key.
+        }
+        return null;
+      }
       this.cache.set(cacheKey, {
         workspaceId,
         appId: created.app_id,
