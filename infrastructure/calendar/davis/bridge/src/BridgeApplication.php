@@ -28,6 +28,179 @@ final class BridgeProtocolException extends RuntimeException
 {
 }
 
+final class BridgeIdempotencyStore
+{
+    private const WINDOW = 600;
+
+    /** @var callable(): int */
+    private $clock;
+
+    public function __construct(
+        private readonly string $directory,
+        ?callable $clock = null,
+    ) {
+        $this->clock = $clock ?? static fn (): int => time();
+    }
+
+    /** @param callable(): int|null $clock */
+    public static function fromEnvironment(?callable $clock = null): self
+    {
+        $directory = getenv('BRIDGE_IDEMPOTENCY_DIR');
+        $directory = $directory === false || trim($directory) === ''
+            ? '/tmp/email-ops-bridge-idempotency'
+            : trim($directory);
+
+        return new self($directory, $clock);
+    }
+
+    public static function keyFor(string $callerIdentity, string $idempotencyKey): string
+    {
+        return hash('sha256', $callerIdentity."\0".$idempotencyKey);
+    }
+
+    /**
+     * @param callable(): array<string, mixed> $create
+     * @return array{result: array<string, mixed>, replayed: bool}
+     */
+    public function remember(
+        string $callerIdentity,
+        string $idempotencyKey,
+        string $fingerprint,
+        callable $create,
+    ): array {
+        $this->ensureDirectory();
+        $key = self::keyFor($callerIdentity, $idempotencyKey);
+        $entryPath = $this->directory.'/'.$key.'.json';
+        $lockPath = $this->directory.'/'.$key.'.lock';
+        $lock = fopen($lockPath, 'c+');
+        if (!is_resource($lock)) {
+            throw new RuntimeException('Could not open the idempotency lock.');
+        }
+        if (!chmod($lockPath, 0600)) {
+            fclose($lock);
+            throw new RuntimeException('Could not secure the idempotency lock.');
+        }
+
+        try {
+            if (!flock($lock, LOCK_EX)) {
+                throw new RuntimeException('Could not acquire the idempotency lock.');
+            }
+
+            try {
+                $now = ($this->clock)();
+                $this->purge($now);
+                $cached = $this->read($entryPath);
+                if ($cached !== null) {
+                    if ($cached['created_at'] + self::WINDOW > $now) {
+                        if (!hash_equals($cached['fingerprint'], $fingerprint)) {
+                            throw new BridgeHttpException(409, 'Idempotency-Key was already used for another request.');
+                        }
+
+                        return ['result' => $cached['result'], 'replayed' => true];
+                    }
+                    if (is_file($entryPath)) {
+                        unlink($entryPath);
+                    }
+                }
+
+                $result = $create();
+                $this->write($entryPath, [
+                    'fingerprint' => $fingerprint,
+                    'response' => $result,
+                    'created_at' => ($this->clock)(),
+                ]);
+
+                return ['result' => $result, 'replayed' => false];
+            } finally {
+                flock($lock, LOCK_UN);
+            }
+        } finally {
+            fclose($lock);
+        }
+    }
+
+    private function ensureDirectory(): void
+    {
+        if (!is_dir($this->directory) && !mkdir($this->directory, 0700, true) && !is_dir($this->directory)) {
+            throw new RuntimeException('Could not create the idempotency directory.');
+        }
+        if (!chmod($this->directory, 0700)) {
+            throw new RuntimeException('Could not secure the idempotency directory.');
+        }
+    }
+
+    /** @return array{fingerprint: string, created_at: int, result: array<string, mixed>}|null */
+    private function read(string $path): ?array
+    {
+        if (!is_file($path)) {
+            return null;
+        }
+        if (!chmod($path, 0600)) {
+            return null;
+        }
+        $contents = file_get_contents($path);
+        if ($contents === false) {
+            return null;
+        }
+
+        try {
+            $entry = json_decode($contents, true, 16, JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            return null;
+        }
+        if (!is_array($entry)
+            || !is_string($entry['fingerprint'] ?? null)
+            || !is_int($entry['created_at'] ?? null)
+            || !is_array($entry['response'] ?? null)
+        ) {
+            return null;
+        }
+
+        return [
+            'fingerprint' => $entry['fingerprint'],
+            'created_at' => $entry['created_at'],
+            'result' => $entry['response'],
+        ];
+    }
+
+    private function purge(int $now): void
+    {
+        foreach (glob($this->directory.'/*.json') ?: [] as $path) {
+            $entry = $this->read($path);
+            if ($entry === null || $entry['created_at'] + self::WINDOW <= $now) {
+                if (is_file($path)) {
+                    unlink($path);
+                }
+            }
+        }
+    }
+
+    /** @param array{fingerprint: string, response: array<string, mixed>, created_at: int} $entry */
+    private function write(string $path, array $entry): void
+    {
+        $encoded = json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        $temporary = tempnam($this->directory, '.bridge-idempotency-');
+        if ($temporary === false) {
+            throw new RuntimeException('Could not create the idempotency entry.');
+        }
+
+        try {
+            if (!chmod($temporary, 0600)) {
+                throw new RuntimeException('Could not secure the idempotency entry.');
+            }
+            $written = file_put_contents($temporary, $encoded, LOCK_EX);
+            if ($written !== strlen($encoded) || !rename($temporary, $path)) {
+                throw new RuntimeException('Could not write the idempotency entry.');
+            }
+            $temporary = '';
+        } finally {
+            if ($temporary !== '' && is_file($temporary)) {
+                unlink($temporary);
+            }
+        }
+    }
+}
+
 final class BridgeCommandResult
 {
     public function __construct(
@@ -321,11 +494,6 @@ final class BridgeApplication
     private const DEVICE_MAX_TTL = 400 * 24 * 60 * 60;
     private const BACKEND_DEFAULT_TTL = 24 * 60 * 60;
     private const BACKEND_MAX_TTL = 24 * 60 * 60;
-    private const IDEMPOTENCY_WINDOW = 600;
-
-    /** @var array<string, array{fingerprint: string, expires_at: int, result: array<string, mixed>}> */
-    private array $idempotency = [];
-
     /** @var callable(string): bool */
     private $ensureUser;
 
@@ -335,6 +503,8 @@ final class BridgeApplication
     /** @var callable(): DateTimeImmutable|null */
     private $clock;
 
+    private readonly BridgeIdempotencyStore $idempotencyStore;
+
     /** @param callable(string): void|null $auditLogger */
     public function __construct(
         private readonly BridgeConfig $config,
@@ -342,10 +512,14 @@ final class BridgeApplication
         callable $ensureUser,
         ?callable $auditLogger = null,
         ?callable $clock = null,
+        ?BridgeIdempotencyStore $idempotencyStore = null,
     ) {
         $this->ensureUser = $ensureUser;
         $this->clock = $clock;
         $this->auditLogger = $auditLogger ?? static fn (string $line): bool => error_log($line);
+        $this->idempotencyStore = $idempotencyStore ?? BridgeIdempotencyStore::fromEnvironment(
+            fn (): int => $this->now()->getTimestamp(),
+        );
     }
 
     /**
@@ -373,10 +547,10 @@ final class BridgeApplication
 
         $headers = $this->normalizeHeaders($headers);
         try {
-            $this->authorize($headers, $callerIp);
+            $callerIdentity = $this->authorize($headers, $callerIp);
 
             if ($method === 'POST' && $route === '/v1/keys') {
-                return $this->create($headers, $body, $callerIp);
+                return $this->create($headers, $body, $callerIp, $callerIdentity);
             }
             if ($method === 'GET' && $route === '/v1/keys') {
                 return $this->list($query, $callerIp);
@@ -394,7 +568,7 @@ final class BridgeApplication
     }
 
     /** @param array<string, string> $headers */
-    private function create(array $headers, string $body, string $callerIp): BridgeHttpResponse
+    private function create(array $headers, string $body, string $callerIp, string $callerIdentity): BridgeHttpResponse
     {
         $input = $this->decodeBody($body);
         $request = $this->validateCreate($input);
@@ -403,25 +577,24 @@ final class BridgeApplication
             throw new BridgeHttpException(400, 'Idempotency-Key is required and must be printable.');
         }
 
-        $this->purgeIdempotency();
         $fingerprint = hash('sha256', json_encode($request, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
-        $cached = $this->idempotency[$idempotencyKey] ?? null;
-        if ($cached !== null) {
-            if (!hash_equals($cached['fingerprint'], $fingerprint)) {
-                throw new BridgeHttpException(409, 'Idempotency-Key was already used for another request.');
-            }
-            $this->audit('create', $request['login'], $cached['result']['app_id'] ?? null, $request['purpose'], $callerIp, 'replayed');
-            return new BridgeHttpResponse(201, $cached['result']);
-        }
 
         try {
-            $result = $this->createDavisKey($request);
-            $this->idempotency[$idempotencyKey] = [
-                'fingerprint' => $fingerprint,
-                'expires_at' => time() + self::IDEMPOTENCY_WINDOW,
-                'result' => $result,
-            ];
-            $this->audit('create', $request['login'], $result['app_id'], $request['purpose'], $callerIp, 'created');
+            $cached = $this->idempotencyStore->remember(
+                $callerIdentity,
+                $idempotencyKey,
+                $fingerprint,
+                fn (): array => $this->createDavisKey($request),
+            );
+            $result = $cached['result'];
+            $this->audit(
+                'create',
+                $request['login'],
+                $result['app_id'] ?? null,
+                $request['purpose'],
+                $callerIp,
+                $cached['replayed'] ? 'replayed' : 'created',
+            );
             return new BridgeHttpResponse(201, $result);
         } catch (BridgeHttpException $error) {
             $this->audit('create', $request['login'], null, $request['purpose'], $callerIp, 'rejected');
@@ -799,7 +972,7 @@ final class BridgeApplication
     }
 
     /** @param array<string, string> $headers */
-    private function authorize(array $headers, string $callerIp): void
+    private function authorize(array $headers, string $callerIp): string
     {
         if (!$this->config->sourceAllowed($callerIp)) {
             throw new BridgeHttpException(403, 'Forbidden source.');
@@ -812,6 +985,8 @@ final class BridgeApplication
         if (!hash_equals($this->config->tokenHash, hash('sha256', $candidate))) {
             throw new BridgeHttpException(401, 'Bridge authentication failed.');
         }
+
+        return hash('sha256', $candidate);
     }
 
     /** @param array<string, string> $headers */
@@ -840,16 +1015,6 @@ final class BridgeApplication
         $clock = $this->clock ?? static fn (): DateTimeImmutable => new DateTimeImmutable('now', new DateTimeZone('UTC'));
         $now = $clock();
         return $now->setTimezone(new DateTimeZone('UTC'));
-    }
-
-    private function purgeIdempotency(): void
-    {
-        $now = time();
-        foreach ($this->idempotency as $key => $entry) {
-            if ($entry['expires_at'] <= $now) {
-                unset($this->idempotency[$key]);
-            }
-        }
     }
 
     private function stripAnsi(string $value): string
