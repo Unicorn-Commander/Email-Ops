@@ -12,7 +12,7 @@ import { useRouter } from 'next/navigation';
 import { cn } from '@/components/ui';
 import { useTheme } from '@/state/theme';
 import { clearSession } from '@/lib/api';
-import { SunIcon, MoonIcon, GearIcon } from '@/components/mail/icons';
+import { SunIcon, MoonIcon, GearIcon, SlidersIcon } from '@/components/mail/icons';
 import { Avatar } from './Avatar';
 import { useHydratedUser } from './useHydratedUser';
 
@@ -84,6 +84,18 @@ export function AccountMenu({ size = 30 }: { size?: number }) {
             >
               {resolved === 'dark' ? <SunIcon className="h-4 w-4" /> : <MoonIcon className="h-4 w-4" />}
               {resolved === 'dark' ? 'Light theme' : 'Dark theme'}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                router.push('/settings');
+              }}
+              className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] text-secondary transition-colors hover:bg-surface-elevated hover:text-primary"
+            >
+              <SlidersIcon className="h-4 w-4" />
+              Connect your AI
             </button>
             <button
               type="button"

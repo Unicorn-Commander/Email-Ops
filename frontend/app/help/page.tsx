@@ -23,7 +23,9 @@ import {
   type ReactNode,
 } from 'react';
 import { Badge, cn } from '@/components/ui';
+import { useMcpUrl } from '@/components/connect/useMcpUrl';
 import { SearchIcon } from '@/components/mail/icons';
+import { claudeCodeOauthCommand, claudeCodeTokenCommand } from '@/lib/connectSnippets';
 
 /* ------------------------------------------------------------------ chrome -- */
 
@@ -819,41 +821,66 @@ function SmsSection() {
 }
 
 function IntegrationsSection() {
+  const { url, ready } = useMcpUrl();
+  const oauthCommand = ready ? claudeCodeOauthCommand(url) : '';
+  const tokenCommand = ready ? claudeCodeTokenCommand(url) : '';
   return (
     <Section
       id="integrations"
       title="Automation & integrations"
       lead="Everything the UI can do, an agent can do through the API — as you, under the same fences."
     >
-      <H3 id="mcp">MCP — connect Claude &amp; suite agents</H3>
+      <H3 id="mcp">MCP — connect your AI</H3>
       <P>
-        Email-Ops exposes an MCP server at <Mono>/api/v1/mcp</Mono>. Tools cover reading
-        threads, triage, search, agent-inbox review, cleanup staging, and compose — every call
-        runs as the calling user, inside their workspace, under the same entitlements and
-        row-level security as this UI. Add it to Claude Code with:
+        Email-Ops exposes an MCP server at <Mono>/api/v1/mcp</Mono> on this site. Tools cover
+        reading threads, triage, search, agent-inbox review, cleanup staging, and compose — every
+        call runs as you, inside your workspace, under the same entitlements and row-level
+        security as this UI. The steps for Claude Desktop, claude.ai, ChatGPT, Cursor, and Codex
+        are on <a className="text-accent hover:underline" href="/settings">Settings</a>.
       </P>
-      <pre className="mt-2 overflow-x-auto rounded-token bg-surface-overlay/60 p-3 font-mono text-[11px] leading-5 text-secondary">
-        {`claude mcp add --transport http email-ops \\
-  https://email-ops.magicunicorn.dev/api/v1/mcp \\
-  --header "Authorization: Bearer eo_pat_..."`}
-      </pre>
-      <H3 id="pats">Personal access tokens (PATs)</H3>
       <P>
-        A PAT (<Mono>eo_pat_…</Mono>) is a long-lived token you mint for an agent or CLI.
-        Today they are minted via the API (<Mono>POST /api/v1/auth/pats</Mono> with your normal
-        login token — see <Mono>docs/MCP.md</Mono> in the repo); the plaintext token is shown
-        exactly once. Two safety properties worth knowing:
+        <B>Sign in (recommended).</B> Add Email-Ops to Claude Code. A browser window asks you to
+        sign in:
+      </P>
+      {oauthCommand ? (
+        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all rounded-token bg-surface-overlay/60 p-3 font-mono text-[11px] leading-5 text-secondary">
+          {oauthCommand}
+        </pre>
+      ) : (
+        <P>The command uses this site&rsquo;s address and appears as soon as the page knows it.</P>
+      )}
+      <P>
+        <B>Or paste a token.</B> Create one under{' '}
+        <a className="text-accent hover:underline" href="/settings#api-tokens">
+          Settings → API tokens
+        </a>
+        . It is shown once. Replace <Mono>eo_pat_…</Mono> in this command — do not leave the
+        placeholder in place:
+      </P>
+      {tokenCommand ? (
+        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all rounded-token bg-surface-overlay/60 p-3 font-mono text-[11px] leading-5 text-secondary">
+          {tokenCommand}
+        </pre>
+      ) : null}
+      <H3 id="pats">API tokens</H3>
+      <P>
+        An API token (<Mono>eo_pat_…</Mono>) is a long-lived credential for an agent or CLI that
+        cannot open a browser. Create and revoke tokens in{' '}
+        <a className="text-accent hover:underline" href="/settings">Settings</a>. The plaintext is
+        shown once, then never again. Worth knowing:
       </P>
       <Ul>
         <Li>
-          A PAT can never mint, list, or revoke other PATs — no self-perpetuating credential
-          chains. Manage them with your real login.
+          A token can never mint, list, or revoke other tokens. Manage them while you are signed
+          in with your account.
         </Li>
         <Li>
-          PATs support scopes (e.g. <Mono>mail:read</Mono>, <Mono>mail:write</Mono>,{' '}
-          <Mono>agent-inbox:approve</Mono>, <Mono>cleaner:run</Mono>) so an automation can be
-          limited to what it needs.
+          Tokens carry scopes (for example <Mono>mail:read</Mono>, <Mono>mail:write</Mono>,{' '}
+          <Mono>agent-inbox:read</Mono>, <Mono>agent-inbox:approve</Mono>, <Mono>cleaner:run</Mono>
+          ). The suggested pair is <Mono>mail:read</Mono> and <Mono>agent-inbox:read</Mono>.{' '}
+          <Mono>mail:write</Mono> lets an agent send.
         </Li>
+        <Li>A new token expires. The default lifetime is 90 days, and 365 is the maximum.</Li>
       </Ul>
       <H3 id="connect-device">Connect a device (IMAP / native mail apps)</H3>
       <P>

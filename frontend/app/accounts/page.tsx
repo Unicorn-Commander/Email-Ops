@@ -99,6 +99,23 @@ export default function AccountsPage() {
         </div>
       </header>
 
+      <Card padded>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-primary">Connect your AI</h2>
+            <p className="mt-1 max-w-xl text-sm leading-6 text-tertiary">
+              API tokens, and the steps for Claude, ChatGPT, Cursor, and Codex, are in Settings.
+            </p>
+          </div>
+          <Link
+            href="/settings"
+            className="inline-flex min-h-[44px] items-center justify-center rounded-token border border-border bg-surface-raised px-3.5 text-sm font-medium text-secondary hover:bg-surface-overlay hover:text-primary sm:min-h-[36px]"
+          >
+            Open Settings
+          </Link>
+        </div>
+      </Card>
+
       {loading ? (
         <div className="grid gap-4 xl:grid-cols-2">
           {[0, 1].map((i) => (
