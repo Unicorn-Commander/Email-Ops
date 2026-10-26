@@ -1430,15 +1430,15 @@ export class JamesClient extends StalwartPort {
     const submissionArgs: Record<string, unknown> = {
       create: { sub: { emailId: '#outbound', identityId: identity.id } },
     };
-    if (stagedInDrafts && sentMailboxId && sentMailboxId !== stageMailboxId) {
-      submissionArgs.onSuccessUpdateEmail = {
-        '#sub': {
-          'keywords/$draft': null,
-          [`mailboxIds/${stageMailboxId}`]: null,
-          [`mailboxIds/${sentMailboxId}`]: true,
-        },
-      };
-    }
+    const sentPatch: Record<string, unknown> | null =
+      stagedInDrafts && sentMailboxId && sentMailboxId !== stageMailboxId
+        ? {
+            'keywords/$draft': null,
+            [`mailboxIds/${stageMailboxId}`]: null,
+            [`mailboxIds/${sentMailboxId}`]: true,
+          }
+        : null;
+    if (sentPatch) submissionArgs.onSuccessUpdateEmail = { '#sub': sentPatch };
     const responses = await this.jmap([
       ['Email/set', { create: { outbound } }, '0'],
       ['EmailSubmission/set', submissionArgs, '1'],
@@ -1455,13 +1455,70 @@ export class JamesClient extends StalwartPort {
     const created = this.named(responses, 'Email/set')?.created?.outbound;
     const providerMessageId = created?.id ?? null;
     const threadId = created?.threadId ?? request.inReplyToThreadId ?? null;
+    if (providerMessageId == null) {
+      return {
+        accepted: false,
+        providerMessageId: null,
+        threadId,
+        lane: 'james',
+        reason: 'james submission returned no id',
+      };
+    }
+    // The staged Email can be created while the submission itself is refused
+    // (notCreated, or a method-level error). Then nothing left the server: report
+    // it, and the staged copy stays in its staging folder for the sender to retry.
+    const submission = this.named(responses, 'EmailSubmission/set');
+    if (!submission?.created?.sub) {
+      const failure = submission?.notCreated?.sub ?? this.named(responses, 'error');
+      const why = typeof failure?.type === 'string' ? failure.type : 'no submission created';
+      return {
+        accepted: false,
+        providerMessageId: null,
+        threadId,
+        lane: 'james',
+        reason: `james submission not created: ${why}`,
+      };
+    }
+    if (sentPatch)
+      await this.ensureFiledInSent(request.fromAddress, providerMessageId, responses, sentPatch);
     return {
-      accepted: providerMessageId != null,
+      accepted: true,
       providerMessageId,
       threadId,
       lane: 'james',
-      reason: providerMessageId == null ? 'james submission returned no id' : null,
+      reason: null,
     };
+  }
+
+  /**
+   * RFC 8621 §7.5: a server that applies onSuccessUpdateEmail answers with an
+   * implicit Email/set under the submission's call id. When that answer is
+   * missing or did not update the sent message, apply the same patch directly so
+   * the sent copy still leaves Drafts for Sent. Best effort: the send succeeded.
+   */
+  private async ensureFiledInSent(
+    mailbox: string,
+    emailId: string,
+    responses: any[],
+    patch: Record<string, unknown>,
+  ): Promise<void> {
+    const implicit = responses.find(
+      (r) => Array.isArray(r) && r[0] === 'Email/set' && r[2] === '1',
+    );
+    const updated = implicit?.[1]?.updated;
+    if (
+      updated &&
+      typeof updated === 'object' &&
+      Object.prototype.hasOwnProperty.call(updated, emailId)
+    )
+      return;
+    const direct = await this.jmap([['Email/set', { update: { [emailId]: patch } }, '0']], mailbox);
+    const directUpdated = direct ? this.named(direct, 'Email/set')?.updated : undefined;
+    if (!directUpdated || !Object.prototype.hasOwnProperty.call(directUpdated, emailId)) {
+      this.logger.warn(
+        `james: sent message ${emailId} could not be filed into Sent; it stays in Drafts`,
+      );
+    }
   }
 
   /** Every folder under the mailbox's account (JMAP `Mailbox/get` all ids). */

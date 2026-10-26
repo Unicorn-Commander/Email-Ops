@@ -37,9 +37,14 @@ function methodCalls(init: RequestInit): any[] {
   return JSON.parse(init.body as string).methodCalls;
 }
 
-function mockSendFetch(mailboxes: any[]) {
+function mockSendFetch(
+  mailboxes: any[],
+  opts: { submission?: 'created' | 'notCreated'; implicitUpdate?: boolean } = {},
+) {
+  const { submission = 'created', implicitUpdate = true } = opts;
   const queryRoles: string[] = [];
   const mailboxGetCalls: any[][] = [];
+  const directUpdates: any[] = [];
   const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
     if (String(url).endsWith('/session')) return jsonResponse(SESSION);
     const calls = methodCalls(init!);
@@ -53,9 +58,14 @@ function mockSendFetch(mailboxes: any[]) {
       const query = calls.find((call) => call[0] === 'Mailbox/query')[1];
       const role = query.filter.role as string;
       queryRoles.push(role);
+      // The exact answer James 3.9 gave on dogfood (probe, 2026-10-26).
       return jsonResponse({
         methodResponses: [
-          ['Mailbox/query', { type: 'invalidArguments', description: `${role} is not a valid role` }, '0'],
+          [
+            'error',
+            { type: 'invalidArguments', description: `'/filter/role' property is not valid: ${role} is not a valid role` },
+            '0',
+          ],
         ],
       });
     }
@@ -64,16 +74,30 @@ function mockSendFetch(mailboxes: any[]) {
       return jsonResponse({ methodResponses: [['Mailbox/get', { list: mailboxes }, '0']] });
     }
     if (methods.includes('EmailSubmission/set')) {
-      return jsonResponse({
-        methodResponses: [
-          ['Email/set', { created: { outbound: { id: 'email-1', threadId: 'thread-1' } } }, '0'],
-          ['EmailSubmission/set', { created: { submission: { id: 'submission-1' } } }, '1'],
-        ],
-      });
+      const methodResponses: any[] = [
+        ['Email/set', { created: { outbound: { id: 'email-1', threadId: 'thread-1' } } }, '0'],
+      ];
+      if (submission === 'created') {
+        methodResponses.push(['EmailSubmission/set', { created: { sub: { id: 'submission-1' } } }, '1']);
+        // RFC 8621 §7.5: the implicit Email/set answer for onSuccessUpdateEmail.
+        if (implicitUpdate) methodResponses.push(['Email/set', { updated: { 'email-1': null } }, '1']);
+      } else {
+        methodResponses.push([
+          'EmailSubmission/set',
+          { notCreated: { sub: { type: 'forbiddenFrom', description: 'not allowed to send as this address' } } },
+          '1',
+        ]);
+      }
+      return jsonResponse({ methodResponses });
+    }
+    if (methods.includes('Email/set')) {
+      const update = calls.find((call) => call[0] === 'Email/set')[1].update;
+      directUpdates.push(update);
+      return jsonResponse({ methodResponses: [['Email/set', { updated: { 'email-1': null } }, '0']] });
     }
     return jsonResponse({ methodResponses: [] });
   });
-  return { fetchSpy, queryRoles, mailboxGetCalls };
+  return { fetchSpy, queryRoles, mailboxGetCalls, directUpdates };
 }
 
 function mockThreadFallbackFetch() {
@@ -113,7 +137,7 @@ describe('JamesClient James 3.9 compatibility', () => {
   });
 
   it('resolves Sent and Drafts through Mailbox/get after James rejects those role queries', async () => {
-    const { fetchSpy, queryRoles, mailboxGetCalls } = mockSendFetch([
+    const { fetchSpy, queryRoles, mailboxGetCalls, directUpdates } = mockSendFetch([
       { id: 'mbx-sent', name: 'Outgoing', role: 'SeNt' },
       { id: 'mbx-drafts', name: 'Working', role: 'DRAFTS' },
       { id: 'mbx-inbox', name: 'Inbox', role: 'INBOX' },
@@ -149,6 +173,47 @@ describe('JamesClient James 3.9 compatibility', () => {
       'mailboxIds/mbx-drafts': null,
       'mailboxIds/mbx-sent': true,
     });
+    expect(directUpdates).toEqual([]);
+  });
+
+  const DRAFTS_AND_SENT = [
+    { id: 'mbx-sent', name: 'Sent', role: 'sent' },
+    { id: 'mbx-drafts', name: 'Drafts', role: 'drafts' },
+  ];
+  const SEND = {
+    fromAddress: 'hq@unicorncommander.ai',
+    toAddress: 'recipient@example.test',
+    subject: 'James roles',
+    body: 'body',
+  };
+
+  it('files the sent copy into Sent directly when James returns no implicit Email/set', async () => {
+    const { fetchSpy, directUpdates } = mockSendFetch(DRAFTS_AND_SENT, { implicitUpdate: false });
+    global.fetch = fetchSpy as any;
+    const client = new JamesClient(makeConfig(CONFIGURED));
+
+    const result = await client.send('hq@unicorncommander.ai', SEND, false);
+
+    expect(result).toMatchObject({ accepted: true, providerMessageId: 'email-1' });
+    expect(directUpdates).toEqual([
+      { 'email-1': { 'keywords/$draft': null, 'mailboxIds/mbx-drafts': null, 'mailboxIds/mbx-sent': true } },
+    ]);
+  });
+
+  it('reports a refused submission as not accepted: the message was staged but never sent', async () => {
+    const { fetchSpy, directUpdates } = mockSendFetch(DRAFTS_AND_SENT, { submission: 'notCreated' });
+    global.fetch = fetchSpy as any;
+    const client = new JamesClient(makeConfig(CONFIGURED));
+
+    const result = await client.send('hq@unicorncommander.ai', SEND, false);
+
+    expect(result).toMatchObject({
+      accepted: false,
+      providerMessageId: null,
+      lane: 'james',
+      reason: 'james submission not created: forbiddenFrom',
+    });
+    expect(directUpdates).toEqual([]);
   });
 
   it('uses Sent Items and Drafts names only when Mailbox/get has no matching roles', async () => {
