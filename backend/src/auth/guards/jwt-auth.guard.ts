@@ -1,9 +1,15 @@
-import { ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { ExecutionContext, Injectable, Optional, UnauthorizedException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Reflector } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { PatService, PAT_PREFIX, ResolvedPatRecord } from '../pat.service';
 import { checkPat, PatRecord } from '../pat-scope';
+import {
+  hasBearerToken,
+  isMcpRequest,
+  setMcpUnauthorizedHeader,
+} from '../oauth-discovery/mcp-auth-header';
 
 export type PatAuthenticatedUser = ResolvedPatRecord['user'] & { __patAuth: PatRecord };
 
@@ -26,6 +32,7 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
   constructor(
     private reflector: Reflector,
     private readonly patService: PatService,
+    @Optional() private readonly configService?: ConfigService,
   ) {
     super();
   }
@@ -42,6 +49,15 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     const request = context.switchToHttp().getRequest<Request>();
     const bearer = JwtAuthGuard.extractBearer(request);
 
+    // The browser session cookie is valid for the UI, but never for the MCP
+    // resource. The strategy's extractor enforces this boundary too; calling
+    // Passport here ensures a cookie-only MCP request receives the normal 401
+    // challenge even if another guard previously populated req.user.
+    if (isMcpRequest(request) && !hasBearerToken(request)) {
+      const result = await super.canActivate(context);
+      return result instanceof Promise ? await result : (result as boolean);
+    }
+
     // Anything other than an eo_pat_ token (a real JWT, or no header at all)
     // is completely unaffected — fall through to the untouched passport path.
     if (!bearer || !bearer.startsWith(PAT_PREFIX)) {
@@ -51,7 +67,7 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     const record = await this.patService.resolvePatRecord(bearer);
     if (!record) {
       const response = context.switchToHttp().getResponse<Response>();
-      response.setHeader('WWW-Authenticate', 'Bearer realm="email-ops-mcp"');
+      setMcpUnauthorizedHeader(request, response, this.configService, true);
       throw new UnauthorizedException('Invalid personal access token');
     }
 
@@ -60,7 +76,7 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     const validity = checkPat(record, '*', new Date().toISOString());
     if (!validity.ok && validity.reason !== 'missing-scope') {
       const response = context.switchToHttp().getResponse<Response>();
-      response.setHeader('WWW-Authenticate', 'Bearer realm="email-ops-mcp"');
+      setMcpUnauthorizedHeader(request, response, this.configService, true);
       throw new UnauthorizedException(`Personal access token ${validity.reason}`);
     }
 
@@ -72,6 +88,18 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     };
     request.user = augmented;
     return true;
+  }
+
+  /** Add RFC 9728 discovery to Passport's missing/invalid JWT 401 path. */
+  handleRequest(err: any, user: any, info: any, context: ExecutionContext, status?: any): any {
+    if (err || !user) {
+      const request = context.switchToHttp().getRequest<Request>();
+      const response = context.switchToHttp().getResponse?.();
+      if (response) {
+        setMcpUnauthorizedHeader(request, response, this.configService, hasBearerToken(request));
+      }
+    }
+    return super.handleRequest(err, user, info, context, status);
   }
 
   private static extractBearer(request: Request): string | null {

@@ -22,11 +22,20 @@ https://email-ops.unicorncommander.ai/api/v1/mcp
 
 ## Authentication
 
-The MCP endpoint is guarded by `JwtAuthGuard`. Send a **Bearer token** in the
-`Authorization` header. Three token types are accepted:
+At `https://email-ops.unicorncommander.ai/api/v1/mcp`, sign in with your
+Unicorn Commander account (OAuth) or paste a token. Claude Code can use the
+OAuth discovery flow with the header-free command below:
 
-- A **hosted Keycloak** access token (realm RS256, `aud=email-ops`) — the same
-  identity the hosted web app uses.
+```bash
+claude mcp add --transport http email-ops https://email-ops.unicorncommander.ai/api/v1/mcp
+```
+
+The MCP endpoint is guarded by `JwtAuthGuard`. For the token form, send a
+**Bearer token** in the `Authorization` header. Three token types are accepted:
+
+- A **hosted Keycloak** access token (realm RS256, with `aud` or `azp` matching
+  the configured Email-Ops client/audience) — the same identity the hosted web
+  app uses.
 - A locally signed HS256 session JWT returned by `/api/v1/auth/local/login` in
   the self-host profile.
 - An **`eo_pat_…` personal access token** (SUITE-IDENTITY §D9) — a long-lived

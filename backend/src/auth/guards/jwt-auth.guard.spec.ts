@@ -3,7 +3,11 @@ import { JwtAuthGuard } from './jwt-auth.guard';
 import { PatService } from '../pat.service';
 
 function makeContext(opts: { authorization?: string; isPublic?: boolean }) {
-  const req: any = { headers: { authorization: opts.authorization }, user: undefined };
+  const req: any = {
+    path: '/api/v1/mcp',
+    headers: { authorization: opts.authorization },
+    user: undefined,
+  };
   const setHeader = jest.fn();
   const res: any = { setHeader };
   const context: any = {
@@ -54,7 +58,12 @@ describe('JwtAuthGuard', () => {
     const { context, setHeader } = makeContext({ authorization: 'Bearer eo_pat_revokedtoken' });
 
     await expect(guard.canActivate(context)).rejects.toBeInstanceOf(UnauthorizedException);
-    expect(setHeader).toHaveBeenCalledWith('WWW-Authenticate', 'Bearer realm="email-ops-mcp"');
+    expect(setHeader).toHaveBeenCalledWith(
+      'WWW-Authenticate',
+      expect.stringContaining(
+        'resource_metadata="http://localhost/.well-known/oauth-protected-resource/api/v1/mcp"',
+      ),
+    );
   });
 
   it('rejects an expired PAT before it can reach any protected route', async () => {
@@ -68,7 +77,12 @@ describe('JwtAuthGuard', () => {
     const { context, setHeader } = makeContext({ authorization: 'Bearer eo_pat_expiredtoken' });
 
     await expect(guard.canActivate(context)).rejects.toThrow('Personal access token expired');
-    expect(setHeader).toHaveBeenCalledWith('WWW-Authenticate', 'Bearer realm="email-ops-mcp"');
+    expect(setHeader).toHaveBeenCalledWith(
+      'WWW-Authenticate',
+      expect.stringContaining(
+        'resource_metadata="http://localhost/.well-known/oauth-protected-resource/api/v1/mcp"',
+      ),
+    );
   });
 
   it('rejects a revoked PAT before it can reach any protected route', async () => {
@@ -85,7 +99,12 @@ describe('JwtAuthGuard', () => {
 
     await expect(guard.canActivate(context)).rejects.toThrow('Personal access token revoked');
     expect(req.user).toBeUndefined();
-    expect(setHeader).toHaveBeenCalledWith('WWW-Authenticate', 'Bearer realm="email-ops-mcp"');
+    expect(setHeader).toHaveBeenCalledWith(
+      'WWW-Authenticate',
+      expect.stringContaining(
+        'resource_metadata="http://localhost/.well-known/oauth-protected-resource/api/v1/mcp"',
+      ),
+    );
   });
 
   it('falls through to the existing passport JWT path for a non-eo_pat_ bearer', async () => {
