@@ -16,10 +16,7 @@ export abstract class CalendarCredentialsPort {
 
 @Injectable()
 export class UnavailableCalendarCredentials extends CalendarCredentialsPort {
-  async resolve(
-    _workspaceId: string,
-    _mailbox: CalendarCredentialMailbox,
-  ): Promise<CalendarCredential | null> {
+  async resolve(): Promise<CalendarCredential | null> {
     return null;
   }
 }

@@ -35,28 +35,6 @@ function pad(value: number, width = 2): string {
   return String(value).padStart(width, '0');
 }
 
-function splitUnescaped(value: string, delimiter: string): string[] {
-  const parts: string[] = [];
-  let current = '';
-  let escaped = false;
-  for (const char of value) {
-    if (escaped) {
-      current += char;
-      escaped = false;
-    } else if (char === '\\') {
-      current += char;
-      escaped = true;
-    } else if (char === delimiter) {
-      parts.push(current);
-      current = '';
-    } else {
-      current += char;
-    }
-  }
-  parts.push(current);
-  return parts;
-}
-
 function unescapeText(value: string): string {
   return value.replace(/\\([\\,;Nn])/g, (_match, escaped: string) => {
     if (escaped.toLowerCase() === 'n') return '\n';
