@@ -1,0 +1,136 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * A tiny fixture for the bridge protocol tests. It intentionally emits the
+ * Davis 5.6.2 command shapes, while all ids/secrets are generated at runtime.
+ */
+
+$statePath = getenv('FAKE_CONSOLE_STATE');
+if (!is_string($statePath) || $statePath === '') {
+    fwrite(STDERR, "missing fixture state\n");
+    exit(2);
+}
+
+$state = is_file($statePath) ? json_decode(file_get_contents($statePath) ?: '', true) : null;
+if (!is_array($state)) {
+    $state = ['users' => [], 'keys' => [], 'create_count' => 0];
+}
+$state['users'] ??= [];
+$state['keys'] ??= [];
+$state['create_count'] ??= 0;
+
+$args = array_values(array_filter(array_slice($argv, 1), static fn (string $arg): bool => $arg !== '--no-interaction'));
+$command = $args[0] ?? '';
+
+$save = static function () use (&$state, $statePath): void {
+    file_put_contents($statePath, json_encode($state, JSON_THROW_ON_ERROR));
+};
+
+if ($command === 'davis:app-key:create') {
+    $name = $args[1] ?? '';
+    $login = '';
+    for ($i = 2; $i < count($args) - 1; $i++) {
+        if ($args[$i] === '-u' || $args[$i] === '--user') {
+            $login = $args[$i + 1];
+            break;
+        }
+    }
+    if (!in_array($login, $state['users'], true)) {
+        fwrite(STDERR, "These users do not exist: {$login}.\n");
+        exit(2);
+    }
+
+    $state['create_count']++;
+    $appId = 'app_'.substr(hash('sha256', $name.'|'.$login.'|'.$state['create_count']), 0, 24);
+    $secret = bin2hex(random_bytes(32));
+    $state['keys'][] = [
+        'name' => $name,
+        'app_id' => $appId,
+        'scope' => [$login],
+        'created' => gmdate('Y-m-d H:i'),
+        'last_used' => 'never',
+        'used_as' => 'nobody',
+        'status' => 'active',
+    ];
+    $save();
+    echo "------------------------------\n";
+    echo " Name            {$name}\n";
+    echo " App id          {$appId}\n";
+    echo " Secret          {$secret}\n";
+    echo " Scope           {$login}\n";
+    echo " Basic username  {$login}*{$appId}\n";
+    echo "------------------------------\n";
+    echo " ! [WARNING] The secret is not stored and will not be shown again.\n";
+    exit(0);
+}
+
+if ($command === 'davis:app-key:list') {
+    if ($state['keys'] === []) {
+        echo "No app key yet.\n";
+        exit(0);
+    }
+    $columns = ['Name', 'App id', 'Scope', 'Created', 'Last used', 'Used as', 'Status'];
+    $rows = array_map(static function (array $key): array {
+        return [
+            $key['name'],
+            $key['app_id'],
+            implode(', ', $key['scope']),
+            $key['created'],
+            $key['last_used'],
+            $key['used_as'],
+            $key['status'],
+        ];
+    }, $state['keys']);
+    $widths = array_map('strlen', $columns);
+    foreach ($rows as $row) {
+        foreach ($row as $index => $value) {
+            $widths[$index] = max($widths[$index], strlen((string) $value));
+        }
+    }
+    $border = '+';
+    foreach ($widths as $width) {
+        $border .= str_repeat('-', $width + 2). '+';
+    }
+    echo $border."\n";
+    $printRow = static function (array $row) use ($widths): void {
+        $line = '|';
+        foreach ($row as $index => $value) {
+            $line .= ' '.str_pad((string) $value, $widths[$index]).' |';
+        }
+        echo $line."\n";
+    };
+    $printRow($columns);
+    echo $border."\n";
+    foreach (array_reverse($rows) as $row) {
+        $printRow($row);
+    }
+    echo $border."\n";
+    exit(0);
+}
+
+if ($command === 'davis:app-key:revoke') {
+    $appId = $args[1] ?? '';
+    foreach ($state['keys'] as &$key) {
+        if ($key['app_id'] !== $appId) {
+            continue;
+        }
+        if (str_starts_with($key['status'], 'revoked ')) {
+            echo "[NOTE] {$appId} was already revoked on ".substr($key['status'], 8).".\n";
+        } else {
+            $key['status'] = 'revoked '.gmdate('Y-m-d H:i');
+            echo "[OK] Revoked {$appId}.\n";
+            $save();
+        }
+        unset($key);
+        exit(0);
+    }
+    unset($key);
+    fwrite(STDERR, "No app key with the app id {$appId}.\n");
+    exit(1);
+}
+
+fwrite(STDERR, "unknown fixture command\n");
+exit(2);
