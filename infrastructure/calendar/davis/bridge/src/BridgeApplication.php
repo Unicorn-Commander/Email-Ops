@@ -683,7 +683,7 @@ final class BridgeApplication
     private function parseListOutput(string $output): array
     {
         $output = $this->stripAnsi($output);
-        if (trim($output) === 'No app key yet.') {
+        if (preg_match('/\A(?:\[NOTE\]\s*)?No app key yet\.\z/', trim($output))) {
             return [];
         }
 
@@ -732,7 +732,7 @@ final class BridgeApplication
     private function isUnknownUserOutput(string $output): bool
     {
         $lines = array_values(array_filter(array_map('trim', preg_split('/\r?\n/', $this->stripAnsi($output)) ?: [])));
-        return count($lines) === 1 && (bool) preg_match('/\AThese users do not exist: .+\.\z/', $lines[0]);
+        return count($lines) === 1 && (bool) preg_match('/\A(?:\[ERROR\]\s*)?These users do not exist: .+\.\z/', $lines[0]);
     }
 
     /** @return array<string, mixed> */

@@ -39,7 +39,7 @@ if ($command === 'davis:app-key:create') {
         }
     }
     if (!in_array($login, $state['users'], true)) {
-        fwrite(STDERR, "These users do not exist: {$login}.\n");
+        fwrite(STDERR, "[ERROR] These users do not exist: {$login}.\n");
         exit(2);
     }
 
@@ -69,7 +69,7 @@ if ($command === 'davis:app-key:create') {
 
 if ($command === 'davis:app-key:list') {
     if ($state['keys'] === []) {
-        echo "No app key yet.\n";
+        echo "[NOTE] No app key yet.\n";
         exit(0);
     }
     $columns = ['Name', 'App id', 'Scope', 'Created', 'Last used', 'Used as', 'Status'];

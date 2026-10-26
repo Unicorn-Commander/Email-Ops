@@ -52,6 +52,12 @@ checkSame(['status' => 'ok'], $health->body, 'health body');
 $unauthenticated = $application->handle('GET', '/v1/keys?login=person%40calendar.test', [], '', '127.0.0.1');
 checkSame(401, $unauthenticated->status, 'missing auth status');
 
+$emptyListed = $application->handle('GET', '/v1/keys?login=person%40calendar.test', [
+    'authorization' => 'Bearer '.$token,
+], '', '127.0.0.1');
+checkSame(200, $emptyListed->status, 'empty key list status');
+checkSame([], $emptyListed->body['items'], 'empty key list body');
+
 $headers = [
     'Authorization' => 'Bearer '.$token,
     'Idempotency-Key' => 'fictional-create-retry-1',
@@ -179,4 +185,4 @@ check(!str_contains($logsText, $token), 'audit log contained the token');
 check(str_contains($logsText, 'BRIDGE_AUDIT'), 'audit log was not emitted');
 
 unlink($statePath);
-echo "bridge tests passed: 16 assertions\n";
+echo "bridge tests passed: 17 assertions\n";
