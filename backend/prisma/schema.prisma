@@ -443,6 +443,7 @@ model Workspace {
   spaces             Space[]
   invitations        Invitation[]
   uiCommands         UiCommand[]
+  calendarDeviceKeys  CalendarDeviceKey[]
 
   @@index([slug])
   @@index([status])
@@ -649,6 +650,7 @@ model MailboxAccount {
   scheduledSends ScheduledSend[]
   outboundAttachments OutboundAttachment[]
   mailRules      MailRule[]
+  calendarDeviceKeys CalendarDeviceKey[]
 
   // One mailbox identity per address per workspace.
   @@unique([workspaceId, emailAddress])
@@ -657,6 +659,39 @@ model MailboxAccount {
   // "my inboxes" / "agent X's inboxes" / "shared boxes".
   @@index([workspaceId, ownerKind, ownerKey])
   @@map("mailbox_accounts")
+}
+
+// ============================================================
+// CALENDAR DEVICE KEY (Email-Ops OWNS metadata; Davis owns the secret)
+// ============================================================
+//
+// Davis is the authority for native app-key lifecycle and plaintext secret
+// material. This row intentionally stores only the bridge reference and
+// operator-facing metadata. There is no secret, secret hash, or reversible
+// credential field here.
+//
+// RLS-fenced on workspaceId exactly like MailboxAccount. The mailbox owner
+// fence remains an application-layer check because a workspace may contain
+// private human mailboxes alongside shared mailboxes.
+model CalendarDeviceKey {
+  id          String   @id @default(uuid())
+  workspaceId String
+  mailboxId   String
+  label       String
+  davisAppId  String
+  createdById String
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+  revokedAt   DateTime?
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox   MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, davisAppId])
+  @@index([workspaceId])
+  @@index([workspaceId, mailboxId, revokedAt])
+  @@index([workspaceId, expiresAt])
+  @@map("calendar_device_keys")
 }
 
 // ============================================================

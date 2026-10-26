@@ -37,7 +37,9 @@ BEGIN
       -- Wave 7: the agent-send trust allowlist.
       ('trusted_correspondents'),
       -- 2026-10-05: send kits (an un-granted table fails the no-GUC read below as permission denied).
-      ('agent_send_kits')
+      ('agent_send_kits'),
+      -- Calendar Phase 2b: Davis-owned device-key metadata.
+      ('calendar_device_keys')
   )
   SELECT string_agg(f.relname, ', ' ORDER BY f.relname) INTO missing
   FROM fenced f
@@ -64,7 +66,8 @@ BEGIN
       'space_mailboxes', 'space_agents', 'ui_commands',
       'mail_contacts', 'mail_signatures', 'mail_vacation_settings',
       'trusted_correspondents', -- Wave 7
-      'agent_send_kits' -- send kits, 2026-10-05
+      'agent_send_kits', -- send kits, 2026-10-05
+      'calendar_device_keys' -- calendar Phase 2b
     ])
   LOOP
     EXECUTE format('SELECT count(*) FROM %I', tbl) INTO n;
@@ -102,11 +105,14 @@ DELETE FROM sms_accounts WHERE id = 'sms-acct-aaaa';
 DELETE FROM sender_policies WHERE id = 'sender-aaaa';
 DELETE FROM thread_dispositions WHERE id = 'td-aaaa';
 DELETE FROM email_messages WHERE id = 'msg-aaaa';
+DELETE FROM calendar_device_keys WHERE id = 'device-aaaa';
 DELETE FROM mailbox_accounts WHERE id = 'mbx-aaaa';
 DELETE FROM ui_commands WHERE id IN ('ui-aaaa-alice', 'ui-aaaa-bob');
 
 INSERT INTO mailbox_accounts (id, "workspaceId", "emailAddress", "isDefault", "postmarkLane", active, "createdAt", "updatedAt")
 VALUES ('mbx-aaaa', '0190a000-7e57-7000-8000-0000000eaaaa', 'desk-aaaa@example.test', true, true, true, now(), now());
+INSERT INTO calendar_device_keys (id, "workspaceId", "mailboxId", label, "davisAppId", "createdById", "createdAt", "expiresAt")
+VALUES ('device-aaaa', '0190a000-7e57-7000-8000-0000000eaaaa', 'mbx-aaaa', 'RLS fixture device', 'app_rls_aaaa', 'user-aaaa', now(), now() + interval '1 day');
 INSERT INTO email_messages (id, "workspaceId", "mailboxAccountId", "contactId", "threadId", "externalSource", "externalRef", mode, status, direction, "toAddress", subject, "providerMessageId", "createdAt", "updatedAt")
 VALUES ('msg-aaaa', '0190a000-7e57-7000-8000-0000000eaaaa', 'mbx-aaaa', 'contact-aaaa', 'thread-aaaa', 'phase7', 'email-aaaa', 'SEND', 'SENT', 'SENT', 'lead-aaaa@example.test', 'AAAA', 'pmid-aaaa', now(), now());
 INSERT INTO agent_inbox_items (id, "workspaceId", "messageId", kind, state, "draftedBy", summary, "createdAt", "updatedAt")
@@ -160,11 +166,14 @@ DELETE FROM sms_accounts WHERE id = 'sms-acct-bbbb';
 DELETE FROM sender_policies WHERE id = 'sender-bbbb';
 DELETE FROM thread_dispositions WHERE id = 'td-bbbb';
 DELETE FROM email_messages WHERE id = 'msg-bbbb';
+DELETE FROM calendar_device_keys WHERE id = 'device-bbbb';
 DELETE FROM mailbox_accounts WHERE id = 'mbx-bbbb';
 DELETE FROM ui_commands WHERE id = 'ui-bbbb-bob';
 
 INSERT INTO mailbox_accounts (id, "workspaceId", "emailAddress", "isDefault", "postmarkLane", active, "createdAt", "updatedAt")
 VALUES ('mbx-bbbb', '0190a000-7e57-7000-8000-0000000ebbbb', 'desk-bbbb@example.test', true, true, true, now(), now());
+INSERT INTO calendar_device_keys (id, "workspaceId", "mailboxId", label, "davisAppId", "createdById", "createdAt", "expiresAt")
+VALUES ('device-bbbb', '0190a000-7e57-7000-8000-0000000ebbbb', 'mbx-bbbb', 'RLS fixture device', 'app_rls_bbbb', 'user-bbbb', now(), now() + interval '1 day');
 INSERT INTO email_messages (id, "workspaceId", "mailboxAccountId", "contactId", "threadId", "externalSource", "externalRef", mode, status, direction, "toAddress", subject, "providerMessageId", "createdAt", "updatedAt")
 VALUES ('msg-bbbb', '0190a000-7e57-7000-8000-0000000ebbbb', 'mbx-bbbb', 'contact-bbbb', 'thread-bbbb', 'phase7', 'email-bbbb', 'SEND', 'SENT', 'SENT', 'lead-bbbb@example.test', 'BBBB', 'pmid-bbbb', now(), now());
 INSERT INTO agent_inbox_items (id, "workspaceId", "messageId", kind, state, "draftedBy", summary, "createdAt", "updatedAt")
@@ -226,6 +235,7 @@ BEGIN
   SELECT count(*) INTO n FROM space_mailboxes WHERE "spaceId" = 'sp-bbbb'; IF n <> 0 THEN RAISE EXCEPTION 'space_mailboxes leaked via foreign parent space'; END IF;
   SELECT count(*) INTO n FROM space_agents WHERE "spaceId" = 'sp-bbbb'; IF n <> 0 THEN RAISE EXCEPTION 'space_agents leaked via foreign parent space'; END IF;
   SELECT count(*) INTO n FROM ui_commands WHERE id = 'ui-bbbb-bob'; IF n <> 0 THEN RAISE EXCEPTION 'ui_commands leaked across workspace'; END IF;
+  SELECT count(*) INTO n FROM calendar_device_keys WHERE id = 'device-bbbb'; IF n <> 0 THEN RAISE EXCEPTION 'calendar_device_keys leaked'; END IF;
 
   SELECT count(*) INTO n FROM ui_commands WHERE id = 'ui-aaaa-alice'; IF n <> 1 THEN RAISE EXCEPTION 'ui_commands owner row invisible'; END IF;
   PERFORM set_config('app.uc_uid', 'uc-uid-bob', true);
@@ -264,6 +274,13 @@ BEGIN
     RAISE EXCEPTION 'same-workspace different-ucUid ui_commands insert unexpectedly succeeded';
   EXCEPTION WHEN insufficient_privilege OR check_violation THEN NULL;
   END;
+
+  BEGIN
+    INSERT INTO calendar_device_keys (id, "workspaceId", "mailboxId", label, "davisAppId", "createdById", "expiresAt")
+    VALUES ('device-evil', '0190a000-7e57-7000-8000-0000000ebbbb', 'mbx-bbbb', 'wrong workspace', 'app_rls_evil', 'user-evil', now() + interval '1 day');
+    RAISE EXCEPTION 'cross-workspace calendar_device_keys insert unexpectedly succeeded';
+  EXCEPTION WHEN insufficient_privilege OR check_violation OR foreign_key_violation THEN NULL;
+  END;
 END $$;
 
 \echo 'Asserting cross-fence UPDATE/DELETE are no-ops'
@@ -285,6 +302,8 @@ BEGIN
   GET DIAGNOSTICS changed = ROW_COUNT; IF changed <> 0 THEN RAISE EXCEPTION 'cross-fence DELETE space_agents changed % rows', changed; END IF;
   UPDATE ui_commands SET "consumedAt" = "consumedAt" WHERE id = 'ui-bbbb-bob';
   GET DIAGNOSTICS changed = ROW_COUNT; IF changed <> 0 THEN RAISE EXCEPTION 'cross-fence UPDATE ui_commands changed % rows', changed; END IF;
+  UPDATE calendar_device_keys SET label = label WHERE id = 'device-bbbb';
+  GET DIAGNOSTICS changed = ROW_COUNT; IF changed <> 0 THEN RAISE EXCEPTION 'cross-fence UPDATE calendar_device_keys changed % rows', changed; END IF;
 END $$;
 
 \echo 'Cleaning deterministic Phase 7 rows'
@@ -308,6 +327,7 @@ DELETE FROM sms_accounts WHERE id = 'sms-acct-aaaa';
 DELETE FROM sender_policies WHERE id = 'sender-aaaa';
 DELETE FROM thread_dispositions WHERE id = 'td-aaaa';
 DELETE FROM email_messages WHERE id = 'msg-aaaa';
+DELETE FROM calendar_device_keys WHERE id = 'device-aaaa';
 DELETE FROM mailbox_accounts WHERE id = 'mbx-aaaa';
 DELETE FROM ui_commands WHERE id IN ('ui-aaaa-alice', 'ui-aaaa-bob');
 COMMIT;
@@ -331,6 +351,7 @@ DELETE FROM sms_accounts WHERE id = 'sms-acct-bbbb';
 DELETE FROM sender_policies WHERE id = 'sender-bbbb';
 DELETE FROM thread_dispositions WHERE id = 'td-bbbb';
 DELETE FROM email_messages WHERE id = 'msg-bbbb';
+DELETE FROM calendar_device_keys WHERE id = 'device-bbbb';
 DELETE FROM mailbox_accounts WHERE id = 'mbx-bbbb';
 DELETE FROM ui_commands WHERE id = 'ui-bbbb-bob';
 COMMIT;
