@@ -4,8 +4,9 @@
 declare(strict_types=1);
 
 /**
- * A tiny fixture for the bridge protocol tests. It intentionally emits the
- * Davis 5.6.2 command shapes, while all ids/secrets are generated at runtime.
+ * A fixture for the bridge protocol tests. It prints the Davis 5.6.2 output exactly as captured from the live server
+ * on 2026-10-26: Symfony-style tables and definition lists (dashed borders, space-padded cells, no pipes) and
+ * " [OK]" / " [ERROR]" / " ! [NOTE]" / " [WARNING]" blocks. All ids and secrets are generated at runtime.
  */
 
 $statePath = getenv('FAKE_CONSOLE_STATE');
@@ -22,24 +23,60 @@ $state['users'] ??= [];
 $state['keys'] ??= [];
 $state['create_count'] ??= 0;
 
-$args = array_values(array_filter(array_slice($argv, 1), static fn (string $arg): bool => $arg !== '--no-interaction'));
+$args = array_values(array_filter(array_slice($argv, 1), static fn (string $arg): bool => !in_array($arg, ['--no-interaction', '--no-ansi'], true)));
 $command = $args[0] ?? '';
 
 $save = static function () use (&$state, $statePath): void {
     file_put_contents($statePath, json_encode($state, JSON_THROW_ON_ERROR));
 };
 
-if ($command === 'davis:app-key:create') {
-    $name = $args[1] ?? '';
-    $login = '';
-    for ($i = 2; $i < count($args) - 1; $i++) {
-        if ($args[$i] === '-u' || $args[$i] === '--user') {
-            $login = $args[$i + 1];
-            break;
+// Symfony's block style: a blank line, the padded message (80 columns), a blank line.
+$block = static function (string $prefix, string $message): void {
+    echo "\n".str_pad(' '.$prefix.' '.$message, 80)."\n\n";
+};
+
+// Symfony's table style for SymfonyStyle: " " + per column (" " + cell + " ") joined by " ", borders of dashes.
+$table = static function (?array $headers, array $rows): void {
+    $all = $headers === null ? $rows : array_merge([$headers], $rows);
+    $widths = [];
+    foreach ($all as $row) {
+        foreach (array_values($row) as $index => $cell) {
+            $widths[$index] = max($widths[$index] ?? 0, mb_strlen((string) $cell));
         }
     }
+    $border = ' '.implode(' ', array_map(static fn (int $width): string => str_repeat('-', $width + 2), $widths)).' ';
+    $line = static function (array $row) use ($widths): string {
+        $cells = [];
+        foreach (array_values($row) as $index => $cell) {
+            $cells[] = ' '.$cell.str_repeat(' ', $widths[$index] - mb_strlen((string) $cell)).' ';
+        }
+        return ' '.implode(' ', $cells).' ';
+    };
+    echo $border."\n";
+    if ($headers !== null) {
+        echo $line($headers)."\n".$border."\n";
+    }
+    foreach ($rows as $row) {
+        echo $line($row)."\n";
+    }
+    echo $border."\n";
+};
+
+$option = static function (array $args, array $names): ?string {
+    for ($i = 1; $i < count($args) - 1; $i++) {
+        if (in_array($args[$i], $names, true)) {
+            return $args[$i + 1];
+        }
+    }
+    return null;
+};
+
+if ($command === 'davis:app-key:create') {
+    $name = $args[1] ?? '';
+    $login = (string) $option($args, ['-u', '--user']);
+    $expiresAt = $option($args, ['--expires-at']);
     if (!in_array($login, $state['users'], true)) {
-        fwrite(STDERR, "[ERROR] These users do not exist: {$login}.\n");
+        $block('[ERROR]', "These users do not exist: {$login}.");
         exit(2);
     }
 
@@ -53,61 +90,26 @@ if ($command === 'davis:app-key:create') {
         'created' => gmdate('Y-m-d H:i'),
         'last_used' => 'never',
         'used_as' => 'nobody',
-        'status' => 'active',
+        // Davis stores an expiry in revokedAt, so a live expiring key lists as "expires <date>".
+        'status' => $expiresAt === null ? 'active' : 'expires '.(new DateTimeImmutable($expiresAt))->format('Y-m-d H:i'),
     ];
     $save();
-    echo "------------------------------\n";
-    echo " Name            {$name}\n";
-    echo " App id          {$appId}\n";
-    echo " Secret          {$secret}\n";
-    echo " Scope           {$login}\n";
-    echo " Basic username  <login>*{$appId}\n";
-    echo "------------------------------\n";
-    echo " ! [WARNING] The secret is not stored and will not be shown again.\n";
+    echo "\n";
+    $table(null, [['Name', $name], ['App id', $appId], ['Secret', $secret], ['Scope', $login], ['Basic username', '<login>*'.$appId]]);
+    echo "\n";
+    $block('[WARNING]', 'The secret is not stored and will not be shown again.');
     exit(0);
 }
 
 if ($command === 'davis:app-key:list') {
     if ($state['keys'] === []) {
-        echo "[NOTE] No app key yet.\n";
+        $block('! [NOTE]', 'No app key yet.');
         exit(0);
     }
-    $columns = ['Name', 'App id', 'Scope', 'Created', 'Last used', 'Used as', 'Status'];
-    $rows = array_map(static function (array $key): array {
-        return [
-            $key['name'],
-            $key['app_id'],
-            implode(', ', $key['scope']),
-            $key['created'],
-            $key['last_used'],
-            $key['used_as'],
-            $key['status'],
-        ];
-    }, $state['keys']);
-    $widths = array_map('strlen', $columns);
-    foreach ($rows as $row) {
-        foreach ($row as $index => $value) {
-            $widths[$index] = max($widths[$index], strlen((string) $value));
-        }
-    }
-    $border = '+';
-    foreach ($widths as $width) {
-        $border .= str_repeat('-', $width + 2). '+';
-    }
-    echo $border."\n";
-    $printRow = static function (array $row) use ($widths): void {
-        $line = '|';
-        foreach ($row as $index => $value) {
-            $line .= ' '.str_pad((string) $value, $widths[$index]).' |';
-        }
-        echo $line."\n";
-    };
-    $printRow($columns);
-    echo $border."\n";
-    foreach (array_reverse($rows) as $row) {
-        $printRow($row);
-    }
-    echo $border."\n";
+    $rows = array_map(static fn (array $key): array => [
+        $key['name'], $key['app_id'], implode(', ', $key['scope']), $key['created'], $key['last_used'], $key['used_as'], $key['status'],
+    ], array_reverse($state['keys']));
+    $table(['Name', 'App id', 'Scope', 'Created', 'Last used', 'Used as', 'Status'], $rows);
     exit(0);
 }
 
@@ -118,17 +120,17 @@ if ($command === 'davis:app-key:revoke') {
             continue;
         }
         if (str_starts_with($key['status'], 'revoked ')) {
-            echo "[NOTE] {$appId} was already revoked on ".substr($key['status'], 8).".\n";
+            $block('! [NOTE]', "{$appId} was already revoked on ".substr($key['status'], 8).'.');
         } else {
             $key['status'] = 'revoked '.gmdate('Y-m-d H:i');
-            echo "[OK] Revoked {$appId}.\n";
+            $block('[OK]', "Revoked {$appId}.");
             $save();
         }
         unset($key);
         exit(0);
     }
     unset($key);
-    fwrite(STDERR, "No app key with the app id {$appId}.\n");
+    $block('[ERROR]', "No app key with the app id {$appId}.");
     exit(1);
 }
 

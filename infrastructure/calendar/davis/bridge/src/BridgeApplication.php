@@ -506,7 +506,7 @@ final class BridgeApplication
 
         $login = $this->validateLogin($input['login'] ?? null);
         $label = $input['label'] ?? null;
-        if (!is_string($label) || $label === '' || strlen($label) > 64 || !preg_match('/\A[\x20-\x7e]+\z/', $label)) {
+        if (!is_string($label) || $label === '' || $label !== trim($label) || strlen($label) > 64 || !preg_match('/\A[\x20-\x7e]+\z/', $label)) {
             throw new BridgeHttpException(400, 'label must be 64 or fewer printable characters.');
         }
 
@@ -581,10 +581,27 @@ final class BridgeApplication
                 }
                 throw new BridgeProtocolException('Unexpected Davis create retry failure.');
             }
-            return $this->parseCreateOutput($retry->stdout, $name, $request['login'], $expires);
+            return $this->parseCreatedKey($retry->stdout, $name, $request['login'], $expires);
         }
 
-        return $this->parseCreateOutput($result->stdout, $name, $request['login'], $expires);
+        return $this->parseCreatedKey($result->stdout, $name, $request['login'], $expires);
+    }
+
+    /** Parse a successful create; if Davis made a key we cannot read back, revoke it rather than leave it live. */
+    private function parseCreatedKey(string $stdout, string $name, string $login, DateTimeImmutable $expires): array
+    {
+        try {
+            return $this->parseCreateOutput($stdout, $name, $login, $expires);
+        } catch (BridgeProtocolException $error) {
+            if (preg_match('/\bapp_[a-f0-9]{24}\b/', $this->stripAnsi($stdout), $match)) {
+                try {
+                    $this->runRevokeCommand($match[0]);
+                } catch (Throwable) {
+                    // The original protocol error is the one to report; Davis expiry remains the backstop.
+                }
+            }
+            throw $error;
+        }
     }
 
     /** @return list<array<string, mixed>> */
@@ -607,14 +624,14 @@ final class BridgeApplication
         $allowed = false;
         foreach (preg_split('/\r?\n/', $output) ?: [] as $line) {
             $line = trim($line);
-            if ($line === '' || preg_match('/\A[-+]+\z/', $line)) {
+            if ($line === '' || preg_match('/\A[-\s]+\z/', $line)) {
                 continue;
             }
             if (preg_match('/\A(?:\[OK\]\s+)?Revoked '.preg_quote($appId, '/').'\.\z/', $line)) {
                 $allowed = true;
                 continue;
             }
-            if (preg_match('/\A(?:\[NOTE\]\s+)?'.preg_quote($appId, '/').' was already revoked on \d{4}-\d{2}-\d{2} \d{2}:\d{2}\.\z/', $line)) {
+            if (preg_match('/\A(?:!\s*)?(?:\[NOTE\]\s+)?'.preg_quote($appId, '/').' was already revoked on \d{4}-\d{2}-\d{2} \d{2}:\d{2}\.\z/', $line)) {
                 $allowed = true;
                 continue;
             }
@@ -631,10 +648,10 @@ final class BridgeApplication
         $fields = [];
         foreach (preg_split('/\r?\n/', $this->stripAnsi($output)) ?: [] as $line) {
             $line = trim($line);
-            if ($line === '' || preg_match('/\A[-+]+\z/', $line)) {
+            if ($line === '' || preg_match('/\A[-\s]+\z/', $line)) {
                 continue;
             }
-            if (preg_match('/\A!.*The secret is not stored and will not be shown again\.\z/', $line)) {
+            if (preg_match('/\A(?:!\s*)?(?:\[WARNING\]\s*)?The secret is not stored and will not be shown again\.\z/', $line)) {
                 continue;
             }
             if (preg_match('/\A(Name|App id|Secret|Scope|Basic username)\s{2,}(.+)\z/', $line, $match)) {
@@ -683,56 +700,82 @@ final class BridgeApplication
     private function parseListOutput(string $output): array
     {
         $output = $this->stripAnsi($output);
-        if (preg_match('/\A(?:\[NOTE\]\s*)?No app key yet\.\z/', trim($output))) {
+        if (preg_match('/\A(?:!\s*)?(?:\[NOTE\]\s*)?No app key yet\.\z/', trim($output))) {
             return [];
         }
 
+        // Davis 5.6.2 prints a Symfony-style table: dashed border lines with one run of dashes per column, and
+        // space-padded cells with no pipes (captured on the live server 2026-10-26). Column starts come from the
+        // first border; cells are sliced by character so a human-made key with a non-ASCII name still lines up.
+        $columns = ['Name', 'App id', 'Scope', 'Created', 'Last used', 'Used as', 'Status'];
+        $starts = null;
         $headerSeen = false;
         $items = [];
         foreach (preg_split('/\r?\n/', $output) ?: [] as $line) {
-            $line = trim($line);
-            if ($line === '' || preg_match('/\A[+\-]+\z/', $line)) {
+            $line = rtrim($line);
+            if (trim($line) === '') {
                 continue;
             }
-            if (preg_match('/\A\|\s*Name\s*\|\s*App id\s*\|\s*Scope\s*\|\s*Created\s*\|\s*Last used\s*\|\s*Used as\s*\|\s*Status\s*\|\z/', $line)) {
-                if ($headerSeen) {
-                    throw new BridgeProtocolException('Duplicate Davis list header.');
+            if (preg_match('/\A\s*-+(?:\s+-+)+\s*\z/', $line)) {
+                if ($starts === null) {
+                    preg_match_all('/-+/', $line, $runs, PREG_OFFSET_CAPTURE);
+                    $starts = array_map(static fn (array $run): int => $run[1], $runs[0]);
+                    if (count($starts) !== count($columns)) {
+                        throw new BridgeProtocolException('Unexpected Davis list layout.');
+                    }
+                }
+                continue;
+            }
+            if ($starts === null) {
+                throw new BridgeProtocolException('Unexpected Davis list output.');
+            }
+            $cells = [];
+            foreach ($starts as $index => $offset) {
+                $next = $starts[$index + 1] ?? null;
+                $cells[] = trim($next === null ? mb_substr($line, $offset) : mb_substr($line, $offset, $next - $offset));
+            }
+            if (!$headerSeen) {
+                if ($cells !== $columns) {
+                    throw new BridgeProtocolException('Davis list header was missing.');
                 }
                 $headerSeen = true;
                 continue;
             }
-            if (preg_match('/\A\|\s*(.*?)\s*\|\s*(app_[a-f0-9]{24})\s*\|\s*([^|]+?)\s*\|\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*\|\s*(never|\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*\|\s*(.*?)\s*\|\s*(active|expires \d{4}-\d{2}-\d{2} \d{2}:\d{2}|revoked \d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*\|\z/', $line, $match)) {
-                if (!$headerSeen || $match[1] === '') {
-                    throw new BridgeProtocolException('Davis list row appeared before its header.');
-                }
-                $scope = array_values(array_filter(array_map('trim', explode(',', $match[3]))));
-                if ($scope === []) {
-                    throw new BridgeProtocolException('Davis returned an empty key scope.');
-                }
-                $items[] = [
-                    'name' => $match[1],
-                    'app_id' => $match[2],
-                    'scope' => $scope,
-                    'created_at' => $match[4],
-                    'last_used_at' => $match[5] === 'never' ? null : $match[5],
-                    'used_as' => $match[6],
-                    'status' => $match[7],
-                ];
-                continue;
+            [$name, $appId, $scopeText, $created, $lastUsed, $usedAs, $status] = $cells;
+            $date = '\d{4}-\d{2}-\d{2} \d{2}:\d{2}';
+            if ($name === '' || !preg_match('/\Aapp_[a-f0-9]{24}\z/', $appId)
+                || !preg_match('/\A'.$date.'\z/', $created)
+                || !preg_match('/\A(?:never|'.$date.')\z/', $lastUsed)
+                || !preg_match('/\A(?:active|(?:expires|revoked) '.$date.')\z/', $status)) {
+                throw new BridgeProtocolException('Unexpected Davis list row.');
             }
-            throw new BridgeProtocolException('Unexpected Davis list output.');
+            $scope = array_values(array_filter(array_map('trim', explode(',', $scopeText))));
+            if ($scope === []) {
+                throw new BridgeProtocolException('Davis returned an empty key scope.');
+            }
+            $items[] = [
+                'name' => $name,
+                'app_id' => $appId,
+                'scope' => $scope,
+                'created_at' => $created,
+                'last_used_at' => $lastUsed === 'never' ? null : $lastUsed,
+                'used_as' => $usedAs,
+                'status' => $status,
+            ];
         }
 
         if (!$headerSeen) {
             throw new BridgeProtocolException('Davis list header was missing.');
         }
+
         return $items;
     }
 
     private function isUnknownUserOutput(string $output): bool
     {
-        $lines = array_values(array_filter(array_map('trim', preg_split('/\r?\n/', $this->stripAnsi($output)) ?: [])));
-        return count($lines) === 1 && (bool) preg_match('/\A(?:\[ERROR\]\s*)?These users do not exist: .+\.\z/', $lines[0]);
+        // Symfony wraps a long error block onto several lines, so judge the whole message, not one line.
+        $text = trim(preg_replace('/\s+/', ' ', $this->stripAnsi($output)) ?? '');
+        return (bool) preg_match('/\A(?:\[ERROR\]\s*)?These users do not exist: \S+(?:, \S+)*\.\z/', $text);
     }
 
     /** @return array<string, mixed> */

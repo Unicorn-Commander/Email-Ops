@@ -59,16 +59,22 @@ services:
         condition: service_healthy
     ports:
       - "${BRIDGE_BIND_ADDRESS:?set BRIDGE_BIND_ADDRESS to the mail host tailnet address}:${BRIDGE_HOST_PORT:-8891}:8080"
+    # davis_internal is internal-only (database), and Docker never publishes ports for a container whose only
+    # network is internal; davis_bridge_edge exists only to carry the tailnet-bound port.
     networks:
       - davis_internal
+      - davis_bridge_edge
+    # The image's own Davis code (same digest as the davis service) with an in-memory var/ for Symfony's cache and
+    # logs. Mounting the shared davis_www volume read-only and the bridge inside it failed on 2026-10-26: Docker
+    # cannot create a mount point inside a read-only volume.
     volumes:
-      - davis_www:/var/www/davis:ro
       - type: bind
         source: ./bridge
-        target: /var/www/davis/bridge
+        target: /opt/davis-bridge
         read_only: true
     tmpfs:
       - /tmp
+      - /var/www/davis/var:mode=1777
     healthcheck:
       test:
         - CMD-SHELL
@@ -83,7 +89,7 @@ services:
       resources:
         limits:
           memory: 256M
-    command: ["php", "-S", "0.0.0.0:8080", "/var/www/davis/bridge/server.php"]
+    command: ["php", "-S", "0.0.0.0:8080", "/opt/davis-bridge/server.php"]
     logging: *default-logging
 
   davis-web:
@@ -148,6 +154,8 @@ networks:
   davis_internal:
     name: davis_internal
     internal: true
+  davis_bridge_edge:
+    name: davis_bridge_edge
   james_network:
     name: ${JAMES_COMPOSE_NETWORK:?set JAMES_COMPOSE_NETWORK in .env}
     external: true
