@@ -434,7 +434,10 @@ export class JamesClient extends StalwartPort {
     // (notably Sent and Drafts), while still exposing the role on Mailbox/get.
     // Keep the query fast path for engines that support it, then use the full
     // mailbox list when the query returns a JMAP error or no id.
-    const queryResponses = await this.jmap([['Mailbox/query', { filter: { role } }, '0']], forAddress);
+    const queryResponses = await this.jmap(
+      [['Mailbox/query', { filter: { role } }, '0']],
+      forAddress,
+    );
     const queryResult = queryResponses ? this.named(queryResponses, 'Mailbox/query') : undefined;
     if (queryResult && typeof queryResult === 'object' && typeof queryResult.type !== 'string') {
       const ids = queryResult.ids;
@@ -559,7 +562,14 @@ export class JamesClient extends StalwartPort {
     let list = this.named(responses, 'Email/get')?.list;
     if (this.threadGetNotFound(responses, threadId)) {
       list = await this.getEmailListById(mailbox, threadId, [
-        'id', 'threadId', 'from', 'to', 'subject', 'receivedAt', 'preview', 'keywords',
+        'id',
+        'threadId',
+        'from',
+        'to',
+        'subject',
+        'receivedAt',
+        'preview',
+        'keywords',
       ]);
     }
     if (!Array.isArray(list)) return [];
@@ -776,7 +786,9 @@ export class JamesClient extends StalwartPort {
     const responses = await this.jmap([['Thread/get', { ids: [threadId] }, '0']], mailbox);
     if (!responses) return [];
     const rawIds = this.named(responses, 'Thread/get')?.list?.[0]?.emailIds;
-    const emailIds = Array.isArray(rawIds) ? rawIds.filter((id): id is string => typeof id === 'string') : [];
+    const emailIds = Array.isArray(rawIds)
+      ? rawIds.filter((id): id is string => typeof id === 'string')
+      : [];
     const notFound = this.threadGetNotFound(responses, threadId);
     if (emailIds.length > 0 || !notFound) return emailIds;
 
