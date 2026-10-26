@@ -10,6 +10,8 @@
  */
 
 import Link from 'next/link';
+import { API_BASE } from '@/lib/api';
+import { mcpUrlFromApiBase } from '@/lib/mcpPublicUrl';
 import type { ReactNode } from 'react';
 import { Dialog } from '@/components/ui';
 
@@ -175,17 +177,16 @@ export function ShortcutsHelp({ open, onClose }: { open: boolean; onClose: () =>
 
         <Section title="Connect Email-Ops to Claude &amp; agents (MCP)">
           <p className="text-tertiary">
-            Mint a personal access token (<span className="mono">eo_pat_…</span>) and
-            add Email-Ops as an MCP server so Claude Code and suite agents can read,
-            triage, and stage/send mail as you — under the same fences as this UI:
+            Add Email-Ops as an MCP server so Claude Code and suite agents can read,
+            triage, and stage/send mail as you — under the same fences as this UI. A
+            browser window asks you to sign in; or paste a token from Settings:
           </p>
           <pre className="mt-1 overflow-x-auto rounded-token bg-surface-overlay/60 p-3 font-mono text-[11px] leading-5 text-secondary">
 {`claude mcp add --transport http email-ops \\
-  https://email-ops.magicunicorn.dev/api/v1/mcp \\
-  --header "Authorization: Bearer eo_pat_..."`}
+  ${mcpUrlFromApiBase(API_BASE, typeof window === 'undefined' ? '' : window.location.origin)}`}
           </pre>
           <p className="text-tertiary">
-            See <b>docs/MCP.md</b> in the repo for the tool list and token minting.
+            More clients and token options: <Link href="/settings" className="underline">Settings → Connect your AI</Link>.
           </p>
         </Section>
 
