@@ -437,6 +437,10 @@ model Workspace {
   scheduledSends     ScheduledSend[]
   outboundAttachments OutboundAttachment[]
   agentSendKits     AgentSendKit[]
+  standingApprovals StandingApproval[]
+  standingApprovalUses StandingApprovalUse[]
+  approvalLinks ApprovalLink[]
+  approvalSessions ApprovalSession[]
   mailRules          MailRule[]
   mailRuleForwards   MailRuleForward[]
   trustedCorrespondents TrustedCorrespondent[]
@@ -541,6 +545,7 @@ model User {
 
   @@index([email])
   @@index([keycloakId])
+  approvalSessions ApprovalSession[]
   @@map("users")
 }
 
@@ -658,6 +663,7 @@ model MailboxAccount {
   @@index([workspaceId, isDefault])
   // "my inboxes" / "agent X's inboxes" / "shared boxes".
   @@index([workspaceId, ownerKind, ownerKey])
+  standingApprovals StandingApproval[]
   @@map("mailbox_accounts")
 }
 
@@ -824,6 +830,7 @@ model EmailMessage {
   // cancellable until this instant; the scheduler sends it unless rejected.
   sendAt             DateTime?
   kitId              String?
+  standingApprovalId String?
   // Inbound spam classification stamped by the SpamPort once the mail engine
   // produces a verdict (e.g. an rspamd/SpamAssassin score + a normalized verdict
   // 'clean'|'spam'|'unsure'). NULL until the engine is live (honest — no fiction
@@ -846,6 +853,8 @@ model EmailMessage {
   updatedAt         DateTime           @updatedAt
 
   workspace        Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  standingApproval StandingApproval? @relation(fields: [standingApprovalId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  standingApprovalUse StandingApprovalUse?
   agentInbox       AgentInboxItem?
   engagementEvents EmailEngagementEvent[]
 
@@ -1706,3 +1715,75 @@ model SpaceAgent {
 // Workspace a tenant-scoped table — Workspace is the tenancy CONTROL table (not
 // RLS-fenced); MailboxAccount + EmailMessage + AgentInboxItem +
 // EmailEngagementEvent are the scoped projections (RLS-fenced by the migrations).
+
+// Immutable campaign requests. Renewal/widening creates a new human-reviewed row.
+model StandingApproval {
+  id String @id @default(uuid())
+  workspaceId String
+  campaignKey String
+  mailboxId String
+  fromAddress String
+  templateSha256 String
+  bodyTemplate String @db.Text
+  placeholderRules Json
+  optionalLines Json
+  subjects String[]
+  recipientRules Json
+  capPerDay Int
+  expiresAt DateTime
+  createdBy String
+  createdAt DateTime @default(now())
+  approvedBy String?
+  approvedAt DateTime?
+  revokedBy String?
+  revokedAt DateTime?
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  mailbox MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  messages EmailMessage[]
+  uses StandingApprovalUse[]
+  @@index([workspaceId, mailboxId, expiresAt])
+  @@index([workspaceId, campaignKey])
+  @@map("standing_approvals")
+}
+
+// Reservations count against the cap even when the provider outcome is unknown.
+model StandingApprovalUse {
+  messageId String @id
+  workspaceId String
+  approvalId String
+  reservedAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  message EmailMessage @relation(fields: [messageId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  approval StandingApproval @relation(fields: [approvalId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  @@index([workspaceId, approvalId, reservedAt])
+  @@map("standing_approval_uses")
+}
+
+model ApprovalLink {
+  id String @id @default(uuid())
+  workspaceId String
+  kind String
+  targetId String
+  definitionSha256 String
+  recipientSha256 String
+  expiresAt DateTime
+  consumedAt DateTime?
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  @@index([workspaceId, kind, targetId])
+  @@map("approval_links")
+}
+
+// Opaque, workspace-bound browser sessions accepted only by approval routes.
+model ApprovalSession {
+  id String @id
+  workspaceId String
+  userId String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  @@index([workspaceId, userId])
+  @@map("approval_sessions")
+}

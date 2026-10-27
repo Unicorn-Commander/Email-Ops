@@ -100,6 +100,7 @@ export interface MessageView {
  * (workspace_id, external_source, external_ref) returns the EXISTING message.
  */
 export interface MessageComposeView {
+  standing_approval_id?: string;
   id: string;
   thread_id: string | null;
   status: string; // queued|sent|delivered|draft|pending_approval|rejected|failed
@@ -252,6 +253,7 @@ export interface AgentInboxView {
   thread_id: string | null;
   /** The human-approved send kit attached to this staged message, if any. */
   kit_id: string | null;
+  standing_approval_id?: string;
   attachments?: { name: string; type: string | null; size: number | null }[];
   sends_at?: string | null;
   reviewed_by_uc_uid: string | null;

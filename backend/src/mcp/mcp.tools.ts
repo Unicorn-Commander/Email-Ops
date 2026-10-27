@@ -72,6 +72,8 @@ import { MailRulesService } from '../mail-rules/mail-rules.service';
 import { MailRuleView } from '../mail-rules/mail-rules.types';
 import { TrustedCorrespondentsService } from '../trusted-correspondents/trusted-correspondents.service';
 import { TrustedCorrespondentView } from '../email/email.types';
+import { StandingApprovalsService, StandingRequest } from '../approvals/standing-approvals.service';
+import { assertHumanApproval } from '../approvals/human-approval';
 import { enforceExtraScope, PatTaggedIdentity } from './mcp-scopes';
 
 /**
@@ -100,6 +102,7 @@ export class EmailOpsTools {
     private readonly senderPolicy: SenderPolicyService,
     private readonly admin: MailEngineAdminPort,
     private readonly mailDomains: MailDomainService,
+    private readonly standing?: StandingApprovalsService,
   ) {}
 
   /** Health/info — safe for any authenticated caller. */
@@ -898,6 +901,30 @@ export class EmailOpsTools {
     return { ok: true, ...res };
   }
 
+  async requestStandingApproval(user: User, args: StandingRequest & { workspace_id?: string }) {
+    assertHumanApproval(user);
+    const workspace = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    return this.standing!.request(workspace, user, args);
+  }
+
+  async listStandingApprovals(user: User, args: { workspace_id?: string }) {
+    assertHumanApproval(user);
+    const workspace = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    return { items: await this.standing!.list(workspace, user) };
+  }
+
+  async approveStandingApproval(user: User, args: { workspace_id?: string; id: string; definition_sha256: string }) {
+    assertHumanApproval(user);
+    const workspace = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    return this.standing!.approve(workspace, user, args.id, args.definition_sha256);
+  }
+
+  async revokeStandingApproval(user: User, args: { workspace_id?: string; id: string }) {
+    assertHumanApproval(user);
+    const workspace = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    return this.standing!.revoke(workspace, user, args.id);
+  }
+
   async proposeSendKit(
     user: User,
     args: {
@@ -973,7 +1000,7 @@ export class EmailOpsTools {
       expires_at?: string;
     },
   ): Promise<unknown> {
-    if ((user as any).__patAuth || (user as any).__isFederationActor) {
+    if ((user as any).__patAuth || (user as any).__isFederationActor || (user as any).__isFederationAuth) {
       throw new ForbiddenException('Only a signed-in human may approve a send kit.');
     }
     const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
@@ -995,7 +1022,7 @@ export class EmailOpsTools {
     user: User,
     args: { workspace_id?: string; kit_id: string; note?: string },
   ): Promise<unknown> {
-    if ((user as any).__patAuth || (user as any).__isFederationActor) {
+    if ((user as any).__patAuth || (user as any).__isFederationActor || (user as any).__isFederationAuth) {
       throw new ForbiddenException('Only a signed-in human may reject a send kit.');
     }
     const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);

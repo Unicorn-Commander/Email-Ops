@@ -425,6 +425,7 @@ export interface AgentInboxItemView {
   body_sha256: string | null;
   thread_id: string | null;
   kit_id: string | null;
+  standing_approval_id?: string;
   attachments?: { name: string; type: string | null; size: number | null }[];
   sends_at?: string | null;
   reviewed_by_uc_uid: string | null;
@@ -552,6 +553,7 @@ export async function rejectAgentInboxItem(
 export type AgentSendKitState = 'PROPOSED' | 'APPROVED' | 'REJECTED';
 
 export interface AgentSendKitView {
+  approval_url?: string;
   id: string;
   kit_id: string;
   title: string;

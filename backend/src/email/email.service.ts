@@ -114,6 +114,8 @@ import {
 import { mapWithConcurrency, withTimeout } from '../common/async/concurrency';
 import { mayActThroughMailbox } from '../common/mailbox/mailbox-fence';
 import { resolveMailboxScope } from '../common/mailbox/mailbox-scope';
+import { ApprovalLinksService, kitTarget } from '../approvals/approval-links.service';
+import { StandingApprovalsService } from '../approvals/standing-approvals.service';
 import { ApprovalPendingNotice, StableNotifierService } from '../notify/stable-notifier.service';
 import {
   deriveReplyAll,
@@ -352,6 +354,7 @@ export interface AgentSendKitListView {
   recipients?: string[];
   recipient_hashes?: string[];
   replaced?: boolean;
+  approval_url?: string;
 }
 
 function sameInstant(a: Date, b: Date): boolean {
@@ -393,6 +396,8 @@ export class EmailService {
     // constructors. When absent, a calendar draft remains pending rather than
     // being marked approved without applying the remote change.
     @Optional() private readonly calendar?: CalendarService,
+    @Optional() private readonly approvalLinks?: ApprovalLinksService,
+    @Optional() private readonly standingApprovals?: StandingApprovalsService,
   ) {}
 
   /**
@@ -2504,8 +2509,10 @@ export class EmailService {
     const definition = this.buildSendKitDefinition(input);
     const templateSha256 = agentSendKitTemplateSha256(definition);
     const proposedAt = new Date();
+    let notifyProposal = false;
 
-    return this.prisma.withWorkspace(workspaceId, proposedBy, async (tx) => {
+    const result = await this.prisma.withWorkspace(workspaceId, proposedBy, async (tx) => {
+      await tx.$queryRaw`SELECT "kitId" FROM "agent_send_kits" WHERE "workspaceId" = ${workspaceId} AND "kitId" = ${input.kitId} FOR UPDATE`;
       const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, proposedBy);
       if (!this.sendKitAddressVisible(definition.fromAddress, sendKitAddresses)) {
         throw new NotFoundException('Mailbox not found.');
@@ -2526,6 +2533,7 @@ export class EmailService {
             message: 'An approved or rejected send kit cannot be changed.',
           });
         }
+        notifyProposal = true;
         const replaced = await tx.agentSendKit.update({
           where: { kitId: input.kitId },
           data: this.sendKitProposalData(
@@ -2541,6 +2549,7 @@ export class EmailService {
         return { ...(await this.sendKitView(tx, replaced, true)), replaced: true };
       }
 
+      notifyProposal = true;
       const created = await tx.agentSendKit.create({
         data: {
           kitId: input.kitId,
@@ -2557,6 +2566,11 @@ export class EmailService {
       });
       return { ...(await this.sendKitView(tx, created, true)), replaced: false };
     });
+    if (notifyProposal && result.state === AgentSendKitState.PROPOSED) this.fireApprovalNotice({
+      id: result.kit_id, workspaceId, kind: 'SEND KIT', summary: result.title,
+      draftedBy: proposedBy, approvalUrl: result.approval_url,
+    });
+    return result;
   }
 
   private buildSendKitDefinition(input: AgentSendKitDefinitionInput): AgentSendKitDefinition {
@@ -2642,6 +2656,9 @@ export class EmailService {
       note: row.note,
       sent_today: sentToday,
     };
+    if (this.approvalLinks && row.state === AgentSendKitState.PROPOSED && row.expiresAt > now) {
+      view.approval_url = await this.approvalLinks.issue(tx, kitTarget(row));
+    }
     if (full) {
       view.body_template = row.bodyTemplate ?? '';
       view.placeholder_rules = row.placeholderRules as Record<string, string>;
@@ -3185,7 +3202,7 @@ export class EmailService {
               )
             );
           });
-          if (external.length) {
+          if (external.length && !(await this.standingApprovals?.reserve(tx, workspaceId, item.message))) {
             const now = new Date();
             const kit = item.message.kitId
               ? await tx.agentSendKit.findFirst({
@@ -3669,6 +3686,7 @@ export class EmailService {
     }
 
     return this.prisma.withWorkspace(workspaceId, approvedBy, async (tx) => {
+      await tx.$queryRaw`SELECT "kitId" FROM "agent_send_kits" WHERE "workspaceId" = ${workspaceId} AND "kitId" = ${input.kitId} FOR UPDATE`;
       const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, approvedBy);
       const existing = await tx.agentSendKit.findFirst({
         where: { kitId: input.kitId, workspaceId },
@@ -3772,6 +3790,7 @@ export class EmailService {
     if (!rejectedBy)
       throw new ForbiddenException('A human identity is required to reject a send kit.');
     return this.prisma.withWorkspace(workspaceId, rejectedBy, async (tx) => {
+      await tx.$queryRaw`SELECT "kitId" FROM "agent_send_kits" WHERE "workspaceId" = ${workspaceId} AND "kitId" = ${kitId} FOR UPDATE`;
       const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, rejectedBy);
       const existing = await tx.agentSendKit.findFirst({ where: { kitId, workspaceId } });
       if (!existing) throw new NotFoundException('The send kit was not found in this workspace.');
@@ -5130,6 +5149,7 @@ export class EmailService {
 
   private composeView(m: {
     id: string;
+    standingApprovalId?: string | null;
     threadId: string | null;
     status: EmailMessageStatus;
     mode: EmailMode;
@@ -5146,6 +5166,7 @@ export class EmailService {
     const to = m.toAddresses?.length ? m.toAddresses : m.toAddress ? [m.toAddress] : [];
     return {
       id: m.id,
+      ...(m.standingApprovalId ? { standing_approval_id: m.standingApprovalId } : {}),
       thread_id: m.threadId ?? null,
       status: this.statusWire(m.status),
       mode: this.modeWire(m.mode),
@@ -5192,6 +5213,7 @@ export class EmailService {
       attachments?: unknown;
       inReplyToThreadId?: string | null;
       kitId?: string | null;
+      standingApprovalId?: string | null;
     } | null,
   ): AgentInboxView {
     const payload = this.cleanupPayload(it.payload);
@@ -5228,6 +5250,7 @@ export class EmailService {
       body_sha256: isCleanup || msg?.body == null ? null : plainTextBodySha256(msg.body),
       thread_id: isCleanup ? null : (msg?.inReplyToThreadId ?? null),
       kit_id: isCleanup ? null : (msg?.kitId ?? null),
+      ...(!isCleanup && msg?.standingApprovalId ? { standing_approval_id: msg.standingApprovalId } : {}),
       attachments: isCleanup
         ? []
         : this.attachmentsMeta(msg?.attachments).map((a) => ({

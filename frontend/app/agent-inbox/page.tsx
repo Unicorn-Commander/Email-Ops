@@ -21,6 +21,7 @@
  */
 
 import Link from 'next/link';
+import { StandingApprovals } from '@/components/agent-inbox/StandingApprovals';
 import { useCallback, useMemo, useState } from 'react';
 import { Badge, Button, Card, Skeleton, SkeletonText, cn, useConfirm } from '@/components/ui';
 import { Tooltip } from '@/components/Tooltip';
@@ -152,6 +153,7 @@ export default function AgentInboxPage() {
         <NoWorkspace />
       ) : (
         <>
+          <StandingApprovals />
           <SendKitsSection kits={sendKits} canReview={canReview} />
           <AgentPauseSection
             agents={agents}
@@ -480,6 +482,7 @@ function ProposedSendKitCard({
               <span className="font-medium text-secondary">Note:</span> {kit.note}
             </p>
           )}
+          {kit.approval_url && <a href={kit.approval_url} className="text-sm text-accent underline">Open phone approval</a>}
           <p className="break-all font-mono text-[11px] text-muted">template hash {kit.template_sha256.slice(0, 12)}…</p>
         </div>
 

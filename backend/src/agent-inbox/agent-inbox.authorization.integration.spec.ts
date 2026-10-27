@@ -7,6 +7,7 @@ import { AgentInboxKind, MembershipStatus, WorkspaceRole } from '@prisma/client'
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from '../auth/auth.service';
 import { JwtStrategy } from '../auth/strategies/jwt.strategy';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PatService } from '../auth/pat.service';
 import { MembershipService } from '../common/workspace/membership.service';
 import { AgentInboxController } from './agent-inbox.controller';
@@ -36,7 +37,7 @@ describe('agent inbox decision workspace roles', () => {
   for(const id of [ws,foreign])await prisma.workspace.create({data:{id,slug:id,displayName:'Synthetic role-test workspace'}});
   user=await prisma.user.create({data:{id:userId,email:userId+'@role-test.example',username:userId,keycloakId:randomUUID()}});
   await prisma.membership.createMany({data:[{userKey:user.keycloakId,workspaceId:ws,role:WorkspaceRole.VIEWER,status:MembershipStatus.ACTIVE},{userKey:user.keycloakId,workspaceId:foreign,role:WorkspaceRole.OWNER,status:MembershipStatus.ACTIVE}]});
-  const mod=await Test.createTestingModule({controllers:[AgentInboxController],providers:[JwtStrategy,
+  const mod=await Test.createTestingModule({controllers:[AgentInboxController],providers:[JwtStrategy,JwtAuthGuard,
    {provide:ConfigService,useValue:config},{provide:AuthService,useValue:auth},
    {provide:MembershipService,useValue:membership},{provide:PatService,useValue:new PatService(prisma)},
    {provide:EmailService,useValue:mail}]}).compile();

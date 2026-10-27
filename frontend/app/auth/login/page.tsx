@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useState } from 'react';
+import { approvalReturnPath } from '@/lib/approvalsApi';
 import { useRouter } from 'next/navigation';
 import {
   ApiError,
@@ -40,7 +41,7 @@ export default function Login() {
     try {
       const result = await localLogin(email, password);
       setStoredUser(result.user);
-      router.replace('/dashboard');
+      router.replace(approvalReturnPath());
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Unable to sign in');
     } finally {

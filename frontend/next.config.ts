@@ -37,7 +37,10 @@ const nextConfig: NextConfig = {
   // Don't advertise the framework/version.
   poweredByHeader: false,
   async headers() {
-    return [{ source: '/:path*', headers: SECURITY_HEADERS }];
+    return [
+      { source: '/:path*', headers: SECURITY_HEADERS },
+      { source: '/approve', headers: [{ key: 'Referrer-Policy', value: 'no-referrer' }, { key: 'Cache-Control', value: 'no-store' }] },
+    ];
   },
   // Pin the file-tracing root to THIS app so Next doesn't infer a parent
   // directory's lockfile as the workspace root (the repo sits under a shared

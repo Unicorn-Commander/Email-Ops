@@ -1,3 +1,4 @@
+import { ApprovalsModule } from '../approvals/approvals.module';
 import { Module } from '@nestjs/common';
 import { McpController } from './mcp.controller';
 import { McpManifestController } from './mcp-manifest.controller';
@@ -27,6 +28,7 @@ import { CalendarModule } from '../calendar/calendar.module';
   // conversational-provisioning write tools (policy gate + the canonical apply
   // path). WorkspaceModule provides the membership gate; AuthModule the JWT guard.
   imports: [
+    ApprovalsModule,
     AuthModule,
     WorkspaceModule,
     EmailModule,

@@ -12,7 +12,7 @@ import { All, Controller, Logger, Req, Res, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Request, Response } from 'express';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { ExplicitCredentialGuard } from '../auth/guards/explicit-credential.guard';
 import { setMcpUnauthorizedHeader } from '../auth/oauth-discovery/mcp-auth-header';
 import { McpService } from './mcp.service';
 import { User } from '@prisma/client';
@@ -35,7 +35,7 @@ export class McpController {
   // No controller-level WorkspaceMembershipGuard: with no workspace in the request it authorizes against the
   // server's DEFAULT workspace, which 403s every OAuth user who is not a member there (i.e. every customer). Each
   // MCP tool already checks membership for its own workspace argument via MembershipService.
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(ExplicitCredentialGuard)
   @ApiOperation({
     summary: 'MCP Streamable HTTP endpoint. Auth as an Email-Ops user; agent acts on their behalf.',
   })

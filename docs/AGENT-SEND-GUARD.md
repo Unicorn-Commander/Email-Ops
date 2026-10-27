@@ -13,7 +13,9 @@ external domain when that domain is neither a verified workspace domain nor a
 trusted correspondent. The refusal is HTTP/MCP 403, carries a machine-readable
 `reason`, and leaves the item pending.
 
-The exception is a `kit_id` attached at compose time. The lifecycle is deliberately
+An active [standing campaign approval](STANDING-APPROVALS.md) can authorize a
+matching template and sender for new recipients within human-approved limits.
+Otherwise, the exception is a `kit_id` attached at compose time. The lifecycle is deliberately
 agent-first and human-visible:
 
 1. The agent calls `propose_send_kit` with a short `title` and the complete kit
@@ -56,7 +58,7 @@ matched as one anchored regular expression after CRLF-to-LF normalization; the
 guard escapes literal text and substitutes each placeholder rule. A kit also
 requires the staged sender, one To recipient, no Cc/Bcc, no attachments, an
 allowed subject, a recipient hash in the kit, and fewer than `cap_per_day`
-messages sent during the current UTC day.
+messages sent during the current America/New_York calendar day.
 
 ### Worked personalised wave
 
