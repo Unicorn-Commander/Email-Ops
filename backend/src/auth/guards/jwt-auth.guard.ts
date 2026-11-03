@@ -3,11 +3,16 @@ import { AuthGuard } from '@nestjs/passport';
 import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
+import { User } from '@prisma/client';
 import { PatService, PAT_PREFIX, ResolvedPatRecord } from '../pat.service';
 import { checkPat, PatRecord } from '../pat-scope';
+import { NoWorkspaceAccessException } from '../no-workspace-access.exception';
+import { MembershipService } from '../../common/workspace/membership.service';
+import { tenancyEnabled } from '../../common/workspace/feature-flags';
 import {
   hasBearerToken,
   isMcpRequest,
+  setMcpInsufficientScopeHeader,
   setMcpUnauthorizedHeader,
 } from '../oauth-discovery/mcp-auth-header';
 
@@ -32,6 +37,7 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
   constructor(
     private reflector: Reflector,
     private readonly patService: PatService,
+    @Optional() private readonly membership?: MembershipService,
     @Optional() private readonly configService?: ConfigService,
   ) {
     super();
@@ -54,14 +60,13 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     // Passport here ensures a cookie-only MCP request receives the normal 401
     // challenge even if another guard previously populated req.user.
     if (isMcpRequest(request) && !hasBearerToken(request)) {
-      const result = await super.canActivate(context);
-      return result instanceof Promise ? await result : (result as boolean);
+      return this.activateJwt(context);
     }
 
     // Anything other than an eo_pat_ token (a real JWT, or no header at all)
     // is completely unaffected — fall through to the untouched passport path.
     if (!bearer || !bearer.startsWith(PAT_PREFIX)) {
-      return super.canActivate(context) as Promise<boolean>;
+      return this.activateJwt(context);
     }
 
     const record = await this.patService.resolvePatRecord(bearer);
@@ -96,10 +101,37 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
       const request = context.switchToHttp().getRequest<Request>();
       const response = context.switchToHttp().getResponse?.();
       if (response) {
-        setMcpUnauthorizedHeader(request, response, this.configService, hasBearerToken(request));
+        if (err instanceof NoWorkspaceAccessException) {
+          setMcpInsufficientScopeHeader(request, response, this.configService);
+        } else {
+          setMcpUnauthorizedHeader(request, response, this.configService, hasBearerToken(request));
+        }
       }
     }
     return super.handleRequest(err, user, info, context, status);
+  }
+
+  private async activateJwt(context: ExecutionContext): Promise<boolean> {
+    const result = await super.canActivate(context);
+    await this.assertMcpWorkspaceAccess(context);
+    return result as boolean;
+  }
+
+  private async assertMcpWorkspaceAccess(context: ExecutionContext): Promise<void> {
+    const request = context.switchToHttp().getRequest<Request>();
+    const user = request.user as User | undefined;
+    if (!this.membership || !user || !isMcpRequest(request)) return;
+    if (!tenancyEnabled((key) => this.configService?.get<string>(key))) return;
+
+    // Preserve the existing allow-list JIT-seeding behavior for identities that
+    // are authorized to enter the suite, then require an active workspace.
+    await this.membership.ensureSeededMembership(user);
+    const memberships = await this.membership.listActiveMemberships(user);
+    if (memberships.length > 0) return;
+
+    const response = context.switchToHttp().getResponse<Response>();
+    setMcpInsufficientScopeHeader(request, response, this.configService);
+    throw new NoWorkspaceAccessException();
   }
 
   private static extractBearer(request: Request): string | null {

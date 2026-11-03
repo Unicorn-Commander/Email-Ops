@@ -41,6 +41,8 @@ The MCP endpoint is guarded by `JwtAuthGuard`. For the token form, send a
 - An **`eo_pat_…` personal access token** (SUITE-IDENTITY §D9) — a long-lived
   token you mint for an agent/CLI. Recommended for Claude Code.
 
+If you see 'no workspace access', your sign-in worked; ask your admin for an invite.
+
 ### Mint / revoke a PAT
 
 PATs are managed under `/api/v1/auth/pats`, guarded so that **a PAT can never

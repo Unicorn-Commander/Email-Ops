@@ -5,6 +5,7 @@ import { User, InvitationStatus } from '@prisma/client';
 import { resolveUserAccess, describeAccessList } from './access-list';
 import { encrypt, isEncryptionConfigured } from '../connected-accounts/crypto';
 import { DEFAULT_WORKSPACE_FALLBACK } from '../common/workspace/workspace.util';
+import { NoWorkspaceAccessException } from './no-workspace-access.exception';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
 const LOCAL_PASSWORD_SCHEME = 'scrypt';
@@ -316,6 +317,9 @@ export class AuthService implements OnModuleInit {
         }));
       if (!access.allowed && !invited) {
         this.logger.warn(`Rejected SSO JIT for ${email || '(no email)'} — ${access.reason}`);
+        if (typeof email === 'string' && email.trim()) {
+          throw new NoWorkspaceAccessException();
+        }
         throw new UnauthorizedException(
           'You are not authorized for Email-Ops. Contact your administrator.',
         );
