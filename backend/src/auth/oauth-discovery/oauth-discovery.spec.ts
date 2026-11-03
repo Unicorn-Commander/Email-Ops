@@ -8,9 +8,11 @@ import { AuthService } from '../auth.service';
 import { JwtAuthGuard } from '../guards/jwt-auth.guard';
 import { JwtStrategy } from '../strategies/jwt.strategy';
 import { PatService } from '../pat.service';
+import { NoWorkspaceAccessException } from '../no-workspace-access.exception';
 import { createMcpCorsMiddleware } from './mcp-cors';
 import { OAuthDiscoveryController } from './oauth-discovery.controller';
 import { OAuthDiscoveryService } from './oauth-discovery.service';
+import { MembershipService } from '../../common/workspace/membership.service';
 
 let jwksPublicKey = '';
 
@@ -99,6 +101,11 @@ describe('Email-Ops MCP OAuth discovery and resource-server boundary', () => {
   const patService = {
     resolvePatRecord: jest.fn(async () => null),
   } as unknown as PatService;
+  const membershipServiceMock = {
+    ensureSeededMembership: jest.fn(async () => undefined),
+    listActiveMemberships: jest.fn(async () => [{ workspaceId: 'fictional-workspace' }]),
+  };
+  const membershipService = membershipServiceMock as unknown as MembershipService;
 
   beforeAll(async () => {
     const module = await Test.createTestingModule({
@@ -110,6 +117,7 @@ describe('Email-Ops MCP OAuth discovery and resource-server boundary', () => {
         JwtAuthGuard,
         { provide: ConfigService, useValue: config },
         { provide: PatService, useValue: patService },
+        { provide: MembershipService, useValue: membershipService },
         { provide: AuthService, useValue: authService },
       ],
     }).compile();
@@ -281,6 +289,80 @@ describe('Email-Ops MCP OAuth discovery and resource-server boundary', () => {
 
     expect(response.body).toEqual({ ok: true });
     expect(authService.validateJwtPayload).toHaveBeenCalled();
+  });
+
+  it('returns a verified-user 403 when the user has no active workspace membership', async () => {
+    membershipServiceMock.listActiveMemberships.mockResolvedValueOnce([]);
+    const now = Math.floor(Date.now() / 1000);
+    const token = jwt.sign(
+      {
+        sub: 'fictional-unprovisioned-sub',
+        email: 'unprovisioned@example.test',
+        iss: realmIssuer,
+        azp: 'email-ops',
+        aud: 'account',
+        iat: now - 10,
+        exp: now + 300,
+      },
+      keyPair.privateKey,
+      { algorithm: 'RS256', keyid: 'synthetic-jwks-key' },
+    );
+    const response = await httpRequest('/api/v1/mcp', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: mcpBody(),
+    });
+
+    expect(response.status).toBe(403);
+    expect(response.headers['www-authenticate']).toBe(
+      'Bearer realm="email-ops-mcp", resource_metadata="https://email-ops.example.test/.well-known/oauth-protected-resource/api/v1/mcp", error="insufficient_scope", error_description="no workspace access"',
+    );
+    expect(response.body).toEqual({
+      error: 'no_workspace_access',
+      message:
+        'Your account is verified but has no workspace in Email-Ops yet. Ask your workspace admin for an invite.',
+    });
+  });
+
+  it('preserves the verified-user 403 raised during identity resolution', async () => {
+    (authService.validateJwtPayload as jest.Mock).mockRejectedValueOnce(
+      new NoWorkspaceAccessException(),
+    );
+    const now = Math.floor(Date.now() / 1000);
+    const token = jwt.sign(
+      {
+        sub: 'fictional-unprovisioned-identity',
+        email: 'unprovisioned-identity@example.test',
+        iss: realmIssuer,
+        azp: 'email-ops',
+        aud: 'account',
+        iat: now - 10,
+        exp: now + 300,
+      },
+      keyPair.privateKey,
+      { algorithm: 'RS256', keyid: 'synthetic-jwks-key' },
+    );
+    const response = await httpRequest('/api/v1/mcp', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: mcpBody(),
+    });
+
+    expect(response.status).toBe(403);
+    expect(response.headers['www-authenticate']).toContain(
+      'error="insufficient_scope", error_description="no workspace access"',
+    );
+    expect(response.body).toEqual({
+      error: 'no_workspace_access',
+      message:
+        'Your account is verified but has no workspace in Email-Ops yet. Ask your workspace admin for an invite.',
+    });
   });
 
   it('rejects a signed Keycloak token with a wrong issuer or expired exp', async () => {

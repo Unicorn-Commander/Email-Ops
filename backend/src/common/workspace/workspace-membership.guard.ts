@@ -2,6 +2,7 @@ import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@
 import { User } from '@prisma/client';
 import { MembershipService } from './membership.service';
 import { resolveWorkspaceId, defaultWorkspaceId, WithWorkspaceClaim } from './workspace.util';
+import { NoWorkspaceAccessException } from '../../auth/no-workspace-access.exception';
 
 /**
  * Gate for workspace-scoped routes (SUITE-IDENTITY §D4/§D5).
@@ -39,7 +40,19 @@ export class WorkspaceMembershipGuard implements CanActivate {
       req?.headers?.['x-workspace-id'] ??
       resolveWorkspaceId(user, defaultWorkspaceId());
 
-    const { workspaceId, role } = await this.membership.resolveWithRole(user, requested);
+    let resolved: Awaited<ReturnType<MembershipService['resolveWithRole']>>;
+    try {
+      resolved = await this.membership.resolveWithRole(user, requested);
+    } catch (error) {
+      if (
+        error instanceof ForbiddenException &&
+        error.message === 'No workspace access for this user.'
+      ) {
+        throw new NoWorkspaceAccessException();
+      }
+      throw error;
+    }
+    const { workspaceId, role } = resolved;
     // Stash for downstream handlers + the withWorkspace GUC chokepoint, and the
     // caller's role for the provisioning RBAC gates (@WorkspaceRole()).
     req.workspaceId = workspaceId;
