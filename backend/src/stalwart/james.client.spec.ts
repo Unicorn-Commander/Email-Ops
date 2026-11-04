@@ -18,6 +18,15 @@ function jsonResponse(body: unknown, ok = true, status = 200): Response {
   return { ok, status, json: async () => body } as unknown as Response;
 }
 
+function binaryResponse(data: Buffer, contentType: string, ok = true, status = 200): Response {
+  return {
+    ok,
+    status,
+    headers: { get: (name: string) => (name.toLowerCase() === 'content-type' ? contentType : null) },
+    arrayBuffer: async () => data,
+  } as unknown as Response;
+}
+
 /** The live shape: accounts keyed by accountId, `name` = the mailbox address. */
 const SESSION = {
   primaryAccounts: { 'urn:ietf:params:jmap:mail': 'acct-hq' },
@@ -30,6 +39,99 @@ const SESSION = {
 const CONFIGURED = {
   JAMES_JMAP_URL: 'https://james.example.test/jmap/',
   JAMES_JMAP_BASIC: 'hq@unicorncommander.ai:secret',
+};
+
+const DSN_MESSAGE_ID = '01a1a700-0258-7aba-b362-58e44b1c7400';
+const DSN_RAW_BLOB_ID = 'raw-dsn-555';
+const DSN_BOUNDARY = '----=_Part_555_123456.789';
+const DSN_STATUS_PART = [
+  'Reporting-MTA: dns; mx.example.net',
+  '',
+  'Final-Recipient: rfc822; mailbox-555@example.com',
+  'Action: failed',
+  'Status: 5.1.1',
+  'Remote-MTA: dns; mx.example.net',
+  'Diagnostic-Code: smtp; 550 5.1.1 mailbox unavailable; reference 555-0142',
+  '',
+].join('\r\n');
+const DSN_ORIGINAL_PART = [
+  'From: sender-555@example.com',
+  'To: mailbox-555@example.com',
+  'Subject: Example delivery attempt',
+  'Date: Wed, 04 Nov 2026 22:00:00 +0000',
+  'Message-ID: <original-555@example.com>',
+  'MIME-Version: 1.0',
+  'Content-Type: text/plain; charset=UTF-8',
+  '',
+  'A fictional message for the DSN fixture.',
+  '',
+].join('\r\n');
+const DSN_RAW_MESSAGE = [
+  'From: Mail Delivery Subsystem <mailer-daemon@example.net>',
+  'To: sender-555@example.com',
+  'Date: Wed, 04 Nov 2026 22:00:01 +0000',
+  'Subject: Delivery Status Notification (Failure)',
+  'Message-ID: <dsn-555@example.net>',
+  'MIME-Version: 1.0',
+  'Content-Type: multipart/report; report-type=delivery-status;',
+  ` boundary="${DSN_BOUNDARY}"`,
+  '',
+  `--${DSN_BOUNDARY}`,
+  'Content-Type: text/plain; charset=UTF-8',
+  'Content-Transfer-Encoding: 7bit',
+  '',
+  'Too many retries failure. Bouncing after 3 retries.',
+  '',
+  `--${DSN_BOUNDARY}`,
+  'Content-Type: message/delivery-status',
+  'Content-Transfer-Encoding: 7bit',
+  '',
+  DSN_STATUS_PART,
+  `--${DSN_BOUNDARY}`,
+  'Content-Type: message/rfc822',
+  'Content-Disposition: attachment; filename="the other list, on video"',
+  '',
+  DSN_ORIGINAL_PART,
+  `--${DSN_BOUNDARY}--`,
+  '',
+].join('\r\n');
+const DSN_SESSION = {
+  primaryAccounts: { 'urn:ietf:params:jmap:mail': 'acct-example' },
+  accounts: { 'acct-example': { name: 'mailbox-555@example.com' } },
+  downloadUrl: 'https://james.example.net/download/{accountId}/{blobId}/{name}?accept={type}',
+  uploadUrl: 'https://james.example.net/upload/{accountId}',
+};
+const DSN_EMAIL = {
+  id: DSN_MESSAGE_ID,
+  blobId: DSN_RAW_BLOB_ID,
+  size: Buffer.byteLength(DSN_RAW_MESSAGE),
+  threadId: DSN_MESSAGE_ID,
+  from: [{ email: 'mailer-daemon@example.net', name: 'Mail Delivery Subsystem' }],
+  to: [{ email: 'sender-555@example.com' }],
+  subject: 'Delivery Status Notification (Failure)',
+  receivedAt: '2026-11-04T22:00:01.000Z',
+  preview: 'Too many retries failure. Bouncing after 3 retries.',
+  keywords: { $seen: true },
+  messageId: ['dsn-555@example.net'],
+  references: [],
+  textBody: [{ partId: '2', type: 'text/plain' }],
+  bodyValues: { '2': { value: 'Too many retries failure. Bouncing after 3 retries.' } },
+  attachments: [
+    {
+      blobId: `${DSN_MESSAGE_ID}_3`,
+      name: 'status.dat',
+      type: 'message/delivery-status',
+      size: Buffer.byteLength(DSN_STATUS_PART),
+      cid: null,
+    },
+    {
+      blobId: `${DSN_MESSAGE_ID}_4`,
+      name: 'the other list, on video',
+      type: 'message/rfc822',
+      size: Buffer.byteLength(DSN_ORIGINAL_PART),
+      cid: null,
+    },
+  ],
 };
 
 /** Mock fetch: GET /session serves sessions (in order, last repeats); POST serves JMAP. */
@@ -505,6 +607,56 @@ describe('JamesClient', () => {
           'header:X-Email-Ops-Forwarded-From:asText',
         ]),
       );
+    });
+
+    it('serves James numbered DSN parts and surfaces RFC 3464 fields', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        const textUrl = String(url);
+        if (textUrl.endsWith('/session')) return jsonResponse(DSN_SESSION);
+        if (textUrl.includes('/download/')) {
+          if (textUrl.includes(`${DSN_MESSAGE_ID}_3`) || textUrl.includes(`${DSN_MESSAGE_ID}_4`)) {
+            return binaryResponse(Buffer.alloc(0), 'application/octet-stream', false, 404);
+          }
+          if (textUrl.includes(`/${DSN_RAW_BLOB_ID}/`)) {
+            return binaryResponse(Buffer.from(DSN_RAW_MESSAGE), 'message/rfc822');
+          }
+          return binaryResponse(Buffer.alloc(0), 'application/octet-stream', false, 404);
+        }
+        const calls = JSON.parse(init!.body as string).methodCalls as any[];
+        if (calls.some((call) => call[0] === 'Thread/get')) {
+          return jsonResponse({
+            methodResponses: [
+              ['Thread/get', { list: [{ id: DSN_MESSAGE_ID, emailIds: [DSN_MESSAGE_ID] }] }, '0'],
+              ['Email/get', { list: [DSN_EMAIL] }, '1'],
+            ],
+          });
+        }
+        if (calls.some((call) => call[0] === 'Email/get')) {
+          return jsonResponse({ methodResponses: [['Email/get', { list: [DSN_EMAIL] }, '0']] });
+        }
+        return jsonResponse({ methodResponses: [] });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig({ JAMES_JMAP_URL: 'https://james.example.net/jmap/' }));
+
+      const [detail] = await client.getThreadDetail('mailbox-555@example.com', DSN_MESSAGE_ID);
+      expect(detail.attachments).toEqual(DSN_EMAIL.attachments);
+      expect(detail.dsn).toEqual({
+        action: 'failed',
+        status: '5.1.1',
+        diagnostic_code: 'smtp; 550 5.1.1 mailbox unavailable; reference 555-0142',
+        final_recipient: 'rfc822; mailbox-555@example.com',
+        remote_mta: 'dns; mx.example.net',
+        reporting_mta: 'dns; mx.example.net',
+      });
+
+      const status = await client.downloadBlob('mailbox-555@example.com', `${DSN_MESSAGE_ID}_3`);
+      const original = await client.downloadBlob('mailbox-555@example.com', `${DSN_MESSAGE_ID}_4`);
+      expect(status?.data.toString()).toContain('Diagnostic-Code: smtp; 550 5.1.1');
+      expect(original?.data.toString()).toContain('Subject: Example delivery attempt');
+      expect(
+        fetchSpy.mock.calls.filter(([requestUrl]) => String(requestUrl).includes('/download/')).length,
+      ).toBeGreaterThanOrEqual(6);
     });
 
     it('setThreadRead patches $seen on every message in the thread (two-step: resolve ids, then Email/set)', async () => {

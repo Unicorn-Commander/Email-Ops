@@ -5978,6 +5978,7 @@ export class EmailService {
         size: a.size,
         cid: a.cid,
       })),
+      ...(m.dsn !== undefined ? { dsn: m.dsn } : {}),
     };
   }
 

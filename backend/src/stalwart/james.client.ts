@@ -47,6 +47,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { StalwartPort } from './stalwart.port';
 import { parseSearchQuery, buildJmapFilter } from './search-query';
+import { extractJamesMimePart } from './james.mime';
 import {
   StalwartAttachment,
   StalwartBlobDownload,
@@ -59,6 +60,7 @@ import {
   StalwartMessageDetail,
   StalwartMessageHeaders,
   StalwartParticipant,
+  StalwartDsn,
   StalwartSendRequest,
   StalwartSendResult,
   StalwartVacationState,
@@ -711,7 +713,7 @@ export class JamesClient extends StalwartPort {
     const out: StalwartMessageDetail[] = [];
     for (const m of list) {
       const mapped = this.mapMessageDetail(m, threadId);
-      if (mapped) out.push(mapped);
+      if (mapped) out.push(await this.withDsn(mailbox, mapped));
     }
     return out;
   }
@@ -739,7 +741,8 @@ export class JamesClient extends StalwartPort {
     if (!responses) return null;
     const list = this.named(responses, 'Email/get')?.list;
     if (!Array.isArray(list) || !list.length) return null;
-    return this.mapMessageDetail(list[0], messageId);
+    const mapped = this.mapMessageDetail(list[0], messageId);
+    return mapped ? this.withDsn(mailbox, mapped) : null;
   }
 
   /** The Email/get properties both detail readers request (bodies fetched by value). */
@@ -863,6 +866,70 @@ export class JamesClient extends StalwartPort {
       flagged: keywords['$flagged'] === true,
       attachments,
     };
+  }
+
+  /** Read RFC 3464 fields from a James message/delivery-status MIME part. */
+  private async withDsn(
+    mailbox: string,
+    detail: StalwartMessageDetail,
+  ): Promise<StalwartMessageDetail> {
+    const statusPart = detail.attachments.find(
+      (attachment) =>
+        attachment.type?.split(';', 1)[0]?.trim().toLowerCase() === 'message/delivery-status',
+    );
+    if (!statusPart) return detail;
+    const blob = await this.downloadJamesPart(mailbox, statusPart.blobId, detail.rawBlobId);
+    const dsn = blob ? this.parseDsn(blob.data) : null;
+    return dsn ? { ...detail, dsn } : detail;
+  }
+
+  private parseDsn(data: Buffer): StalwartDsn | null {
+    const sections = data
+      .toString('utf8')
+      .replace(/\r\n/g, '\n')
+      .split(/\n\s*\n/);
+    const parsed = sections.map((section) => {
+      const fields = new Map<string, string>();
+      let current: string | null = null;
+      for (const line of section.split('\n')) {
+        if (/^[ \t]/.test(line) && current) {
+          fields.set(current, `${fields.get(current) ?? ''} ${line.trim()}`.trim());
+          continue;
+        }
+        const match = line.match(/^([^:]+):[ \t]*(.*)$/);
+        if (!match) {
+          current = null;
+          continue;
+        }
+        current = match[1].trim().toLowerCase();
+        fields.set(current, match[2].trim());
+      }
+      return fields;
+    });
+    const recipient = parsed.find(
+      (fields) =>
+        fields.has('final-recipient') ||
+        fields.has('action') ||
+        fields.has('status') ||
+        fields.has('diagnostic-code'),
+    );
+    const reporting = parsed.find((fields) => fields.has('reporting-mta'));
+    const value = (fields: Map<string, string> | undefined, key: string): string | null => {
+      const result = fields
+        ?.get(key)
+        ?.replace(/[ \t]+/g, ' ')
+        .trim();
+      return result || null;
+    };
+    const dsn: StalwartDsn = {
+      action: value(recipient, 'action'),
+      status: value(recipient, 'status'),
+      diagnostic_code: value(recipient, 'diagnostic-code'),
+      final_recipient: value(recipient, 'final-recipient'),
+      remote_mta: value(recipient, 'remote-mta'),
+      reporting_mta: value(reporting, 'reporting-mta') ?? value(recipient, 'reporting-mta'),
+    };
+    return Object.values(dsn).some((field) => field !== null) ? dsn : null;
   }
 
   /** Resolve a JMAP `htmlBody`/`textBody` EmailBodyPart list to its bodyValues text. */
@@ -1129,6 +1196,47 @@ export class JamesClient extends StalwartPort {
 
   /** Download one blob (an attachment's bytes) via the JMAP session `downloadUrl` template. */
   async downloadBlob(mailbox: string, blobId: string): Promise<StalwartBlobDownload | null> {
+    return this.downloadJamesPart(mailbox, blobId);
+  }
+
+  private async downloadJamesPart(
+    mailbox: string,
+    blobId: string,
+    parentBlobId: string | null = null,
+  ): Promise<StalwartBlobDownload | null> {
+    const part = this.jamesPartBlobId(blobId);
+    const direct = await this.fetchBlob(mailbox, blobId);
+    if (direct) {
+      const extracted = part ? extractJamesMimePart(direct.data, Number(part.partId)) : null;
+      return extracted
+        ? { data: extracted.data, contentType: extracted.contentType ?? direct.contentType }
+        : direct;
+    }
+    if (!part) return null;
+
+    const parentIds = parentBlobId && parentBlobId !== blobId ? [parentBlobId] : [part.messageId];
+    for (const candidate of parentIds) {
+      const parent = await this.fetchBlob(mailbox, candidate);
+      const extracted = parent ? extractJamesMimePart(parent.data, Number(part.partId)) : null;
+      if (parent && extracted) {
+        return { data: extracted.data, contentType: extracted.contentType ?? parent.contentType };
+      }
+    }
+
+    if (!parentBlobId) {
+      const resolvedParent = await this.jamesParentBlobId(mailbox, part.messageId);
+      if (resolvedParent && resolvedParent !== part.messageId) {
+        const parent = await this.fetchBlob(mailbox, resolvedParent);
+        const extracted = parent ? extractJamesMimePart(parent.data, Number(part.partId)) : null;
+        if (parent && extracted) {
+          return { data: extracted.data, contentType: extracted.contentType ?? parent.contentType };
+        }
+      }
+    }
+    return null;
+  }
+
+  private async fetchBlob(mailbox: string, blobId: string): Promise<StalwartBlobDownload | null> {
     if (!this.jmapUrl) return null;
     await this.ensureBlobTemplates();
     const accountId = await this.resolveAccountIdFor(mailbox);
@@ -1156,6 +1264,17 @@ export class JamesClient extends StalwartPort {
       this.logger.warn(`James blob download read error: ${(err as Error).message}`);
       return null;
     }
+  }
+
+  private jamesPartBlobId(blobId: string): { messageId: string; partId: string } | null {
+    const match = blobId.match(/^(.+)_([0-9]+)$/);
+    return match ? { messageId: match[1], partId: match[2] } : null;
+  }
+
+  private async jamesParentBlobId(mailbox: string, messageId: string): Promise<string | null> {
+    const list = await this.getEmailListById(mailbox, messageId, ['id', 'blobId']);
+    const blobId = list?.[0]?.blobId;
+    return typeof blobId === 'string' && blobId ? blobId : null;
   }
 
   /** Upload a blob (an attachment) via the JMAP session `uploadUrl` template. */

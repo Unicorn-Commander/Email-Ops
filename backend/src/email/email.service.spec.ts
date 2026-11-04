@@ -1201,12 +1201,28 @@ describe('EmailService (verify DB; Stalwart MOCKED)', () => {
           isUnread: false,
           flagged: false,
           attachments: [],
+          dsn: {
+            action: 'failed',
+            status: '5.1.1',
+            diagnostic_code: 'smtp; 550 5.1.1 mailbox unavailable',
+            final_recipient: 'rfc822; reader@example.com',
+            remote_mta: 'dns; mx.example.net',
+            reporting_mta: 'dns; mx.example.net',
+          },
         },
       ];
       const messages = await service.listThreadMessages(WS, UC_UID, tid);
       const ids = messages.map((m) => m.id);
       expect(ids).toContain('live-msg-1');
       expect(ids).toContain(sent.id);
+      expect(messages.find((m) => m.id === 'live-msg-1')?.dsn).toEqual({
+        action: 'failed',
+        status: '5.1.1',
+        diagnostic_code: 'smtp; 550 5.1.1 mailbox unavailable',
+        final_recipient: 'rfc822; reader@example.com',
+        remote_mta: 'dns; mx.example.net',
+        reporting_mta: 'dns; mx.example.net',
+      });
       // Preview-only contract: each message exposes a `preview`, not a full body field.
       for (const m of messages) {
         expect(m).toHaveProperty('preview');

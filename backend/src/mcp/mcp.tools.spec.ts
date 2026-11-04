@@ -533,6 +533,39 @@ describe('EmailOpsTools', () => {
       expect(email.listThreadMessages).toHaveBeenCalledWith('ws-1', '', 'thread-1', 'mb-1');
     });
 
+    it('backfills James numbered MIME part metadata when the byte-fetch reports octet-stream', async () => {
+      const email: Partial<EmailService> = {
+        downloadAttachment: jest.fn().mockResolvedValue({
+          data: Buffer.from('status bytes'),
+          contentType: 'application/octet-stream',
+          filename: null,
+        }),
+        listThreadMessages: jest.fn().mockResolvedValue([
+          {
+            id: 'james-message-555',
+            attachments: [
+              {
+                blob_id: 'james-message-555_3',
+                name: 'status.dat',
+                type: 'message/delivery-status',
+                size: 12,
+                cid: null,
+              },
+            ],
+          },
+        ]),
+      };
+      const t = toolsWith(email);
+      const res: any = await t.getAttachment({} as any, {
+        workspace_id: 'ws-1',
+        mailbox_id: 'mb-1',
+        blob_id: 'james-message-555_3',
+        thread_id: 'thread-555',
+      });
+      expect(res.name).toBe('status.dat');
+      expect(res.mime_type).toBe('message/delivery-status');
+    });
+
     it('backfills by unique size within the message when Gmail rotated the attachment id', async () => {
       // Gmail attachment ids are NOT stable across fetches: the fresh thread
       // read returns a DIFFERENT composite blob_id, so exact-id match fails.
