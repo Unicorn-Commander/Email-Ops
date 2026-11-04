@@ -47,8 +47,8 @@ describe('MCP PAT scope enforcement', () => {
     const toolNames = Object.keys(MCP_TOOL_SCOPES) as McpToolName[];
     // Send-kit proposals: +4 lifecycle/read tools alongside approve_send_kit,
     // plus read-only mail-domain verification, plus agent pause/resume, plus
-    // the paced bulk inbox approval are all included in the registered scope surface.
-    expect(toolNames).toHaveLength(79);
+    // the paced bulk inbox approval are all included in the registered scope surface → 80.
+    expect(toolNames).toHaveLength(80);
     for (const toolName of toolNames) {
       expect(() => enforceMcpToolScope(pat(['*']), toolName, NOW)).not.toThrow();
     }
