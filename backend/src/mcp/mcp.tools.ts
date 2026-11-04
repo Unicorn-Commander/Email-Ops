@@ -562,9 +562,11 @@ export class EmailOpsTools {
     }
     let name = blob.filename?.trim() || null;
     let mime = blob.contentType?.trim() || null;
-    if ((!name || !mime) && args.thread_id) {
+    const genericMime = mime?.toLowerCase() === 'application/octet-stream';
+    if ((!name || !mime || genericMime) && args.thread_id) {
       // Backfill name/mime from thread metadata (Gmail's attachments.get and the
-      // James blob store return bytes only). Best-effort: a failed lookup never
+      // James blob store return bytes only; James may also report the requested
+      // octet-stream content type for a numbered MIME part. Best-effort: a failed lookup never
       // fails the fetch — the bytes are already in hand. ⚠️Gmail attachment ids
       // are NOT stable across fetches, so a fresh thread read can return a
       // DIFFERENT composite blob_id for the same attachment — match exact id
@@ -592,7 +594,7 @@ export class EmailOpsTools {
         }
         if (att) {
           name = name ?? (att.name?.trim() || null);
-          mime = mime ?? (att.type?.trim() || null);
+          mime = !mime || genericMime ? att.type?.trim() || mime : mime;
         }
       } catch {
         // metadata backfill is optional — keep the bytes

@@ -70,6 +70,16 @@ export interface AttachmentView {
   cid: string | null;
 }
 
+/** Delivery-status fields from an RFC 3464 multipart/report message. */
+export interface DsnView {
+  action: string | null;
+  status: string | null;
+  diagnostic_code: string | null;
+  final_recipient: string | null;
+  remote_mta: string | null;
+  reporting_mta: string | null;
+}
+
 /** One message within a thread (bodies as previews only, PLUS the webmail-wave detail fields). */
 export interface MessageView {
   id: string;
@@ -92,6 +102,8 @@ export interface MessageView {
   is_unread?: boolean;
   flagged?: boolean;
   attachments?: AttachmentView[];
+  /** Parsed RFC 3464 delivery status; absent for ordinary messages. */
+  dsn?: DsnView | null;
 }
 
 /**

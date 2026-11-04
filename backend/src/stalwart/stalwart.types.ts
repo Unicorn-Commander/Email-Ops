@@ -66,6 +66,16 @@ export interface StalwartAttachment {
   cid: string | null;
 }
 
+/** Parsed RFC 3464 delivery-status fields on a multipart/report message. */
+export interface StalwartDsn {
+  action: string | null;
+  status: string | null;
+  diagnostic_code: string | null;
+  final_recipient: string | null;
+  remote_mta: string | null;
+  reporting_mta: string | null;
+}
+
 /**
  * The FULL detail of one message in a thread (the thread-detail enrichment):
  * bodies (raw HTML — the client sanitizes), full participant lists, threading
@@ -90,6 +100,8 @@ export interface StalwartMessageDetail extends StalwartMessage {
   isUnread: boolean;
   flagged: boolean;
   attachments: StalwartAttachment[];
+  /** Present when a message/delivery-status MIME part was parsed successfully. */
+  dsn?: StalwartDsn | null;
 }
 
 /** A folder + search + paging query against one mailbox's live mail. */
