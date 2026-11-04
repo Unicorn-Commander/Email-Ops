@@ -45,6 +45,7 @@ import {
   holdPolicyOf,
   type AgentInboxItemView,
   type AgentInboxNoticePayload,
+  type AgentSendKitState,
   type AgentSendKitView,
   type AgentView,
   type AutoSentItemView,
@@ -246,6 +247,9 @@ function SendKitsSection({ kits, canReview }: { kits: UseSendKits; canReview: bo
           <div className="flex flex-wrap items-center gap-2">
             <h2 id="send-kits-heading" className="text-lg font-semibold text-primary">Send kits</h2>
             {kits.proposed.length > 0 && <Badge variant="review">{kits.proposed.length} proposed</Badge>}
+            {kits.expired.length > 0 && <Badge variant="warning">{kits.expired.length} expired</Badge>}
+            {kits.returned.length > 0 && <Badge variant="info">{kits.returned.length} returned</Badge>}
+            {kits.superseded.length > 0 && <Badge variant="neutral">{kits.superseded.length} superseded</Badge>}
           </div>
           <p className="mt-1 max-w-2xl text-sm leading-5 text-tertiary">
             An agent proposes the wave here. You approve the exact kit once; the send guard still checks every message.
@@ -279,6 +283,45 @@ function SendKitsSection({ kits, canReview }: { kits: UseSendKits; canReview: bo
                   onReject={kits.reject}
                 />
               ))}
+            </div>
+          )}
+
+          {kits.expired.length > 0 && (
+            <div className="space-y-3">
+              <h3 className="text-sm font-semibold uppercase tracking-[0.08em] text-tertiary">Expired kits</h3>
+              {kits.expired.map((kit) => (
+                <LifecycleSendKitCard
+                  key={kit.kit_id}
+                  kit={kit}
+                  canAct={canApprove}
+                  onExtend={kits.extend}
+                  onRepropose={kits.repropose}
+                  onReturn={kits.returnToAgent}
+                />
+              ))}
+            </div>
+          )}
+
+          {kits.returned.length > 0 && (
+            <div className="space-y-3">
+              <h3 className="text-sm font-semibold uppercase tracking-[0.08em] text-tertiary">Returned kits</h3>
+              {kits.returned.map((kit) => (
+                <LifecycleSendKitCard
+                  key={kit.kit_id}
+                  kit={kit}
+                  canAct={canApprove}
+                  onExtend={kits.extend}
+                  onRepropose={kits.repropose}
+                  onReturn={kits.returnToAgent}
+                />
+              ))}
+            </div>
+          )}
+
+          {kits.superseded.length > 0 && (
+            <div className="space-y-3">
+              <h3 className="text-sm font-semibold uppercase tracking-[0.08em] text-tertiary">Superseded kits</h3>
+              {kits.superseded.map((kit) => <SupersededSendKitRow key={kit.kit_id} kit={kit} />)}
             </div>
           )}
 
@@ -477,6 +520,7 @@ function ProposedSendKitCard({
               {(kit.recipients ?? []).map((recipient) => <li key={recipient} className="break-all">{recipient}</li>)}
             </ul>
           </details>
+          <p className="text-xs text-secondary">{kit.unsent_count} unsent recipient{kit.unsent_count === 1 ? '' : 's'}</p>
           {kit.note && (
             <p className="break-words rounded-token bg-surface-base px-3 py-2 text-xs leading-5 text-tertiary">
               <span className="font-medium text-secondary">Note:</span> {kit.note}
@@ -529,11 +573,188 @@ function ApprovedSendKitRow({ kit }: { kit: AgentSendKitView }) {
     <div className="min-w-0 rounded-token border border-subtle bg-surface-base px-3 py-3">
       <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
         <p className="break-words text-sm font-medium text-primary">{kit.title}</p>
-        <p className="shrink-0 text-xs text-tertiary">{kit.sent_today} / {kit.cap_per_day} sent today · expires {formatKitExpiry(kit.expires_at)}</p>
+        <p className="shrink-0 text-xs text-tertiary">{kit.sent_today} / {kit.cap_per_day} sent today · {kit.unsent_count} unsent · expires {formatKitExpiry(kit.expires_at)}</p>
       </div>
       <p className="mt-1 break-all font-mono text-[11px] text-muted">{kit.kit_id}</p>
     </div>
   );
+}
+
+function LifecycleSendKitCard({
+  kit,
+  canAct,
+  onExtend,
+  onRepropose,
+  onReturn,
+}: {
+  kit: AgentSendKitView;
+  canAct: boolean;
+  onExtend: UseSendKits['extend'];
+  onRepropose: UseSendKits['repropose'];
+  onReturn: UseSendKits['returnToAgent'];
+}) {
+  const [expiresAt, setExpiresAt] = useState(() => defaultKitExtension(kit.expires_at));
+  const [note, setNote] = useState('');
+  const [acting, setActing] = useState<null | 'extend' | 'repropose' | 'return'>(null);
+  const [error, setError] = useState<string | null>(null);
+  const canExtend = canAct && kit.state === 'EXPIRED';
+  const canRepropose = canAct && (kit.state === 'EXPIRED' || kit.state === 'RETURNED');
+  const canReturn = canAct && kit.state === 'EXPIRED';
+
+  async function act(kind: 'extend' | 'repropose' | 'return') {
+    if (!canAct || acting !== null) return;
+    if (kind === 'return' && !note.trim()) {
+      setError('Add a note before returning this kit to the agent.');
+      return;
+    }
+    const expiry = new Date(expiresAt);
+    if (kind !== 'return' && !Number.isFinite(expiry.getTime())) {
+      setError('Choose a valid future expiry.');
+      return;
+    }
+    setActing(kind);
+    setError(null);
+    const result =
+      kind === 'extend'
+        ? await onExtend(kit, expiry.toISOString())
+        : kind === 'repropose'
+          ? await onRepropose(kit, expiry.toISOString())
+          : await onReturn(kit, note.trim());
+    if (!result.ok) {
+      setError(result.error ?? `Could not ${kind} this kit.`);
+      setActing(null);
+    }
+  }
+
+  return (
+    <Card className="overflow-hidden border-warning/30 ring-1 ring-warning/10">
+      <div className="space-y-4 p-4 sm:p-5">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <SendKitStateBadge state={kit.state} />
+              <span className="break-all font-mono text-[11px] text-muted">{kit.kit_id}</span>
+            </div>
+            <h3 className="mt-2 break-words text-base font-semibold text-primary">{kit.title}</h3>
+          </div>
+          <p className="shrink-0 text-xs text-tertiary">expires {formatKitExpiry(kit.expires_at)}</p>
+        </div>
+
+        <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm text-secondary">
+          <span>{kit.unsent_count} unsent recipient{kit.unsent_count === 1 ? '' : 's'}</span>
+          <span>{kit.recipient_count} total recipient{kit.recipient_count === 1 ? '' : 's'}</span>
+          <span className="font-mono text-xs">{kit.from_address}</span>
+        </div>
+
+        {kit.remaining_recipients && kit.remaining_recipients.length > 0 ? (
+          <div>
+            <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Remaining recipients</p>
+            <ul className="mt-1 max-h-28 space-y-1 overflow-y-auto rounded-token border border-subtle bg-surface-base p-2 font-mono text-xs text-tertiary">
+              {kit.remaining_recipients.map((recipient) => <li key={recipient} className="break-all">{recipient}</li>)}
+            </ul>
+          </div>
+        ) : kit.unsent_count > 0 ? (
+          <p className="text-xs text-tertiary">The remaining addresses are retained as hashes and cannot be displayed.</p>
+        ) : null}
+
+        {kit.return_note && (
+          <p className="rounded-token bg-surface-base px-3 py-2 text-xs leading-5 text-tertiary">
+            <span className="font-medium text-secondary">Agent note:</span> {kit.return_note}
+          </p>
+        )}
+
+        {canExtend || canRepropose || canReturn ? (
+          <div className="space-y-3 border-t border-subtle pt-3">
+            {canExtend || canRepropose ? (
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                {canExtend && (
+                  <label className="min-w-0 flex-1 text-xs text-tertiary">
+                    New expiry
+                    <input
+                      type="datetime-local"
+                      value={expiresAt}
+                      onChange={(event) => setExpiresAt(event.target.value)}
+                      className="mt-1 block w-full rounded-token border border-subtle bg-surface-base px-2.5 py-2 text-sm text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    />
+                  </label>
+                )}
+                {canExtend && (
+                  <Button size="sm" disabled={acting !== null} onClick={() => void act('extend')}>
+                    {acting === 'extend' ? 'Extending…' : 'Extend'}
+                  </Button>
+                )}
+                {canRepropose && (
+                  <Button variant="secondary" size="sm" disabled={acting !== null || kit.unsent_count === 0} onClick={() => void act('repropose')}>
+                    {acting === 'repropose' ? 'Re-proposing…' : 'Re-propose unsent'}
+                  </Button>
+                )}
+              </div>
+            ) : null}
+            {canReturn && (
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                <label className="min-w-0 flex-1 text-xs text-tertiary">
+                  Note to drafting agent
+                  <textarea
+                    value={note}
+                    onChange={(event) => setNote(event.target.value)}
+                    rows={2}
+                    maxLength={2000}
+                    placeholder="What needs changing?"
+                    className="mt-1 block w-full resize-y rounded-token border border-subtle bg-surface-base px-2.5 py-2 text-sm text-primary placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  />
+                </label>
+                <Button variant="danger" size="sm" disabled={acting !== null || !note.trim()} onClick={() => void act('return')}>
+                  {acting === 'return' ? 'Returning…' : 'Return to agent'}
+                </Button>
+              </div>
+            )}
+          </div>
+        ) : canAct ? (
+          <p className="border-t border-subtle pt-3 text-sm text-tertiary">No lifecycle action is available for this kit.</p>
+        ) : (
+          <p className="border-t border-subtle pt-3 text-sm text-warning">A signed-in workspace member must manage this kit.</p>
+        )}
+        {error && <p className="break-words text-xs text-danger">{error}</p>}
+      </div>
+    </Card>
+  );
+}
+
+function SupersededSendKitRow({ kit }: { kit: AgentSendKitView }) {
+  return (
+    <div className="min-w-0 rounded-token border border-subtle bg-surface-base px-3 py-3">
+      <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-2">
+          <SendKitStateBadge state={kit.state} />
+          <p className="break-words text-sm font-medium text-primary">{kit.title}</p>
+        </div>
+        <p className="shrink-0 text-xs text-tertiary">{kit.unsent_count} unsent recipient{kit.unsent_count === 1 ? '' : 's'}</p>
+      </div>
+      <p className="mt-1 break-all font-mono text-[11px] text-muted">{kit.kit_id}</p>
+      {kit.superseded_by_kit_id && (
+        <p className="mt-1 break-all text-xs text-tertiary">Replaced by <span className="font-mono">{kit.superseded_by_kit_id}</span></p>
+      )}
+    </div>
+  );
+}
+
+function SendKitStateBadge({ state }: { state: AgentSendKitState }) {
+  const variant =
+    state === 'EXPIRED' ? 'warning' : state === 'RETURNED' ? 'info' : state === 'SUPERSEDED' ? 'neutral' : 'review';
+  return <Badge variant={variant}>{state}</Badge>;
+}
+
+function defaultKitExtension(iso: string): string {
+  const original = new Date(iso);
+  const date = Number.isFinite(original.getTime()) && original.getTime() > Date.now()
+    ? original
+    : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  return toDateTimeLocal(date);
+}
+
+function toDateTimeLocal(date: Date): string {
+  const adjusted = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000);
+  return adjusted.toISOString().slice(0, 16);
 }
 
 function TemplatePreview({ kit }: { kit: AgentSendKitView }) {

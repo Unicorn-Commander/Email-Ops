@@ -550,7 +550,13 @@ export async function rejectAgentInboxItem(
 
 // ── Personalised send kits ─────────────────────────────────────────────────
 
-export type AgentSendKitState = 'PROPOSED' | 'APPROVED' | 'REJECTED';
+export type AgentSendKitState =
+  | 'PROPOSED'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'EXPIRED'
+  | 'RETURNED'
+  | 'SUPERSEDED';
 
 export interface AgentSendKitView {
   approval_url?: string;
@@ -572,12 +578,19 @@ export interface AgentSendKitView {
   rejected_by: string | null;
   rejected_at: string | null;
   note: string | null;
+  return_note: string | null;
+  returned_by: string | null;
+  returned_at: string | null;
+  superseded_by_kit_id: string | null;
   sent_today: number;
+  unsent_count: number;
   body_template?: string;
   placeholder_rules?: Record<string, string>;
   optional_lines?: number[];
   recipients?: string[];
   recipient_hashes?: string[];
+  remaining_recipients?: string[];
+  return_notice_id?: string;
 }
 
 export interface AgentSendKitListResponse {
@@ -628,6 +641,47 @@ export async function rejectSendKit(
   return apiPost<AgentSendKitView>(
     `${sendKitsBase(workspaceId)}/${encodeURIComponent(kitId)}/reject`,
     note ? { note } : {},
+    token,
+  );
+}
+
+export async function extendSendKit(
+  workspaceId: string,
+  kitId: string,
+  expiresAt: string,
+  templateSha256: string,
+  token?: string,
+): Promise<AgentSendKitView> {
+  return apiPost<AgentSendKitView>(
+    `${sendKitsBase(workspaceId)}/${encodeURIComponent(kitId)}/extend`,
+    { expires_at: expiresAt, template_sha256: templateSha256 },
+    token,
+  );
+}
+
+export async function reproposeSendKit(
+  workspaceId: string,
+  kitId: string,
+  expiresAt: string,
+  newKitId?: string,
+  token?: string,
+): Promise<AgentSendKitView> {
+  return apiPost<AgentSendKitView>(
+    `${sendKitsBase(workspaceId)}/${encodeURIComponent(kitId)}/re-propose`,
+    { expires_at: expiresAt, ...(newKitId ? { new_kit_id: newKitId } : {}) },
+    token,
+  );
+}
+
+export async function returnSendKitToAgent(
+  workspaceId: string,
+  kitId: string,
+  note: string,
+  token?: string,
+): Promise<AgentSendKitView> {
+  return apiPost<AgentSendKitView>(
+    `${sendKitsBase(workspaceId)}/${encodeURIComponent(kitId)}/return`,
+    { note },
     token,
   );
 }

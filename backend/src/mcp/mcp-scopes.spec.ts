@@ -45,9 +45,9 @@ describe('MCP PAT scope enforcement', () => {
 
   it('allows a grandfathered wildcard PAT to invoke every registered tool', () => {
     const toolNames = Object.keys(MCP_TOOL_SCOPES) as McpToolName[];
-    // Send-kit proposals: +4 lifecycle/read tools alongside approve_send_kit,
-    // plus read-only mail-domain verification, plus agent pause/resume → 68.
-    expect(toolNames).toHaveLength(78);
+    // Send-kit proposals, lifecycle/read tools, mail-domain verification, and
+    // agent pause/resume are all included in the registered scope surface.
+    expect(toolNames).toHaveLength(79);
     for (const toolName of toolNames) {
       expect(() => enforceMcpToolScope(pat(['*']), toolName, NOW)).not.toThrow();
     }

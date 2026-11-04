@@ -87,7 +87,14 @@ const COMPOSE_ATTACHMENT = z
     }
   });
 const INBOX_STATE = z.enum(['pending', 'approved', 'rejected']);
-const SEND_KIT_STATE = z.enum(['PROPOSED', 'APPROVED', 'REJECTED']);
+const SEND_KIT_STATE = z.enum([
+  'PROPOSED',
+  'APPROVED',
+  'REJECTED',
+  'EXPIRED',
+  'RETURNED',
+  'SUPERSEDED',
+]);
 const MAIL_FOLDER = z.enum(['inbox', 'archive', 'spam', 'trash', 'sent', 'drafts']);
 const DISPOSITION = z.enum(['INBOX', 'ARCHIVE', 'TRASH', 'SPAM']);
 
@@ -976,7 +983,7 @@ export class McpService {
       {
         title: 'List agent send kits',
         description:
-          'List send-kit proposals and approvals, optionally filtered by PROPOSED, APPROVED, or REJECTED.',
+          'List send-kit proposals and approvals, including computed EXPIRED, RETURNED, and SUPERSEDED states plus unsent_count, optionally filtered by state.',
         inputSchema: {
           workspace_id: z.string().optional(),
           state: SEND_KIT_STATE.optional(),
@@ -990,7 +997,7 @@ export class McpService {
       {
         title: 'Get an agent send kit',
         description:
-          'Get the full send-kit definition, including retained recipients and body template.',
+          'Get the full send-kit definition, including retained/unsent recipients, unsent_count, and a return note when present.',
         inputSchema: {
           workspace_id: z.string().optional(),
           kit_id: z.string().min(1).max(200),
@@ -1037,6 +1044,21 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await tools.rejectSendKit(user, args)),
+    );
+
+    registerTool(
+      'return_send_kit_to_agent',
+      {
+        title: 'Return a send kit to its drafting agent',
+        description:
+          'Human-only action. Mark a send kit RETURNED and create a NOTICE for the drafting agent; a note is required.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          kit_id: z.string().min(1).max(200),
+          note: z.string().min(1).max(2000),
+        },
+      },
+      async (args: any) => wrap(await tools.returnSendKitToAgent(user, args)),
     );
 
     // ── Trusted-correspondent tools (Wave 7: the outbound trust allowlist) ──

@@ -7,6 +7,9 @@ import { NotifyModule } from '../notify/notify.module';
 import { NativeUnsubscribeHttpClient, NativeUnsubscribeHttpPort } from './native-unsubscribe-http';
 import { ApprovalsModule } from '../approvals/approvals.module';
 import { CalendarModule } from '../calendar/calendar.module';
+import { AuthModule } from '../auth/auth.module';
+import { WorkspaceModule } from '../common/workspace/workspace.module';
+import { SendKitController } from './send-kit.controller';
 
 /**
  * The Email-Ops core domain: the SoR + the EmailOpsPort contract logic + the
@@ -15,7 +18,17 @@ import { CalendarModule } from '../calendar/calendar.module';
  * to the SAME implementation — one set of rules, one RLS path.
  */
 @Module({
-  imports: [StalwartModule, ConnectedAccountsModule, MailProviderModule, NotifyModule, CalendarModule, ApprovalsModule],
+  imports: [
+    StalwartModule,
+    ConnectedAccountsModule,
+    MailProviderModule,
+    NotifyModule,
+    CalendarModule,
+    ApprovalsModule,
+    AuthModule,
+    WorkspaceModule,
+  ],
+  controllers: [SendKitController],
   providers: [
     NativeUnsubscribeHttpClient,
     { provide: NativeUnsubscribeHttpPort, useExisting: NativeUnsubscribeHttpClient },

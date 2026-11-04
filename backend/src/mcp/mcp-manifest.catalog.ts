@@ -1291,12 +1291,12 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "list_send_kits",
-      "description": "List personalised send-kit proposals and approvals, optionally filtered by state.",
+      "description": "List personalised send-kit proposals and approvals, including computed EXPIRED, RETURNED, and SUPERSEDED states plus unsent_count, optionally filtered by state.",
       "input_schema": {
         "type": "object",
         "properties": {
           "workspace_id": { "type": "string" },
-          "state": { "type": "string", "enum": ["PROPOSED", "APPROVED", "REJECTED"] }
+          "state": { "type": "string", "enum": ["PROPOSED", "APPROVED", "REJECTED", "EXPIRED", "RETURNED", "SUPERSEDED"] }
         },
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -1307,7 +1307,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "get_send_kit",
-      "description": "Get the full send-kit definition, including retained recipients and body template.",
+      "description": "Get the full send-kit definition, including retained/unsent recipients, unsent_count, and a return note when present.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1359,6 +1359,24 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
           "note": { "type": "string", "maxLength": 2000 }
         },
         "required": ["kit_id"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": ["write:agent_inbox"],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
+      "name": "return_send_kit_to_agent",
+      "description": "Human-only return of a send kit to its drafting agent; the required note becomes a NOTICE item.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": { "type": "string" },
+          "kit_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "note": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        },
+        "required": ["kit_id", "note"],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       },
