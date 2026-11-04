@@ -99,6 +99,7 @@ import {
   recipientHash,
   type AgentSendKitDefinition,
   type AgentSendKitDefinitionInput,
+  type AgentSendKitMessage,
   type AgentSendKitRecord,
 } from './agent-send-kit';
 import { shouldAdvanceStatus } from './message-status';
@@ -140,6 +141,11 @@ import {
 import { NativeUnsubscribeHttpPort } from './native-unsubscribe-http';
 import { CalendarService, getCalendarDraftPayload } from '../calendar/calendar.service';
 import { CalendarDraftPayload } from '../calendar/calendar.types';
+import {
+  DEFAULT_KIT_APPROVAL_SECONDS_BETWEEN,
+  planAgentInboxSchedule,
+  type AgentInboxScheduleCandidate,
+} from './agent-inbox-scheduler';
 
 /**
  * Fan-out bounds for the multi-mailbox webmail endpoints (unified inbox +
@@ -307,6 +313,7 @@ type ApprovePrep =
       subject: string | null;
       mailbox: MailboxAccount | null;
       req: SendReq;
+      scheduledApproval?: boolean;
     };
 
 export interface AgentSendKitProposalInput extends AgentSendKitDefinitionInput {
@@ -357,6 +364,7 @@ export interface AgentSendKitListView {
   from: string;
   from_address: string;
   cap_per_day: number;
+  approval_seconds_between: number;
   expires_at: string;
   subjects: string[];
   recipient_count: number;
@@ -383,6 +391,34 @@ export interface AgentSendKitListView {
   approval_url?: string;
   remaining_recipients?: string[];
   return_notice_id?: string;
+}
+
+export type BulkApproveAgentInboxItemStatus =
+  | 'scheduled'
+  | 'approved'
+  | 'already_approved'
+  | 'already_rejected'
+  | 'refused';
+
+export interface BulkApproveAgentInboxItemResult {
+  item_id: string;
+  status: BulkApproveAgentInboxItemStatus;
+  reason?: string;
+  send_at?: string | null;
+}
+
+export interface BulkApproveAgentInboxSchedule {
+  first_send: string | null;
+  last_send: string | null;
+  count: number;
+  count_per_sender: Record<string, number>;
+}
+
+export interface BulkApproveAgentInboxResult {
+  items: BulkApproveAgentInboxItemResult[];
+  schedule: BulkApproveAgentInboxSchedule;
+  approved_count: number;
+  refused_count: number;
 }
 
 function sameInstant(a: Date, b: Date): boolean {
@@ -2717,6 +2753,7 @@ export class EmailService {
       from: row.fromAddress ?? '',
       from_address: row.fromAddress ?? '',
       cap_per_day: row.capPerDay ?? 0,
+      approval_seconds_between: DEFAULT_KIT_APPROVAL_SECONDS_BETWEEN,
       expires_at: row.expiresAt?.toISOString?.() ?? '',
       subjects: row.subjects ?? [],
       recipient_count:
@@ -3223,6 +3260,329 @@ export class EmailService {
   }
 
   /**
+   * Approve up to 200 inbox items while reserving their delivery timestamps.
+   * Email rows use the existing draft `sendAt`/`payload.sends_at` worker path;
+   * cleanup and notice rows delegate to the canonical single-item approval.
+   *
+   * The reservation transaction also records one APPROVED audit event per newly
+   * scheduled email. A retry sees the APPROVED state and returns an idempotent
+   * `already_approved` result without creating a second event or schedule.
+   */
+  async bulkApproveAgentInboxItems(
+    workspaceId: string,
+    ucUid: string | null,
+    itemIds: string[],
+    note?: string | null,
+    trustRecipients?: boolean,
+    agentPrincipal = false,
+    reviewerRole?: WorkspaceRole,
+  ): Promise<BulkApproveAgentInboxResult> {
+    const ids = [...new Set(itemIds.map((itemId) => itemId.trim()).filter(Boolean))];
+    if (ids.length === 0 || ids.length > 200) {
+      throw new BadRequestException('Bulk approval requires between 1 and 200 item ids.');
+    }
+
+    const now = new Date();
+    const resultById = new Map<string, BulkApproveAgentInboxItemResult>();
+    const immediateIds: string[] = [];
+    const candidates: AgentInboxScheduleCandidate[] = [];
+
+    await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+      const rows = await tx.agentInboxItem.findMany({
+        where: { id: { in: ids }, workspaceId, ...this.agentInboxScopeWhere(scope) },
+        include: { message: true },
+      });
+      const rowsById = new Map(rows.map((row) => [row.id, row]));
+      const candidateRows = new Map<
+        string,
+        { row: (typeof rows)[number]; message: NonNullable<(typeof rows)[number]['message']> }
+      >();
+      const payloadOf = (raw: unknown): Record<string, unknown> =>
+        raw && typeof raw === 'object' && !Array.isArray(raw)
+          ? { ...(raw as Record<string, unknown>) }
+          : {};
+      const kitIdOf = (row: (typeof rows)[number]): string | null => {
+        const payload = payloadOf(row.payload);
+        const payloadKitId = payload.kit_id;
+        if (typeof row.message?.kitId === 'string' && row.message.kitId.trim()) {
+          return row.message.kitId.trim();
+        }
+        return typeof payloadKitId === 'string' && payloadKitId.trim() ? payloadKitId.trim() : null;
+      };
+      const kitIds = [
+        ...new Set(rows.map(kitIdOf).filter((kitId): kitId is string => Boolean(kitId))),
+      ];
+      const kits = kitIds.length
+        ? await tx.agentSendKit.findMany({ where: { workspaceId, kitId: { in: kitIds } } })
+        : [];
+      const kitsById = new Map(kits.map((kit) => [kit.kitId, kit]));
+      const dayWindow = businessDayWindow(now);
+      const sentTodayByKit = new Map<string, number>();
+      for (const kitId of kitIds) {
+        const count = await tx.emailMessage.count({
+          where: {
+            workspaceId,
+            kitId,
+            OR: [
+              { sentAt: { gte: dayWindow.start, lt: dayWindow.end } },
+              { sendAt: { gte: dayWindow.start, lt: dayWindow.end } },
+            ],
+          },
+        });
+        sentTodayByKit.set(kitId, count);
+      }
+
+      for (const id of ids) {
+        const row = rowsById.get(id);
+        if (!row) {
+          resultById.set(id, { item_id: id, status: 'refused', reason: 'not_found' });
+          continue;
+        }
+        if (row.state === AgentInboxState.APPROVED) {
+          resultById.set(id, {
+            item_id: id,
+            status: 'already_approved',
+            send_at: row.message?.sendAt?.toISOString?.() ?? null,
+          });
+          continue;
+        }
+        if (row.state === AgentInboxState.REJECTED) {
+          resultById.set(id, { item_id: id, status: 'already_rejected', send_at: null });
+          continue;
+        }
+        if (
+          row.approvalTier === AgentInboxApprovalTier.OWNER_ADMIN &&
+          reviewerRole !== undefined &&
+          reviewerRole !== WorkspaceRole.OWNER &&
+          reviewerRole !== WorkspaceRole.ADMIN
+        ) {
+          resultById.set(id, { item_id: id, status: 'refused', reason: 'owner_admin_required' });
+          continue;
+        }
+        if (row.kind !== AgentInboxKind.EMAIL) {
+          immediateIds.push(id);
+          continue;
+        }
+        if (!row.message) {
+          resultById.set(id, { item_id: id, status: 'refused', reason: 'message_missing' });
+          continue;
+        }
+
+        const mailbox = row.message.mailboxAccountId
+          ? await tx.mailboxAccount.findFirst({
+              where: { id: row.message.mailboxAccountId, workspaceId },
+            })
+          : await this.defaultMailbox(tx, workspaceId, ucUid);
+        if (mailbox && !(await mayActThroughMailbox(tx, mailbox, ucUid))) {
+          resultById.set(id, { item_id: id, status: 'refused', reason: 'mailbox_owner_required' });
+          continue;
+        }
+
+        const payload = payloadOf(row.payload);
+        const kitId = kitIdOf(row);
+        const kit = kitId ? (kitsById.get(kitId) ?? null) : null;
+        const sentToday = kitId ? (sentTodayByKit.get(kitId) ?? 0) : 0;
+        if (agentPrincipal) {
+          const recipients = [
+            ...(row.message.toAddresses?.length
+              ? row.message.toAddresses
+              : [row.message.toAddress ?? '']),
+            ...(row.message.ccAddresses ?? []),
+            ...(row.message.bccAddresses ?? []),
+          ]
+            .map((address) => normalizeAddress(address))
+            .filter(Boolean);
+          const domains = await verifiedInternalDomains(tx, workspaceId);
+          const trusted = await tx.trustedCorrespondent.findMany({
+            where: { workspaceId },
+            select: { address: true, scope: true },
+          });
+          const external = recipients.filter((address) => {
+            const domain = address.split('@')[1] ?? '';
+            return (
+              !domains.has(domain) &&
+              !trusted.some((entry) =>
+                entry.scope === TrustedCorrespondentScope.ADDRESS
+                  ? entry.address === address
+                  : entry.address === domain,
+              )
+            );
+          });
+          if (
+            external.length > 0 &&
+            !(await this.standingApprovals?.reserve(tx, workspaceId, row.message)) &&
+            !kitId
+          ) {
+            resultById.set(id, { item_id: id, status: 'refused', reason: 'kit_missing' });
+            continue;
+          }
+        }
+        if (kitId) {
+          const refusal = agentSendKitRefusalReason({
+            message: {
+              fromAddress: row.message.fromAddress,
+              toAddress: row.message.toAddress,
+              toAddresses: row.message.toAddresses ?? [],
+              ccAddresses: row.message.ccAddresses ?? [],
+              bccAddresses: row.message.bccAddresses ?? [],
+              subject: row.message.subject,
+              body: row.message.body,
+              attachments: row.message.attachments,
+            } satisfies AgentSendKitMessage,
+            kit: kit as AgentSendKitRecord | null,
+            sentToday,
+            now,
+          });
+          if (refusal) {
+            resultById.set(id, { item_id: id, status: 'refused', reason: refusal });
+            continue;
+          }
+        }
+
+        const notBeforeRaw = payload.not_before ?? payload.notBefore;
+        const notBefore =
+          notBeforeRaw !== undefined
+            ? new Date(String(notBeforeRaw))
+            : (row.message.sendAt ?? null);
+        const paceRaw = payload.approval_seconds_between ?? payload.approvalSecondsBetween;
+        const approvalSecondsBetween =
+          typeof paceRaw === 'number' && Number.isFinite(paceRaw) ? paceRaw : null;
+        const sender =
+          normalizeAddress(
+            row.message.fromAddress ?? mailbox?.emailAddress ?? row.message.toAddress ?? '',
+          ) || '(unknown sender)';
+        const candidate: AgentInboxScheduleCandidate = {
+          itemId: id,
+          sender,
+          kitId,
+          approvalSecondsBetween,
+          notBefore,
+          expiresAt: kit?.expiresAt ?? null,
+          capPerDay: kit?.capPerDay ?? null,
+          sentToday,
+        };
+        candidates.push(candidate);
+        candidateRows.set(id, { row, message: row.message });
+      }
+
+      const plan = planAgentInboxSchedule(candidates, now);
+      for (const refused of plan.refused) {
+        resultById.set(refused.itemId, {
+          item_id: refused.itemId,
+          status: 'refused',
+          reason: refused.reason,
+        });
+      }
+      for (const scheduled of plan.scheduled) {
+        const source = candidateRows.get(scheduled.itemId);
+        if (!source) continue;
+        const payload = payloadOf(source.row.payload);
+        payload.sends_at = scheduled.sendAt.toISOString();
+        payload.approval_seconds_between = scheduled.approvalSecondsBetween;
+        payload.agent_principal = agentPrincipal;
+        await tx.emailMessage.update({
+          where: { id: source.message.id },
+          data: { sendAt: scheduled.sendAt },
+        });
+        await tx.agentInboxItem.update({
+          where: { id: scheduled.itemId },
+          data: {
+            state: AgentInboxState.APPROVED,
+            reviewedByUcUid: ucUid,
+            reviewedAt: now,
+            reviewNote: note ?? null,
+            payload: payload as Prisma.InputJsonValue,
+          },
+          include: { message: true },
+        });
+        await this.recordAction(tx, workspaceId, {
+          kind: AgentActionKind.APPROVED,
+          agentKey: source.row.draftedBy,
+          messageId: source.message.id,
+          actorUcUid: ucUid,
+          detail: `${source.message.subject ?? '(no subject)'} (scheduled ${scheduled.sendAt.toISOString()})`,
+        });
+        resultById.set(scheduled.itemId, {
+          item_id: scheduled.itemId,
+          status: 'scheduled',
+          send_at: scheduled.sendAt.toISOString(),
+        });
+      }
+    });
+
+    for (const id of immediateIds) {
+      try {
+        const result = await this.approveAgentInboxItem(
+          workspaceId,
+          ucUid,
+          id,
+          note ?? null,
+          trustRecipients,
+          agentPrincipal,
+          reviewerRole,
+        );
+        resultById.set(id, {
+          item_id: id,
+          status: result ? 'approved' : 'refused',
+          ...(result ? {} : { reason: 'not_found' }),
+          send_at: null,
+        });
+      } catch (error) {
+        const response = (error as { response?: unknown }).response;
+        const reason =
+          response &&
+          typeof response === 'object' &&
+          !Array.isArray(response) &&
+          typeof (response as Record<string, unknown>).reason === 'string'
+            ? ((response as Record<string, unknown>).reason as string)
+            : error instanceof Error
+              ? error.message
+              : 'approval_failed';
+        resultById.set(id, { item_id: id, status: 'refused', reason });
+      }
+    }
+
+    const items = ids.map(
+      (id) =>
+        resultById.get(id) ?? {
+          item_id: id,
+          status: 'refused' as const,
+          reason: 'approval_failed',
+        },
+    );
+    const scheduledItems = items.filter((item) => item.status === 'scheduled');
+    const firstSend = scheduledItems.reduce<string | null>(
+      (first, item) => (!first || (item.send_at ?? '') < first ? (item.send_at ?? null) : first),
+      null,
+    );
+    const lastSend = scheduledItems.reduce<string | null>(
+      (last, item) => (!last || (item.send_at ?? '') > last ? (item.send_at ?? null) : last),
+      null,
+    );
+    const countPerSender: Record<string, number> = {};
+    for (const candidate of candidates) {
+      const result = resultById.get(candidate.itemId);
+      if (result?.status !== 'scheduled') continue;
+      const sender = candidate.sender;
+      countPerSender[sender] = (countPerSender[sender] ?? 0) + 1;
+    }
+    return {
+      items,
+      schedule: {
+        first_send: firstSend,
+        last_send: lastSend,
+        count: scheduledItems.length,
+        count_per_sender: countPerSender,
+      },
+      approved_count: items.filter(
+        (item) => item.status === 'scheduled' || item.status === 'approved',
+      ).length,
+      refused_count: items.filter((item) => item.status === 'refused').length,
+    };
+  }
+
+  /**
    * Approve a pending agent-inbox draft: PENDING → APPROVED, hand the staged
    * draft to the send lane, advance the message to queued/sent/failed. Returns
    * the updated message view. Idempotent-ish: approving a non-pending item is a
@@ -3260,7 +3620,14 @@ export class EmailService {
           include: { message: true },
         });
         if (!item) return { kind: 'null' };
-        if (item.state !== AgentInboxState.PENDING) {
+        const scheduledApproval = Boolean(
+          item.state === AgentInboxState.APPROVED &&
+          item.kind === AgentInboxKind.EMAIL &&
+          item.message?.sendAt &&
+          item.message.sendAt.getTime() <= Date.now() &&
+          this.readSendAt(item.payload) !== null,
+        );
+        if (item.state !== AgentInboxState.PENDING && !scheduledApproval) {
           return {
             kind: 'result',
             value: {
@@ -3491,6 +3858,7 @@ export class EmailService {
           draftedBy: item.draftedBy,
           subject: item.message.subject ?? null,
           mailbox: mailbox ?? null,
+          scheduledApproval,
           req: {
             fromAddress:
               item.message.fromAddress ?? mailbox?.emailAddress ?? item.message.toAddress!,
@@ -3662,24 +4030,28 @@ export class EmailService {
       const sent = await this.stampSendResult(tx, prep.messageId, result);
       const updated = await tx.agentInboxItem.update({
         where: { id: prep.itemId },
-        data: {
-          state: AgentInboxState.APPROVED,
-          reviewedByUcUid: ucUid,
-          reviewedAt: new Date(),
-          reviewNote: note ?? null,
-        },
+        data: prep.scheduledApproval
+          ? { state: AgentInboxState.APPROVED }
+          : {
+              state: AgentInboxState.APPROVED,
+              reviewedByUcUid: ucUid,
+              reviewedAt: new Date(),
+              reviewNote: note ?? null,
+            },
         include: { message: true },
       });
       this.logger.log(
         `agent-inbox item ${prep.itemId} APPROVED by ${ucUid ?? '(unknown)'} — draft handed to send lane (message ${prep.messageId})`,
       );
-      await this.recordAction(tx, workspaceId, {
-        kind: AgentActionKind.APPROVED,
-        agentKey: prep.draftedBy,
-        messageId: prep.messageId,
-        actorUcUid: ucUid,
-        detail: prep.subject,
-      });
+      if (!prep.scheduledApproval) {
+        await this.recordAction(tx, workspaceId, {
+          kind: AgentActionKind.APPROVED,
+          agentKey: prep.draftedBy,
+          messageId: prep.messageId,
+          actorUcUid: ucUid,
+          detail: prep.subject,
+        });
+      }
       return { inbox: this.inboxView(updated, sent), message: this.composeView(sent) };
     });
   }

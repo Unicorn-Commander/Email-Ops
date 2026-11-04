@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
+  AgentInboxState,
   MailboxAccount,
   Prisma,
   ScheduledSend,
@@ -330,18 +331,28 @@ export class SchedulingService {
   /** Auto-approve deferred agent drafts at sends_at; rejection removes them from this set. */
   async fireDueAgentInboxSends(now = new Date(), take = 50): Promise<number> {
     const rows = await this.prisma.systemClient.agentInboxItem.findMany({
-      where: { state: 'PENDING' },
+      where: { state: { in: [AgentInboxState.PENDING, AgentInboxState.APPROVED] } },
       take: take * 3,
       orderBy: { createdAt: 'asc' },
     });
     let sent = 0;
     for (const row of rows) {
       const payload = row.payload;
-      const raw = payload && typeof payload === 'object' && !Array.isArray(payload)
-        ? (payload as Record<string, unknown>).sends_at : undefined;
+      const payloadObject =
+        payload && typeof payload === 'object' && !Array.isArray(payload)
+          ? (payload as Record<string, unknown>)
+          : {};
+      const raw = payloadObject.sends_at;
       if (typeof raw !== 'string' || !Number.isFinite(new Date(raw).getTime()) || new Date(raw) > now) continue;
       try {
-        const result = await this.email.approveAgentInboxItem(row.workspaceId, null, row.id, 'scheduled send', false, true);
+        const result = await this.email.approveAgentInboxItem(
+          row.workspaceId,
+          row.reviewedByUcUid,
+          row.id,
+          'scheduled send',
+          false,
+          payloadObject.agent_principal !== false,
+        );
         if (result) sent += 1;
       } catch (err) {
         this.logger.warn(`deferred agent send failed row=${row.id}: ${(err as Error).message}`);

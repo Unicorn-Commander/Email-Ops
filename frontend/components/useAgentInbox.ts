@@ -19,12 +19,14 @@ import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   approveAgentInboxItem,
+  bulkApproveAgentInboxItems,
   listAgentInbox,
   rejectAgentInboxItem,
   ApiError,
   type AgentInboxItemView,
   type AgentInboxState,
   type ApproveOptions,
+  type BulkApproveAgentInboxResult,
   type MyWorkspace,
 } from '@/lib/api';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
@@ -51,6 +53,10 @@ export interface ReviewOutcome {
   error?: string;
 }
 
+export interface BulkApproveOutcome extends ReviewOutcome {
+  result?: BulkApproveAgentInboxResult;
+}
+
 export interface UseAgentInbox {
   /** The workspace the queue is scoped to (null = caller has no membership). */
   workspace: MyWorkspace | null;
@@ -71,6 +77,10 @@ export interface UseAgentInbox {
    * the first-contact trust choice.
    */
   approve: (itemId: string, note?: string, opts?: ApproveOptions) => Promise<ReviewOutcome>;
+  /** Approve selected drafts and return the server's paced schedule. */
+  bulkApprove: (itemIds: string[], note?: string, opts?: ApproveOptions) => Promise<BulkApproveOutcome>;
+  /** Reject selected drafts sequentially, then refresh once. */
+  bulkReject: (itemIds: string[], note?: string) => Promise<ReviewOutcome>;
   /** Reject (never sends / never executes; NOTICE → dismisses). Refreshes on success. */
   reject: (itemId: string, note?: string) => Promise<ReviewOutcome>;
 }
@@ -209,6 +219,40 @@ export function useAgentInbox(): UseAgentInbox {
     [act],
   );
 
+  const bulkApprove = useCallback(
+    async (itemIds: string[], note?: string, opts?: ApproveOptions): Promise<BulkApproveOutcome> => {
+      if (!workspace) return { ok: false, error: 'No active workspace.' };
+      try {
+        const result = await bulkApproveAgentInboxItems(workspace.workspace_id, itemIds, note, opts);
+        await fetchFor(workspace, state, true);
+        if (typeof window !== 'undefined') window.dispatchEvent(new Event('agent-inbox:changed'));
+        return { ok: true, result };
+      } catch (err) {
+        if (guard401(err)) return { ok: false, error: 'Session expired.' };
+        return { ok: false, error: messageOf(err, 'Could not approve the selected items.') };
+      }
+    },
+    [workspace, fetchFor, state, guard401],
+  );
+
+  const bulkReject = useCallback(
+    async (itemIds: string[], note?: string): Promise<ReviewOutcome> => {
+      if (!workspace) return { ok: false, error: 'No active workspace.' };
+      try {
+        for (const itemId of itemIds) {
+          await rejectAgentInboxItem(workspace.workspace_id, itemId, note);
+        }
+        await fetchFor(workspace, state, true);
+        if (typeof window !== 'undefined') window.dispatchEvent(new Event('agent-inbox:changed'));
+        return { ok: true };
+      } catch (err) {
+        if (guard401(err)) return { ok: false, error: 'Session expired.' };
+        return { ok: false, error: messageOf(err, 'Could not reject the selected items.') };
+      }
+    },
+    [workspace, fetchFor, state, guard401],
+  );
+
   return {
     workspace,
     state,
@@ -219,6 +263,8 @@ export function useAgentInbox(): UseAgentInbox {
     error,
     refresh,
     approve,
+    bulkApprove,
+    bulkReject,
     reject,
   };
 }

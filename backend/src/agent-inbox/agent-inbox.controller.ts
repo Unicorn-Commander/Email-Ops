@@ -47,6 +47,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { Throttle } from '@nestjs/throttler';
 import { AgentInboxKind, AgentInboxState, User, WorkspaceRole } from '@prisma/client';
 import { ExplicitCredentialGuard } from '../auth/guards/explicit-credential.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -154,6 +155,24 @@ class ApproveSendKitHashDto {
 
 class RejectSendKitDto {
   @IsOptional() @IsString() @MaxLength(2000) note?: string;
+}
+
+class BulkApproveDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(200)
+  @IsString({ each: true })
+  @MaxLength(200, { each: true })
+  item_ids!: string[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  note?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  trustRecipients?: boolean;
 }
 
 @ApiTags('agent-inbox')
@@ -314,6 +333,46 @@ export class AgentInboxController {
     return { items, count: pendingCount };
   }
 
+  @Post('bulk-approve')
+  @Throttle({ short: { ttl: 60_000, limit: 60 }, long: { ttl: 3_600_000, limit: 200 } })
+  @ApiOperation({ summary: 'Approve up to 200 agent-inbox drafts with paced delivery.' })
+  @ApiResponse({ status: 201, description: 'Per-item decisions and the delivery schedule.' })
+  async bulkApprove(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Body() body: BulkApproveDto,
+    @WorkspaceRoleParam() role?: WorkspaceRole,
+  ) {
+    await this.membership.assertCanReviewInbox(user, workspaceId);
+    // Match the single-approve gate before the bulk service does any writes.
+    // Missing/foreign ids remain per-item not_found results from the service;
+    // entitlement checks only run for ids that are visible in this workspace.
+    const kinds = await Promise.all(
+      body.item_ids.map((itemId) =>
+        this.email.peekAgentInboxKind(workspaceId, ucUidOf(user as WithWorkspaceClaim), itemId),
+      ),
+    );
+    for (const kind of kinds) {
+      if (kind === null) continue;
+      const gate =
+        kind === AgentInboxKind.CLEANUP
+          ? checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId)
+          : kind === AgentInboxKind.NOTICE
+            ? { allowed: true as const, reason: '' }
+            : checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+      if (!gate.allowed) throw new ForbiddenException(gate.reason);
+    }
+    return this.email.bulkApproveAgentInboxItems(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      body.item_ids,
+      body.note ?? null,
+      body.trustRecipients,
+      false,
+      role,
+    );
+  }
+
   // NOTE: declared BEFORE @Get(':id') so 'auto-sent' never matches as an item id.
   @Get('auto-sent')
   @ApiOperation({
@@ -360,6 +419,7 @@ export class AgentInboxController {
   }
 
   @Post(':id/approve')
+  @Throttle({ short: { ttl: 60_000, limit: 60 }, long: { ttl: 3_600_000, limit: 200 } })
   @ApiOperation({
     summary:
       'Approve a pending agent-inbox draft: hand it to the send lane and advance ' +
@@ -427,6 +487,7 @@ export class AgentInboxController {
   }
 
   @Post(':id/reject')
+  @Throttle({ short: { ttl: 60_000, limit: 60 }, long: { ttl: 3_600_000, limit: 200 } })
   @ApiOperation({
     summary:
       'Reject a pending agent-inbox draft: mark it rejected; the message is never ' +

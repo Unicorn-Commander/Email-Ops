@@ -1,5 +1,5 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
-import { AgentInboxKind, AgentInboxState, User } from '@prisma/client';
+import { AgentInboxKind, AgentInboxState, User, WorkspaceRole } from '@prisma/client';
 import { MembershipService } from '../common/workspace/membership.service';
 import { EmailService } from '../email/email.service';
 import { WithWorkspaceClaim } from '../common/workspace/workspace.util';
@@ -93,6 +93,43 @@ describe('AgentInboxController (delegation)', () => {
       undefined,
     );
     expect(out).toMatchObject({ inbox: { state: 'approved' }, message: { status: 'sent' } });
+  });
+
+  it('POST bulk-approve delegates the selected ids and preserves the human-sized throttle', async () => {
+    const peekAgentInboxKind = jest.fn().mockResolvedValue(AgentInboxKind.EMAIL);
+    const bulkApproveAgentInboxItems = jest.fn().mockResolvedValue({
+      items: [{ item_id: 'item-9', status: 'scheduled', send_at: '2026-11-03T23:40:00.000Z' }],
+      schedule: {
+        first_send: '2026-11-03T23:40:00.000Z',
+        last_send: '2026-11-03T23:40:00.000Z',
+        count: 1,
+        count_per_sender: { 'sender@example.test': 1 },
+      },
+      approved_count: 1,
+      refused_count: 0,
+    });
+    const ctrl = make({ peekAgentInboxKind, bulkApproveAgentInboxItems });
+    const out = await ctrl.bulkApprove(
+      WS,
+      userWith(bothSkus),
+      { item_ids: ['item-9'], note: 'paced', trustRecipients: false },
+      WorkspaceRole.MEMBER,
+    );
+
+    expect(bulkApproveAgentInboxItems).toHaveBeenCalledWith(
+      WS,
+      'kc-sub-aaron',
+      ['item-9'],
+      'paced',
+      false,
+      false,
+      WorkspaceRole.MEMBER,
+    );
+    expect(out).toMatchObject({ approved_count: 1, schedule: { count: 1 } });
+    for (const method of ['approve', 'reject', 'bulkApprove'] as const) {
+      expect(Reflect.getMetadata('THROTTLER:LIMITshort', AgentInboxController.prototype[method])).toBe(60);
+      expect(Reflect.getMetadata('THROTTLER:TTLshort', AgentInboxController.prototype[method])).toBe(60_000);
+    }
   });
 
   it('POST approve passes trustRecipients:false through (Wave 7 learning opt-out)', async () => {

@@ -22,7 +22,7 @@
 
 import Link from 'next/link';
 import { StandingApprovals } from '@/components/agent-inbox/StandingApprovals';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Badge, Button, Card, Skeleton, SkeletonText, cn, useConfirm } from '@/components/ui';
 import { Tooltip } from '@/components/Tooltip';
 import { useUiCommands } from '@/components/UiCommandProvider';
@@ -39,6 +39,15 @@ import { CleanupTargetsList, cleanupTargetsSentence } from '@/components/mail/Cl
 import { RobotIcon } from '@/components/mail/icons';
 import { agentLabel } from '@/lib/agents';
 import { cleanupReason, deriveCleanupTargets } from '@/lib/cleanupTargets';
+import {
+  filterAndSortQueue,
+  formatBulkSchedule,
+  pendingQueueIds,
+  toggleVisibleSelection,
+  type QueueKitFilter,
+  type QueueSort,
+  type QueueStateFilter,
+} from '@/components/agent-inbox/queue';
 import {
   agentInboxRecipientLine,
   agentInboxNoticePayload,
@@ -79,11 +88,27 @@ export default function AgentInboxPage() {
   const canReview = ['MEMBER', 'MANAGER', 'ADMIN', 'OWNER'].includes((inbox.workspace?.role ?? '').toUpperCase());
   const autoSent = useAutoSent(workspaceId);
   const trusted = useTrustedCorrespondents(workspaceId);
+  const confirm = useConfirm();
 
   const [tab, setTab] = useState<QueueTab>('pending');
   const [trustedOpen, setTrustedOpen] = useState(false);
   const [reviewing, setReviewing] = useState<ReviewSubject | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [sort, setSort] = useState<QueueSort>('created');
+  const [stateFilter, setStateFilter] = useState<QueueStateFilter>('all');
+  const [kitFilter, setKitFilter] = useState<QueueKitFilter>('all');
+  const [bulkNote, setBulkNote] = useState('');
+  const [bulkActing, setBulkActing] = useState<null | 'approve' | 'reject'>(null);
+  const [bulkMessage, setBulkMessage] = useState<string | null>(null);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelected((current) => {
+      const visibleIds = new Set(inbox.items.map((item) => item.id));
+      return new Set([...current].filter((id) => visibleIds.has(id)));
+    });
+  }, [inbox.items]);
 
   const changeTab = useCallback(
     (next: QueueTab) => {
@@ -114,6 +139,69 @@ export default function AgentInboxPage() {
 
   const activeLoading =
     tab === 'auto-sent' ? autoSent.load === 'loading' : inbox.load === 'loading';
+
+  const kitOptions = useMemo(
+    () => [...new Set(inbox.items.map((item) => item.kit_id).filter((kitId): kitId is string => Boolean(kitId)))].sort(),
+    [inbox.items],
+  );
+  const queueItems = useMemo(
+    () => filterAndSortQueue(inbox.items, stateFilter, kitFilter, sort),
+    [inbox.items, kitFilter, sort, stateFilter],
+  );
+  const selectableItems = useMemo(() => queueItems.filter((item) => item.state === 'pending'), [queueItems]);
+  const selectableIds = useMemo(() => pendingQueueIds(queueItems), [queueItems]);
+  const selectedPendingIds = selectableItems.filter((item) => selected.has(item.id)).map((item) => item.id);
+  const allVisibleSelected = selectableItems.length > 0 && selectedPendingIds.length === selectableItems.length;
+
+  const toggleSelected = useCallback((itemId: string, checked: boolean) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (checked) next.add(itemId);
+      else next.delete(itemId);
+      return next;
+    });
+  }, []);
+
+  const toggleAllVisible = useCallback(() => {
+    setSelected((current) => toggleVisibleSelection(current, selectableIds));
+  }, [selectableIds]);
+
+  const approveSelected = useCallback(async () => {
+    if (!canReview || selectedPendingIds.length === 0 || bulkActing !== null) return;
+    const ok = await confirm({
+      title: `Approve ${selectedPendingIds.length} selected item${selectedPendingIds.length === 1 ? '' : 's'}?`,
+      description: 'Kit drafts will be paced per sender; direct drafts will be at least two seconds apart.',
+      confirmLabel: 'Approve selected (paced)',
+      cancelLabel: 'Not yet',
+    });
+    if (!ok) return;
+    setBulkActing('approve');
+    setBulkMessage(null);
+    setBulkError(null);
+    const outcome = await inbox.bulkApprove(selectedPendingIds, bulkNote.trim() || undefined);
+    if (outcome.ok && outcome.result) {
+      setBulkMessage(formatBulkSchedule(outcome.result));
+      setSelected(new Set());
+    } else {
+      setBulkError(outcome.error ?? 'Could not approve the selected items.');
+    }
+    setBulkActing(null);
+  }, [bulkActing, bulkNote, canReview, confirm, inbox, selectedPendingIds]);
+
+  const rejectSelected = useCallback(async () => {
+    if (!canReview || selectedPendingIds.length === 0 || bulkActing !== null) return;
+    setBulkActing('reject');
+    setBulkMessage(null);
+    setBulkError(null);
+    const outcome = await inbox.bulkReject(selectedPendingIds, bulkNote.trim() || undefined);
+    if (outcome.ok) {
+      setBulkMessage(`${selectedPendingIds.length} item${selectedPendingIds.length === 1 ? '' : 's'} rejected.`);
+      setSelected(new Set());
+    } else {
+      setBulkError(outcome.error ?? 'Could not reject the selected items.');
+    }
+    setBulkActing(null);
+  }, [bulkActing, bulkNote, canReview, inbox, selectedPendingIds]);
 
   // The reviewed queue item, re-resolved from the live list so a decided item's
   // state flip (pending → approved) reflects if the panel stays open mid-refresh.
@@ -169,6 +257,30 @@ export default function AgentInboxPage() {
             )}
           </div>
 
+          {tab !== 'auto-sent' && inbox.load === 'ready' && (
+            <QueueControls
+              canReview={canReview}
+              sort={sort}
+              stateFilter={stateFilter}
+              kitFilter={kitFilter}
+              kitOptions={kitOptions}
+              onSortChange={setSort}
+              onStateFilterChange={setStateFilter}
+              onKitFilterChange={setKitFilter}
+              allVisibleSelected={allVisibleSelected}
+              selectableCount={selectableItems.length}
+              selectedCount={selectedPendingIds.length}
+              onToggleAll={toggleAllVisible}
+              bulkNote={bulkNote}
+              onBulkNoteChange={setBulkNote}
+              bulkActing={bulkActing}
+              bulkMessage={bulkMessage}
+              bulkError={bulkError}
+              onApproveSelected={() => void approveSelected()}
+              onRejectSelected={() => void rejectSelected()}
+            />
+          )}
+
           {tab === 'auto-sent' ? (
             <AutoSentList
               autoSent={autoSent}
@@ -178,14 +290,16 @@ export default function AgentInboxPage() {
             <QueueSkeleton />
           ) : inbox.load === 'error' ? (
             <ErrorState message={inbox.error} onRetry={() => void inbox.refresh()} />
-          ) : inbox.items.length === 0 ? (
+          ) : queueItems.length === 0 ? (
             <EmptyState tab={tab} />
           ) : (
             <div className="space-y-3">
-              {inbox.items.map((item) => (
+              {queueItems.map((item) => (
                 <ReviewCard
                   key={item.id}
                   item={item}
+                  selected={selected.has(item.id)}
+                  onSelectedChange={(checked) => toggleSelected(item.id, checked)}
                   canReview={canReview}
                   onOpen={() => openReview({ kind: 'item', item })}
                   onApprove={(note) => inbox.approve(item.id, note)}
@@ -489,6 +603,7 @@ function ProposedSendKitCard({
           <div className="shrink-0 text-left text-xs text-tertiary sm:text-right">
             <p>expires {formatKitExpiry(kit.expires_at)}</p>
             <p className="mt-1 font-medium text-secondary">cap {kit.cap_per_day} / day</p>
+            <p className="mt-1 font-medium text-secondary">pace {kit.approval_seconds_between}s / sender</p>
           </div>
         </div>
 
@@ -573,7 +688,7 @@ function ApprovedSendKitRow({ kit }: { kit: AgentSendKitView }) {
     <div className="min-w-0 rounded-token border border-subtle bg-surface-base px-3 py-3">
       <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
         <p className="break-words text-sm font-medium text-primary">{kit.title}</p>
-        <p className="shrink-0 text-xs text-tertiary">{kit.sent_today} / {kit.cap_per_day} sent today · {kit.unsent_count} unsent · expires {formatKitExpiry(kit.expires_at)}</p>
+        <p className="shrink-0 text-xs text-tertiary">{kit.sent_today} / {kit.cap_per_day} sent today · {kit.approval_seconds_between}s / sender · {kit.unsent_count} unsent · expires {formatKitExpiry(kit.expires_at)}</p>
       </div>
       <p className="mt-1 break-all font-mono text-[11px] text-muted">{kit.kit_id}</p>
     </div>
@@ -890,6 +1005,140 @@ function Tabs({
   );
 }
 
+function QueueControls({
+  canReview,
+  sort,
+  stateFilter,
+  kitFilter,
+  kitOptions,
+  onSortChange,
+  onStateFilterChange,
+  onKitFilterChange,
+  allVisibleSelected,
+  selectableCount,
+  selectedCount,
+  onToggleAll,
+  bulkNote,
+  onBulkNoteChange,
+  bulkActing,
+  bulkMessage,
+  bulkError,
+  onApproveSelected,
+  onRejectSelected,
+}: {
+  canReview: boolean;
+  sort: QueueSort;
+  stateFilter: QueueStateFilter;
+  kitFilter: QueueKitFilter;
+  kitOptions: string[];
+  onSortChange: (value: QueueSort) => void;
+  onStateFilterChange: (value: QueueStateFilter) => void;
+  onKitFilterChange: (value: QueueKitFilter) => void;
+  allVisibleSelected: boolean;
+  selectableCount: number;
+  selectedCount: number;
+  onToggleAll: () => void;
+  bulkNote: string;
+  onBulkNoteChange: (value: string) => void;
+  bulkActing: null | 'approve' | 'reject';
+  bulkMessage: string | null;
+  bulkError: string | null;
+  onApproveSelected: () => void;
+  onRejectSelected: () => void;
+}) {
+  return (
+    <Card className="space-y-3 border-subtle bg-surface-raised/70 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="inline-flex min-h-[36px] items-center gap-2 rounded-token px-2 text-sm text-secondary">
+          <input
+            type="checkbox"
+            checked={allVisibleSelected}
+            disabled={selectableCount === 0}
+            onChange={onToggleAll}
+            aria-label="Select all visible pending items"
+            className="h-4 w-4 rounded border-subtle accent-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          />
+          <span>Select all visible</span>
+          <span className="font-mono text-xs text-muted">({selectableCount})</span>
+        </label>
+        <label className="sr-only" htmlFor="agent-inbox-sort">Sort agent inbox</label>
+        <select
+          id="agent-inbox-sort"
+          value={sort}
+          onChange={(event) => onSortChange(event.target.value as QueueSort)}
+          className="min-h-[36px] rounded-token border border-subtle bg-surface-base px-2 text-xs text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          <option value="created">Sort: created</option>
+          <option value="kit">Sort: kit</option>
+          <option value="sender">Sort: sender</option>
+          <option value="recipient">Sort: recipient</option>
+          <option value="tier">Sort: tier</option>
+        </select>
+        <label className="sr-only" htmlFor="agent-inbox-state">Filter agent inbox state</label>
+        <select
+          id="agent-inbox-state"
+          value={stateFilter}
+          onChange={(event) => onStateFilterChange(event.target.value as QueueStateFilter)}
+          className="min-h-[36px] rounded-token border border-subtle bg-surface-base px-2 text-xs text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          <option value="all">State: all</option>
+          <option value="pending">State: pending</option>
+          <option value="approved">State: approved</option>
+          <option value="rejected">State: rejected</option>
+        </select>
+        <label className="sr-only" htmlFor="agent-inbox-kit">Filter agent inbox kit</label>
+        <select
+          id="agent-inbox-kit"
+          value={kitFilter}
+          onChange={(event) => onKitFilterChange(event.target.value)}
+          className="min-h-[36px] max-w-[220px] rounded-token border border-subtle bg-surface-base px-2 text-xs text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          <option value="all">Kit: all</option>
+          <option value="with-kit">Kit: attached</option>
+          <option value="without-kit">Kit: none</option>
+          {kitOptions.map((kitId) => <option key={kitId} value={kitId}>Kit: {kitId}</option>)}
+        </select>
+        <span className="ml-auto font-mono text-xs text-muted">{selectedCount} selected</span>
+      </div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+        <div className="min-w-0 flex-1">
+          <label htmlFor="agent-inbox-bulk-note" className="text-[11px] font-medium text-tertiary">
+            Note for selected decisions (optional)
+          </label>
+          <textarea
+            id="agent-inbox-bulk-note"
+            value={bulkNote}
+            onChange={(event) => onBulkNoteChange(event.target.value)}
+            rows={1}
+            maxLength={2000}
+            placeholder="Kept on each audit record"
+            className="mt-1 w-full resize-y rounded-token border border-subtle bg-surface-base px-2.5 py-2 text-sm text-primary placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          />
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            disabled={!canReview || selectedCount === 0 || bulkActing !== null}
+            onClick={onApproveSelected}
+          >
+            {bulkActing === 'approve' ? 'Approving…' : 'Approve selected (paced)'}
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            disabled={!canReview || selectedCount === 0 || bulkActing !== null}
+            onClick={onRejectSelected}
+          >
+            {bulkActing === 'reject' ? 'Rejecting…' : 'Reject selected'}
+          </Button>
+        </div>
+      </div>
+      {bulkMessage && <p role="status" className="text-xs text-success">{bulkMessage}</p>}
+      {bulkError && <p role="alert" className="text-xs text-danger">{bulkError}</p>}
+    </Card>
+  );
+}
+
 /** EMAIL vs CLEANUP presentation (label, badge tone, the verbs in confirm copy). */
 function kindMeta(kind?: string) {
   if (kind === 'CLEANUP') {
@@ -912,12 +1161,16 @@ function kindMeta(kind?: string) {
 
 function ReviewCard({
   item,
+  selected,
+  onSelectedChange,
   canReview,
   onOpen,
   onApprove,
   onReject,
 }: {
   item: AgentInboxItemView;
+  selected: boolean;
+  onSelectedChange: (checked: boolean) => void;
   canReview: boolean;
   /** Open the full-fidelity review panel for this item. */
   onOpen: () => void;
@@ -945,6 +1198,8 @@ function ReviewCard({
       <NoticeCard
         item={item}
         notice={notice}
+        selected={selected}
+        onSelectedChange={onSelectedChange}
         canReview={canReview}
         onApprove={onApprove}
         onReject={onReject}
@@ -1003,6 +1258,18 @@ function ReviewCard({
   return (
     <Card className="overflow-hidden">
       <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-start sm:justify-between">
+        {pending && (
+          <label className="flex shrink-0 items-start pt-1">
+            <span className="sr-only">Select {item.subject || item.summary || 'this item'}</span>
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={(event) => onSelectedChange(event.target.checked)}
+              aria-label={`Select ${item.subject || item.summary || 'this item'}`}
+              className="h-4 w-4 rounded border-subtle accent-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            />
+          </label>
+        )}
         {/* The summary is a button: selecting an item opens the full review. */}
         <button
           type="button"
@@ -1127,12 +1394,16 @@ function ReviewCard({
 function NoticeCard({
   item,
   notice,
+  selected,
+  onSelectedChange,
   canReview,
   onApprove,
   onReject,
 }: {
   item: AgentInboxItemView;
   notice: AgentInboxNoticePayload | null;
+  selected: boolean;
+  onSelectedChange: (checked: boolean) => void;
   canReview: boolean;
   onApprove: (note?: string) => Promise<{ ok: boolean; error?: string }>;
   onReject: (note?: string) => Promise<{ ok: boolean; error?: string }>;
@@ -1174,6 +1445,18 @@ function NoticeCard({
     <Card className="overflow-hidden">
       <div className="space-y-3 p-4">
         <div className="flex flex-wrap items-center gap-2">
+          {item.state === 'pending' && (
+            <label className="flex shrink-0 items-center">
+              <span className="sr-only">Select {subject}</span>
+              <input
+                type="checkbox"
+                checked={selected}
+                onChange={(event) => onSelectedChange(event.target.checked)}
+                aria-label={`Select ${subject}`}
+                className="h-4 w-4 rounded border-subtle accent-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              />
+            </label>
+          )}
           <Badge variant="info">Notice</Badge>
           <StateBadge state={item.state} />
           {receivedLabel && <span className="text-[11px] text-muted">Received {receivedLabel}</span>}
