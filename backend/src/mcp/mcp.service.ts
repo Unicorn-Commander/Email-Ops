@@ -902,6 +902,25 @@ export class McpService {
     );
 
     registerTool(
+      'bulk_approve_agent_inbox_items',
+      {
+        title: 'Approve agent-inbox drafts with paced delivery',
+        description:
+          'Approve up to 200 agent-inbox drafts in one human queue action. ' +
+          'Send-kit drafts are scheduled per sender at the kit pacing (61 seconds by default), ' +
+          'direct drafts are separated by at least 2 seconds, and the result includes per-item ' +
+          'refusals plus the first/last send and count per sender. Already-approved items are idempotent.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          item_ids: z.array(z.string().min(1).max(200)).min(1).max(200),
+          note: z.string().max(2000).optional(),
+          trust_recipients: z.boolean().optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.bulkApproveAgentInboxItems(user, args)),
+    );
+
+    registerTool(
       'reject_agent_inbox_item',
       {
         title: 'Reject an agent-inbox draft',

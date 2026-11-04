@@ -886,6 +886,45 @@ export class EmailOpsTools {
     return { ok: true, ...res };
   }
 
+  async bulkApproveAgentInboxItems(
+    user: User,
+    args: {
+      workspace_id?: string;
+      item_ids: string[];
+      note?: string;
+      trust_recipients?: boolean;
+    },
+  ): Promise<unknown> {
+    if (!Array.isArray(args.item_ids) || args.item_ids.length < 1 || args.item_ids.length > 200) {
+      throw new BadRequestException('item_ids must contain between 1 and 200 items.');
+    }
+    const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    const { role } = await this.membership.resolveWithRole(user, args.workspace_id);
+    const uid = ucUidOf(user as WithWorkspaceClaim);
+    const kinds = await Promise.all(
+      args.item_ids.map((itemId) => this.email.peekAgentInboxKind(workspaceId, uid, itemId)),
+    );
+    for (const kind of kinds) {
+      if (kind === null) continue;
+      const gate =
+        kind === AgentInboxKind.CLEANUP
+          ? checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId)
+          : kind === AgentInboxKind.NOTICE
+            ? { allowed: true as const, reason: '' }
+            : checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+      if (!gate.allowed) throw new ForbiddenException(gate.reason);
+    }
+    return this.email.bulkApproveAgentInboxItems(
+      workspaceId,
+      uid,
+      args.item_ids,
+      args.note ?? null,
+      args.trust_recipients,
+      !!(user as any).__isFederationActor || !!(user as any).__patAuth,
+      role,
+    );
+  }
+
   async rejectAgentInboxItem(
     user: User,
     args: { workspace_id?: string; item_id: string; note?: string },

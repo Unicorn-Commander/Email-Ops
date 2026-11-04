@@ -56,6 +56,7 @@ export const MCP_TOOL_SCOPES = {
   undo_batch: 'cleaner:run',
   list_agent_inbox: 'agent-inbox:read',
   approve_agent_inbox_item: 'agent-inbox:approve',
+  bulk_approve_agent_inbox_items: 'agent-inbox:approve',
   reject_agent_inbox_item: 'agent-inbox:approve',
   propose_send_kit: 'mail:write',
   list_send_kits: 'agent-inbox:read',

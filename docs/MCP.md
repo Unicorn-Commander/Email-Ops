@@ -177,6 +177,7 @@ it exists.
 | :--- | :--- | :--- | :--- |
 | `list_agent_inbox` | List agent-inbox queue | `workspace_id?`, `state?` | Yes |
 | `approve_agent_inbox_item` | Approve draft (sends it) | `workspace_id?`, `item_id`, `note?` | No |
+| `bulk_approve_agent_inbox_items` | Approve up to 200 drafts with per-sender pacing and a returned schedule | `workspace_id?`, `item_ids`, `note?`, `trust_recipients?` | No |
 | `reject_agent_inbox_item` | Reject draft (never sends) | `workspace_id?`, `item_id`, `note?` | No |
 | `propose_send_kit` | Propose a personalised kit for a human to see and approve; the proposal is not send-authorizing | `workspace_id?`, `kit_id`, `title`, `body_template`, `placeholder_rules?`, `optional_lines?`, `subjects`, `recipients`, `from_address`, `cap_per_day`, `expires_at`, `note?` | No |
 | `list_send_kits` | List send-kit proposals and approvals, including computed `EXPIRED`, `RETURNED`, and `SUPERSEDED` states plus `unsent_count`, optionally filtered by state | `workspace_id?`, `state?` (`PROPOSED`/`APPROVED`/`REJECTED`/`EXPIRED`/`RETURNED`/`SUPERSEDED`) | Yes |

@@ -1234,6 +1234,45 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
       "read_only": false
     },
     {
+      "name": "bulk_approve_agent_inbox_items",
+      "description": "Approve up to 200 agent-inbox drafts with paced delivery. Send-kit drafts are scheduled per sender at 61 seconds by default, direct drafts are separated by at least 2 seconds, and the result includes per-item refusals plus the first/last send and count per sender. Already-approved items are idempotent.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "item_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "minItems": 1,
+            "maxItems": 200
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "trust_recipients": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "item_ids"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:agent_inbox"
+      ],
+      "tier_required": "pro",
+      "read_only": false
+    },
+    {
       "name": "reject_agent_inbox_item",
       "description": "Reject a PENDING agent-inbox draft: mark it REJECTED; the message is never sent. Returns the updated inbox item + message.",
       "input_schema": {

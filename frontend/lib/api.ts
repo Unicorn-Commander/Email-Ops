@@ -494,6 +494,25 @@ export interface ReviewResult {
   message: MessageView | null;
 }
 
+export interface BulkApproveAgentInboxItemResult {
+  item_id: string;
+  status: 'scheduled' | 'approved' | 'already_approved' | 'already_rejected' | 'refused';
+  reason?: string;
+  send_at?: string | null;
+}
+
+export interface BulkApproveAgentInboxResult {
+  items: BulkApproveAgentInboxItemResult[];
+  schedule: {
+    first_send: string | null;
+    last_send: string | null;
+    count: number;
+    count_per_sender: Record<string, number>;
+  };
+  approved_count: number;
+  refused_count: number;
+}
+
 const inboxBase = (workspaceId: string) =>
   `/workspaces/${encodeURIComponent(workspaceId)}/agent-inbox`;
 
@@ -534,6 +553,25 @@ export async function approveAgentInboxItem(
   );
 }
 
+/** Approve a selection while reserving paced send timestamps per sender. */
+export async function bulkApproveAgentInboxItems(
+  workspaceId: string,
+  itemIds: string[],
+  note?: string,
+  opts?: ApproveOptions,
+  token?: string,
+): Promise<BulkApproveAgentInboxResult> {
+  return apiPost<BulkApproveAgentInboxResult>(
+    `${inboxBase(workspaceId)}/bulk-approve`,
+    {
+      item_ids: itemIds,
+      ...(note ? { note } : {}),
+      ...(opts?.trustRecipients !== undefined ? { trustRecipients: opts.trustRecipients } : {}),
+    },
+    token,
+  );
+}
+
 /** Reject a pending draft (it is never sent). */
 export async function rejectAgentInboxItem(
   workspaceId: string,
@@ -567,6 +605,7 @@ export interface AgentSendKitView {
   from: string;
   from_address: string;
   cap_per_day: number;
+  approval_seconds_between: number;
   expires_at: string;
   subjects: string[];
   recipient_count: number;
