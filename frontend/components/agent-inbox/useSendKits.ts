@@ -5,8 +5,11 @@ import { useRouter } from 'next/navigation';
 import {
   ApiError,
   approveSendKit,
+  extendSendKit,
   getSendKit,
   listSendKits,
+  reproposeSendKit,
+  returnSendKitToAgent,
   rejectSendKit,
   type AgentSendKitView,
 } from '@/lib/api';
@@ -24,12 +27,18 @@ export interface UseSendKits {
   items: AgentSendKitView[];
   proposed: AgentSendKitView[];
   approved: AgentSendKitView[];
+  expired: AgentSendKitView[];
+  returned: AgentSendKitView[];
+  superseded: AgentSendKitView[];
   humanSession: boolean;
   load: SendKitsLoad;
   error: string | null;
   refresh: () => Promise<void>;
   approve: (kit: AgentSendKitView) => Promise<SendKitActionOutcome>;
   reject: (kit: AgentSendKitView, note?: string) => Promise<SendKitActionOutcome>;
+  extend: (kit: AgentSendKitView, expiresAt: string) => Promise<SendKitActionOutcome>;
+  repropose: (kit: AgentSendKitView, expiresAt: string) => Promise<SendKitActionOutcome>;
+  returnToAgent: (kit: AgentSendKitView, note: string) => Promise<SendKitActionOutcome>;
 }
 
 function messageOf(error: unknown, fallback: string): string {
@@ -60,7 +69,7 @@ export function useSendKits(): UseSendKits {
       const summaries = result.items ?? [];
       const proposedDetails = await Promise.all(
         summaries
-          .filter((kit) => kit.state === 'PROPOSED')
+          .filter((kit) => ['PROPOSED', 'EXPIRED', 'RETURNED'].includes(kit.state))
           .map(async (kit) => {
             try {
               return await getSendKit(workspaceId, kit.kit_id);
@@ -89,13 +98,23 @@ export function useSendKits(): UseSendKits {
   }, [refresh]);
 
   const act = useCallback(
-    async (kind: 'approve' | 'reject', kit: AgentSendKitView, note?: string): Promise<SendKitActionOutcome> => {
+    async (
+      kind: 'approve' | 'reject' | 'extend' | 'repropose' | 'return',
+      kit: AgentSendKitView,
+      value?: string,
+    ): Promise<SendKitActionOutcome> => {
       if (!workspaceId) return { ok: false, error: 'No active workspace.' };
       try {
         if (kind === 'approve') {
           await approveSendKit(workspaceId, kit.kit_id, kit.template_sha256);
+        } else if (kind === 'reject') {
+          await rejectSendKit(workspaceId, kit.kit_id, value);
+        } else if (kind === 'extend') {
+          await extendSendKit(workspaceId, kit.kit_id, value ?? '', kit.template_sha256);
+        } else if (kind === 'repropose') {
+          await reproposeSendKit(workspaceId, kit.kit_id, value ?? '');
         } else {
-          await rejectSendKit(workspaceId, kit.kit_id, note);
+          await returnSendKitToAgent(workspaceId, kit.kit_id, value ?? '');
         }
         await refresh();
         if (typeof window !== 'undefined') window.dispatchEvent(new Event('agent-inbox:changed'));
@@ -116,11 +135,17 @@ export function useSendKits(): UseSendKits {
     items,
     proposed: items.filter((kit) => kit.state === 'PROPOSED'),
     approved: items.filter((kit) => kit.state === 'APPROVED'),
+    expired: items.filter((kit) => kit.state === 'EXPIRED'),
+    returned: items.filter((kit) => kit.state === 'RETURNED'),
+    superseded: items.filter((kit) => kit.state === 'SUPERSEDED'),
     humanSession,
     load,
     error,
     refresh,
     approve: (kit) => act('approve', kit),
     reject: (kit, note) => act('reject', kit, note),
+    extend: (kit, expiresAt) => act('extend', kit, expiresAt),
+    repropose: (kit, expiresAt) => act('repropose', kit, expiresAt),
+    returnToAgent: (kit, note) => act('return', kit, note),
   };
 }

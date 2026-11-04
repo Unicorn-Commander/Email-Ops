@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
-import { AgentInboxKind, AgentInboxState, AgentSendKitState, EmailMessageStatus, EmailMode } from '@prisma/client';
+import { AgentActionKind, AgentInboxKind, AgentInboxState, AgentSendKitState, EmailMessageStatus, EmailMode } from '@prisma/client';
 import { createHash } from 'crypto';
 import { EmailService } from './email.service';
 import {
@@ -36,7 +36,7 @@ function message(overrides: Partial<AgentSendKitMessage> = {}): AgentSendKitMess
 }
 
 function kit(
-  overrides: Partial<typeof definition> & { state?: 'PROPOSED' | 'APPROVED' | 'REJECTED' } = {},
+  overrides: Partial<typeof definition> & { state?: 'PROPOSED' | 'APPROVED' | 'REJECTED' | 'EXPIRED' | 'RETURNED' | 'SUPERSEDED' } = {},
 ) {
   return {
     ...definition,
@@ -82,6 +82,12 @@ describe('personalised agent send-kit guard', () => {
     expect(
       agentSendKitRefusalReason({ message: message(), kit: kit({ state: 'REJECTED' }), sentToday: 0, now: NOW }),
     ).toBe('kit_rejected');
+    expect(
+      agentSendKitRefusalReason({ message: message(), kit: kit({ state: 'RETURNED' }), sentToday: 0, now: NOW }),
+    ).toBe('kit_returned');
+    expect(
+      agentSendKitRefusalReason({ message: message(), kit: kit({ state: 'SUPERSEDED' }), sentToday: 0, now: NOW }),
+    ).toBe('kit_superseded');
   });
 
   it('accepts a valid personalised message and a single leading RE: subject prefix', () => {
@@ -468,6 +474,212 @@ describe('approve_send_kit and agent-inbox projections', () => {
       thread_id: 'reply-thread-at-compose',
       kit_id: 'kit-1',
     });
+  });
+
+  it('derives EXPIRED and persists the prior state when a kit is read after expiry', async () => {
+    const row = storedKit({
+      expiresAt: new Date('2026-09-01T00:00:00.000Z'),
+      state: AgentSendKitState.PROPOSED,
+    });
+    const update = jest.fn().mockImplementation(({ data }) => ({ ...row, ...data }));
+    const tx = {
+      agentSendKit: { findMany: jest.fn().mockResolvedValue([row]), update },
+      emailMessage: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
+    };
+
+    const [view] = await serviceWithTx(tx).listSendKits('workspace-1', 'human-1');
+
+    expect(view).toMatchObject({ state: AgentSendKitState.EXPIRED, unsent_count: 2 });
+    expect(update).toHaveBeenCalledWith({
+      where: { kitId: 'kit-1' },
+      data: { state: AgentSendKitState.EXPIRED, expiredFromState: AgentSendKitState.PROPOSED },
+    });
+  });
+
+  it('extends an expired kit only after re-attesting the same template hash', async () => {
+    const row = storedKit({
+      state: AgentSendKitState.EXPIRED,
+      expiredFromState: AgentSendKitState.APPROVED,
+      expiresAt: new Date('2026-09-01T00:00:00.000Z'),
+      approvedBy: 'human-1',
+      approvedAt: NOW,
+    });
+    const updated = {
+      ...row,
+      state: AgentSendKitState.APPROVED,
+      expiredFromState: null,
+      expiresAt: new Date('2026-10-10T00:00:00.000Z'),
+    };
+    const update = jest.fn().mockResolvedValue(updated);
+    const audit = jest.fn().mockResolvedValue({});
+    const tx = {
+      agentSendKit: { findFirst: jest.fn().mockResolvedValue(row), update },
+      emailMessage: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
+      agentActionEvent: { create: audit },
+    };
+
+    const out = await serviceWithTx(tx).extendSendKit('workspace-1', 'human-1', {
+      kitId: 'kit-1',
+      expiresAt: new Date('2026-10-10T00:00:00.000Z'),
+      templateSha256: row.templateSha256,
+    });
+
+    expect(out.state).toBe(AgentSendKitState.APPROVED);
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        state: AgentSendKitState.APPROVED,
+        expiredFromState: null,
+        expiresAt: new Date('2026-10-10T00:00:00.000Z'),
+      }),
+    }));
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ kind: AgentActionKind.SEND_KIT_EXTENDED, actorUcUid: 'human-1' }),
+    }));
+  });
+
+  it('re-proposes only unsent recipients and supersedes the old kit', async () => {
+    const row = storedKit({
+      state: AgentSendKitState.EXPIRED,
+      expiredFromState: AgentSendKitState.APPROVED,
+      expiresAt: new Date('2026-09-01T00:00:00.000Z'),
+    });
+    const created = {
+      ...row,
+      kitId: 'kit-2',
+      state: AgentSendKitState.PROPOSED,
+      recipients: ['bob@example.com'],
+      recipientHashes: definition.recipientHashes.filter((hash) => hash !== definition.recipientHashes[0]),
+      expiresAt: new Date('2026-10-10T00:00:00.000Z'),
+      proposedAt: NOW,
+    };
+    const create = jest.fn().mockResolvedValue(created);
+    const update = jest.fn().mockResolvedValue({ ...row, state: AgentSendKitState.SUPERSEDED, supersededByKitId: 'kit-2' });
+    const audit = jest.fn().mockResolvedValue({});
+    const findFirst = jest.fn().mockImplementation(({ where }) =>
+      Promise.resolve(where.kitId === 'kit-1' ? row : null),
+    );
+    const tx = {
+      agentSendKit: { findFirst, create, update },
+      emailMessage: {
+        count: jest.fn().mockResolvedValue(0),
+        findMany: jest.fn().mockResolvedValue([{ toAddress: 'alice@example.com', toAddresses: ['alice@example.com'] }]),
+      },
+      agentActionEvent: { create: audit },
+    };
+
+    const out = await serviceWithTx(tx).reproposeSendKit('workspace-1', 'human-1', {
+      kitId: 'kit-1',
+      newKitId: 'kit-2',
+      expiresAt: new Date('2026-10-10T00:00:00.000Z'),
+    });
+
+    expect(out).toMatchObject({ kit_id: 'kit-2', state: AgentSendKitState.PROPOSED, unsent_count: 1 });
+    expect(create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        kitId: 'kit-2',
+        state: AgentSendKitState.PROPOSED,
+        recipients: ['bob@example.com'],
+        capPerDay: row.capPerDay,
+      }),
+    });
+    expect(update).toHaveBeenCalledWith({
+      where: { kitId: 'kit-1' },
+      data: expect.objectContaining({ state: AgentSendKitState.SUPERSEDED, supersededByKitId: 'kit-2' }),
+    });
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ kind: AgentActionKind.SEND_KIT_REPROPOSED }),
+    }));
+  });
+
+  it('returns a kit, creates a NOTICE for the drafting agent, and records the note', async () => {
+    const row = storedKit({
+      state: AgentSendKitState.EXPIRED,
+      expiredFromState: AgentSendKitState.PROPOSED,
+      expiresAt: new Date('2026-09-01T00:00:00.000Z'),
+    });
+    const notice = jest.fn().mockResolvedValue({ id: 'notice-1' });
+    const update = jest.fn().mockResolvedValue({
+      ...row,
+      state: AgentSendKitState.RETURNED,
+      returnNote: 'Please revise the opening line.',
+      returnedBy: 'human-1',
+      returnedAt: NOW,
+    });
+    const audit = jest.fn().mockResolvedValue({});
+    const tx = {
+      agentSendKit: { findFirst: jest.fn().mockResolvedValue(row), update },
+      emailMessage: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
+      agentInboxItem: { create: notice },
+      agentActionEvent: { create: audit },
+    };
+
+    const out = await serviceWithTx(tx).returnSendKitToAgent('workspace-1', 'human-1', {
+      kitId: 'kit-1',
+      note: 'Please revise the opening line.',
+    });
+
+    expect(out).toMatchObject({
+      state: AgentSendKitState.RETURNED,
+      return_note: 'Please revise the opening line.',
+      return_notice_id: 'notice-1',
+      unsent_count: 2,
+    });
+    expect(notice).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        kind: AgentInboxKind.NOTICE,
+        draftedBy: 'agent-1',
+        payload: {
+          type: 'send_kit_returned',
+          kit_id: 'kit-1',
+          note: 'Please revise the opening line.',
+          unsent_count: 2,
+          first_recipients: ['alice@example.com', 'bob@example.com'],
+        },
+      }),
+    });
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ kind: AgentActionKind.SEND_KIT_RETURNED, agentKey: 'agent-1' }),
+    }));
+  });
+
+  it('refuses approval of a draft attached to a returned kit with a clear reason', async () => {
+    const staged = message();
+    const item = {
+      id: 'inbox-returned',
+      workspaceId: 'workspace-1',
+      messageId: 'message-returned',
+      kind: AgentInboxKind.EMAIL,
+      state: AgentInboxState.PENDING,
+      approvalTier: 'MAILBOX_OWNER',
+      draftedBy: 'agent-1',
+      payload: null,
+      message: {
+        id: 'message-returned',
+        mailboxAccountId: null,
+        sendAt: null,
+        kitId: 'kit-1',
+        fromAddress: staged.fromAddress,
+        toAddress: staged.toAddress,
+        toAddresses: staged.toAddresses,
+        ccAddresses: staged.ccAddresses,
+        bccAddresses: staged.bccAddresses,
+        subject: staged.subject,
+        body: staged.body,
+        bodyHtml: null,
+        attachments: [],
+      },
+    };
+    const tx = {
+      agentInboxItem: { findFirst: jest.fn().mockResolvedValue(item) },
+      mailDomain: { findMany: jest.fn().mockResolvedValue([]) },
+      trustedCorrespondent: { findMany: jest.fn().mockResolvedValue([]) },
+      agentSendKit: { findFirst: jest.fn().mockResolvedValue(storedKit({ state: AgentSendKitState.RETURNED })) },
+      emailMessage: { count: jest.fn().mockResolvedValue(0) },
+    };
+
+    await expect(
+      serviceWithTx(tx).approveAgentInboxItem('workspace-1', 'human-1', 'inbox-returned', null, false, true),
+    ).rejects.toMatchObject({ response: { reason: 'kit_returned' } });
   });
 
   it('binds the supplied definition to the server-computed canonical hash', () => {

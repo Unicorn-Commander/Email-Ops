@@ -962,7 +962,10 @@ export class EmailOpsTools {
 
   async listSendKits(
     user: User,
-    args: { workspace_id?: string; state?: 'PROPOSED' | 'APPROVED' | 'REJECTED' },
+    args: {
+      workspace_id?: string;
+      state?: 'PROPOSED' | 'APPROVED' | 'REJECTED' | 'EXPIRED' | 'RETURNED' | 'SUPERSEDED';
+    },
   ): Promise<{ items: unknown[]; count: number }> {
     const workspaceId = await this.resolve(user, args.workspace_id);
     const items = await this.email.listSendKits(
@@ -1032,6 +1035,18 @@ export class EmailOpsTools {
       args.kit_id,
       args.note ?? null,
     );
+  }
+
+  async returnSendKitToAgent(
+    user: User,
+    args: { workspace_id?: string; kit_id: string; note: string },
+  ): Promise<unknown> {
+    assertHumanApproval(user);
+    const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    return this.email.returnSendKitToAgent(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
+      kitId: args.kit_id,
+      note: args.note,
+    });
   }
 
   // ── Mail-engine admin tools (control-plane; domains / quotas / teardown) ─

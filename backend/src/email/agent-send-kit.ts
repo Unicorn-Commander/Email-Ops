@@ -11,6 +11,8 @@ export const AGENT_SEND_KIT_REFUSAL_REASONS = [
   'kit_not_approved',
   'kit_rejected',
   'kit_expired',
+  'kit_returned',
+  'kit_superseded',
   'from_mismatch',
   'extra_recipients',
   'attachments_not_allowed',
@@ -43,7 +45,13 @@ export interface AgentSendKitDefinition {
   capPerDay: number;
 }
 
-export type AgentSendKitStateValue = 'PROPOSED' | 'APPROVED' | 'REJECTED';
+export type AgentSendKitStateValue =
+  | 'PROPOSED'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'EXPIRED'
+  | 'RETURNED'
+  | 'SUPERSEDED';
 
 export interface AgentSendKitRecord extends AgentSendKitDefinition {
   state?: AgentSendKitStateValue;
@@ -239,6 +247,9 @@ export interface AgentSendKitCheckInput {
 export function agentSendKitRefusalReason(input: AgentSendKitCheckInput): AgentSendKitRefusalReason | null {
   const { message, kit } = input;
   if (!kit) return 'kit_missing';
+  if (kit.state === 'EXPIRED') return 'kit_expired';
+  if (kit.state === 'RETURNED') return 'kit_returned';
+  if (kit.state === 'SUPERSEDED') return 'kit_superseded';
   if (kit.state === 'REJECTED') return 'kit_rejected';
   if (kit.state !== undefined && kit.state !== 'APPROVED') return 'kit_not_approved';
   const now = input.now ?? new Date();

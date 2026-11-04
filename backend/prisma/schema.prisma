@@ -208,6 +208,9 @@ enum AgentSendKitState {
   PROPOSED
   APPROVED
   REJECTED
+  EXPIRED
+  RETURNED
+  SUPERSEDED
 }
 
 // ── Agent autonomy dial (Email-Ops OWNS this) ──
@@ -255,6 +258,9 @@ enum AgentActionKind {
   MAIL_DOMAIN_VERIFICATION_REQUESTED
   MAIL_DOMAIN_VERIFIED
   MAIL_DOMAIN_VERIFICATION_FAILED
+  SEND_KIT_EXTENDED
+  SEND_KIT_REPROPOSED
+  SEND_KIT_RETURNED
 }
 
 // ── Mailbox ownership + agent access (the command-center plane) ──
@@ -1018,6 +1024,9 @@ model AgentSendKit {
   kitId            String   @id
   workspaceId      String
   state            AgentSendKitState @default(APPROVED)
+  // When an active kit is materialized as EXPIRED on a read, retain the
+  // state that EXTEND should restore (PROPOSED or APPROVED).
+  expiredFromState  AgentSendKitState?
   title            String
   proposedBy       String?
   proposedAt       DateTime?
@@ -1026,6 +1035,10 @@ model AgentSendKit {
   rejectedBy       String?
   rejectedAt       DateTime?
   note             String?  @db.Text
+  returnNote       String?  @db.Text
+  returnedBy       String?
+  returnedAt       DateTime?
+  supersededByKitId String?
   templateSha256   String
   bodyTemplate     String   @db.Text
   placeholderRules Json
@@ -1040,6 +1053,7 @@ model AgentSendKit {
 
   @@index([workspaceId, state])
   @@index([workspaceId, expiresAt])
+  @@index([workspaceId, supersededByKitId])
   @@map("agent_send_kits")
 }
 

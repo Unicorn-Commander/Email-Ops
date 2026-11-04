@@ -32,6 +32,7 @@
  *     and never leaves.
  */
 
+import { randomUUID } from 'crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -95,6 +96,7 @@ import {
   agentSendKitTemplateSha256,
   buildAgentSendKitDefinition,
   plainTextBodySha256,
+  recipientHash,
   type AgentSendKitDefinition,
   type AgentSendKitDefinitionInput,
   type AgentSendKitRecord,
@@ -156,6 +158,8 @@ const AGENT_SEND_KIT_REASON_MESSAGES: Record<string, string> = {
   kit_not_approved: 'The send kit is still awaiting human approval.',
   kit_rejected: 'The send kit was rejected by a human and cannot authorize sends.',
   kit_expired: 'The human-approved send kit has expired.',
+  kit_returned: 'The send kit was returned to the drafting agent for changes.',
+  kit_superseded: 'The send kit was replaced by a newer proposal.',
   from_mismatch: 'The staged sender does not match the approved send kit.',
   extra_recipients: 'A send kit permits exactly one To recipient and no Cc or Bcc recipients.',
   attachments_not_allowed: 'Attachments are not allowed by a send kit.',
@@ -326,6 +330,23 @@ export interface AgentSendKitApprovalInput {
   expiresAt?: Date;
 }
 
+export interface AgentSendKitExtensionInput {
+  kitId: string;
+  expiresAt: Date;
+  templateSha256: string;
+}
+
+export interface AgentSendKitReproposalInput {
+  kitId: string;
+  expiresAt: Date;
+  newKitId?: string;
+}
+
+export interface AgentSendKitReturnInput {
+  kitId: string;
+  note: string;
+}
+
 export type AgentSendKitListState = AgentSendKitState;
 
 export interface AgentSendKitListView {
@@ -347,7 +368,12 @@ export interface AgentSendKitListView {
   rejected_by: string | null;
   rejected_at: string | null;
   note: string | null;
+  return_note: string | null;
+  returned_by: string | null;
+  returned_at: string | null;
+  superseded_by_kit_id: string | null;
   sent_today: number;
+  unsent_count: number;
   body_template?: string;
   placeholder_rules?: Record<string, string>;
   optional_lines?: number[];
@@ -355,6 +381,8 @@ export interface AgentSendKitListView {
   recipient_hashes?: string[];
   replaced?: boolean;
   approval_url?: string;
+  remaining_recipients?: string[];
+  return_notice_id?: string;
 }
 
 function sameInstant(a: Date, b: Date): boolean {
@@ -2409,9 +2437,9 @@ export class EmailService {
     ucUid: string | null,
     state?: AgentInboxState,
   ): Promise<AgentInboxView[]> {
-    const items = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+    const result = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
-      return tx.agentInboxItem.findMany({
+      const items = await tx.agentInboxItem.findMany({
         // Explicit workspaceId predicate (defense-in-depth: the real fence when
         // RLS is inert under the owner role) + a bound so this hot path — drained
         // on every agent-inbox view and assistant stream — can never turn into an
@@ -2425,13 +2453,31 @@ export class EmailService {
         include: { message: true },
         take: 200,
       });
+      const kitIds = [
+        ...new Set(
+          items
+            .map((item) => item.message?.kitId)
+            .filter((kitId): kitId is string => typeof kitId === 'string' && kitId.length > 0),
+        ),
+      ];
+      const kits =
+        kitIds.length > 0 && typeof tx.agentSendKit?.findMany === 'function'
+          ? await tx.agentSendKit.findMany({ where: { workspaceId, kitId: { in: kitIds } } })
+          : [];
+      const readableKits = await Promise.all(
+        kits.map((kit) => this.expireSendKitOnRead(tx, kit, new Date())),
+      );
+      return { items, kits: readableKits };
     });
     // Lazy TARGET BACKFILL: items staged before target-capture existed carry only
     // bare thread_ids, so their approval cards could only say "N threads". Resolve
     // the real subjects on read (bounded, OUTSIDE the tx — the §3 JMAP lesson) and
     // persist, so old pending batches become reviewable too. Degrade-clean.
-    await this.backfillNativeCleanupTargets(workspaceId, ucUid, items);
-    return items.map((it) => this.inboxView(it, it.message));
+    await this.backfillNativeCleanupTargets(workspaceId, ucUid, result.items);
+    const kits = new Map(result.kits.map((kit) => [kit.kitId, kit]));
+    return result.items.map((it) =>
+      this.inboxView(it, it.message, kits.get(it.message?.kitId ?? '')),
+    );
   }
 
   /** Pending inbox rows plus one pending item for every proposed send kit. */
@@ -2451,6 +2497,7 @@ export class EmailService {
           where: {
             workspaceId,
             state: AgentSendKitState.PROPOSED,
+            expiresAt: { gt: new Date() },
             ...this.sendKitScopeWhere(sendKitAddresses),
           },
         }),
@@ -2465,17 +2512,18 @@ export class EmailService {
     state?: AgentSendKitListState,
   ): Promise<AgentSendKitListView[]> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const now = new Date();
       const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, ucUid);
       const rows = await tx.agentSendKit.findMany({
         where: {
           workspaceId,
-          ...(state ? { state } : {}),
+          ...this.sendKitStateWhere(state, now),
           ...this.sendKitScopeWhere(sendKitAddresses),
         },
         orderBy: [{ state: 'asc' }, { proposedAt: 'desc' }, { expiresAt: 'desc' }],
         take: 200,
       });
-      return Promise.all(rows.map((row) => this.sendKitView(tx, row, false)));
+      return Promise.all(rows.map((row) => this.sendKitView(tx, row, false, now)));
     });
   }
 
@@ -2490,6 +2538,28 @@ export class EmailService {
       if (row && !this.sendKitAddressVisible(row.fromAddress, sendKitAddresses)) return null;
       return row ? this.sendKitView(tx, row, true) : null;
     });
+  }
+
+  private sendKitStateWhere(
+    state: AgentSendKitListState | undefined,
+    now: Date,
+  ): Prisma.AgentSendKitWhereInput {
+    if (!state) return {};
+    if (state === AgentSendKitState.EXPIRED) {
+      return {
+        OR: [
+          { state: AgentSendKitState.EXPIRED },
+          {
+            state: { in: [AgentSendKitState.PROPOSED, AgentSendKitState.APPROVED] },
+            expiresAt: { lte: now },
+          },
+        ],
+      };
+    }
+    if (state === AgentSendKitState.PROPOSED || state === AgentSendKitState.APPROVED) {
+      return { state, expiresAt: { gt: now } };
+    }
+    return { state };
   }
 
   async proposeSendKit(
@@ -2595,6 +2665,7 @@ export class EmailService {
     return {
       workspaceId,
       state: AgentSendKitState.PROPOSED,
+      expiredFromState: null,
       title,
       proposedBy,
       proposedAt,
@@ -2603,6 +2674,10 @@ export class EmailService {
       rejectedBy: null,
       rejectedAt: null,
       note: input.note?.trim().slice(0, 2000) || null,
+      returnNote: null,
+      returnedBy: null,
+      returnedAt: null,
+      supersededByKitId: null,
       templateSha256,
       bodyTemplate: definition.bodyTemplate,
       placeholderRules: definition.placeholderRules as Prisma.InputJsonValue,
@@ -2620,8 +2695,9 @@ export class EmailService {
     tx: WorkspaceTxClient,
     row: AgentSendKit,
     full: boolean,
+    now = new Date(),
   ): Promise<AgentSendKitListView> {
-    const now = new Date();
+    row = await this.expireSendKitOnRead(tx, row, now);
     const dayWindow = businessDayWindow(now);
     const sentToday = tx.emailMessage?.count
       ? await tx.emailMessage.count({
@@ -2632,6 +2708,7 @@ export class EmailService {
           },
         })
       : 0;
+    const unsent = await this.unsentSendKitRecipients(tx, row);
     const view: AgentSendKitListView = {
       id: row.kitId,
       kit_id: row.kitId,
@@ -2654,7 +2731,12 @@ export class EmailService {
       rejected_by: row.rejectedBy,
       rejected_at: row.rejectedAt?.toISOString() ?? null,
       note: row.note,
+      return_note: row.returnNote ?? null,
+      returned_by: row.returnedBy ?? null,
+      returned_at: row.returnedAt?.toISOString() ?? null,
+      superseded_by_kit_id: row.supersededByKitId ?? null,
       sent_today: sentToday,
+      unsent_count: unsent.count,
     };
     if (this.approvalLinks && row.state === AgentSendKitState.PROPOSED && row.expiresAt > now) {
       view.approval_url = await this.approvalLinks.issue(tx, kitTarget(row));
@@ -2667,8 +2749,82 @@ export class EmailService {
         : [];
       view.recipients = row.recipients ?? [];
       view.recipient_hashes = row.recipientHashes ?? [];
+      view.remaining_recipients = unsent.recipients;
     }
     return view;
+  }
+
+  private async expireSendKitOnRead(
+    tx: WorkspaceTxClient,
+    row: AgentSendKit,
+    now: Date,
+  ): Promise<AgentSendKit> {
+    const state = row.state ?? AgentSendKitState.APPROVED;
+    if (
+      (state !== AgentSendKitState.PROPOSED && state !== AgentSendKitState.APPROVED) ||
+      !Number.isFinite(row.expiresAt?.getTime?.()) ||
+      row.expiresAt > now
+    ) {
+      return row;
+    }
+    const expiredFromState = row.expiredFromState ?? state;
+    if (typeof tx.agentSendKit?.update !== 'function') {
+      return { ...row, state: AgentSendKitState.EXPIRED, expiredFromState };
+    }
+    const updated = await tx.agentSendKit.update({
+      where: { kitId: row.kitId },
+      data: { state: AgentSendKitState.EXPIRED, expiredFromState },
+    });
+    return { ...row, ...updated, state: AgentSendKitState.EXPIRED, expiredFromState };
+  }
+
+  private sendKitState(
+    row: Pick<AgentSendKit, 'state' | 'expiresAt'>,
+    now: Date,
+  ): AgentSendKitState {
+    const state = row.state ?? AgentSendKitState.APPROVED;
+    if (
+      (state === AgentSendKitState.PROPOSED || state === AgentSendKitState.APPROVED) &&
+      Number.isFinite(row.expiresAt?.getTime?.()) &&
+      row.expiresAt <= now
+    ) {
+      return AgentSendKitState.EXPIRED;
+    }
+    return state;
+  }
+
+  private async unsentSendKitRecipients(
+    tx: WorkspaceTxClient,
+    row: AgentSendKit,
+  ): Promise<{ count: number; recipients: string[] }> {
+    const sentHashes = new Set<string>();
+    if (typeof tx.emailMessage?.findMany === 'function') {
+      const sent = await tx.emailMessage.findMany({
+        where: { workspaceId: row.workspaceId, kitId: row.kitId, sentAt: { not: null } },
+        select: { toAddress: true, toAddresses: true },
+      });
+      for (const message of sent) {
+        const addresses = message.toAddresses?.length
+          ? message.toAddresses
+          : message.toAddress
+            ? [message.toAddress]
+            : [];
+        for (const address of addresses) {
+          if (address) sentHashes.add(recipientHash(address));
+        }
+      }
+    }
+    const recipients = (row.recipients ?? []).filter(
+      (address) => !sentHashes.has(recipientHash(address)),
+    );
+    if (recipients.length > 0 || (row.recipients ?? []).length > 0) {
+      return { count: recipients.length, recipients };
+    }
+    const hashes = row.recipientHashes ?? [];
+    return {
+      count: hashes.filter((hash) => !sentHashes.has(hash)).length,
+      recipients: [],
+    };
   }
 
   /**
@@ -3818,6 +3974,302 @@ export class EmailService {
     });
   }
 
+  async extendSendKit(
+    workspaceId: string,
+    extendedBy: string,
+    input: AgentSendKitExtensionInput,
+  ): Promise<AgentSendKitListView> {
+    if (!extendedBy) {
+      throw new ForbiddenException('A human identity is required to extend a send kit.');
+    }
+    this.assertFutureKitExpiry(input.expiresAt);
+    const templateSha256 = input.templateSha256.trim();
+    if (!/^[0-9a-f]{64}$/i.test(templateSha256)) {
+      throw new BadRequestException('template_sha256 must be a 64-character hexadecimal hash.');
+    }
+
+    return this.prisma.withWorkspace(workspaceId, extendedBy, async (tx) => {
+      let existing = await this.sendKitForHumanAction(tx, workspaceId, extendedBy, input.kitId);
+      existing = await this.expireSendKitOnRead(tx, existing, new Date());
+      const state = existing.state ?? AgentSendKitState.APPROVED;
+      if (
+        state !== AgentSendKitState.PROPOSED &&
+        state !== AgentSendKitState.APPROVED &&
+        state !== AgentSendKitState.EXPIRED
+      ) {
+        throw new BadRequestException({
+          reason: 'kit_not_extendable',
+          message: 'Only an active or expired PROPOSED/APPROVED send kit can be extended.',
+        });
+      }
+
+      const definition = this.sendKitDefinitionFromRow(existing);
+      const canonicalHash = agentSendKitTemplateSha256(definition);
+      if (templateSha256 !== existing.templateSha256 || canonicalHash !== existing.templateSha256) {
+        throw new BadRequestException({
+          reason: 'template_hash_mismatch',
+          message: 'template_sha256 must re-attest the stored send-kit template exactly.',
+        });
+      }
+
+      const restoredState =
+        state === AgentSendKitState.EXPIRED
+          ? (existing.expiredFromState ??
+            (existing.approvedAt ? AgentSendKitState.APPROVED : AgentSendKitState.PROPOSED))
+          : state;
+      const updated = await tx.agentSendKit.update({
+        where: { kitId: existing.kitId },
+        data: {
+          state: restoredState,
+          expiredFromState: null,
+          expiresAt: input.expiresAt,
+        },
+      });
+      await this.recordAction(tx, workspaceId, {
+        kind: AgentActionKind.SEND_KIT_EXTENDED,
+        agentKey: existing.proposedBy,
+        actorUcUid: extendedBy,
+        detail: `${existing.kitId}; template_sha256 re-attested`,
+      });
+      return this.sendKitView(tx, { ...existing, ...updated }, true);
+    });
+  }
+
+  async reproposeSendKit(
+    workspaceId: string,
+    reproposedBy: string,
+    input: AgentSendKitReproposalInput,
+  ): Promise<AgentSendKitListView> {
+    if (!reproposedBy) {
+      throw new ForbiddenException('A human identity is required to re-propose a send kit.');
+    }
+    this.assertFutureKitExpiry(input.expiresAt);
+
+    const result = await this.prisma.withWorkspace(workspaceId, reproposedBy, async (tx) => {
+      let existing = await this.sendKitForHumanAction(tx, workspaceId, reproposedBy, input.kitId);
+      existing = await this.expireSendKitOnRead(tx, existing, new Date());
+      const state = existing.state ?? AgentSendKitState.APPROVED;
+      if (state === AgentSendKitState.REJECTED || state === AgentSendKitState.SUPERSEDED) {
+        throw new BadRequestException({
+          reason: 'kit_not_reproposable',
+          message: 'Rejected or superseded send kits cannot be re-proposed.',
+        });
+      }
+      const remaining = await this.unsentSendKitRecipients(tx, existing);
+      if (remaining.recipients.length === 0) {
+        throw new BadRequestException({
+          reason: 'no_unsent_recipients',
+          message: 'The send kit has no retained unsent recipients to re-propose.',
+        });
+      }
+
+      const newKitId = this.reproposalKitId(existing.kitId, input.newKitId);
+      if (newKitId === existing.kitId) {
+        throw new BadRequestException('new_kit_id must differ from the existing kit id.');
+      }
+      const collision = await tx.agentSendKit.findFirst({
+        where: { kitId: newKitId, workspaceId },
+      });
+      if (collision) {
+        throw new ConflictException({
+          reason: 'kit_id_taken',
+          message: 'The requested replacement kit id already exists.',
+        });
+      }
+
+      const definition = this.sendKitDefinitionFromRow(existing, remaining.recipients);
+      const created = await tx.agentSendKit.create({
+        data: {
+          kitId: newKitId,
+          workspaceId,
+          state: AgentSendKitState.PROPOSED,
+          expiredFromState: null,
+          title: existing.title,
+          proposedBy: existing.proposedBy,
+          proposedAt: new Date(),
+          approvedBy: null,
+          approvedAt: null,
+          rejectedBy: null,
+          rejectedAt: null,
+          note: existing.returnNote ?? existing.note ?? null,
+          returnNote: null,
+          returnedBy: null,
+          returnedAt: null,
+          supersededByKitId: null,
+          templateSha256: agentSendKitTemplateSha256(definition),
+          bodyTemplate: definition.bodyTemplate,
+          placeholderRules: definition.placeholderRules as Prisma.InputJsonValue,
+          optionalLines: definition.optionalLines as unknown as Prisma.InputJsonValue,
+          subjects: definition.subjects,
+          recipients: definition.recipients,
+          recipientHashes: definition.recipientHashes,
+          fromAddress: definition.fromAddress,
+          capPerDay: definition.capPerDay,
+          expiresAt: input.expiresAt,
+        },
+      });
+      await tx.agentSendKit.update({
+        where: { kitId: existing.kitId },
+        data: {
+          state: AgentSendKitState.SUPERSEDED,
+          expiredFromState: null,
+          supersededByKitId: newKitId,
+        },
+      });
+      await this.recordAction(tx, workspaceId, {
+        kind: AgentActionKind.SEND_KIT_REPROPOSED,
+        agentKey: existing.proposedBy,
+        actorUcUid: reproposedBy,
+        detail: `${existing.kitId} -> ${newKitId}; unsent_count=${remaining.count}`,
+      });
+      return this.sendKitView(tx, created, true);
+    });
+    if (result.state === AgentSendKitState.PROPOSED) {
+      this.fireApprovalNotice({
+        id: result.kit_id,
+        workspaceId,
+        kind: 'SEND KIT',
+        summary: result.title,
+        draftedBy: result.proposed_by,
+        approvalUrl: result.approval_url,
+      });
+    }
+    return result;
+  }
+
+  async returnSendKitToAgent(
+    workspaceId: string,
+    returnedBy: string,
+    input: AgentSendKitReturnInput,
+  ): Promise<AgentSendKitListView> {
+    if (!returnedBy) {
+      throw new ForbiddenException('A human identity is required to return a send kit.');
+    }
+    const note = input.note.trim();
+    if (!note) throw new BadRequestException('note is required when returning a send kit.');
+    if (note.length > 2000) throw new BadRequestException('note must be at most 2000 characters.');
+
+    return this.prisma.withWorkspace(workspaceId, returnedBy, async (tx) => {
+      let existing = await this.sendKitForHumanAction(tx, workspaceId, returnedBy, input.kitId);
+      existing = await this.expireSendKitOnRead(tx, existing, new Date());
+      const state = existing.state ?? AgentSendKitState.APPROVED;
+      if (state === AgentSendKitState.RETURNED) {
+        return this.sendKitView(tx, existing, true);
+      }
+      if (state === AgentSendKitState.REJECTED || state === AgentSendKitState.SUPERSEDED) {
+        throw new BadRequestException({
+          reason: 'kit_not_returnable',
+          message: 'Rejected or superseded send kits cannot be returned to an agent.',
+        });
+      }
+
+      const remaining = await this.unsentSendKitRecipients(tx, existing);
+      let draftedBy = existing.proposedBy;
+      if (!draftedBy && typeof tx.agentInboxItem?.findFirst === 'function') {
+        const draft = await tx.agentInboxItem.findFirst({
+          where: {
+            workspaceId,
+            state: AgentInboxState.PENDING,
+            message: { is: { kitId: existing.kitId } },
+          },
+          orderBy: { createdAt: 'desc' },
+          select: { draftedBy: true },
+        });
+        draftedBy = draft?.draftedBy ?? null;
+      }
+      if (!draftedBy) {
+        throw new BadRequestException({
+          reason: 'drafting_agent_missing',
+          message: 'No drafting agent is attached to this send kit.',
+        });
+      }
+
+      const notice = await tx.agentInboxItem.create({
+        data: {
+          workspaceId,
+          kind: AgentInboxKind.NOTICE,
+          approvalTier: AgentInboxApprovalTier.MAILBOX_OWNER,
+          state: AgentInboxState.PENDING,
+          draftedBy,
+          summary: `Send kit ${existing.kitId} returned for revision`,
+          payload: {
+            type: 'send_kit_returned',
+            kit_id: existing.kitId,
+            note,
+            unsent_count: remaining.count,
+            first_recipients: remaining.recipients.slice(0, 5),
+          } as Prisma.InputJsonValue,
+        },
+      });
+      const updated = await tx.agentSendKit.update({
+        where: { kitId: existing.kitId },
+        data: {
+          state: AgentSendKitState.RETURNED,
+          returnNote: note,
+          returnedBy,
+          returnedAt: new Date(),
+        },
+      });
+      await this.recordAction(tx, workspaceId, {
+        kind: AgentActionKind.SEND_KIT_RETURNED,
+        agentKey: draftedBy,
+        actorUcUid: returnedBy,
+        detail: `${existing.kitId}; unsent_count=${remaining.count}`,
+      });
+      const result = await this.sendKitView(tx, { ...existing, ...updated }, true);
+      if (notice?.id) result.return_notice_id = notice.id;
+      return result;
+    });
+  }
+
+  private async sendKitForHumanAction(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    ucUid: string,
+    kitId: string,
+  ): Promise<AgentSendKit> {
+    await tx.$queryRaw`SELECT "kitId" FROM "agent_send_kits" WHERE "workspaceId" = ${workspaceId} AND "kitId" = ${kitId} FOR UPDATE`;
+    const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, ucUid);
+    const existing = await tx.agentSendKit.findFirst({ where: { kitId, workspaceId } });
+    if (!existing || !this.sendKitAddressVisible(existing.fromAddress, sendKitAddresses)) {
+      throw new NotFoundException('The send kit was not found in this workspace.');
+    }
+    return existing;
+  }
+
+  private assertFutureKitExpiry(expiresAt: Date): void {
+    if (!Number.isFinite(expiresAt?.getTime?.()) || expiresAt <= new Date()) {
+      throw new BadRequestException('expires_at must be in the future.');
+    }
+  }
+
+  private sendKitDefinitionFromRow(
+    row: AgentSendKit,
+    recipients = row.recipients ?? [],
+  ): AgentSendKitDefinition {
+    return this.buildSendKitDefinition({
+      bodyTemplate: row.bodyTemplate ?? '',
+      placeholderRules: (row.placeholderRules ?? {}) as Record<string, string>,
+      optionalLines: Array.isArray(row.optionalLines)
+        ? row.optionalLines.filter((line): line is number => typeof line === 'number')
+        : [],
+      subjects: row.subjects ?? [],
+      recipients,
+      fromAddress: row.fromAddress ?? '',
+      capPerDay: row.capPerDay ?? 0,
+    });
+  }
+
+  private reproposalKitId(existingKitId: string, requested?: string): string {
+    const trimmed = requested?.trim();
+    if (trimmed) {
+      if (trimmed.length > 200)
+        throw new BadRequestException('new_kit_id must be at most 200 characters.');
+      return trimmed;
+    }
+    return `${existingKitId.slice(0, 176)}-reproposal-${randomUUID().slice(0, 8)}`;
+  }
+
   // ── Wave 7: the agent-send autonomy matrix support surface ─────────────
 
   /**
@@ -4090,17 +4542,27 @@ export class EmailService {
     ucUid: string | null,
     itemId: string,
   ): Promise<AgentInboxDetailView | null> {
-    const item = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+    const result = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
-      return tx.agentInboxItem.findFirst({
+      const item = await tx.agentInboxItem.findFirst({
         where: { id: itemId, workspaceId, ...this.agentInboxScopeWhere(scope) },
         include: { message: true },
       });
+      const kit =
+        item?.message?.kitId && typeof tx.agentSendKit?.findFirst === 'function'
+          ? await tx.agentSendKit.findFirst({
+              where: { kitId: item.message.kitId, workspaceId },
+            })
+          : null;
+      return {
+        item,
+        kit: kit ? await this.expireSendKitOnRead(tx, kit, new Date()) : null,
+      };
     });
-    if (!item) return null;
+    if (!result.item) return null;
     return {
-      ...this.inboxView(item, item.message),
-      message: this.messageFullView(item.message),
+      ...this.inboxView(result.item, result.item.message, result.kit),
+      message: this.messageFullView(result.item.message),
     };
   }
 
@@ -5215,8 +5677,13 @@ export class EmailService {
       kitId?: string | null;
       standingApprovalId?: string | null;
     } | null,
+    kit?: Pick<AgentSendKit, 'state' | 'expiresAt' | 'expiredFromState'> | null,
   ): AgentInboxView {
-    const payload = this.cleanupPayload(it.payload);
+    const originalPayload = this.cleanupPayload(it.payload);
+    const kitHold = kit ? this.agentSendKitHoldReason(kit) : null;
+    const payload = kitHold
+      ? this.payloadWithKitHoldReason(originalPayload, kitHold)
+      : originalPayload;
     const isCleanup = it.kind === AgentInboxKind.CLEANUP;
     const toAddresses = isCleanup
       ? []
@@ -5266,7 +5733,56 @@ export class EmailService {
       // Wave 7: EMAIL items now carry payload too (payload.policy — why the
       // gate held the send). Additive: pre-wave EMAIL items had a null payload
       // in the DB, so they keep rendering null here.
-      payload: isCleanup || (it.payload && typeof it.payload === 'object') ? payload : null,
+      payload:
+        isCleanup || kitHold || (it.payload && typeof it.payload === 'object') ? payload : null,
+    };
+  }
+
+  private agentSendKitHoldReason(
+    kit: Pick<AgentSendKit, 'state' | 'expiresAt' | 'expiredFromState'>,
+  ): { code: string; message: string } | null {
+    const state = this.sendKitState(kit, new Date());
+    const reason =
+      state === AgentSendKitState.EXPIRED
+        ? 'kit_expired'
+        : state === AgentSendKitState.RETURNED
+          ? 'kit_returned'
+          : state === AgentSendKitState.SUPERSEDED
+            ? 'kit_superseded'
+            : state === AgentSendKitState.REJECTED
+              ? 'kit_rejected'
+              : state === AgentSendKitState.PROPOSED
+                ? 'kit_not_approved'
+                : null;
+    return reason ? { code: reason, message: AGENT_SEND_KIT_REASON_MESSAGES[reason] } : null;
+  }
+
+  private payloadWithKitHoldReason(
+    payload: Record<string, unknown>,
+    reason: { code: string; message: string },
+  ): Record<string, unknown> {
+    const rawPolicy = payload.policy;
+    const existingReasons =
+      rawPolicy && typeof rawPolicy === 'object' && !Array.isArray(rawPolicy)
+        ? Array.isArray((rawPolicy as Record<string, unknown>).reasons)
+          ? ((rawPolicy as Record<string, unknown>).reasons as unknown[]).filter(
+              (value): value is { code?: unknown; message?: unknown } =>
+                !!value && typeof value === 'object' && !Array.isArray(value),
+            )
+          : []
+        : [];
+    const reasons = [
+      reason,
+      ...existingReasons
+        .filter((value) => value.code !== reason.code)
+        .map((value) => ({
+          code: typeof value.code === 'string' ? value.code : 'hold',
+          message: typeof value.message === 'string' ? value.message : 'The draft is held.',
+        })),
+    ];
+    return {
+      ...payload,
+      policy: { decision: 'hold', reasons },
     };
   }
 
