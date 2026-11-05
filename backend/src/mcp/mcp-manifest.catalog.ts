@@ -1570,6 +1570,37 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
       "read_only": false
     },
     {
+      "name": "sweep_hard_bounces",
+      "description": "Scan recent sovereign mailbox messages for RFC 3464 action=failed 5.1.x hard-bounce DSNs and upsert BOUNCED suppression rows. Requires an active MEMBER-or-higher workspace role. Returns counts only; dry_run reports the counts without writing suppressions.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "mailbox_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "since_days": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "dry_run": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
       "name": "ui_navigate",
       "description": "Push a NAVIGATE command to the calling user’s open Email-Ops cockpit: route it to an app path (e.g. /mail, /agents, /agent-inbox, /cleanup, /dashboard, /insights, /mailboxes, /accounts). Applied on the user’s next focus-gated poll. No side effect. Returns { enqueued, command_id, kind }.",
       "input_schema": {

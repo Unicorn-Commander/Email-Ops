@@ -80,7 +80,11 @@ import { TrustedCorrespondentsService } from '../trusted-correspondents/trusted-
 import { TrustedCorrespondentView } from '../email/email.types';
 import { StandingApprovalsService, StandingRequest } from '../approvals/standing-approvals.service';
 import { assertHumanApproval } from '../approvals/human-approval';
-import { SuppressionService, SuppressionView } from '../unsubscribe/suppression.service';
+import {
+  HardBounceSweepResult,
+  SuppressionService,
+  SuppressionView,
+} from '../unsubscribe/suppression.service';
 import { enforceExtraScope, PatTaggedIdentity } from './mcp-scopes';
 
 /**
@@ -1306,6 +1310,24 @@ export class EmailOpsTools {
       args.email,
       args.note ?? null,
     );
+  }
+
+  async sweepHardBounces(
+    user: User,
+    args: {
+      workspace_id?: string;
+      mailbox_id?: string;
+      since_days?: number;
+      dry_run?: boolean;
+    },
+  ): Promise<HardBounceSweepResult> {
+    if (!this.suppressions) throw new ServiceUnavailableException('suppression_not_configured');
+    const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    return this.suppressions.sweepHardBounces(workspaceId, {
+      mailboxId: args.mailbox_id,
+      sinceDays: args.since_days,
+      dryRun: args.dry_run,
+    });
   }
 
   // ── helpers ────────────────────────────────────────────────────────────

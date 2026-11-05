@@ -48,8 +48,8 @@ describe('MCP PAT scope enforcement', () => {
     // Send-kit proposals: +4 lifecycle/read tools alongside approve_send_kit,
     // plus read-only mail-domain verification, plus agent pause/resume, plus
     // the paced bulk inbox approval plus the workspace suppression tools are
-    // all included in the registered scope surface → 82.
-    expect(toolNames).toHaveLength(82);
+    // all included in the registered scope surface → 83.
+    expect(toolNames).toHaveLength(83);
     for (const toolName of toolNames) {
       expect(() => enforceMcpToolScope(pat(['*']), toolName, NOW)).not.toThrow();
     }
@@ -71,6 +71,7 @@ describe('MCP PAT scope enforcement', () => {
   it('tags workspace suppression tools as mail read/write', () => {
     expect(MCP_TOOL_SCOPES.list_suppressed_recipients).toBe('mail:read');
     expect(MCP_TOOL_SCOPES.suppress_recipient).toBe('mail:write');
+    expect(MCP_TOOL_SCOPES.sweep_hard_bounces).toBe('mail:write');
   });
 
   it('does not scope-check a JWT identity', () => {

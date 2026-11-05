@@ -6,11 +6,14 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { EmailEngagementKind, Prisma, SuppressedRecipientReason } from '@prisma/client';
 import { normalizeAddress } from '../email/autonomy';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
+import { StalwartPort } from '../stalwart/stalwart.port';
+import { StalwartMessageDetail } from '../stalwart/stalwart.types';
 
 export const RECIPIENT_SUPPRESSED = 'recipient_suppressed';
 export const RECIPIENT_SUPPRESSED_MESSAGE = 'The recipient is suppressed in this workspace.';
@@ -35,6 +38,36 @@ type PublicToken = {
   usedAt: Date | null;
 };
 
+export interface HardBounceSweepOptions {
+  mailboxId?: string | null;
+  sinceDays?: number;
+  dryRun?: boolean;
+}
+
+export interface HardBounceSweepResult {
+  scanned: number;
+  hard_bounces: number;
+  added: number;
+  already_present: number;
+  skipped_soft: number;
+}
+
+type HardBounceCandidate = {
+  email: string;
+  messageId: string;
+  note: string | null;
+};
+
+type HardBounceScan = {
+  scanned: number;
+  hardBounces: number;
+  skippedSoft: number;
+  candidates: HardBounceCandidate[];
+};
+
+const HARD_BOUNCE_PAGE_SIZE = 100;
+const DEFAULT_HARD_BOUNCE_SINCE_DAYS = 7;
+
 /**
  * The shared suppression and RFC 8058 token seam.
  *
@@ -48,6 +81,7 @@ export class SuppressionService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    @Optional() private readonly stalwart?: StalwartPort,
   ) {}
 
   normalizeEmail(raw: string): string {
@@ -109,6 +143,183 @@ export class SuppressionService {
       tx.suppressedRecipient.deleteMany({ where: { id, workspaceId } }),
     );
     return result.count > 0;
+  }
+
+  /**
+   * Scan recent sovereign mailbox messages for RFC 3464 hard-bounce DSNs.
+   * James supplies `dsn` on the same thread-detail read used by the webmail
+   * thread route; this method deliberately does not introduce another JMAP
+   * shape or persist a mailbox cursor.
+   */
+  async sweepHardBounces(
+    workspaceId: string,
+    options: HardBounceSweepOptions = {},
+  ): Promise<HardBounceSweepResult> {
+    const sinceDays = options.sinceDays ?? DEFAULT_HARD_BOUNCE_SINCE_DAYS;
+    if (!Number.isInteger(sinceDays) || sinceDays <= 0) {
+      throw new BadRequestException('sinceDays must be a positive integer.');
+    }
+
+    const mailboxId = options.mailboxId?.trim() || null;
+    const cutoff = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
+    const mailboxes = await this.prisma.withWorkspace(workspaceId, null, (tx) =>
+      tx.mailboxAccount.findMany({
+        where: {
+          workspaceId,
+          active: true,
+          provider: 'stalwart',
+          ...(mailboxId ? { id: mailboxId } : {}),
+        },
+        select: { id: true, emailAddress: true },
+        orderBy: { createdAt: 'asc' },
+      }),
+    );
+
+    if (mailboxId && mailboxes.length === 0) {
+      throw new NotFoundException('Sovereign mailbox not found in this workspace.');
+    }
+
+    const result: HardBounceSweepResult = {
+      scanned: 0,
+      hard_bounces: 0,
+      added: 0,
+      already_present: 0,
+      skipped_soft: 0,
+    };
+    const candidates: HardBounceCandidate[] = [];
+
+    if (!this.stalwart) return result;
+    for (const mailbox of mailboxes) {
+      const scan = await this.scanMailboxHardBounces(mailbox.emailAddress, cutoff);
+      result.scanned += scan.scanned;
+      result.hard_bounces += scan.hardBounces;
+      result.skipped_soft += scan.skippedSoft;
+      candidates.push(...scan.candidates);
+    }
+
+    if (candidates.length === 0) return result;
+
+    await this.prisma.withWorkspace(workspaceId, null, async (tx) => {
+      for (const candidate of candidates) {
+        const existing = await tx.suppressedRecipient.findFirst({
+          where: { workspaceId, email: candidate.email },
+          select: { id: true },
+        });
+        if (existing) result.already_present += 1;
+        else result.added += 1;
+
+        if (options.dryRun) continue;
+        await tx.suppressedRecipient.upsert({
+          where: { workspaceId_email: { workspaceId, email: candidate.email } },
+          create: {
+            workspaceId,
+            email: candidate.email,
+            reason: SuppressedRecipientReason.BOUNCED,
+            source: `dsn:${candidate.messageId}`,
+            note: candidate.note,
+          },
+          update: {
+            reason: SuppressedRecipientReason.BOUNCED,
+            source: `dsn:${candidate.messageId}`,
+            note: candidate.note,
+          },
+        });
+      }
+    });
+
+    return result;
+  }
+
+  private async scanMailboxHardBounces(mailbox: string, cutoff: number): Promise<HardBounceScan> {
+    const scan: HardBounceScan = {
+      scanned: 0,
+      hardBounces: 0,
+      skippedSoft: 0,
+      candidates: [],
+    };
+    const seenMessages = new Set<string>();
+    let offset = 0;
+
+    while (true) {
+      let page;
+      try {
+        page = await this.stalwart!.listFolderThreads(mailbox, {
+          folder: 'inbox',
+          limit: HARD_BOUNCE_PAGE_SIZE,
+          offset,
+          query: null,
+        });
+      } catch {
+        break;
+      }
+      if (!page || page.threads.length === 0) break;
+
+      let reachedCutoff = false;
+      for (const thread of page.threads) {
+        const threadTime = thread.lastMessageAt ? Date.parse(thread.lastMessageAt) : NaN;
+        if (Number.isFinite(threadTime) && threadTime < cutoff) {
+          reachedCutoff = true;
+          break;
+        }
+
+        let details: StalwartMessageDetail[];
+        try {
+          details = await this.stalwart!.getThreadDetail(mailbox, thread.id);
+        } catch {
+          continue;
+        }
+        for (const detail of details) {
+          if (seenMessages.has(detail.id)) continue;
+          seenMessages.add(detail.id);
+          const messageTime = detail.sentAt ? Date.parse(detail.sentAt) : NaN;
+          if (!Number.isFinite(messageTime) || messageTime < cutoff) continue;
+          scan.scanned += 1;
+
+          const dsn = detail.dsn;
+          const action = dsn?.action?.trim().toLowerCase();
+          const status = dsn?.status?.trim() ?? '';
+          if (action !== 'failed' || !status) continue;
+          if (!this.isHardBounceStatus(status)) {
+            scan.skippedSoft += 1;
+            continue;
+          }
+
+          scan.hardBounces += 1;
+          const email = this.dsnRecipient(dsn?.final_recipient);
+          if (!email) continue;
+          scan.candidates.push({
+            email,
+            messageId: detail.id,
+            note: dsn?.diagnostic_code?.trim().slice(0, 120) || null,
+          });
+        }
+      }
+      if (reachedCutoff) break;
+
+      const nextOffset = offset + page.threads.length;
+      const hasMore =
+        page.total !== undefined
+          ? nextOffset < page.total
+          : page.threads.length === HARD_BOUNCE_PAGE_SIZE;
+      if (!hasMore) break;
+      offset = nextOffset;
+    }
+
+    return scan;
+  }
+
+  private isHardBounceStatus(status: string): boolean {
+    // RFC 3464 5.1.x is the mailbox/user-unknown family. The prefix also
+    // covers the explicitly required 5.1.1, 5.1.2, 5.1.3, 5.1.6 and 5.1.10
+    // codes without accidentally admitting 4.x.x or policy 5.2.x/5.7.x.
+    return status.startsWith('5.1.');
+  }
+
+  private dsnRecipient(raw: string | null | undefined): string | null {
+    if (!raw) return null;
+    const value = raw.includes(';') ? raw.slice(raw.indexOf(';') + 1).trim() : raw.trim();
+    const email = normalizeAddress(value);
+    return EMAIL_RE.test(email) ? email : null;
   }
 
   /** Return the first matching suppression for a transaction-scoped recipient set. */

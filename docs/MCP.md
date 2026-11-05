@@ -209,6 +209,7 @@ public RFC 8058 one-click endpoint and these MCP tools.
 | :--- | :--- | :--- | :--- |
 | `list_suppressed_recipients` | List suppression records, optionally filtered by address or reason | `workspace_id?`, `email?`, `reason?` (`UNSUBSCRIBED`/`BOUNCED`/`COMPLAINT`/`MANUAL`) | Yes |
 | `suppress_recipient` | Add or refresh a MANUAL suppression; member-or-higher role required | `workspace_id?`, `email`, `note?` | No |
+| `sweep_hard_bounces` | Scan recent sovereign mailbox DSNs and upsert 5.1.x BOUNCED suppressions; returns counts only and supports `dry_run` | `workspace_id?`, `mailbox_id?`, `since_days?`, `dry_run?` | No |
 
 There is deliberately no MCP unsuppress tool. A signed-in human uses the
 workspace REST `DELETE /api/v1/workspaces/:workspaceId/suppressions/:id` route.

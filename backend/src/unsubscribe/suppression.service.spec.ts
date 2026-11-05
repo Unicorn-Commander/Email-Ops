@@ -10,6 +10,7 @@ describe('SuppressionService', () => {
   let tx: any;
   let prisma: any;
   let systemToken: any;
+  let stalwart: any;
   let service: SuppressionService;
 
   beforeEach(() => {
@@ -53,6 +54,14 @@ describe('SuppressionService', () => {
       },
       emailMessage: { findFirst: jest.fn().mockResolvedValue({ id: messageId }) },
       emailEngagementEvent: { upsert: jest.fn().mockResolvedValue({}) },
+      mailboxAccount: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'mailbox-fictional-555',
+            emailAddress: 'sender@example.test',
+          },
+        ]),
+      },
     };
     config = {
       get: jest.fn((key: string, fallback?: string) =>
@@ -70,7 +79,11 @@ describe('SuppressionService', () => {
           Promise.resolve(fn(tx)),
       ),
     };
-    service = new SuppressionService(prisma, config as any);
+    stalwart = {
+      listFolderThreads: jest.fn(),
+      getThreadDetail: jest.fn(),
+    };
+    service = new SuppressionService(prisma, config as any, stalwart);
   });
 
   it('builds RFC 8058 headers without changing body bytes or storing the raw token', async () => {
@@ -149,5 +162,126 @@ describe('SuppressionService', () => {
     await expect(
       service.remove(workspaceId, 'fictional-reviewer-555', 'suppression-555'),
     ).resolves.toBe(true);
+  });
+
+  describe('hard-bounce sweep', () => {
+    const recent = () => new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+    beforeEach(() => {
+      const rows = new Map<string, any>();
+      tx.suppressedRecipient.findFirst = jest.fn(({ where }: any) =>
+        Promise.resolve(rows.get(where.email) ?? null),
+      );
+      tx.suppressedRecipient.upsert.mockImplementation(({ create, update }: any) => {
+        const row = { id: `suppression-${create.email}`, ...create, ...update };
+        rows.set(create.email, row);
+        return Promise.resolve(row);
+      });
+      stalwart.listFolderThreads.mockResolvedValue({
+        threads: [{ id: 'thread-fictional-555', lastMessageAt: recent() }],
+      });
+    });
+
+    it('adds a 5.1.1 bounce once, then reports it already present', async () => {
+      stalwart.getThreadDetail.mockResolvedValue([
+        {
+          id: 'dsn-message-fictional-555',
+          threadId: 'thread-fictional-555',
+          sentAt: recent(),
+          dsn: {
+            action: 'failed',
+            status: '5.1.1',
+            diagnostic_code: 'smtp; 550 5.1.1 mailbox unavailable; fictional reference',
+            final_recipient: 'rfc822; Bounced.Person@example.com',
+          },
+        },
+      ]);
+
+      await expect(service.sweepHardBounces(workspaceId, { sinceDays: 7 })).resolves.toEqual({
+        scanned: 1,
+        hard_bounces: 1,
+        added: 1,
+        already_present: 0,
+        skipped_soft: 0,
+      });
+      await expect(service.sweepHardBounces(workspaceId, { sinceDays: 7 })).resolves.toEqual({
+        scanned: 1,
+        hard_bounces: 1,
+        added: 0,
+        already_present: 1,
+        skipped_soft: 0,
+      });
+      expect(tx.suppressedRecipient.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          create: expect.objectContaining({
+            email: 'bounced.person@example.com',
+            reason: SuppressedRecipientReason.BOUNCED,
+            source: 'dsn:dsn-message-fictional-555',
+            note: 'smtp; 550 5.1.1 mailbox unavailable; fictional reference',
+          }),
+        }),
+      );
+    });
+
+    it('counts 4.4.1 and 5.7.1 as skipped soft/policy DSNs', async () => {
+      stalwart.getThreadDetail.mockResolvedValue([
+        {
+          id: 'soft-message-fictional-444',
+          threadId: 'thread-fictional-555',
+          sentAt: recent(),
+          dsn: {
+            action: 'failed',
+            status: '4.4.1',
+            diagnostic_code: 'smtp; 451 temporary failure',
+            final_recipient: 'rfc822; soft@example.test',
+          },
+        },
+        {
+          id: 'policy-message-fictional-571',
+          threadId: 'thread-fictional-555',
+          sentAt: recent(),
+          dsn: {
+            action: 'failed',
+            status: '5.7.1',
+            diagnostic_code: 'smtp; 550 policy rejection',
+            final_recipient: 'rfc822; policy@example.test',
+          },
+        },
+      ]);
+
+      await expect(service.sweepHardBounces(workspaceId)).resolves.toEqual({
+        scanned: 2,
+        hard_bounces: 0,
+        added: 0,
+        already_present: 0,
+        skipped_soft: 2,
+      });
+      expect(tx.suppressedRecipient.upsert).not.toHaveBeenCalled();
+    });
+
+    it('dry_run returns additions without writing suppression rows', async () => {
+      stalwart.getThreadDetail.mockResolvedValue([
+        {
+          id: 'dry-run-message-fictional-555',
+          threadId: 'thread-fictional-555',
+          sentAt: recent(),
+          dsn: {
+            action: 'failed',
+            status: '5.1.2',
+            diagnostic_code: 'smtp; 550 host unknown',
+            final_recipient: 'rfc822; dry-run@example.test',
+          },
+        },
+      ]);
+
+      await expect(service.sweepHardBounces(workspaceId, { dryRun: true })).resolves.toEqual({
+        scanned: 1,
+        hard_bounces: 1,
+        added: 1,
+        already_present: 0,
+        skipped_soft: 0,
+      });
+      expect(tx.suppressedRecipient.upsert).not.toHaveBeenCalled();
+    });
   });
 });
