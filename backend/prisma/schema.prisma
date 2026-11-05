@@ -373,6 +373,13 @@ enum EmailEngagementKind {
   UNSUBSCRIBED
 }
 
+enum SuppressedRecipientReason {
+  UNSUBSCRIBED
+  BOUNCED
+  COMPLAINT
+  MANUAL
+}
+
 // ── Space visibility (Email-Ops OWNS this — the soft grouping layer) ──
 //
 // A Space is a soft, overlapping grouping of mailboxes + agents INSIDE the
@@ -450,6 +457,8 @@ model Workspace {
   mailRules          MailRule[]
   mailRuleForwards   MailRuleForward[]
   trustedCorrespondents TrustedCorrespondent[]
+  suppressedRecipients SuppressedRecipient[]
+  unsubscribeTokens UnsubscribeToken[]
   spaces             Space[]
   invitations        Invitation[]
   uiCommands         UiCommand[]
@@ -863,6 +872,7 @@ model EmailMessage {
   standingApprovalUse StandingApprovalUse?
   agentInbox       AgentInboxItem?
   engagementEvents EmailEngagementEvent[]
+  unsubscribeTokens UnsubscribeToken[]
 
   // The idempotency tuple is unique per workspace (partial on the non-null
   // source/ref — see the migration's partial unique index for the NULL case).
@@ -1050,11 +1060,48 @@ model AgentSendKit {
   capPerDay        Int
   expiresAt        DateTime
   workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  unsubscribeTokens UnsubscribeToken[]
 
   @@index([workspaceId, state])
   @@index([workspaceId, expiresAt])
   @@index([workspaceId, supersededByKitId])
   @@map("agent_send_kits")
+}
+
+model SuppressedRecipient {
+  id          String                    @id @default(uuid())
+  workspaceId String
+  email       String
+  reason      SuppressedRecipientReason
+  source      String
+  note        String?                   @db.Text
+  createdAt   DateTime                  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, email])
+  @@index([workspaceId, reason])
+  @@map("suppressed_recipients")
+}
+
+model UnsubscribeToken {
+  id         String    @id @default(uuid())
+  workspaceId String
+  tokenHash  String    @unique
+  email      String
+  kitId      String?
+  messageId  String?
+  createdAt  DateTime  @default(now())
+  usedAt     DateTime?
+
+  workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  kit       AgentSendKit? @relation(fields: [kitId], references: [kitId], onDelete: SetNull, onUpdate: NoAction)
+  message   EmailMessage? @relation(fields: [messageId], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@unique([workspaceId, email, messageId])
+  @@index([workspaceId, email])
+  @@index([workspaceId, messageId])
+  @@map("unsubscribe_tokens")
 }
 
 // A per-mailbox inbound mail rule. `match` / `actions` hold the rule-engine
