@@ -33,9 +33,11 @@ export interface EnsureEntitledWorkspaceResult {
 /**
  * Materializes the Ops-Center organization mirror in Email-Ops.
  *
- * The Ops-Center org id is the idempotency key and the workspace id. This
- * service only writes that workspace and the caller's membership; it never
- * renames an existing mirror or changes memberships in another workspace.
+ * The Ops-Center org id is the idempotency key. A mapped workspace is the
+ * canonical target; when no mapping exists, the historical org-id workspace is
+ * created and stamped so subsequent logins resolve to it. This service only
+ * writes that workspace and the caller's membership; it never renames an
+ * existing mirror or changes memberships in another workspace.
  */
 @Injectable()
 export class WorkspaceProvisioningService {
@@ -92,23 +94,34 @@ export class WorkspaceProvisioningService {
       desiredRole: WorkspaceRole;
     },
   ): Promise<EnsureEntitledWorkspaceResult> {
-    const existing = await tx.workspace.findUnique({ where: { id: fields.orgId } });
+    const mapped = await tx.workspace.findUnique({
+      where: { opsCenterOrgId: fields.orgId },
+    });
+    const existing = mapped ?? (await tx.workspace.findUnique({ where: { id: fields.orgId } }));
+    if (existing?.opsCenterOrgId && existing.opsCenterOrgId !== fields.orgId) {
+      throw new Error(
+        `Workspace ${existing.id} is already mapped to Ops-Center org ${existing.opsCenterOrgId}`,
+      );
+    }
+
     const slug = existing?.slug ?? (await this.uniqueSlug(tx, fields.baseSlug));
     const workspace = await tx.workspace.upsert({
-      where: { id: fields.orgId },
-      update: {},
+      where: { id: existing?.id ?? fields.orgId },
+      update: { opsCenterOrgId: fields.orgId },
       create: {
         id: fields.orgId,
         slug,
         displayName: fields.displayName,
+        opsCenterOrgId: fields.orgId,
       },
     });
+    const workspaceId = workspace.id;
 
     const existingMembership = await tx.membership.findUnique({
       where: {
         userKey_workspaceId: {
           userKey: fields.userKey,
-          workspaceId: fields.orgId,
+          workspaceId,
         },
       },
     });
@@ -129,7 +142,7 @@ export class WorkspaceProvisioningService {
             where: {
               userKey_workspaceId: {
                 userKey: fields.userKey,
-                workspaceId: fields.orgId,
+                workspaceId,
               },
             },
             data: update,
@@ -143,7 +156,7 @@ export class WorkspaceProvisioningService {
       membership = await tx.membership.create({
         data: {
           userKey: fields.userKey,
-          workspaceId: fields.orgId,
+          workspaceId,
           role: fields.desiredRole,
           status: MembershipStatus.ACTIVE,
           isDefault: !hasAnyMembership,
@@ -152,9 +165,10 @@ export class WorkspaceProvisioningService {
     }
 
     this.logger.log(
-      `Ensured entitled workspace ${fields.orgId} for membership ${fields.userKey} (${membership.role})`,
+      `Ensured entitled workspace ${workspaceId} for Ops-Center org ${fields.orgId} ` +
+        `and membership ${fields.userKey} (${membership.role})`,
     );
-    return { workspaceId: fields.orgId, workspace, membership };
+    return { workspaceId, workspace, membership };
   }
 
   private async uniqueSlug(tx: Prisma.TransactionClient, base: string): Promise<string> {

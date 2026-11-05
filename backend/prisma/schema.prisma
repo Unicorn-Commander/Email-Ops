@@ -410,6 +410,8 @@ model Workspace {
   id                String                 @id // == uc-registry workspace_id (uuidv7). NO @default.
   slug              String                 @unique
   displayName       String
+  // Ops-Center org identity; nullable for workspaces created outside entitlement provisioning.
+  opsCenterOrgId    String?                @unique
   parentWorkspaceId String?
   isolationMode     String                 @default("standard") // 'strict'|'standard'|'open'  (TEXT+CHECK, §5)
   isolationTier     String                 @default("shared") // 'shared'|'premium'|'enterprise'|'dedicated'
