@@ -73,6 +73,7 @@ export const MCP_TOOL_SCOPES = {
   untrust_correspondent: 'mail:write',
   list_suppressed_recipients: 'mail:read',
   suppress_recipient: 'mail:write',
+  sweep_hard_bounces: 'mail:write',
   list_mail_domains: 'mail:read',
   get_mail_domain_verification: 'mail:read',
   list_mail_accounts: 'mail:read',

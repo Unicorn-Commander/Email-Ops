@@ -14,7 +14,16 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import { IsEmail, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsEmail,
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import { Response } from 'express';
 import { SuppressedRecipientReason, User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -34,6 +43,12 @@ class SuppressionQueryDto {
 class CreateSuppressionDto {
   @IsEmail() email!: string;
   @IsOptional() @IsString() @MaxLength(2000) note?: string;
+}
+
+class SweepBouncesDto {
+  @IsOptional() @IsString() @MaxLength(200) mailbox_id?: string;
+  @IsOptional() @IsInt() @Min(1) since_days?: number;
+  @IsOptional() @IsBoolean() dry_run?: boolean;
 }
 
 const NOT_FOUND_HTML = `<!doctype html>
@@ -119,6 +134,25 @@ export class SuppressionController {
       reason: query.reason,
     });
     return { items, count: items.length };
+  }
+
+  @Post('sweep-bounces')
+  @ApiOperation({ summary: 'Sweep recent sovereign mailbox messages for hard-bounce DSNs.' })
+  @ApiResponse({
+    status: 201,
+    description: '{ scanned, hard_bounces, added, already_present, skipped_soft }',
+  })
+  async sweepBounces(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Body() body: SweepBouncesDto,
+  ) {
+    const authorizedWorkspace = await this.membership.assertCanReviewInbox(user, workspaceId);
+    return this.suppressions.sweepHardBounces(authorizedWorkspace, {
+      mailboxId: body.mailbox_id,
+      sinceDays: body.since_days,
+      dryRun: body.dry_run,
+    });
   }
 
   @Post()

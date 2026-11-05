@@ -1173,6 +1173,25 @@ export class McpService {
       async (args: any) => wrap(await tools.suppressRecipient(user, args)),
     );
 
+    registerTool(
+      'sweep_hard_bounces',
+      {
+        title: 'Sweep hard-bounce DSNs',
+        description:
+          'Scan recent sovereign mailbox messages for RFC 3464 action=failed ' +
+          '5.1.x hard-bounce DSNs and upsert BOUNCED suppression rows. Requires an ' +
+          'active MEMBER-or-higher workspace role. Returns counts only; dry_run ' +
+          'reports the counts without writing suppressions.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          mailbox_id: z.string().min(1).max(200).optional(),
+          since_days: z.number().int().min(1).optional(),
+          dry_run: z.boolean().optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.sweepHardBounces(user, args ?? {})),
+    );
+
     // ── Mail-engine admin tools (control-plane; OWNER-gated writes) ──
 
     registerTool(
