@@ -10,6 +10,7 @@ import { CalendarModule } from '../calendar/calendar.module';
 import { AuthModule } from '../auth/auth.module';
 import { WorkspaceModule } from '../common/workspace/workspace.module';
 import { SendKitController } from './send-kit.controller';
+import { UnsubscribeModule } from '../unsubscribe/unsubscribe.module';
 
 /**
  * The Email-Ops core domain: the SoR + the EmailOpsPort contract logic + the
@@ -27,6 +28,7 @@ import { SendKitController } from './send-kit.controller';
     ApprovalsModule,
     AuthModule,
     WorkspaceModule,
+    UnsubscribeModule,
   ],
   controllers: [SendKitController],
   providers: [

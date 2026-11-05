@@ -19,6 +19,7 @@ import { AgentViewModule } from '../agent-view/agent-view.module';
 import { MailRulesModule } from '../mail-rules/mail-rules.module';
 import { TrustedCorrespondentsModule } from '../trusted-correspondents/trusted-correspondents.module';
 import { CalendarModule } from '../calendar/calendar.module';
+import { UnsubscribeModule } from '../unsubscribe/unsubscribe.module';
 
 @Module({
   // EmailModule exports EmailService so the contract MCP tools run the SAME SoR
@@ -59,6 +60,7 @@ import { CalendarModule } from '../calendar/calendar.module';
     // list/trust/untrust MCP tools share the REST implementation + RLS path.
     TrustedCorrespondentsModule,
     CalendarModule,
+    UnsubscribeModule,
   ],
   // McpManifestController is the PUBLIC per-environment federation-manifest route
   // (mcp_endpoint derived from the host / PUBLIC_BASE_URL) — fixes prod advertising

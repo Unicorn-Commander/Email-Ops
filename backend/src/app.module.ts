@@ -35,6 +35,7 @@ import { MailRulesModule } from './mail-rules/mail-rules.module';
 import { TrustedCorrespondentsModule } from './trusted-correspondents/trusted-correspondents.module';
 import { NotifyModule } from './notify/notify.module';
 import { CalendarModule } from './calendar/calendar.module';
+import { UnsubscribeModule } from './unsubscribe/unsubscribe.module';
 
 @Module({
   imports: [
@@ -126,6 +127,7 @@ import { CalendarModule } from './calendar/calendar.module';
     // escalation sweep. Dormant unless the notify env is wired.
     NotifyModule,
     CalendarModule,
+    UnsubscribeModule,
     // MCP last so it can consume the contract + agent-inbox + ui_* tools.
     McpModule,
   ],

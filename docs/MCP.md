@@ -198,6 +198,21 @@ preview; the REST detail route returns the full staged message for review.
 | `set_disposition` | Move thread to folder | `workspace_id?`, `thread_id`, `disposition` | No |
 | `set_sender_policy` | Block/trust a sender | `workspace_id?`, `scope?`, `pattern`, `kind`, `reason?` | No |
 
+### Workspace Suppression
+
+Suppression is checked before every outbound compose, approval, scheduled-send,
+and send-kit hand-off. A matching address returns the stable reason
+`recipient_suppressed`; the same workspace suppression row is shared by the
+public RFC 8058 one-click endpoint and these MCP tools.
+
+| Tool Name | Purpose | Key Parameters | Read-Only |
+| :--- | :--- | :--- | :--- |
+| `list_suppressed_recipients` | List suppression records, optionally filtered by address or reason | `workspace_id?`, `email?`, `reason?` (`UNSUBSCRIBED`/`BOUNCED`/`COMPLAINT`/`MANUAL`) | Yes |
+| `suppress_recipient` | Add or refresh a MANUAL suppression; member-or-higher role required | `workspace_id?`, `email`, `note?` | No |
+
+There is deliberately no MCP unsuppress tool. A signed-in human uses the
+workspace REST `DELETE /api/v1/workspaces/:workspaceId/suppressions/:id` route.
+
 ### Fleet & Provisioning
 
 | Tool Name | Purpose | Key Parameters | Read-Only |

@@ -121,6 +121,11 @@ import { ApprovalLinksService, kitTarget } from '../approvals/approval-links.ser
 import { StandingApprovalsService } from '../approvals/standing-approvals.service';
 import { ApprovalPendingNotice, StableNotifierService } from '../notify/stable-notifier.service';
 import {
+  RECIPIENT_SUPPRESSED,
+  RECIPIENT_SUPPRESSED_MESSAGE,
+  SuppressionService,
+} from '../unsubscribe/suppression.service';
+import {
   deriveReplyAll,
   mergeReplyAll,
   parseExplicitRecipients,
@@ -273,6 +278,7 @@ type ComposePrep =
         mailbox: MailboxAccount | null;
         agentKey: string | null;
         subject: string | null;
+        kitId: string | null;
         req: SendReq;
       };
     };
@@ -285,6 +291,7 @@ type ComposePrep =
 type ApprovePrep =
   | { kind: 'null' }
   | { kind: 'result'; value: { inbox: AgentInboxView; message: MessageComposeView | null } }
+  | { kind: 'suppressed'; inbox: AgentInboxView }
   | {
       kind: 'native-cleanup';
       itemId: string;
@@ -312,6 +319,7 @@ type ApprovePrep =
       draftedBy: string | null;
       subject: string | null;
       mailbox: MailboxAccount | null;
+      kitId: string | null;
       req: SendReq;
       scheduledApproval?: boolean;
     };
@@ -462,6 +470,7 @@ export class EmailService {
     @Optional() private readonly calendar?: CalendarService,
     @Optional() private readonly approvalLinks?: ApprovalLinksService,
     @Optional() private readonly standingApprovals?: StandingApprovalsService,
+    @Optional() private readonly suppressions?: SuppressionService,
   ) {}
 
   /**
@@ -1925,6 +1934,16 @@ export class EmailService {
       workspaceId,
       ucUid,
       async (tx): Promise<ComposePrep> => {
+        // Suppression is the first outbound decision after recipient
+        // resolution. It applies equally to immediate sends, drafts, replies,
+        // scheduled drafts, and kit sends; no later autonomy/approval branch may
+        // turn a suppressed recipient back into an eligible one.
+        await this.suppressions?.assertRecipientsNotSuppressed(tx, workspaceId, [
+          ...(input.toAddresses?.length ? input.toAddresses : [input.toAddress]),
+          ...(input.cc ?? []),
+          ...(input.bcc ?? []),
+        ]);
+
         // Idempotency: a prior row with the same tuple returns unchanged.
         const existing = await tx.emailMessage.findUnique({
           where: {
@@ -2257,7 +2276,7 @@ export class EmailService {
         // auto-sent audit feed) shows exactly what left.
         let sendBody = input.body;
         let sendBodyHtml = input.bodyHtml ?? null;
-        if (agent && input.transparencyFooter && agentContext) {
+        if (agent && input.transparencyFooter && agentContext && !input.kitId) {
           const { external } = splitRecipients(
             agentContext.recipients,
             agentContext.internalDomains,
@@ -2294,9 +2313,21 @@ export class EmailService {
             attachments: input.attachments?.length
               ? (input.attachments as unknown as Prisma.InputJsonValue)
               : Prisma.DbNull,
+            kitId: input.kitId ?? null,
             actorUcUid: ucUid,
           },
         });
+        let kitHeaders: { name: string; value: string }[] = [];
+        if (input.kitId && this.suppressions) {
+          kitHeaders = await this.suppressions.prepareKitHeaders(
+            tx,
+            workspaceId,
+            input.toAddress,
+            input.kitId,
+            msg.id,
+            fromAddress ?? input.toAddress,
+          );
+        }
         if (mailbox) {
           await this.rememberContacts(tx, workspaceId, mailbox.id, mailbox.emailAddress, [
             ...this.addressEntries(
@@ -2312,6 +2343,7 @@ export class EmailService {
             mailbox: mailbox ?? null,
             agentKey: agent?.key ?? null,
             subject: input.subject ?? null,
+            kitId: input.kitId ?? null,
             req: {
               fromAddress: fromAddress ?? input.toAddress, // engine requires a From; degrade-safe
               fromName: mailbox?.displayName ?? null,
@@ -2335,8 +2367,15 @@ export class EmailService {
               references: input.references?.length ? input.references : undefined,
               // Wave 7 loop protection: runtime auto-replies are stamped so a
               // receiving agent runtime never answers them back.
-              ...(input.agentAutoreply
-                ? { headers: [{ name: AGENT_AUTOREPLY_HEADER, value: '1' }] }
+              ...(input.agentAutoreply || kitHeaders.length
+                ? {
+                    headers: [
+                      ...(input.agentAutoreply
+                        ? [{ name: AGENT_AUTOREPLY_HEADER, value: '1' }]
+                        : []),
+                      ...kitHeaders,
+                    ],
+                  }
                 : {}),
             },
           },
@@ -2395,6 +2434,9 @@ export class EmailService {
     // (a SHORT tx). The row is already durable; this only advances its status.
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const sent = await this.stampSendResult(tx, prep.send.messageId, result);
+      if (!result.accepted && prep.send.kitId && this.suppressions) {
+        await this.suppressions.discardKitToken(tx, workspaceId, prep.send.messageId);
+      }
       if (prep.send.agentKey) {
         // A registered agent reaching the send lane is an L2 autonomous send (the
         // gate coerces L0/L1 sends to drafts) — audit it WITH its real outcome so
@@ -2427,6 +2469,59 @@ export class EmailService {
     // workspace queue; only email drafts inherit the mailbox scope.
     return {
       OR: [{ messageId: null }, { message: { is: { mailboxAccountId: { in: scope.ids } } } }],
+    };
+  }
+
+  private suppressionInboxData(
+    summary: string | null,
+    rawPayload: unknown,
+  ): {
+    approvalReason: string;
+    summary: string;
+    payload: Prisma.InputJsonValue;
+  } {
+    const payload =
+      rawPayload && typeof rawPayload === 'object' && !Array.isArray(rawPayload)
+        ? { ...(rawPayload as Record<string, unknown>) }
+        : {};
+    const rawPolicy = payload.policy;
+    const existingReasons =
+      rawPolicy && typeof rawPolicy === 'object' && !Array.isArray(rawPolicy)
+        ? Array.isArray((rawPolicy as Record<string, unknown>).reasons)
+          ? ((rawPolicy as Record<string, unknown>).reasons as unknown[]).filter(
+              (value): value is { code?: unknown; message?: unknown } =>
+                !!value && typeof value === 'object' && !Array.isArray(value),
+            )
+          : []
+        : [];
+    for (const key of [
+      'sends_at',
+      'not_before',
+      'notBefore',
+      'approval_seconds_between',
+      'approvalSecondsBetween',
+      'agent_principal',
+    ]) {
+      delete payload[key];
+    }
+    return {
+      approvalReason: RECIPIENT_SUPPRESSED,
+      summary: `${summary ?? 'Email draft'} — refused: ${RECIPIENT_SUPPRESSED}`,
+      payload: {
+        ...payload,
+        policy: {
+          decision: 'hold',
+          reasons: [
+            { code: RECIPIENT_SUPPRESSED, message: RECIPIENT_SUPPRESSED_MESSAGE },
+            ...existingReasons
+              .filter((value) => value.code !== RECIPIENT_SUPPRESSED)
+              .map((value) => ({
+                code: typeof value.code === 'string' ? value.code : 'hold',
+                message: typeof value.message === 'string' ? value.message : 'The draft is held.',
+              })),
+          ],
+        },
+      } as Prisma.InputJsonValue,
     };
   }
 
@@ -3369,6 +3464,34 @@ export class EmailService {
           continue;
         }
 
+        if (this.suppressions) {
+          const suppressed = await this.suppressions.findSuppressedInTx(tx, workspaceId, [
+            ...(row.message.toAddresses?.length
+              ? row.message.toAddresses
+              : [row.message.toAddress ?? '']),
+            ...(row.message.ccAddresses ?? []),
+            ...(row.message.bccAddresses ?? []),
+          ]);
+          if (suppressed) {
+            if (row.message.sendAt) {
+              await tx.emailMessage.update({
+                where: { id: row.message.id },
+                data: { sendAt: null },
+              });
+            }
+            await tx.agentInboxItem.update({
+              where: { id },
+              data: this.suppressionInboxData(row.summary, row.payload),
+            });
+            resultById.set(id, {
+              item_id: id,
+              status: 'refused',
+              reason: RECIPIENT_SUPPRESSED,
+            });
+            continue;
+          }
+        }
+
         const mailbox = row.message.mailboxAccountId
           ? await tx.mailboxAccount.findFirst({
               where: { id: row.message.mailboxAccountId, workspaceId },
@@ -3684,6 +3807,40 @@ export class EmailService {
           return { kind: 'result', value: { inbox: this.inboxView(updated, null), message: null } };
         }
 
+        if (this.suppressions && item.kind === AgentInboxKind.EMAIL && item.message) {
+          const suppressed = await this.suppressions.findSuppressedInTx(tx, workspaceId, [
+            ...(item.message.toAddresses?.length
+              ? item.message.toAddresses
+              : [item.message.toAddress ?? '']),
+            ...(item.message.ccAddresses ?? []),
+            ...(item.message.bccAddresses ?? []),
+          ]);
+          if (suppressed) {
+            if (item.message.sendAt) {
+              await tx.emailMessage.update({
+                where: { id: item.message.id },
+                data: { sendAt: null },
+              });
+            }
+            const updated = await tx.agentInboxItem.update({
+              where: { id: itemId },
+              data: {
+                ...this.suppressionInboxData(item.summary, item.payload),
+                ...(item.state === AgentInboxState.APPROVED
+                  ? {
+                      state: AgentInboxState.PENDING,
+                      reviewedByUcUid: null,
+                      reviewedAt: null,
+                      reviewNote: null,
+                    }
+                  : {}),
+              },
+              include: { message: true },
+            });
+            return { kind: 'suppressed', inbox: this.inboxView(updated, item.message) };
+          }
+        }
+
         if (item.message?.sendAt && item.message.sendAt.getTime() > Date.now()) {
           return {
             kind: 'result',
@@ -3851,17 +4008,35 @@ export class EmailService {
           );
         }
 
+        const sendFromAddress =
+          item.message.fromAddress ?? mailbox?.emailAddress ?? item.message.toAddress!;
+        let kitHeaders: { name: string; value: string }[] = [];
+        if (item.message.kitId && this.suppressions) {
+          kitHeaders = await this.suppressions.prepareKitHeaders(
+            tx,
+            workspaceId,
+            item.message.toAddress!,
+            item.message.kitId,
+            item.message.id,
+            sendFromAddress,
+          );
+        }
+        const runtimeHeaders =
+          item.message.externalSource === AGENT_REPLY_RUNTIME_SOURCE
+            ? [{ name: AGENT_AUTOREPLY_HEADER, value: '1' }]
+            : [];
+
         return {
           kind: 'send',
           itemId,
           messageId: item.message.id,
           draftedBy: item.draftedBy,
           subject: item.message.subject ?? null,
+          kitId: item.message.kitId ?? null,
           mailbox: mailbox ?? null,
           scheduledApproval,
           req: {
-            fromAddress:
-              item.message.fromAddress ?? mailbox?.emailAddress ?? item.message.toAddress!,
+            fromAddress: sendFromAddress,
             fromName: mailbox?.displayName ?? null,
             toAddress: item.message.toAddress!,
             // Rebuild the FULL payload the approver reviewed — cc/bcc/multi-recipient/
@@ -3876,10 +4051,10 @@ export class EmailService {
             attachments: this.parseStoredAttachments(item.message.attachments),
             inReplyToThreadId: item.message.inReplyToThreadId ?? null,
             transactional: mailbox?.postmarkLane ?? true,
-            // Wave 7 loop protection: an approved runtime draft still leaves as
-            // an agent auto-reply — stamp it so no agent runtime answers it back.
-            ...(item.message.externalSource === AGENT_REPLY_RUNTIME_SOURCE
-              ? { headers: [{ name: AGENT_AUTOREPLY_HEADER, value: '1' }] }
+            // Wave 7 loop protection and RFC 8058 kit headers are both added
+            // here, after the exact staged body has been reconstructed.
+            ...(runtimeHeaders.length || kitHeaders.length
+              ? { headers: [...runtimeHeaders, ...kitHeaders] }
               : {}),
           },
         };
@@ -3887,6 +4062,12 @@ export class EmailService {
     );
 
     if (prep.kind === 'null') return null;
+    if (prep.kind === 'suppressed') {
+      throw new ForbiddenException({
+        reason: RECIPIENT_SUPPRESSED,
+        message: RECIPIENT_SUPPRESSED_MESSAGE,
+      });
+    }
     if (prep.kind === 'result') return prep.value;
 
     if (prep.kind === 'native-cleanup') {
@@ -4008,6 +4189,9 @@ export class EmailService {
     if (!result.accepted) {
       await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
         await this.stampSendResult(tx, prep.messageId, result);
+        if (prep.kitId && this.suppressions) {
+          await this.suppressions.discardKitToken(tx, workspaceId, prep.messageId);
+        }
       });
       this.logger.warn(
         `agent-inbox item ${prep.itemId} NOT approved — send REJECTED for message ${prep.messageId}` +
