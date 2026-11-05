@@ -20,7 +20,7 @@
  * role above your own or strand an org with zero owners.
  */
 
-import { randomBytes, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import {
   BadRequestException,
   ForbiddenException,
@@ -54,6 +54,10 @@ import {
 
 /** Invitations live for two weeks unless re-issued. */
 const INVITE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
 
 @Injectable()
 export class WorkspacesService {
@@ -294,6 +298,7 @@ export class WorkspacesService {
 
     const invitedByKey = MembershipService.membershipKey(user);
     const token = randomBytes(24).toString('base64url');
+    const tokenHash = sha256Hex(token);
     const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
 
     const pending = await this.prisma.invitation.findFirst({
@@ -302,23 +307,58 @@ export class WorkspacesService {
     const invite = pending
       ? await this.prisma.invitation.update({
           where: { id: pending.id },
-          data: { role, token, invitedByKey, createdAt: new Date(), expiresAt },
+          data: { role, tokenHash, invitedByKey, createdAt: new Date(), expiresAt },
         })
       : await this.prisma.invitation.create({
-          data: { workspaceId, email, role, token, invitedByKey, expiresAt },
+          data: { workspaceId, email, role, tokenHash, invitedByKey, expiresAt },
         });
 
-    return this.toInviteView(invite, true);
+    return this.toInviteView(invite, token);
   }
 
-  /** Pending invitations for an org. ADMIN+. Includes the token (copy-link). */
+  /** Pending invitations for an org. ADMIN+. Raw tokens are never re-read. */
   async listInvites(workspaceId: string, user: User): Promise<InviteView[]> {
     await this.requireRole(workspaceId, user, WorkspaceRole.ADMIN);
     const invites = await this.prisma.invitation.findMany({
       where: { workspaceId, status: InvitationStatus.PENDING },
       orderBy: { createdAt: 'desc' },
     });
-    return Promise.all(invites.map((i) => this.toInviteView(i, true)));
+    return Promise.all(invites.map((i) => this.toInviteView(i)));
+  }
+
+  /** Rotate a pending invitation's capability. ADMIN+. False → 404. */
+  async reissueInvite(
+    workspaceId: string,
+    user: User,
+    inviteId: string,
+  ): Promise<InviteView | null> {
+    await this.requireRole(workspaceId, user, WorkspaceRole.ADMIN);
+
+    const rotated = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`
+        SELECT id FROM invitations
+        WHERE id = ${inviteId} AND "workspaceId" = ${workspaceId}
+        FOR UPDATE`;
+      const invite = await tx.invitation.findFirst({
+        where: { id: inviteId, workspaceId, status: InvitationStatus.PENDING },
+      });
+      if (!invite) return null;
+
+      const token = randomBytes(24).toString('base64url');
+      const now = new Date();
+      const updated = await tx.invitation.update({
+        where: { id: invite.id },
+        data: {
+          tokenHash: sha256Hex(token),
+          invitedByKey: MembershipService.membershipKey(user),
+          createdAt: now,
+          expiresAt: new Date(now.getTime() + INVITE_TTL_MS),
+        },
+      });
+      return { invite: updated, token };
+    });
+
+    return rotated ? this.toInviteView(rotated.invite, rotated.token) : null;
   }
 
   /** Revoke a pending invitation. ADMIN+. False → 404. */
@@ -357,7 +397,6 @@ export class WorkspacesService {
 
     return live.map((i) => ({
       id: i.id,
-      token: i.token,
       workspace_id: i.workspaceId,
       workspace_display_name: byId.get(i.workspaceId)?.displayName ?? i.workspaceId,
       role: roleToWire(i.role),
@@ -372,12 +411,13 @@ export class WorkspacesService {
   async acceptInvite(user: User, token: string): Promise<MyWorkspace> {
     const t = (token ?? '').trim();
     if (!t) throw new BadRequestException('An invitation token is required.');
+    const tokenHash = sha256Hex(t);
 
     return this.prisma.$transaction(async (tx) => {
       // Serialize accept/revoke/reissue on the same invitation. Re-read after
       // the lock; a consumed/rotated capability must not authorize a retry.
-      await tx.$queryRaw`SELECT id FROM invitations WHERE token = ${t} FOR UPDATE`;
-      const invite = await tx.invitation.findUnique({ where: { token: t } });
+      await tx.$queryRaw`SELECT id FROM invitations WHERE "tokenHash" = ${tokenHash} FOR UPDATE`;
+      const invite = await tx.invitation.findUnique({ where: { tokenHash } });
       if (!invite) throw new NotFoundException('That invitation could not be found.');
       if (invite.status !== InvitationStatus.PENDING) {
         throw new BadRequestException('That invitation is no longer valid.');
@@ -499,7 +539,7 @@ export class WorkspacesService {
     return full || u.username || u.email;
   }
 
-  private async toInviteView(invite: Invitation, includeToken: boolean): Promise<InviteView> {
+  private async toInviteView(invite: Invitation, token: string | null = null): Promise<InviteView> {
     const inviter = (await this.usersByKey([invite.invitedByKey])).get(invite.invitedByKey);
     return {
       id: invite.id,
@@ -507,7 +547,8 @@ export class WorkspacesService {
       role: roleToWire(invite.role),
       status: inviteStatusToWire(invite.status),
       invited_by_email: inviter?.email ?? null,
-      token: includeToken ? invite.token : null,
+      token,
+      can_reissue: invite.status === InvitationStatus.PENDING,
       created_at: invite.createdAt.toISOString(),
       expires_at: invite.expiresAt?.toISOString() ?? null,
       accepted_at: invite.acceptedAt?.toISOString() ?? null,

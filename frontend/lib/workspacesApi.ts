@@ -79,8 +79,9 @@ export interface InviteView {
   role: WorkspaceRole;
   status: InvitationStatus;
   invited_by_email: string | null;
-  /** Present to admins (for the copy-link); null otherwise. */
+  /** Present only on create/reissue responses; list responses never disclose it. */
   token: string | null;
+  can_reissue: boolean;
   created_at: string;
   expires_at: string | null;
   accepted_at: string | null;
@@ -89,7 +90,6 @@ export interface InviteView {
 /** One invitee-facing invitation (mirrors MyInviteView). */
 export interface MyInviteView {
   id: string;
-  token: string;
   workspace_id: string;
   workspace_display_name: string;
   role: WorkspaceRole;
@@ -209,6 +209,15 @@ export async function createInvite(
   token?: string,
 ): Promise<InviteView> {
   return apiPost<InviteView>(`${orgBase(workspaceId)}/invites`, body, token);
+}
+
+/** Rotate a pending invitation and return its new raw token once (ADMIN+). */
+export async function reissueInvite(
+  workspaceId: string,
+  id: string,
+  token?: string,
+): Promise<InviteView> {
+  return apiPost<InviteView>(`${orgBase(workspaceId)}/invites/${seg(id)}/reissue`, {}, token);
 }
 
 /** Revoke a pending invitation (ADMIN+). */

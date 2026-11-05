@@ -9,6 +9,7 @@
  *   DELETE workspaces/:workspaceId/members/:userKey                   — remove / leave    [ADMIN+ | self]
  *   GET    workspaces/:workspaceId/invites                            — pending invites   [ADMIN+]
  *   POST   workspaces/:workspaceId/invites             (InviteDto)     — invite by email  [ADMIN+]
+ *   POST   workspaces/:workspaceId/invites/:id/reissue                — rotate link      [ADMIN+]
  *   DELETE workspaces/:workspaceId/invites/:id                        — revoke            [ADMIN+]
  *
  * The class is JWT-guarded; create + list need only that (no workspace context).
@@ -212,6 +213,25 @@ export class WorkspacesController {
       email: body.email,
       role: body.role ? roleFromWire(body.role) : undefined,
     });
+  }
+
+  @Post(':workspaceId/invites/:inviteId/reissue')
+  @UseGuards(InvitationSessionGuard, WorkspaceMembershipGuard)
+  @ApiOperation({ summary: 'Re-issue a pending invitation link.' })
+  @ApiResponse({
+    status: 201,
+    description: 'The rotated invitation; the raw token is returned once.',
+  })
+  @ApiResponse({ status: 403, description: 'Requires the admin role or higher.' })
+  @ApiResponse({ status: 404, description: 'No pending invitation in this organization.' })
+  async reissueInvite(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('inviteId') inviteId: string,
+  ) {
+    const invite = await this.workspaces.reissueInvite(workspaceId, user, inviteId);
+    if (!invite) throw new NotFoundException('No pending invitation in this organization.');
+    return invite;
   }
 
   @Delete(':workspaceId/invites/:id')
