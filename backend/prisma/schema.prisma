@@ -481,7 +481,8 @@ model Membership {
 /// and list-mine paths span workspace boundaries, so they cannot be fenced by
 /// the current_workspace GUC. The app layer fences the admin surface by the
 /// caller's actual membership role; accept-by-token is self-authorizing (the
-/// random token is the secret). `email` is stored lowercased for the match.
+/// random token is the secret, while only its hash is persisted). `email` is
+/// stored lowercased for the match.
 model Invitation {
   id            String           @id @default(uuid())
   workspaceId   String

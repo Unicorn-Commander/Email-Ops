@@ -25,6 +25,7 @@ export default function AcceptInvitationPage() {
       .then((result) => {
         setState('done');
         setMessage(`You joined ${result.workspace.display_name}.`);
+        window.history.replaceState(null, '', '/invites/accept');
         window.setTimeout(() => router.replace('/dashboard'), 900);
       })
       .catch((error: unknown) => {
