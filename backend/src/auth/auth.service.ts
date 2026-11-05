@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import { User, InvitationStatus } from '@prisma/client';
@@ -7,6 +7,13 @@ import { encrypt, isEncryptionConfigured } from '../connected-accounts/crypto';
 import { DEFAULT_WORKSPACE_FALLBACK } from '../common/workspace/workspace.util';
 import { NoWorkspaceAccessException } from './no-workspace-access.exception';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { PAT_PREFIX } from './pat.service';
+import {
+  emailOpsEntitlementsEnabled,
+  OrgEntitlement,
+  resolveOrgEntitlement,
+} from './org-entitlements.client';
+import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
 
 const LOCAL_PASSWORD_SCHEME = 'scrypt';
 const LOCAL_PASSWORD_KEY_LENGTH = 64;
@@ -76,6 +83,13 @@ export interface JwtPayload {
   username: string;
 }
 
+export interface KeycloakValidationOptions {
+  /** Bearer callers cache the endpoint verdict; browser callbacks re-check. */
+  cacheEntitlement?: boolean;
+  /** Verified bearer expiry, in seconds, for the bounded verdict cache. */
+  tokenExp?: number;
+}
+
 /**
  * Email-Ops authentication.
  *
@@ -94,6 +108,7 @@ export class AuthService implements OnModuleInit {
   constructor(
     private readonly jwtService: JwtService,
     private readonly prisma: PrismaService,
+    @Optional() private readonly provisioning?: WorkspaceProvisioningService,
   ) {
     const meta = describeAccessList();
     this.logger.log(
@@ -242,7 +257,12 @@ export class AuthService implements OnModuleInit {
    *      an account-identity conflict, not a link — see below).
    *   3. neither — JIT-create, GATED by the access list.
    */
-  async validateKeycloakUser(keycloakId: string, profile: any): Promise<User> {
+  async validateKeycloakUser(
+    keycloakId: string,
+    profile: any,
+    forwardedAccessToken?: string,
+    options?: KeycloakValidationOptions,
+  ): Promise<User> {
     const email: string | undefined = profile?.email;
     // The Keycloak `picture` claim (suite avatar spine) — only trust an absolute
     // URL, and never null out a stored photo on a login whose userinfo omits it.
@@ -296,7 +316,70 @@ export class AuthService implements OnModuleInit {
       }
     }
 
-    // 3. An exact verified Keycloak email with a live invitation may establish
+    // 3. Resolve the Ops-Center organization before the legacy JIT branches.
+    //    Only the strategies can supply a human realm bearer; the checks here
+    //    keep a directly-called PAT/federation-shaped path inert as well.
+    let orgEntitlement: OrgEntitlement | null = null;
+    const bearer = typeof forwardedAccessToken === 'string' ? forwardedAccessToken.trim() : '';
+    const mayResolveOrgEntitlement =
+      bearer !== '' &&
+      !bearer.startsWith(PAT_PREFIX) &&
+      !profile?.__federationActor &&
+      !profile?.act &&
+      !profile?.client_id &&
+      !profile?.clientId;
+    if (mayResolveOrgEntitlement && emailOpsEntitlementsEnabled()) {
+      try {
+        orgEntitlement = await resolveOrgEntitlement(bearer, {
+          subject: keycloakId,
+          exp: options?.tokenExp,
+          cache: options?.cacheEntitlement === true,
+        });
+      } catch {
+        // The client is deliberately fail-closed and non-throwing. Keep this
+        // boundary defensive so a future client change cannot alter login.
+        this.logger.warn('Email-Ops entitlement lookup failed; using legacy admission');
+      }
+    }
+
+    if (orgEntitlement && this.provisioning && user?.isActive !== false) {
+      const verifiedEmail =
+        profile?.email_verified === true &&
+        typeof email === 'string' &&
+        (!user || email.trim().toLowerCase() === user.email.trim().toLowerCase());
+      if (verifiedEmail) {
+        let createdForEntitlement = false;
+        if (!user) {
+          const created = await this.createEntitledUser(keycloakId, profile, email!);
+          user = created.user;
+          createdForEntitlement = created.created;
+        }
+        try {
+          await this.provisioning.ensureEntitledWorkspace({
+            user,
+            entitlement: orgEntitlement,
+          });
+        } catch {
+          // Workspace materialization must not turn an endpoint/DB failure into
+          // a new auth admission rule. The existing branches below continue.
+          if (createdForEntitlement && user) {
+            try {
+              await this.prisma.user.delete({ where: { id: user.id } });
+              user = null;
+            } catch {
+              // A provisional identity that cannot be rolled back is not safe
+              // to return as an admitted user; fail closed rather than bypassing
+              // the legacy access-list gate.
+              this.logger.error('Could not roll back provisional entitled user');
+              throw new UnauthorizedException('Unable to establish entitled workspace');
+            }
+          }
+          this.logger.warn('Email-Ops entitled workspace provisioning failed; using legacy path');
+        }
+      }
+    }
+
+    // 4. An exact verified Keycloak email with a live invitation may establish
     // an identity only. Membership still requires explicit token acceptance;
     // this does not add an access-list rule or seed the bootstrap workspace.
     if (!user) {
@@ -351,6 +434,39 @@ export class AuthService implements OnModuleInit {
       data: { lastLoginAt: new Date(), ...(picture ? { picture } : {}) },
     });
     return user;
+  }
+
+  /** Create the local identity admitted by an Ops-Center entitlement. */
+  private async createEntitledUser(
+    keycloakId: string,
+    profile: any,
+    email: string,
+  ): Promise<{ user: User; created: boolean }> {
+    try {
+      return {
+        user: await this.prisma.user.create({
+          data: {
+            email: email.trim(),
+            username: profile?.preferred_username || profile?.username || email.trim(),
+            firstName: profile?.given_name || profile?.firstName || '',
+            lastName: profile?.family_name || profile?.lastName || '',
+            picture:
+              typeof profile?.picture === 'string' && /^https?:\/\//.test(profile.picture)
+                ? profile.picture
+                : null,
+            keycloakId,
+          },
+        }),
+        created: true,
+      };
+    } catch (error) {
+      // A second first-login request may win the unique keycloakId/email race.
+      const existing = await this.prisma.user.findUnique({ where: { keycloakId } });
+      if (existing && existing.email.trim().toLowerCase() === email.trim().toLowerCase()) {
+        return { user: existing, created: false };
+      }
+      throw error;
+    }
   }
 
   /** Mint a local HS256 session token for a resolved user (post OIDC callback). */
@@ -425,7 +541,7 @@ export class AuthService implements OnModuleInit {
    *     validateKeycloakUser path. No path auto-provisions outside the gate.
    *   - Locally-signed session token (no/foreign `iss`) → resolve by local id.
    */
-  async validateJwtPayload(payload: any): Promise<User> {
+  async validateJwtPayload(payload: any, forwardedAccessToken?: string): Promise<User> {
     // Normalize the issuer (trim + strip trailing slash) BEFORE matching, using
     // the same helper the JWT strategy uses to build its JWKS/issuer sets — so a
     // trailing-slash config can't make a verified Brigade token fall through to
@@ -475,7 +591,18 @@ export class AuthService implements OnModuleInit {
         given_name: payload.given_name,
         family_name: payload.family_name,
       };
-      return this.validateKeycloakUser(payload.sub, profile);
+      const humanRealmToken =
+        isKeycloakRealmToken &&
+        !isBrigadeFederationToken &&
+        AuthService.isHumanRealmToken(payload) &&
+        typeof forwardedAccessToken === 'string' &&
+        !forwardedAccessToken.trim().startsWith(PAT_PREFIX);
+      return humanRealmToken
+        ? this.validateKeycloakUser(payload.sub, profile, forwardedAccessToken, {
+            cacheEntitlement: true,
+            tokenExp: payload.exp,
+          })
+        : this.validateKeycloakUser(payload.sub, profile);
     }
 
     // Locally-signed session token.
@@ -514,6 +641,18 @@ export class AuthService implements OnModuleInit {
     if (typeof raw !== 'string') return null;
     const trimmed = raw.trim().replace(/\/+$/, '');
     return trimmed || null;
+  }
+
+  /** Realm users have a verified email; service/machine tokens do not. */
+  static isHumanRealmToken(payload: any): boolean {
+    return (
+      typeof payload?.email === 'string' &&
+      payload.email.trim() !== '' &&
+      payload?.email_verified === true &&
+      !payload?.act &&
+      !payload?.client_id &&
+      !payload?.clientId
+    );
   }
 
   /**
