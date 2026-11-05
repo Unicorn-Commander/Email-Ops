@@ -17,11 +17,20 @@ function makeStore() {
     workspace: {
       findUnique: jest.fn(async ({ where }: any) => {
         if (where.id) return workspaces.get(where.id) ?? null;
+        if (where.opsCenterOrgId) {
+          return (
+            [...workspaces.values()].find((row) => row.opsCenterOrgId === where.opsCenterOrgId) ??
+            null
+          );
+        }
         return [...workspaces.values()].find((row) => row.slug === where.slug) ?? null;
       }),
-      upsert: jest.fn(async ({ where, create }: any) => {
+      upsert: jest.fn(async ({ where, create, update }: any) => {
         const existing = workspaces.get(where.id);
-        if (existing) return existing;
+        if (existing) {
+          Object.assign(existing, update);
+          return existing;
+        }
         const row = { ...create, status: 'active' };
         workspaces.set(row.id, row);
         return row;
@@ -200,6 +209,7 @@ describe('entitled workspace auth wiring', () => {
       id: orgId,
       slug: 'org-6e40af62',
       displayName: 'Lantern Harbor Advisory',
+      opsCenterOrgId: orgId,
     });
     expect(store.memberships.get(`fixture-human-sub:${orgId}`)).toMatchObject({
       role: WorkspaceRole.OWNER,
