@@ -38,11 +38,15 @@ describe('KeycloakStrategy.validate', () => {
       strategy.validate('access-token', 'refresh-token', { sub: 'ignored' }),
     ).resolves.toEqual({ id: 'u1' });
 
-    expect(authService.validateKeycloakUser).toHaveBeenCalledWith('kc-sub', {
-      sub: 'kc-sub',
-      email: 'user@example.test',
-      email_verified: true,
-    });
+    expect(authService.validateKeycloakUser).toHaveBeenCalledWith(
+      'kc-sub',
+      {
+        sub: 'kc-sub',
+        email: 'user@example.test',
+        email_verified: true,
+      },
+      'access-token',
+    );
     expect(authService.storeKcRefreshToken).toHaveBeenCalledWith({ id: 'u1' }, 'refresh-token');
   });
 

@@ -65,7 +65,10 @@ export class KeycloakStrategy extends PassportStrategy(Strategy, 'keycloak') {
     }
 
     const keycloakId = userProfile.sub || userProfile.id;
-    const user = await this.authService.validateKeycloakUser(keycloakId, userProfile);
+    const isHumanRealmProfile = AuthService.isHumanRealmToken(userProfile);
+    const user = isHumanRealmProfile
+      ? await this.authService.validateKeycloakUser(keycloakId, userProfile, accessToken)
+      : await this.authService.validateKeycloakUser(keycloakId, userProfile);
     await this.authService.storeKcRefreshToken(user, refreshToken);
     return user;
   }
