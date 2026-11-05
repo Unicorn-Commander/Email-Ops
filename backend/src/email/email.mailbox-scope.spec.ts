@@ -1,6 +1,10 @@
 import { randomUUID } from 'crypto';
 import { NotFoundException } from '@nestjs/common';
 import {
+  AgentInboxKind,
+  AgentInboxState,
+  EmailDirection,
+  EmailMessageStatus,
   MailboxOwnerKind,
   MailboxScope,
   MembershipStatus,
@@ -79,7 +83,11 @@ describe('EmailService member mailbox scope (integration)', () => {
     prisma = new PrismaService();
     await prisma.$connect();
     await prisma.workspace.create({
-      data: { id: workspaceId, slug: `scope-${workspaceId.slice(0, 8)}`, displayName: 'Mailbox scope test' },
+      data: {
+        id: workspaceId,
+        slug: `scope-${workspaceId.slice(0, 8)}`,
+        displayName: 'Mailbox scope test',
+      },
     });
     await prisma.membership.createMany({
       data: [
@@ -163,9 +171,9 @@ describe('EmailService member mailbox scope (integration)', () => {
     const ownThreads = await service.listMailboxInbox(workspaceId, ownedMember, ownedMailboxId);
     expect(ownThreads).toHaveLength(1);
 
-    await expect(service.listMailboxInbox(workspaceId, ownedMember, otherMailboxId)).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    await expect(
+      service.listMailboxInbox(workspaceId, ownedMember, otherMailboxId),
+    ).rejects.toBeInstanceOf(NotFoundException);
     await expect(
       service.listThreadMessages(workspaceId, ownedMember, 'foreign-thread', otherMailboxId),
     ).rejects.toBeInstanceOf(NotFoundException);
@@ -207,9 +215,13 @@ describe('EmailService member mailbox scope (integration)', () => {
     // ALL and OWNER see the shared mailbox, but both HUMAN mailboxes belong to
     // other people and stay private, exactly as before member scopes existed.
     const allAggregate = await service.listAggregateInbox(workspaceId, allMember, 'inbox', 50);
-    expect(new Set(allAggregate.map((thread) => thread.mailbox_id))).toEqual(new Set([sharedMailboxId]));
+    expect(new Set(allAggregate.map((thread) => thread.mailbox_id))).toEqual(
+      new Set([sharedMailboxId]),
+    );
     const ownerCounts = await service.getWorkspaceMailCounts(workspaceId, owner);
-    expect(new Set(ownerCounts.map((count) => count.mailbox_id))).toEqual(new Set([sharedMailboxId]));
+    expect(new Set(ownerCounts.map((count) => count.mailbox_id))).toEqual(
+      new Set([sharedMailboxId]),
+    );
 
     // A direct read of another member's HUMAN mailbox by an ALL member gets
     // nothing (the fence), not that member's mail.
@@ -237,11 +249,68 @@ describe('EmailService member mailbox scope (integration)', () => {
       (await service.listAgentInbox(workspaceId, allMember)).some((entry) => entry.id === item.id),
     ).toBe(true);
     expect(
-      (await service.listAgentInbox(workspaceId, ownedMember)).some((entry) => entry.id === item.id),
+      (await service.listAgentInbox(workspaceId, ownedMember)).some(
+        (entry) => entry.id === item.id,
+      ),
     ).toBe(false);
     await expect(service.peekAgentInboxKind(workspaceId, ownedMember, item.id)).resolves.toBeNull();
-    await expect(service.approveAgentInboxItem(workspaceId, ownedMember, item.id)).resolves.toBeNull();
-    await expect(service.rejectAgentInboxItem(workspaceId, ownedMember, item.id)).resolves.toBeNull();
+    await expect(
+      service.approveAgentInboxItem(workspaceId, ownedMember, item.id),
+    ).resolves.toBeNull();
+    await expect(
+      service.rejectAgentInboxItem(workspaceId, ownedMember, item.id),
+    ).resolves.toBeNull();
+
+    const unchanged = await prisma.agentInboxItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(unchanged.state).toBe('PENDING');
+  });
+
+  it('shows a draft staged without a mailbox to OWNER and ALL members, never to OWNED', async () => {
+    // A workspace that has not connected a mailbox yet still stages agent
+    // drafts (compose mode=draft). Such a draft has no mailbox to inherit a
+    // scope from; before this case it was invisible to everyone, including the
+    // OWNER, while the stale-approval sweep kept nudging about it.
+    const message = await prisma.emailMessage.create({
+      data: {
+        workspaceId,
+        mailboxAccountId: null,
+        status: EmailMessageStatus.PENDING_APPROVAL,
+        direction: EmailDirection.DRAFT,
+        subject: 'draft with no mailbox',
+        body: 'staged before the workspace connected a mailbox',
+        toAddresses: ['recipient@example.test'],
+        externalSource: 'scope-null-mailbox-test',
+        externalRef: `draft-${randomUUID()}`,
+      },
+    });
+    const item = await prisma.agentInboxItem.create({
+      data: {
+        workspaceId,
+        messageId: message.id,
+        kind: AgentInboxKind.EMAIL,
+        state: AgentInboxState.PENDING,
+        summary: 'draft with no mailbox',
+      },
+    });
+    const visibleTo = async (member: string) =>
+      (await service.listAgentInbox(workspaceId, member)).some((entry) => entry.id === item.id);
+
+    expect(await visibleTo(owner)).toBe(true);
+    expect(await visibleTo(allMember)).toBe(true);
+    expect(await visibleTo(ownedMember)).toBe(false);
+    expect(await service.countAgentInboxPending(workspaceId, owner)).toBeGreaterThanOrEqual(1);
+    await expect(service.peekAgentInboxKind(workspaceId, owner, item.id)).resolves.not.toBeNull();
+    await expect(service.peekAgentInboxKind(workspaceId, ownedMember, item.id)).resolves.toBeNull();
+    await expect(
+      service.approveAgentInboxItem(workspaceId, ownedMember, item.id),
+    ).resolves.toBeNull();
+    await expect(
+      service.rejectAgentInboxItem(workspaceId, ownedMember, item.id),
+    ).resolves.toBeNull();
+    // Another workspace never sees it, whoever asks.
+    expect(
+      (await service.listAgentInbox(randomUUID(), owner)).some((entry) => entry.id === item.id),
+    ).toBe(false);
 
     const unchanged = await prisma.agentInboxItem.findUniqueOrThrow({ where: { id: item.id } });
     expect(unchanged.state).toBe('PENDING');

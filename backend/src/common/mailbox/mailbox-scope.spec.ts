@@ -76,6 +76,7 @@ describe('mailbox scope resolver', () => {
     await expect(resolveMailboxScope(database, workspaceId, 'member-1')).resolves.toEqual({
       governed: true,
       ids: [],
+      unrestricted: false,
     });
   });
 });

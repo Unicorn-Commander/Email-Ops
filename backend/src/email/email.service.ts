@@ -2467,8 +2467,18 @@ export class EmailService {
     if (!scope.governed) return {};
     // Cleanup/SMS items have no email mailbox and remain visible to the normal
     // workspace queue; only email drafts inherit the mailbox scope.
+    //
+    // An email draft staged WITHOUT a mailbox (a workspace that has not connected
+    // one yet) belongs to no member's scope. Workspace-wide members (ADMIN, OWNER,
+    // ALL) see it, exactly as they see every mailbox; an OWNED member does not.
+    // Without this branch such a draft was invisible to everyone, including the
+    // OWNER, while the stale-approval sweep kept nudging about it.
     return {
-      OR: [{ messageId: null }, { message: { is: { mailboxAccountId: { in: scope.ids } } } }],
+      OR: [
+        { messageId: null },
+        { message: { is: { mailboxAccountId: { in: scope.ids } } } },
+        ...(scope.unrestricted ? [{ message: { is: { mailboxAccountId: null } } }] : []),
+      ],
     };
   }
 
