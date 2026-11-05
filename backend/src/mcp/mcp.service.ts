@@ -47,6 +47,7 @@ import { SchedulingService } from '../scheduling/scheduling.service';
 import { AgentViewService } from '../agent-view/agent-view.service';
 import { MailRulesService } from '../mail-rules/mail-rules.service';
 import { TrustedCorrespondentsService } from '../trusted-correspondents/trusted-correspondents.service';
+import { SuppressionService } from '../unsubscribe/suppression.service';
 import { enforceMcpToolScope, McpToolName, PatTaggedIdentity } from './mcp-scopes';
 
 const EMAIL_MODE = z.enum(['send', 'draft']);
@@ -119,6 +120,7 @@ export class McpService {
     private readonly agentView: AgentViewService,
     private readonly mailRules: MailRulesService,
     private readonly trustedCorrespondents: TrustedCorrespondentsService,
+    private readonly suppressions: SuppressionService,
     private readonly calendar: CalendarService,
     @Optional() private readonly standing?: StandingApprovalsService,
   ) {}
@@ -190,6 +192,7 @@ export class McpService {
       this.admin,
       this.mailDomains,
       this.standing,
+      this.suppressions,
     );
     const connectedTools = new ConnectedAccountsTools(this.membership, this.connectedAccounts);
     const uiTools = new UiControlTools(this.membership, this.uiCommands);
@@ -1132,6 +1135,42 @@ export class McpService {
         },
       },
       async (args: any) => wrap(await trustedTools.untrustCorrespondent(user, args)),
+    );
+
+    // ── Workspace suppression tools ──
+
+    registerTool(
+      'list_suppressed_recipients',
+      {
+        title: 'List suppressed recipients',
+        description:
+          'List the workspace suppression records. Suppression wins over every ' +
+          'compose, approval, scheduled-send, and send-kit path. Read-only; no ' +
+          'unsubscribe token values are returned.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          email: z.string().email().optional(),
+          reason: z.enum(['UNSUBSCRIBED', 'BOUNCED', 'COMPLAINT', 'MANUAL']).optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.listSuppressedRecipients(user, args ?? {})),
+    );
+
+    registerTool(
+      'suppress_recipient',
+      {
+        title: 'Suppress a recipient',
+        description:
+          'Add or refresh a MANUAL workspace suppression. Requires an active ' +
+          'MEMBER-or-higher workspace role. There is intentionally no MCP ' +
+          'unsuppress tool; a signed-in human uses the REST DELETE route.',
+        inputSchema: {
+          workspace_id: z.string().optional(),
+          email: z.string().email(),
+          note: z.string().max(2000).optional(),
+        },
+      },
+      async (args: any) => wrap(await tools.suppressRecipient(user, args)),
     );
 
     // ── Mail-engine admin tools (control-plane; OWNER-gated writes) ──

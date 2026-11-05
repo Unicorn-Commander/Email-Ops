@@ -1508,6 +1508,68 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
       "read_only": false
     },
     {
+      "name": "list_suppressed_recipients",
+      "description": "List the workspace suppression records. Suppression wins over every compose, approval, scheduled-send, and send-kit path. Read-only; no unsubscribe token values are returned.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "UNSUBSCRIBED",
+              "BOUNCED",
+              "COMPLAINT",
+              "MANUAL"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "read:email"
+      ],
+      "tier_required": "free",
+      "read_only": true
+    },
+    {
+      "name": "suppress_recipient",
+      "description": "Add or refresh a MANUAL workspace suppression. Requires an active MEMBER-or-higher workspace role. There is intentionally no MCP unsuppress tool; a signed-in human uses the REST DELETE route.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      },
+      "scopes_required": [
+        "write:mail"
+      ],
+      "tier_required": "free",
+      "read_only": false
+    },
+    {
       "name": "ui_navigate",
       "description": "Push a NAVIGATE command to the calling user’s open Email-Ops cockpit: route it to an app path (e.g. /mail, /agents, /agent-inbox, /cleanup, /dashboard, /insights, /mailboxes, /accounts). Applied on the user’s next focus-gated poll. No side effect. Returns { enqueued, command_id, kind }.",
       "input_schema": {

@@ -27,7 +27,12 @@
  * RLS transaction.
  */
 
-import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import {
   AgentInboxKind,
   AgentInboxState,
@@ -35,6 +40,7 @@ import {
   MessageDisposition,
   SenderPolicyKind,
   SenderPolicyScope,
+  SuppressedRecipientReason,
   UiCommandKind,
   User,
   WorkspaceRole,
@@ -74,6 +80,7 @@ import { TrustedCorrespondentsService } from '../trusted-correspondents/trusted-
 import { TrustedCorrespondentView } from '../email/email.types';
 import { StandingApprovalsService, StandingRequest } from '../approvals/standing-approvals.service';
 import { assertHumanApproval } from '../approvals/human-approval';
+import { SuppressionService, SuppressionView } from '../unsubscribe/suppression.service';
 import { enforceExtraScope, PatTaggedIdentity } from './mcp-scopes';
 
 /**
@@ -103,6 +110,7 @@ export class EmailOpsTools {
     private readonly admin: MailEngineAdminPort,
     private readonly mailDomains: MailDomainService,
     private readonly standing?: StandingApprovalsService,
+    private readonly suppressions?: SuppressionService,
   ) {}
 
   /** Health/info — safe for any authenticated caller. */
@@ -1260,6 +1268,44 @@ export class EmailOpsTools {
     if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
     const result = await this.admin.removeAccount(args.address);
     return { status: result.provisioned ? 'ok' : 'failed', result };
+  }
+
+  async listSuppressedRecipients(
+    user: User,
+    args: { workspace_id?: string; email?: string; reason?: string },
+  ): Promise<{ items: SuppressionView[]; count: number }> {
+    if (!this.suppressions) throw new ServiceUnavailableException('suppression_not_configured');
+    const workspaceId = await this.resolve(user, args.workspace_id);
+    let reason: SuppressedRecipientReason | undefined;
+    if (args.reason) {
+      if (
+        !Object.values(SuppressedRecipientReason).includes(args.reason as SuppressedRecipientReason)
+      ) {
+        throw new BadRequestException(
+          'reason must be UNSUBSCRIBED, BOUNCED, COMPLAINT, or MANUAL.',
+        );
+      }
+      reason = args.reason as SuppressedRecipientReason;
+    }
+    const items = await this.suppressions.list(workspaceId, ucUidOf(user as WithWorkspaceClaim), {
+      email: args.email,
+      reason,
+    });
+    return { items, count: items.length };
+  }
+
+  async suppressRecipient(
+    user: User,
+    args: { workspace_id?: string; email: string; note?: string },
+  ): Promise<SuppressionView> {
+    if (!this.suppressions) throw new ServiceUnavailableException('suppression_not_configured');
+    const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    return this.suppressions.suppressManually(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      args.email,
+      args.note ?? null,
+    );
   }
 
   // ── helpers ────────────────────────────────────────────────────────────
