@@ -34,8 +34,8 @@ export interface MemberView {
   created_at: string;
 }
 
-/** A pending invitation, admin-facing (within an org). `token` is exposed to
- * admins so the UI can offer a copyable invite link. */
+/** An invitation, admin-facing (within an org). `token` is only present on the
+ * create/reissue response; list responses never disclose the raw capability. */
 export interface InviteView {
   id: string;
   email: string;
@@ -43,6 +43,7 @@ export interface InviteView {
   status: InvitationStatusWire;
   invited_by_email: string | null;
   token: string | null;
+  can_reissue: boolean;
   created_at: string;
   expires_at: string | null;
   accepted_at: string | null;
@@ -51,7 +52,6 @@ export interface InviteView {
 /** An invitation as seen by the INVITEE (resolves the org name to accept into). */
 export interface MyInviteView {
   id: string;
-  token: string;
   workspace_id: string;
   workspace_display_name: string;
   role: WorkspaceRoleWire;

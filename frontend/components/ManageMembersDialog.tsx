@@ -19,6 +19,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { CopyButton } from '@/components/connect/CopyButton';
 import { Badge, Button, Dialog, Input, Select, useConfirm, type BadgeVariant } from '@/components/ui';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 import { ApiError, type MyWorkspace } from '@/lib/api';
@@ -27,6 +28,7 @@ import {
   isAdminRole,
   listInvites,
   listMembers,
+  reissueInvite,
   removeMember,
   revokeInvite,
   roleRank,
@@ -96,6 +98,7 @@ export function ManageMembersDialog({
   const [inviteRole, setInviteRole] = useState<WorkspaceRole>('member');
   const [inviting, setInviting] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
+  const [revealedInviteLink, setRevealedInviteLink] = useState<string | null>(null);
 
   /** Fetch the roster (+ invites, which are admin-only). `silent` skips the flash. */
   const fetchAll = useCallback(
@@ -203,6 +206,21 @@ export function ManageMembersDialog({
     }
   }
 
+  async function handleReissue(invite: InviteView) {
+    setRowBusy(invite.id);
+    setRowError(null);
+    try {
+      const refreshed = await reissueInvite(workspaceId, invite.id);
+      if (!refreshed.token) throw new Error('The invitation link was not returned.');
+      setRevealedInviteLink(invitationLink(refreshed.token));
+      await fetchAll(true);
+    } catch (err) {
+      setRowError(messageOf(err, 'Could not re-issue the invitation.'));
+    } finally {
+      setRowBusy(null);
+    }
+  }
+
   async function handleInvite() {
     const email = inviteEmail.trim();
     if (!email) {
@@ -212,7 +230,9 @@ export function ManageMembersDialog({
     setInviting(true);
     setInviteError(null);
     try {
-      await createInvite(workspaceId, { email, role: inviteRole });
+      const created = await createInvite(workspaceId, { email, role: inviteRole });
+      if (!created.token) throw new Error('The invitation link was not returned.');
+      setRevealedInviteLink(invitationLink(created.token));
       setInviteEmail('');
       setInviteRole('member');
       await fetchAll(true);
@@ -290,6 +310,7 @@ export function ManageMembersDialog({
                       key={invite.id}
                       invite={invite}
                       busy={rowBusy === invite.id}
+                      onReissue={() => void handleReissue(invite)}
                       onRevoke={() => void handleRevoke(invite)}
                     />
                   ))}
@@ -339,8 +360,39 @@ export function ManageMembersDialog({
           </>
         )}
       </div>
+      {revealedInviteLink && (
+        <Dialog
+          open
+          onOpenChange={(next) => {
+            if (!next) setRevealedInviteLink(null);
+          }}
+          title="Invitation link"
+          description="Share this link with the invitee. It contains the one-time invitation capability."
+          className="max-w-lg"
+          footer={
+            <Button variant="secondary" size="sm" onClick={() => setRevealedInviteLink(null)}>
+              Done
+            </Button>
+          }
+        >
+          <div className="space-y-3">
+            <input
+              readOnly
+              value={revealedInviteLink}
+              aria-label="Invitation link"
+              className="w-full rounded-token border border-border bg-surface-base px-3 py-2 font-mono text-xs text-primary outline-none"
+              onFocus={(event) => event.currentTarget.select()}
+            />
+            <CopyButton value={revealedInviteLink} label="Copy invitation link" />
+          </div>
+        </Dialog>
+      )}
     </Dialog>
   );
+}
+
+function invitationLink(token: string): string {
+  return `${window.location.origin}/invites/accept?token=${encodeURIComponent(token)}`;
 }
 
 /** One member row: identity · status · role (editable for admins) · remove/leave. */
@@ -440,10 +492,12 @@ function MemberRow({
 function InviteRow({
   invite,
   busy,
+  onReissue,
   onRevoke,
 }: {
   invite: InviteView;
   busy: boolean;
+  onReissue: () => void;
   onRevoke: () => void;
 }) {
   return (
@@ -463,6 +517,15 @@ function InviteRow({
         )}
       </div>
       <Badge variant={ROLE_TONE[invite.role]}>{roleLabel(invite.role)}</Badge>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="shrink-0 px-2 text-[11px]"
+        disabled={busy}
+        onClick={onReissue}
+      >
+        Re-issue link
+      </Button>
       <Button
         variant="ghost"
         size="sm"
