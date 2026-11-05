@@ -58,7 +58,7 @@ describe('SuppressionService', () => {
         findMany: jest.fn().mockResolvedValue([
           {
             id: 'mailbox-fictional-555',
-            emailAddress: 'sender@example.test',
+            emailAddress: 'sender@example.com',
           },
         ]),
       },
@@ -233,7 +233,7 @@ describe('SuppressionService', () => {
             action: 'failed',
             status: '4.4.1',
             diagnostic_code: 'smtp; 451 temporary failure',
-            final_recipient: 'rfc822; soft@example.test',
+            final_recipient: 'rfc822; soft@example.com',
           },
         },
         {
@@ -244,7 +244,7 @@ describe('SuppressionService', () => {
             action: 'failed',
             status: '5.7.1',
             diagnostic_code: 'smtp; 550 policy rejection',
-            final_recipient: 'rfc822; policy@example.test',
+            final_recipient: 'rfc822; policy@example.com',
           },
         },
       ]);
@@ -269,7 +269,7 @@ describe('SuppressionService', () => {
             action: 'failed',
             status: '5.1.2',
             diagnostic_code: 'smtp; 550 host unknown',
-            final_recipient: 'rfc822; dry-run@example.test',
+            final_recipient: 'rfc822; dry-run@example.com',
           },
         },
       ]);
