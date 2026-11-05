@@ -429,8 +429,45 @@ export default function SuppressionsPage() {
               </p>
             </Card>
           ) : (
-            <div className="overflow-x-auto rounded-token-lg border border-subtle bg-surface-raised shadow-token">
-              <table className="w-full min-w-[760px] border-collapse text-left text-sm">
+            <>
+            <ul className="space-y-3 sm:hidden">
+              {visible.map((row) => (
+                <li key={row.id} className="rounded-token-lg border border-subtle bg-surface-raised p-3 shadow-token">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="break-all font-medium text-primary">{row.email}</p>
+                      <div className="mt-1.5">
+                        <Badge variant={reasonTone(row.reason)}>{reasonLabel(row.reason)}</Badge>
+                      </div>
+                    </div>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      disabled={removingId !== null}
+                      onClick={() => void onRemove(row)}
+                    >
+                      {removingId === row.id ? 'Removing…' : 'Remove'}
+                    </Button>
+                  </div>
+                  <dl className="mt-3 space-y-1 text-xs text-tertiary">
+                    <div className="flex gap-2">
+                      <dt className="w-14 shrink-0 uppercase tracking-wide">Source</dt>
+                      <dd className="min-w-0 break-all font-mono">{row.source || '—'}</dd>
+                    </div>
+                    <div className="flex gap-2">
+                      <dt className="w-14 shrink-0 uppercase tracking-wide">Note</dt>
+                      <dd className="min-w-0 break-words">{row.note?.trim() ? row.note : '—'}</dd>
+                    </div>
+                    <div className="flex gap-2">
+                      <dt className="w-14 shrink-0 uppercase tracking-wide">Added</dt>
+                      <dd>{formatWhen(row.createdAt)}</dd>
+                    </div>
+                  </dl>
+                </li>
+              ))}
+            </ul>
+            <div className="hidden max-w-full overflow-x-auto rounded-token-lg border border-subtle bg-surface-raised shadow-token sm:block">
+              <table className="w-full border-collapse text-left text-sm">
                 <thead>
                   <tr className="border-b border-subtle bg-surface-overlay/60 text-[12px] uppercase tracking-[0.06em] text-tertiary">
                     <th className="px-3 py-2.5 font-semibold">Email</th>
@@ -476,6 +513,7 @@ export default function SuppressionsPage() {
                 </tbody>
               </table>
             </div>
+            </>
           )}
 
           {load === 'ready' && items.length >= SUPPRESSION_LIST_CAP && (
