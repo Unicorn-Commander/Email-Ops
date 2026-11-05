@@ -215,7 +215,7 @@ export class WorkspacesController {
     });
   }
 
-  @Post(':workspaceId/invites/:id/reissue')
+  @Post(':workspaceId/invites/:inviteId/reissue')
   @UseGuards(InvitationSessionGuard, WorkspaceMembershipGuard)
   @ApiOperation({ summary: 'Re-issue a pending invitation link.' })
   @ApiResponse({
@@ -227,9 +227,9 @@ export class WorkspacesController {
   async reissueInvite(
     @ResolvedWorkspace() workspaceId: string,
     @CurrentUser() user: User,
-    @Param('id') id: string,
+    @Param('inviteId') inviteId: string,
   ) {
-    const invite = await this.workspaces.reissueInvite(workspaceId, user, id);
+    const invite = await this.workspaces.reissueInvite(workspaceId, user, inviteId);
     if (!invite) throw new NotFoundException('No pending invitation in this organization.');
     return invite;
   }
