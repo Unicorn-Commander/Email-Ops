@@ -4,7 +4,7 @@
  * Zone 1 of the command center: the far-left section nav.
  *
  * These are the real app sections (Overview, Mail, Approvals, Agents, Mailboxes,
- * Insights, Cleanup, Settings) — each a real route. The active item is derived
+ * Suppressions, Insights, Cleanup, Settings) — each a real route. The active item is derived
  * from the pathname; Approvals carries the live pending-approval count as a
  * badge. This replaces the global AppShell sidebar for the /mail full-bleed
  * surface, so it stays visible on mobile too (it is the only way off the mail
@@ -28,6 +28,7 @@ import {
   CheckSquareIcon,
   RobotIcon,
   InboxTrayIcon,
+  BanIcon,
   GlobeIcon,
   TrashIcon,
   GearIcon,
@@ -52,6 +53,7 @@ const TOP: NavItem[] = [
   { href: '/agent-inbox', label: 'Approvals', icon: CheckSquareIcon, badgeKey: 'approvals' },
   { href: '/agents', label: 'Agents', icon: RobotIcon },
   { href: '/mailboxes', label: 'Mailboxes', icon: InboxTrayIcon },
+  { href: '/suppressions', label: 'Suppressions', icon: BanIcon },
   { href: '/domains', label: 'Domains', icon: GlobeIcon },
   { href: '/insights', label: 'Insights', icon: BarChartIcon },
   { href: '/calendar', label: 'Calendar', icon: CalendarIcon },
