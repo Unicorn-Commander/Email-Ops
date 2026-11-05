@@ -22,7 +22,7 @@ export async function resolveMailboxScope(
   },
   workspaceId: string,
   userKey: string | null,
-): Promise<{ ids: string[]; governed: boolean }> {
+): Promise<{ ids: string[]; governed: boolean; unrestricted: boolean }> {
   const keys = new Set<string>();
   if (userKey?.trim()) keys.add(userKey.trim());
   if (userKey?.trim() && db.user?.findFirst) {
@@ -58,8 +58,10 @@ export async function resolveMailboxScope(
 
   // No membership is an auth-layer concern. Keep the old single-tenant service
   // behavior here; a guarded tenancy-on request never reaches this fallback.
-  if (!membership) return { ids: await all(), governed: false };
-  if (membership.status !== MembershipStatus.ACTIVE) return { ids: [], governed: true };
+  if (!membership) return { ids: await all(), governed: false, unrestricted: true };
+  if (membership.status !== MembershipStatus.ACTIVE) {
+    return { ids: [], governed: true, unrestricted: false };
+  }
 
   // ADMIN/OWNER always retain workspace-wide visibility, independent of the
   // member's stored scope. ALL is the backwards-compatible default.
@@ -69,7 +71,10 @@ export async function resolveMailboxScope(
     membership.mailboxScope === MailboxScope.ALL ||
     membership.mailboxScope == null
   ) {
-    return { ids: await all(), governed: true };
+    // `unrestricted`: workspace-wide visibility. These members also see agent-inbox
+    // email drafts staged without a mailbox (a workspace that has not connected
+    // one yet). OWNED members never do.
+    return { ids: await all(), governed: true, unrestricted: true };
   }
 
   // There is currently no human-manager relation for Agent rows. Agent.manager-
@@ -84,7 +89,7 @@ export async function resolveMailboxScope(
     },
     select: { id: true },
   })) ?? [];
-  return { ids: owned.map((row) => row.id), governed: true };
+  return { ids: owned.map((row) => row.id), governed: true, unrestricted: false };
 }
 
 /** The public resolver named by the mailbox-scope contract. */
