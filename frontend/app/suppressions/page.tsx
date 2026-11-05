@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
-import { Badge, Button, Card, Input, Select, Skeleton, useConfirm, type BadgeVariant } from '@/components/ui';
+import { Badge, Button, Card, Input, Select, Skeleton, cn, useConfirm, type BadgeVariant } from '@/components/ui';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
 import { ApiError } from '@/lib/api';
 import {
@@ -314,15 +314,25 @@ export default function SuppressionsPage() {
                 <span className="mb-1 block text-[11px] font-medium text-tertiary">
                   Note <span className="font-normal text-muted">(optional)</span>
                 </span>
-                <Input
+                <textarea
                   value={draftNote}
-                  invalid={Boolean(draftErrors.note)}
                   aria-invalid={draftErrors.note ? true : undefined}
                   aria-describedby={draftErrors.note ? 'suppression-note-error' : undefined}
                   maxLength={NOTE_MAX}
+                  rows={2}
                   placeholder="Why this address is suppressed"
                   onChange={(event) => setDraftNote(event.target.value)}
                   disabled={!workspaceId || adding}
+                  className={cn(
+                    'block w-full resize-y rounded-token bg-surface-base text-primary placeholder:text-muted',
+                    'min-h-[44px] px-3 py-2 text-base sm:min-h-[36px] sm:text-sm',
+                    'border transition-colors duration-fast ease-token',
+                    'focus:outline-none focus:ring-2',
+                    draftErrors.note
+                      ? 'border-danger/50 focus:border-danger focus:ring-danger/40'
+                      : 'border-border focus:border-accent focus:ring-accent/40',
+                    'disabled:cursor-not-allowed disabled:opacity-50',
+                  )}
                 />
                 {draftErrors.note && (
                   <span id="suppression-note-error" className="mt-1 block text-[11px] leading-5 text-danger">
