@@ -83,6 +83,33 @@ describe('Brigade federation manifest (.well-known/mcps.json)', () => {
     expect(MCP_MANIFEST_CATALOG).toEqual(manifest);
   });
 
+  it('advertises mailbox selectors and standing-approval requests from the live tools', () => {
+    const byName = new Map(
+      (manifest.tools as {
+        name: string;
+        description: string;
+        input_schema: { properties: Record<string, unknown>; required?: string[] };
+      }[]).map((t) => [t.name, t]),
+    );
+    const accounts = byName.get('list_mail_accounts');
+    expect(accounts?.description).toContain('id, address, display_name, provider, role');
+    expect(accounts?.description).toContain('is_default');
+    expect(accounts?.description).not.toContain('[{ address }]');
+
+    const address = { type: 'string', minLength: 3, maxLength: 320 };
+    for (const name of ['list_threads', 'search_mail']) {
+      const tool = byName.get(name);
+      expect(tool?.description).toContain('mailbox_id or mailbox_address');
+      expect(tool?.input_schema.properties.mailbox_address).toEqual(address);
+      expect(tool?.input_schema.required ?? []).not.toContain('mailbox_address');
+    }
+
+    const request = byName.get('request_standing_approval');
+    expect(request?.description).toContain('PENDING_HUMAN');
+    expect(request?.description).toContain('grants nothing until a human approves');
+    expect(request?.description).toContain('Approve and revoke stay human-only');
+  });
+
   it('gives every tool the per-tool fields the gateway validator requires', () => {
     for (const t of manifest.tools as Record<string, unknown>[]) {
       expect(typeof t.name).toBe('string');
