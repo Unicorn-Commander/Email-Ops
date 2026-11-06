@@ -62,6 +62,7 @@ describe('provision_mailbox is_default', () => {
     const tx = {
       mailboxAccount: {
         findFirst: jest.fn(async () => workspaceDefault),
+        count: jest.fn().mockResolvedValue(workspaceDefault ? 1 : 0),
         updateMany: jest.fn().mockResolvedValue({ count: workspaceDefault ? 1 : 0 }),
         create: jest.fn(async ({ data }: { data: Partial<MailboxAccount> }) =>
           row({ ...data, id: 'mb-created' }),
@@ -161,10 +162,7 @@ describe('provision_mailbox is_default', () => {
         authorize: jest.fn().mockResolvedValue('requires_approval'),
         fileRequest,
       } as unknown as ProvisioningPolicyService,
-      {
-        assertValidAddress: jest.fn(),
-        createMailbox,
-      } as unknown as MailboxAccountsService,
+      { assertValidAddress: jest.fn(), countHostedMailboxes: jest.fn().mockResolvedValue(0), createMailbox } as unknown as MailboxAccountsService,
       {} as never,
       {} as never,
       {} as never,

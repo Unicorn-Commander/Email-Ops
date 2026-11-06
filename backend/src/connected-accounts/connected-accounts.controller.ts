@@ -21,7 +21,7 @@ import { User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { MembershipService } from '../common/workspace/membership.service';
-import { entitlementsOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
+import { WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { ConnectedAccountsService } from './connected-accounts.service';
 import {
   CleanupExecutionResult,
@@ -31,6 +31,7 @@ import {
   ConnectedProvider,
 } from './connected-accounts.types';
 import { checkCleanerEntitlement } from './entitlement';
+import { resolveEffectiveEntitlements } from './entitlement-resolver';
 
 class CleanupPlanBodyDto {
   @IsOptional()
@@ -129,7 +130,7 @@ export class ConnectedAccountsController {
   async stats(@CurrentUser() user: User, @Param('provider') providerParam: string) {
     const provider = this.provider(providerParam);
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     return this.connectedAccounts.getInboxStats(user, provider);
   }
 
@@ -142,7 +143,7 @@ export class ConnectedAccountsController {
   async analyze(@CurrentUser() user: User, @Param('provider') providerParam: string) {
     const provider = this.provider(providerParam);
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     return this.connectedAccounts.analyzeInbox(user, provider);
   }
 
@@ -159,7 +160,7 @@ export class ConnectedAccountsController {
   ) {
     const provider = this.provider(providerParam);
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     return this.connectedAccounts.planCleanup(user, provider, body.criteria ?? {});
   }
 
@@ -177,7 +178,7 @@ export class ConnectedAccountsController {
   ): Promise<CleanupExecutionResult> {
     const provider = this.provider(providerParam);
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     return this.connectedAccounts.executeCleanup(user, provider, body.plan, body.mode, {
       confirm: body.confirm === true,
       confirmToken: body.confirm_token ?? null,
@@ -195,7 +196,7 @@ export class ConnectedAccountsController {
   ) {
     const provider = this.provider(providerParam);
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     const criteria = {
       ...(body.criteria ?? {
         label: body.label ?? '',
@@ -218,7 +219,7 @@ export class ConnectedAccountsController {
   ) {
     const provider = this.provider(providerParam);
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     return this.connectedAccounts.unsubscribe(user, provider, body.senderGroup);
   }
 
@@ -233,7 +234,7 @@ export class ConnectedAccountsController {
   ) {
     const provider = this.provider(providerParam);
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     return this.connectedAccounts.undoBatch(user, provider, body.batchId);
   }
 
@@ -248,7 +249,7 @@ export class ConnectedAccountsController {
   ) {
     const provider = this.provider(providerParam);
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     return this.connectedAccounts.undoBatch(user, provider, batchId);
   }
 
@@ -263,7 +264,7 @@ export class ConnectedAccountsController {
   ) {
     const provider = this.provider(providerParam);
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     return this.connectedAccounts.getArchiveDownloadUrl(user, provider, batchId);
   }
 
@@ -274,7 +275,7 @@ export class ConnectedAccountsController {
   async activity(@CurrentUser() user: User, @Param('provider') providerParam: string) {
     const provider = this.provider(providerParam);
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     return { items: await this.connectedAccounts.listCleanupActivity(user, provider) };
   }
 
@@ -282,8 +283,9 @@ export class ConnectedAccountsController {
     return this.membership.resolveAndAuthorize(user, null);
   }
 
-  private requireCleanerEntitlement(user: User, workspaceId: string): void {
-    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+  private async requireCleanerEntitlement(user: User, workspaceId: string): Promise<void> {
+    const effective = await resolveEffectiveEntitlements(user as WithWorkspaceClaim, workspaceId);
+    const gate = checkCleanerEntitlement(effective.entitlements, workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }

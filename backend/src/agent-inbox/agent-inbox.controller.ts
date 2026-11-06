@@ -60,6 +60,7 @@ import { entitlementsOf, ucUidOf, WithWorkspaceClaim } from '../common/workspace
 import { EmailService } from '../email/email.service';
 import { checkComposeEntitlement } from '../email/entitlement';
 import { checkCleanerEntitlement } from '../connected-accounts/entitlement';
+import { resolveEffectiveEntitlements } from '../connected-accounts/entitlement-resolver';
 
 /** Optional reviewer note carried on an approve/reject. */
 class ReviewBodyDto {
@@ -352,11 +353,12 @@ export class AgentInboxController {
         this.email.peekAgentInboxKind(workspaceId, ucUidOf(user as WithWorkspaceClaim), itemId),
       ),
     );
+    const effective = await resolveEffectiveEntitlements(user as WithWorkspaceClaim, workspaceId);
     for (const kind of kinds) {
       if (kind === null) continue;
       const gate =
         kind === AgentInboxKind.CLEANUP
-          ? checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId)
+          ? checkCleanerEntitlement(effective.entitlements, workspaceId)
           : kind === AgentInboxKind.NOTICE
             ? { allowed: true as const, reason: '' }
             : checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
@@ -453,9 +455,10 @@ export class AgentInboxController {
     if (kind === null) {
       throw new NotFoundException('Agent-inbox item not found in this workspace.');
     }
+    const effective = await resolveEffectiveEntitlements(user as WithWorkspaceClaim, workspaceId);
     const gate =
       kind === AgentInboxKind.CLEANUP
-        ? checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId)
+        ? checkCleanerEntitlement(effective.entitlements, workspaceId)
         : kind === AgentInboxKind.NOTICE
           ? { allowed: true as const, reason: '' }
           : checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);

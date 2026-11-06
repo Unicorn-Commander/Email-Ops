@@ -49,6 +49,8 @@ import { MailVacationService } from './mail-vacation.service';
 import { MailSignaturesService } from './mail-signatures.service';
 import { MailboxAccountsService } from './mailbox-accounts.service';
 import { CreateMailboxInput, UpdateMailboxInput } from './mailbox-accounts.types';
+import { checkMailboxHostingEntitlement } from '../connected-accounts/entitlement';
+import { resolveEffectiveEntitlements } from '../connected-accounts/entitlement-resolver';
 
 class CreateMailboxDto {
   @IsString() @MaxLength(320) email_address!: string;
@@ -359,6 +361,16 @@ export class MailboxAccountsController {
       // transactional demotion inside createMailbox; it is not a second path.
       ...(body.is_default !== undefined ? { isDefault: body.is_default } : {}),
     };
+    const currentHostedMailboxes = await this.mailboxes.countHostedMailboxes(workspaceId, ucUid);
+    const effective = await resolveEffectiveEntitlements(user as WithWorkspaceClaim, workspaceId, {
+      currentHostedMailboxes,
+    });
+    const hosting = checkMailboxHostingEntitlement(effective.entitlements, workspaceId, undefined, {
+      currentHostedMailboxes,
+      mailboxLimit: effective.mailboxLimit,
+    });
+    if (!hosting.allowed) throw new ForbiddenException(hosting.reason);
+
     const decision = await this.policy.authorize(workspaceId, ucUid, role, action, { isSelfOwnMailbox });
     if (decision === 'requires_approval') {
       // APPROVAL mode: file a request instead of applying; an approver replays it.

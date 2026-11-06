@@ -30,8 +30,8 @@ export interface OrgEntitlement {
   role: string | null;
   entitlements: string[];
   /** Present for callers that want an explicit admission verdict. */
-  allowed: true;
-  entitled: true;
+  allowed: boolean;
+  entitled: boolean;
 }
 
 /** Alias retained for callers that use the reference client's terminology. */
@@ -44,6 +44,8 @@ export interface ResolveOrgEntitlementOptions {
   exp?: number;
   /** Cache bearer verdicts; browser callbacks deliberately re-check. */
   cache?: boolean;
+  /** Return a valid org snapshot even when the configured feature is absent. */
+  requireFeature?: boolean;
   getEnv?: OrgEntitlementsEnvGetter;
   logger?: OrgEntitlementsLogger;
   fetchImpl?: typeof fetch;
@@ -56,6 +58,7 @@ interface CachedResolution {
 }
 
 const verdictCache = new Map<string, CachedResolution>();
+const subjectCache = new Map<string, CachedResolution>();
 
 export function ucEntitlementsUrl(
   getEnv: OrgEntitlementsEnvGetter = defaultEnvGetter,
@@ -108,7 +111,9 @@ function cacheKey(subject: string, accessToken: string): string {
 }
 
 function cacheTtlMs(exp: number | undefined, now: number): number {
-  const max = 60_000;
+  // Keep the gate responsive to billing changes without calling Ops-Center for
+  // every cleaner request. A verified token expiry remains the upper bound.
+  const max = 5 * 60_000;
   if (exp === undefined) return max;
   return Math.min(max, exp * 1000 - now);
 }
@@ -116,6 +121,9 @@ function cacheTtlMs(exp: number | undefined, now: number): number {
 function sweepCache(now: number): void {
   for (const [key, entry] of verdictCache) {
     if (entry.expiresAt <= now) verdictCache.delete(key);
+  }
+  for (const [key, entry] of subjectCache) {
+    if (entry.expiresAt <= now) subjectCache.delete(key);
   }
 }
 
@@ -152,22 +160,33 @@ function featureKeys(featureKey: string): Set<string> {
 
 function cacheResolution(
   key: string | null,
+  subject: string | undefined,
   resolution: OrgEntitlement | null,
   exp: number | undefined,
   now: number,
 ): void {
-  if (!key) return;
   const ttl = cacheTtlMs(exp, now);
-  if (ttl > 0) verdictCache.set(key, { resolution, expiresAt: now + ttl });
+  if (ttl <= 0) return;
+  const entry = { resolution, expiresAt: now + ttl };
+  if (key) verdictCache.set(key, entry);
+  if (subject) subjectCache.set(subject, entry);
+}
+
+function visibleResolution(
+  resolution: OrgEntitlement | null,
+  requireFeature: boolean,
+): OrgEntitlement | null {
+  if (!resolution) return null;
+  return requireFeature && !resolution.entitled ? null : resolution;
 }
 
 /**
  * Resolve the caller's Email-Ops organization entitlement.
  *
  * Endpoint failures, malformed responses, and a valid response without the
- * configured feature all return null. This keeps AuthService's legacy access
- * list/invitation branches as the only admission path unless Ops-Center gives
- * a complete, entitled answer.
+ * configured feature all return null by default. Callers that need to inspect
+ * the complete org feature set may set `requireFeature: false`; AuthService's
+ * default admission behavior remains unchanged.
  */
 export async function resolveOrgEntitlement(
   accessToken: string | undefined,
@@ -182,6 +201,7 @@ export async function resolveOrgEntitlement(
   const logger = options.logger ?? consoleLogger;
   const doFetch = options.fetchImpl ?? fetch;
   const now = options.now ?? Date.now;
+  const requireFeature = options.requireFeature ?? true;
   const url = ucEntitlementsUrl(getEnv);
 
   if (!emailOpsEntitlementsEnabled(getEnv)) return null;
@@ -198,7 +218,15 @@ export async function resolveOrgEntitlement(
   sweepCache(nowMs);
   if (key) {
     const cached = verdictCache.get(key);
-    if (cached && cached.expiresAt > nowMs) return cached.resolution;
+    if (cached && cached.expiresAt > nowMs) {
+      return visibleResolution(cached.resolution, requireFeature);
+    }
+  }
+  if (subject && shouldCache) {
+    const cached = subjectCache.get(subject);
+    if (cached && cached.expiresAt > nowMs) {
+      return visibleResolution(cached.resolution, requireFeature);
+    }
   }
 
   const controller = new AbortController();
@@ -213,14 +241,14 @@ export async function resolveOrgEntitlement(
   } catch {
     clearTimeout(timer);
     logger.warn('Email-Ops entitlement endpoint unavailable');
-    cacheResolution(key, null, options.exp ?? tokenExpirySeconds(accessToken), nowMs);
+    cacheResolution(key, subject, null, options.exp ?? tokenExpirySeconds(accessToken), nowMs);
     return null;
   }
   clearTimeout(timer);
 
   if (!response.ok) {
     logger.warn(`Email-Ops entitlement endpoint returned status ${response.status}`);
-    cacheResolution(key, null, options.exp ?? tokenExpirySeconds(accessToken), nowMs);
+    cacheResolution(key, subject, null, options.exp ?? tokenExpirySeconds(accessToken), nowMs);
     return null;
   }
 
@@ -229,7 +257,7 @@ export async function resolveOrgEntitlement(
     body = await response.json();
   } catch {
     logger.warn('Email-Ops entitlement response was not JSON');
-    cacheResolution(key, null, options.exp ?? tokenExpirySeconds(accessToken), nowMs);
+    cacheResolution(key, subject, null, options.exp ?? tokenExpirySeconds(accessToken), nowMs);
     return null;
   }
 
@@ -246,30 +274,28 @@ export async function resolveOrgEntitlement(
 
   if (!orgId || !entitlements) {
     logger.warn('Email-Ops entitlement response had an invalid shape');
-    cacheResolution(key, null, options.exp ?? tokenExpirySeconds(accessToken), nowMs);
+    cacheResolution(key, subject, null, options.exp ?? tokenExpirySeconds(accessToken), nowMs);
     return null;
   }
 
   const acceptedKeys = featureKeys(emailOpsEntitlementFeatureKey(getEnv));
   const entitled = entitlements.some((entry) => acceptedKeys.has(entry.toLowerCase()));
-  const resolution = entitled
-    ? {
-        orgId,
-        orgName,
-        tier,
-        role,
-        entitlements,
-        allowed: true as const,
-        entitled: true as const,
-      }
-    : null;
+  const resolution = {
+    orgId,
+    orgName,
+    tier,
+    role,
+    entitlements,
+    allowed: entitled,
+    entitled,
+  };
 
   logger.log(
     `Email-Ops entitlement decision: status=${response.status} ` +
       `orgPresent=${Boolean(orgId)} featurePresent=${entitled}`,
   );
-  cacheResolution(key, resolution, options.exp ?? tokenExpirySeconds(accessToken), nowMs);
-  return resolution;
+  cacheResolution(key, subject, resolution, options.exp ?? tokenExpirySeconds(accessToken), nowMs);
+  return visibleResolution(resolution, requireFeature);
 }
 
 /** Parallel spelling to the reference client's resolver. */
@@ -278,4 +304,25 @@ export const resolveEntitlement = resolveOrgEntitlement;
 /** Test seam; cached entries contain no bearer token. */
 export function clearOrgEntitlementCacheForTests(): void {
   verdictCache.clear();
+  subjectCache.clear();
+}
+
+/**
+ * Return the most recent verified snapshot for a subject without making an
+ * HTTP call. `undefined` means there is no cache entry; `null` is a cached
+ * fail-closed result. The snapshot contains no bearer token.
+ */
+export function cachedOrgEntitlementForSubject(
+  subject: string | undefined,
+  now: () => number = Date.now,
+): OrgEntitlement | null | undefined {
+  const key = subject?.trim();
+  if (!key) return undefined;
+  const entry = subjectCache.get(key);
+  const nowMs = now();
+  if (!entry || entry.expiresAt <= nowMs) {
+    if (entry) subjectCache.delete(key);
+    return undefined;
+  }
+  return entry.resolution;
 }

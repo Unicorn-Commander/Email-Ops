@@ -7,6 +7,13 @@ export interface EntitlementDecision {
   reason: string;
 }
 
+export interface MailboxHostingEntitlementContext {
+  /** Current count of hosted James/Stalwart mailboxes in the workspace. */
+  currentHostedMailboxes?: number;
+  /** Numeric mailbox add-on capacity supplied by the org entitlement. */
+  mailboxLimit?: number | null;
+}
+
 const logger = new Logger('ConnectedAccountsEntitlement');
 export const SKU_EMAIL_OPS_VAULT = 'email-ops:vault';
 
@@ -35,9 +42,34 @@ export function checkMailboxHostingEntitlement(
   entitlements: string[],
   workspaceId: string,
   getEnv: (k: string) => string | undefined = (k) => process.env[k],
+  context: MailboxHostingEntitlementContext = {},
 ): EntitlementDecision {
   const have = new Set((entitlements ?? []).map(normalizeSku));
   const mode = entitlementMode(getEnv);
+  const mailboxLimit =
+    typeof context.mailboxLimit === 'number' &&
+    Number.isSafeInteger(context.mailboxLimit) &&
+    context.mailboxLimit >= 0
+      ? context.mailboxLimit
+      : null;
+  const currentHostedMailboxes =
+    typeof context.currentHostedMailboxes === 'number' &&
+    Number.isSafeInteger(context.currentHostedMailboxes) &&
+    context.currentHostedMailboxes >= 0
+      ? context.currentHostedMailboxes
+      : null;
+
+  if (
+    mailboxLimit !== null &&
+    currentHostedMailboxes !== null &&
+    currentHostedMailboxes >= mailboxLimit
+  ) {
+    return {
+      allowed: false,
+      mode,
+      reason: `not entitled: your plan includes ${mailboxLimit} hosted mailboxes; add more in Billing.`,
+    };
+  }
 
   if (have.has(SKU_EMAIL_OPS_MAILBOX)) {
     return { allowed: true, mode, reason: 'entitled: caller carries email-ops:mailbox' };
@@ -106,6 +138,10 @@ export function checkCleanerEntitlement(
   };
 }
 
+/**
+ * Gate retained archives. The current entitlement comments make vault a
+ * distinct SKU from the bundled cleaner, so `email-ops` does not imply vault.
+ */
 export function checkVaultEntitlement(
   entitlements: string[],
   workspaceId: string,
