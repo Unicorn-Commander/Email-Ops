@@ -498,7 +498,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "list_threads",
-      "description": "List the THREADS in a mailbox folder (inbox/archive/spam/trash/sent/drafts). Pass mailbox_id for one mailbox; omit it for the unified inbox across every mailbox the caller can read (each thread then carries mailbox_id + mailbox_address). Optional q (full-text), limit (max 200, default 50), offset (paging). Read-only / member-level. Returns { threads, count, folder } - an empty list when the mail engine is dormant (never a 500).",
+      "description": "List the THREADS in a mailbox folder (inbox/archive/spam/trash/sent/drafts). Pass either mailbox_id or mailbox_address for ONE mailbox; omit both for the UNIFIED inbox across every mailbox the caller can read (each thread then carries mailbox_id + mailbox_address). Optional q (full-text), limit (≤200, default 50), offset (paging). Read-only / member-level. Returns { threads, count, folder } — an empty list when the mail engine is dormant (never a 500).",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -507,6 +507,11 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
           },
           "mailbox_id": {
             "type": "string"
+          },
+          "mailbox_address": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 320
           },
           "folder": {
             "type": "string",
@@ -608,7 +613,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "search_mail",
-      "description": "Full-text SEARCH a mailbox folder by query string q (subject/body/participants), applied through each provider's native search - the sovereign James grammar, Gmail q, and Microsoft Graph $search for CONNECTED external accounts. Pass mailbox_id for one mailbox; omit it to search across every readable mailbox (unified), including connected Gmail/Microsoft accounts. Optional folder (default inbox), limit (max 200, default 50), offset. Read-only / member-level. Returns { threads, count, q, search_supported, has_more, next_page_token }. HONESTY RULE: when search_supported is false the provider could not express this query, so an empty threads list means COULD NOT FILTER, not no-matches - do not treat it as authoritative; an empty list with search_supported true (or a dormant engine) means no results.",
+      "description": "Full-text SEARCH a mailbox folder by query string q (subject/body/participants), applied through each provider’s native search — sovereign James, Gmail q, and Microsoft Graph $search for CONNECTED external accounts. Pass either mailbox_id or mailbox_address for ONE mailbox; omit it to search across every readable mailbox (unified), external accounts included. Optional folder (default inbox), limit (≤200, default 50), offset. Read-only / member-level. Returns { threads, count, q, search_supported, has_more, next_page_token }. When search_supported is false the provider could not express the query, so an empty list means “could not filter”, NOT “no matches” — do not treat it as authoritative.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -617,6 +622,11 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
           },
           "mailbox_id": {
             "type": "string"
+          },
+          "mailbox_address": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 320
           },
           "q": {
             "type": "string",
@@ -1802,7 +1812,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "list_mail_accounts",
-      "description": "List the accounts (mailbox logins) the mail engine hosts. Read-only / member-level. Returns { accounts: [{ address }] } or { status:\"engine_not_configured\" } when no WebAdmin endpoint is wired.",
+      "description": "List only engine accounts (mailbox logins) under the caller workspace’s bound domains. Each account includes id, address, display_name, provider, role (human/shared/agent), and is_default. Read-only / member-level. Returns { accounts: [...] } or { status:\"engine_not_configured\" } when no WebAdmin endpoint is wired.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2507,7 +2517,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "request_standing_approval",
-      "description": "Stage an immutable campaign request. An agent principal may create it as PENDING_HUMAN; it grants nothing until a human approves it. Renewal or widening requires a new request. Approve and revoke stay human-only.",
+      "description": "Stage an immutable campaign request for a human to approve. An agent principal may create it as PENDING_HUMAN; that request grants nothing until a human approves it. Renewal or widening requires a new request. Approve and revoke stay human-only.",
       "input_schema": {
         "type": "object",
         "properties": {
