@@ -21,6 +21,7 @@ import { MembershipService } from '../common/workspace/membership.service';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { checkCleanerEntitlement, checkVaultEntitlement } from './entitlement';
+import { resolveEffectiveEntitlements } from './entitlement-resolver';
 import { cleanupTargetsFromPlan } from './cleanup-targets';
 import { ArchiveStorageService } from './archive-storage.service';
 import { ConnectedAccountsEnginePort } from './connected-accounts.port';
@@ -229,7 +230,7 @@ export class ConnectedAccountsService {
     criteria: CleanupCriteria,
   ): Promise<CleanupPlanResult> {
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
 
     const accessToken = await this.safeBrokerToken(user, provider);
     if (!accessToken) {
@@ -273,7 +274,7 @@ export class ConnectedAccountsService {
     options: CleanupExecutionOptions = {},
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
 
     const accessToken = await this.safeBrokerToken(user, provider);
     if (!accessToken) {
@@ -329,6 +330,8 @@ export class ConnectedAccountsService {
     const requested = (Array.isArray(plan.safe) ? plan.safe : [])
       .map((row) => row.id)
       .filter((id) => safeIds.has(id));
+    const effective = await resolveEffectiveEntitlements(user as WithWorkspaceClaim, workspaceId);
+    const vault = checkVaultEntitlement(effective.entitlements, workspaceId).allowed;
 
     return this.prisma.withWorkspace(
       workspaceId,
@@ -336,7 +339,6 @@ export class ConnectedAccountsService {
       async (tx) => {
         const batchId = options.batchId ?? randomUUID();
         const credentials = this.credentialsFor(provider, accessToken);
-        const vault = this.hasVaultEntitlement(user, workspaceId);
         const archiveExpiresAt = vault ? null : this.daysFromNow(7);
         let archiveRef: CleanupExecutionBackupRef | null = null;
         let action: CleanupActionKind = CleanupActionKind.TRASH;
@@ -443,7 +445,7 @@ export class ConnectedAccountsService {
     criteria: CleanupCriteria,
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     const accessToken = await this.requireAccessToken(user, provider);
     const plan = await this.planCleanup(user, provider, criteria);
     // Honour explicit message selection from the UI. An empty selection is a
@@ -510,7 +512,7 @@ export class ConnectedAccountsService {
     senderGroup: string[],
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     await this.assertAgentWriteAllowed(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -554,7 +556,7 @@ export class ConnectedAccountsService {
     batchId: string,
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
 
     const batch = await this.prisma.withWorkspace(
       workspaceId,
@@ -680,7 +682,7 @@ export class ConnectedAccountsService {
     criteria: CleanupCriteria,
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     const requestedByUcUid = ucUidOf(user as WithWorkspaceClaim);
     await this.assertAgentWriteAllowed(workspaceId, requestedByUcUid, CLEANUP_AGENT_KEY);
     const accessToken = await this.safeBrokerToken(user, provider);
@@ -707,7 +709,7 @@ export class ConnectedAccountsService {
     plan: CleanupPlanResult,
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     const requestedByUcUid = ucUidOf(user as WithWorkspaceClaim);
 
     // UNSUBSCRIBE is staged like every other agent destructive verb. On approve,
@@ -860,7 +862,7 @@ export class ConnectedAccountsService {
           batchId: batch.id,
           agentInboxItemId: batch.agentInboxItemId,
           requestedByUcUid: ucUidOf(user as WithWorkspaceClaim),
-          archiveRetained: this.hasVaultEntitlement(user, workspaceId),
+          archiveRetained: await this.hasVaultEntitlement(user, workspaceId),
         },
       );
     } catch (err) {
@@ -932,7 +934,7 @@ export class ConnectedAccountsService {
 
   async listCleanupActivity(user: User, provider: ConnectedProvider): Promise<CleanupBatchView[]> {
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     const rows = await this.prisma.withWorkspace(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -952,7 +954,7 @@ export class ConnectedAccountsService {
     batchId: string,
   ): Promise<{ url: string; expires_in_seconds: number }> {
     const workspaceId = await this.resolveWorkspace(user);
-    this.requireCleanerEntitlement(user, workspaceId);
+    await this.requireCleanerEntitlement(user, workspaceId);
     const batch = await this.prisma.withWorkspace(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
@@ -1687,21 +1689,17 @@ export class ConnectedAccountsService {
     return accessToken;
   }
 
-  private requireCleanerEntitlement(user: User, workspaceId: string): void {
-    const gate = checkCleanerEntitlement(this.entitlementsOf(user), workspaceId);
+  private async requireCleanerEntitlement(user: User, workspaceId: string): Promise<void> {
+    const effective = await resolveEffectiveEntitlements(user as WithWorkspaceClaim, workspaceId);
+    const gate = checkCleanerEntitlement(effective.entitlements, workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
   }
 
-  private entitlementsOf(user: User): string[] {
-    return Array.isArray((user as WithWorkspaceClaim).__entitlements)
-      ? ((user as WithWorkspaceClaim).__entitlements as string[])
-      : [];
-  }
-
-  private hasVaultEntitlement(user: User, workspaceId: string): boolean {
-    return checkVaultEntitlement(this.entitlementsOf(user), workspaceId).allowed;
+  private async hasVaultEntitlement(user: User, workspaceId: string): Promise<boolean> {
+    const effective = await resolveEffectiveEntitlements(user as WithWorkspaceClaim, workspaceId);
+    return checkVaultEntitlement(effective.entitlements, workspaceId).allowed;
   }
 
   private daysFromNow(days: number): Date {

@@ -65,6 +65,7 @@ describe('MailboxAccountsController provisioning is_default', () => {
     const tx = {
       mailboxAccount: {
         findFirst: jest.fn(async () => workspaceDefault),
+        count: jest.fn().mockResolvedValue(workspaceDefault ? 1 : 0),
         updateMany: jest.fn().mockResolvedValue({ count: workspaceDefault ? 1 : 0 }),
         create: jest.fn(async ({ data }: { data: Partial<MailboxAccount> }) =>
           row({ ...data, id: 'mb-created' }),
@@ -145,7 +146,7 @@ describe('MailboxAccountsController provisioning is_default', () => {
     const createMailbox = jest.fn();
     const fileRequest = jest.fn().mockResolvedValue({ id: 'req-1' });
     const controller = new MailboxAccountsController(
-      { assertValidAddress: jest.fn(), createMailbox } as unknown as MailboxAccountsService,
+      { assertValidAddress: jest.fn(), countHostedMailboxes: jest.fn().mockResolvedValue(0), createMailbox } as unknown as MailboxAccountsService,
       {
         authorize: jest.fn().mockResolvedValue('requires_approval'),
         fileRequest,

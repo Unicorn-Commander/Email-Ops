@@ -63,6 +63,7 @@ import {
   checkCleanerEntitlement,
   checkMailboxHostingEntitlement,
 } from '../connected-accounts/entitlement';
+import { resolveEffectiveEntitlements } from '../connected-accounts/entitlement-resolver';
 import {
   CleanupExecutionResult,
   CleanupPlanResult,
@@ -184,10 +185,14 @@ export class EmailOpsTools {
     // approval request an admin could never legitimately grant. Connecting an
     // existing Gmail/Outlook account goes through a different path and stays
     // bundled — no hosting cost, no gate.
-    const hosting = checkMailboxHostingEntitlement(
-      entitlementsOf(user as WithWorkspaceClaim),
-      workspaceId,
-    );
+    const currentHostedMailboxes = await this.mailboxes.countHostedMailboxes(workspaceId, ucUid);
+    const effective = await resolveEffectiveEntitlements(user as WithWorkspaceClaim, workspaceId, {
+      currentHostedMailboxes,
+    });
+    const hosting = checkMailboxHostingEntitlement(effective.entitlements, workspaceId, undefined, {
+      currentHostedMailboxes,
+      mailboxLimit: effective.mailboxLimit,
+    });
     if (!hosting.allowed) {
       throw new ForbiddenException(hosting.reason);
     }
@@ -899,9 +904,10 @@ export class EmailOpsTools {
       args.item_id,
     );
     if (kind === null) return { ok: false, reason: 'agent-inbox item not found in this workspace' };
+    const effective = await resolveEffectiveEntitlements(user as WithWorkspaceClaim, workspaceId);
     const gate =
       kind === AgentInboxKind.CLEANUP
-        ? checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId)
+        ? checkCleanerEntitlement(effective.entitlements, workspaceId)
         : kind === AgentInboxKind.NOTICE
           ? { allowed: true as const, reason: '' }
           : checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
@@ -941,11 +947,12 @@ export class EmailOpsTools {
     const kinds = await Promise.all(
       args.item_ids.map((itemId) => this.email.peekAgentInboxKind(workspaceId, uid, itemId)),
     );
+    const effective = await resolveEffectiveEntitlements(user as WithWorkspaceClaim, workspaceId);
     for (const kind of kinds) {
       if (kind === null) continue;
       const gate =
         kind === AgentInboxKind.CLEANUP
-          ? checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId)
+          ? checkCleanerEntitlement(effective.entitlements, workspaceId)
           : kind === AgentInboxKind.NOTICE
             ? { allowed: true as const, reason: '' }
             : checkComposeEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
@@ -1438,7 +1445,7 @@ export class ConnectedAccountsTools {
     args: { workspace_id?: string; provider: 'gmail' | 'microsoft' },
   ): Promise<unknown> {
     const workspaceId = await this.resolve(user, args.workspace_id);
-    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    const gate = await this.cleanerGate(user, workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
@@ -1450,7 +1457,7 @@ export class ConnectedAccountsTools {
     args: { workspace_id?: string; provider: 'gmail' | 'microsoft' },
   ): Promise<unknown> {
     const workspaceId = await this.resolve(user, args.workspace_id);
-    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    const gate = await this.cleanerGate(user, workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
@@ -1466,7 +1473,7 @@ export class ConnectedAccountsTools {
     },
   ): Promise<CleanupPlanResult> {
     const workspaceId = await this.resolve(user, args.workspace_id);
-    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    const gate = await this.cleanerGate(user, workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
@@ -1482,7 +1489,7 @@ export class ConnectedAccountsTools {
     },
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolve(user, args.workspace_id);
-    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    const gate = await this.cleanerGate(user, workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
@@ -1504,7 +1511,7 @@ export class ConnectedAccountsTools {
     },
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolve(user, args.workspace_id);
-    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    const gate = await this.cleanerGate(user, workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
@@ -1526,7 +1533,7 @@ export class ConnectedAccountsTools {
     },
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolve(user, args.workspace_id);
-    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    const gate = await this.cleanerGate(user, workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
@@ -1548,7 +1555,7 @@ export class ConnectedAccountsTools {
     },
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolve(user, args.workspace_id);
-    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    const gate = await this.cleanerGate(user, workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
@@ -1566,11 +1573,16 @@ export class ConnectedAccountsTools {
     args: { workspace_id?: string; provider: ConnectedProvider; batch_id: string },
   ): Promise<CleanupExecutionResult> {
     const workspaceId = await this.resolve(user, args.workspace_id);
-    const gate = checkCleanerEntitlement(entitlementsOf(user as WithWorkspaceClaim), workspaceId);
+    const gate = await this.cleanerGate(user, workspaceId);
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
     return this.connectedAccounts.undoBatch(user, args.provider, args.batch_id);
+  }
+
+  private async cleanerGate(user: User, workspaceId: string) {
+    const effective = await resolveEffectiveEntitlements(user as WithWorkspaceClaim, workspaceId);
+    return checkCleanerEntitlement(effective.entitlements, workspaceId);
   }
 
   private async resolve(user: User, requested?: string): Promise<string> {

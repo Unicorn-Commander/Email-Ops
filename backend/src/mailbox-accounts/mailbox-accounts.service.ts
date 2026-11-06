@@ -66,6 +66,15 @@ export class MailboxAccountsService {
     );
   }
 
+  /** Count only mailboxes hosted by the James/Stalwart lane for billing gates. */
+  async countHostedMailboxes(workspaceId: string, ucUid: string | null): Promise<number> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      tx.mailboxAccount.count({
+        where: { workspaceId, provider: { in: ['stalwart', 'james'] } },
+      }),
+    );
+  }
+
   async getMailbox(workspaceId: string, ucUid: string | null, id: string): Promise<MailboxView | null> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
