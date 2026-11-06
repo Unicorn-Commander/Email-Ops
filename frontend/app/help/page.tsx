@@ -851,8 +851,8 @@ function IntegrationsSection() {
       )}
       <P>
         <B>Or paste a token.</B> Create one under{' '}
-        <a className="text-accent hover:underline" href="/settings#api-tokens">
-          Settings → API tokens
+        <a className="text-accent hover:underline" href="/settings#agent-tokens">
+          Settings → Agent tokens
         </a>
         . It is shown once. Replace <Mono>eo_pat_…</Mono> in this command — do not leave the
         placeholder in place:
@@ -862,10 +862,10 @@ function IntegrationsSection() {
           {tokenCommand}
         </pre>
       ) : null}
-      <H3 id="pats">API tokens</H3>
+      <H3 id="pats">Agent tokens</H3>
       <P>
         An API token (<Mono>eo_pat_…</Mono>) is a long-lived credential for an agent or CLI that
-        cannot open a browser. Create and revoke tokens in{' '}
+        cannot open a browser. Create and revoke agent tokens in{' '}
         <a className="text-accent hover:underline" href="/settings">Settings</a>. The plaintext is
         shown once, then never again. Worth knowing:
       </P>
@@ -878,7 +878,12 @@ function IntegrationsSection() {
           Tokens carry scopes (for example <Mono>mail:read</Mono>, <Mono>mail:write</Mono>,{' '}
           <Mono>agent-inbox:read</Mono>, <Mono>agent-inbox:approve</Mono>, <Mono>cleaner:run</Mono>
           ). The suggested pair is <Mono>mail:read</Mono> and <Mono>agent-inbox:read</Mono>.{' '}
-          <Mono>mail:write</Mono> lets an agent send.
+          <Mono>mail:write</Mono> stages drafts and makes mail changes; sending through the agent
+          compose path also requires <Mono>agent-inbox:approve</Mono>.
+        </Li>
+        <Li>
+          Each token can use all of your current mailboxes or a selected mailbox list. A selected
+          mailbox you no longer own grants nothing.
         </Li>
         <Li>A new token expires. The default lifetime is 90 days, and 365 is the maximum.</Li>
       </Ul>

@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Badge, Button, Card, CardParts, Input, Skeleton } from '@/components/ui';
+import { ApiError } from '@/lib/api';
+import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
+import { listMailboxes, type MailboxView } from '@/lib/mailboxApi';
 import {
   DEFAULT_EXPIRES_IN_DAYS,
   DEFAULT_PAT_SCOPES,
@@ -13,6 +16,7 @@ import {
   buildCreatePatBody,
   isCreatePatBody,
   redactSecrets,
+  rowMailboxIds,
   rowExpiresAt,
   rowScopes,
 } from '@/lib/patForm';
@@ -24,11 +28,16 @@ import { CopyButton } from './CopyButton';
  * The plaintext is held only in `revealed` until the reader dismisses it.
  */
 export function ApiTokensCard() {
+  const { activeWorkspaceId } = useActiveWorkspace();
   const [items, setItems] = useState<PatListItem[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [humanOnly, setHumanOnly] = useState(false);
+  const [mailboxes, setMailboxes] = useState<MailboxView[] | null>(null);
+  const [mailboxLoadError, setMailboxLoadError] = useState<string | null>(null);
   const [remembered, setRemembered] = useState<Record<string, RememberedPatMeta>>({});
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState<PatScopeId[]>(DEFAULT_PAT_SCOPES);
+  const [mailboxIds, setMailboxIds] = useState<string[]>([]);
   const [expiresInDays, setExpiresInDays] = useState(String(DEFAULT_EXPIRES_IN_DAYS));
   const [formError, setFormError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -42,6 +51,10 @@ export function ApiTokensCard() {
       const next = await listPats();
       setItems(next);
     } catch (error) {
+      if (error instanceof ApiError && error.status === 403) {
+        setHumanOnly(true);
+        return;
+      }
       setItems([]);
       setLoadError(redactSecrets(error instanceof Error ? error.message : 'Could not load tokens.'));
     }
@@ -55,6 +68,10 @@ export function ApiTokensCard() {
       })
       .catch((error: unknown) => {
         if (!alive) return;
+        if (error instanceof ApiError && error.status === 403) {
+          setHumanOnly(true);
+          return;
+        }
         setItems([]);
         setLoadError(redactSecrets(error instanceof Error ? error.message : 'Could not load tokens.'));
       });
@@ -63,10 +80,48 @@ export function ApiTokensCard() {
     };
   }, []);
 
+  useEffect(() => {
+    let alive = true;
+    setMailboxLoadError(null);
+    if (!activeWorkspaceId) {
+      setMailboxes([]);
+      return () => {
+        alive = false;
+      };
+    }
+    setMailboxes(null);
+    void listMailboxes(activeWorkspaceId)
+      .then((result) => {
+        if (alive) setMailboxes(result.items ?? []);
+      })
+      .catch((error: unknown) => {
+        if (!alive) return;
+        setMailboxes([]);
+        setMailboxLoadError(
+          redactSecrets(error instanceof Error ? error.message : 'Could not load mailboxes.'),
+        );
+      });
+    return () => {
+      alive = false;
+    };
+  }, [activeWorkspaceId]);
+
   function toggleScope(id: PatScopeId) {
     setScopes((current) =>
       current.includes(id) ? current.filter((scope) => scope !== id) : [...current, id],
     );
+  }
+
+  function toggleMailbox(id: string) {
+    setMailboxIds((current) => {
+      // Empty is the intentional "all mailboxes" value. Selecting one from
+      // that state starts a scoped allowlist; clearing the last one returns to
+      // the safe, backwards-compatible all-mailboxes default.
+      if (current.length === 0) return [id];
+      return current.includes(id)
+        ? current.filter((mailboxId) => mailboxId !== id)
+        : [...current, id];
+    });
   }
 
   async function onCreate() {
@@ -75,7 +130,12 @@ export function ApiTokensCard() {
       return;
     }
     const parsedDays = /^\d+$/.test(expiresInDays.trim()) ? Number(expiresInDays.trim()) : Number.NaN;
-    const body = buildCreatePatBody({ name, scopes, expiresInDays: parsedDays });
+    const body = buildCreatePatBody({
+      name,
+      scopes,
+      expiresInDays: parsedDays,
+      mailboxIds,
+    });
     if (!isCreatePatBody(body)) {
       setFormError(body.error);
       return;
@@ -93,11 +153,13 @@ export function ApiTokensCard() {
         [created.id]: {
           scopes: Array.isArray(created.scopes) ? created.scopes : body.scopes,
           expires_at: typeof created.expires_at === 'string' ? created.expires_at : null,
+          mailbox_ids: Array.isArray(created.mailbox_ids) ? created.mailbox_ids : mailboxIds,
         },
       }));
       setRevealed({ token: created.token, name: created.name || body.name });
       setName('');
       setScopes(DEFAULT_PAT_SCOPES);
+      setMailboxIds([]);
       setExpiresInDays(String(DEFAULT_EXPIRES_IN_DAYS));
       await load();
     } catch (error) {
@@ -133,14 +195,18 @@ export function ApiTokensCard() {
     return String(b.created_at ?? '').localeCompare(String(a.created_at ?? ''));
   });
 
+  // /auth/pats is deliberately human-session-only. A PAT-authenticated
+  // browser sees no mint/list/revoke controls, even if it navigates here.
+  if (humanOnly) return null;
+
   return (
-    <Card id="api-tokens">
+    <Card id="agent-tokens">
       <CardParts.Header>
         <div>
-          <CardParts.Title className="text-base">API tokens</CardParts.Title>
+          <CardParts.Title className="text-base">Agent tokens</CardParts.Title>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-tertiary">
-            A token lets an agent act as you until it expires or you revoke it. The value is shown
-            once. A token cannot mint or revoke other tokens.
+            Create a human-session token for an agent. Choose its scopes and mailbox access; the
+            value is shown once. A token cannot mint or revoke other tokens.
           </p>
         </div>
       </CardParts.Header>
@@ -206,6 +272,66 @@ export function ApiTokensCard() {
           </p>
 
           <fieldset className="space-y-2">
+            <legend className="text-[11px] font-medium text-tertiary">Mailbox access</legend>
+            <p className="text-[11px] leading-5 text-tertiary">
+              All mailboxes is the default. A selected list is intersected with the mailboxes you
+              still own each request, so removing access takes effect immediately.
+            </p>
+            {mailboxLoadError ? (
+              <p className="text-sm text-danger">{mailboxLoadError}</p>
+            ) : mailboxes === null ? (
+              <p className="text-sm text-tertiary">Loading mailboxes…</p>
+            ) : (
+              <div className="space-y-2">
+                <label className="flex items-start gap-2 rounded-token border border-subtle bg-surface-base px-3 py-2 text-sm text-secondary">
+                  <input
+                    id="pat-mailbox-all"
+                    type="checkbox"
+                    className="mt-1"
+                    checked={mailboxIds.length === 0}
+                    onChange={() => setMailboxIds([])}
+                  />
+                  <span>
+                    <span className="block font-medium text-primary">All current mailboxes</span>
+                    <span className="mt-0.5 block text-[12px] leading-5 text-tertiary">
+                      Unscoped legacy behavior for this user.
+                    </span>
+                  </span>
+                </label>
+                {mailboxes.length === 0 ? (
+                  <p className="text-sm text-tertiary">No mailboxes are available in this organization.</p>
+                ) : (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {mailboxes.map((mailbox) => (
+                      <label
+                        key={mailbox.id}
+                        className="flex items-start gap-2 rounded-token border border-subtle bg-surface-base px-3 py-2 text-sm text-secondary"
+                      >
+                        <input
+                          type="checkbox"
+                          className="mt-1"
+                          checked={mailboxIds.includes(mailbox.id)}
+                          onChange={() => toggleMailbox(mailbox.id)}
+                        />
+                        <span className="min-w-0">
+                          <span className="block truncate font-medium text-primary">
+                            {mailbox.email_address}
+                          </span>
+                          {mailbox.display_name && (
+                            <span className="mt-0.5 block truncate text-[12px] leading-5 text-tertiary">
+                              {mailbox.display_name}
+                            </span>
+                          )}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </fieldset>
+
+          <fieldset className="space-y-2">
             <legend className="text-[11px] font-medium text-tertiary">Scopes</legend>
             <div className="grid gap-2 sm:grid-cols-2">
               {PAT_SCOPES.map((scope) => (
@@ -231,7 +357,8 @@ export function ApiTokensCard() {
 
           {sendEnabled && (
             <p role="note" className="rounded-token border border-warning/40 bg-warning-subtle px-3 py-2 text-sm leading-6 text-secondary">
-              mail:write lets an agent send mail. Leave it off unless you want that.
+              mail:write lets an agent stage drafts and make mail changes. Sending through the agent
+              compose path also requires agent-inbox:approve.
             </p>
           )}
 
@@ -264,6 +391,7 @@ export function ApiTokensCard() {
                 <TokenRow
                   key={item.id}
                   item={item}
+                  mailboxes={mailboxes ?? []}
                   remembered={remembered[item.id]}
                   confirming={confirmId === item.id}
                   busy={revokingId === item.id}
@@ -282,6 +410,7 @@ export function ApiTokensCard() {
 
 function TokenRow({
   item,
+  mailboxes,
   remembered,
   confirming,
   busy,
@@ -290,6 +419,7 @@ function TokenRow({
   onRevoke,
 }: {
   item: PatListItem;
+  mailboxes: MailboxView[];
   remembered?: RememberedPatMeta;
   confirming: boolean;
   busy: boolean;
@@ -299,6 +429,10 @@ function TokenRow({
 }) {
   const revoked = Boolean(item.revoked_at);
   const scopes = rowScopes(item, remembered);
+  const mailboxScope = rowMailboxIds(item, remembered);
+  const mailboxNames = mailboxScope
+    .map((id) => mailboxes.find((mailbox) => mailbox.id === id)?.email_address)
+    .filter((address): address is string => Boolean(address));
   const expires = formatWhen(rowExpiresAt(item, remembered));
   const created = formatWhen(item.created_at);
   const lastUsed = item.last_used_at === undefined ? null : formatWhen(item.last_used_at);
@@ -342,6 +476,16 @@ function TokenRow({
                 <dd className="inline text-secondary">{lastUsed}</dd>
               </div>
             )}
+            <div>
+              <dt className="inline">Mailboxes </dt>
+              <dd className="inline text-secondary">
+                {mailboxScope.length === 0
+                  ? 'All current mailboxes'
+                  : mailboxNames.length === mailboxScope.length
+                    ? mailboxNames.join(', ')
+                    : `${mailboxScope.length} selected mailbox${mailboxScope.length === 1 ? '' : 'es'}`}
+              </dd>
+            </div>
             {item.last_used_at === null && (
               <div>
                 <dt className="inline">Last used </dt>

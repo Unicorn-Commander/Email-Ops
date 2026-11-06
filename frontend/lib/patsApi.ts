@@ -14,6 +14,7 @@ export interface CreatedPat {
   token: string;
   token_prefix: string;
   scopes: string[];
+  mailbox_ids: string[];
   expires_at: string;
   created_at: string;
 }
