@@ -5,6 +5,7 @@ import { withMailboxPrincipalScope } from '../common/mailbox/mailbox-principal';
 import { MailDomainService } from '../mail-engine-admin/mail-domain.service';
 import { DEFAULT_MAILBOX_QUOTA_BYTES } from '../mail-engine-admin/mail-engine-admin.constants';
 import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
+import { MailboxAccountsService } from '../mailbox-accounts/mailbox-accounts.service';
 import { EmailOpsTools } from './mcp.tools';
 
 describe('EmailOpsTools mail-engine admin tenancy', () => {
@@ -70,8 +71,8 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
   } as unknown as MailDomainService;
 
   const mailboxes = {
-    listMailboxes: jest.fn().mockResolvedValue([{ email_address: 'alice@owned.test' }]),
-  };
+    listMailboxes: jest.fn(),
+  } as unknown as MailboxAccountsService;
 
   function makeTools(): EmailOpsTools {
     return new EmailOpsTools(
@@ -80,7 +81,7 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
       {} as never,
       {} as never,
       {} as never,
-      mailboxes as never,
+      mailboxes,
       {} as never,
       {} as never,
       admin,
@@ -108,7 +109,14 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
     (mailDomains.listDomains as jest.Mock).mockResolvedValue([binding]);
     (mailDomains.assertWorkspaceOwnsDomain as jest.Mock).mockResolvedValue(binding);
     (mailboxes.listMailboxes as jest.Mock).mockResolvedValue([
-      { email_address: 'alice@owned.test' },
+      {
+        id: 'mailbox-alice',
+        email_address: 'alice@owned.test',
+        display_name: 'Alice Example',
+        provider: 'james',
+        owner_kind: 'HUMAN',
+        is_default: true,
+      },
     ]);
   });
 
@@ -135,9 +143,19 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
       }],
     });
     await expect(makeTools().listMailAccounts(user, {})).resolves.toEqual({
-      accounts: [{ address: 'alice@owned.test' }],
+      accounts: [
+        {
+          id: 'mailbox-alice',
+          address: 'alice@owned.test',
+          display_name: 'Alice Example',
+          provider: 'james',
+          role: 'human',
+          is_default: true,
+        },
+      ],
     });
     expect(mailDomains.listDomains).toHaveBeenCalledWith('ws-1', 'uc-user-1');
+    expect(mailboxes.listMailboxes).toHaveBeenCalledWith('ws-1', 'uc-user-1');
   });
 
   it('filters engine accounts through a scoped PAT mailbox allowlist', async () => {
@@ -148,7 +166,16 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
 
     await withMailboxPrincipalScope(['mailbox-alice'], async () => {
       await expect(makeTools().listMailAccounts(user, {})).resolves.toEqual({
-        accounts: [{ address: 'alice@owned.test' }],
+        accounts: [
+          {
+            id: 'mailbox-alice',
+            address: 'alice@owned.test',
+            display_name: 'Alice Example',
+            provider: 'james',
+            role: 'human',
+            is_default: true,
+          },
+        ],
       });
     });
     expect(mailboxes.listMailboxes).toHaveBeenCalledWith('ws-1', 'uc-user-1');

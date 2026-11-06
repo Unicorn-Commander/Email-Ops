@@ -544,6 +544,27 @@ export class EmailService {
     return mailbox;
   }
 
+  /** Resolve an address through the same workspace + per-user mailbox fence. */
+  private async mailboxForCallerByAddressInTx(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxAddress: string,
+  ): Promise<MailboxAccount | null> {
+    const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+    const mailbox = await tx.mailboxAccount.findFirst({
+      where: {
+        workspaceId,
+        emailAddress: { equals: mailboxAddress, mode: 'insensitive' },
+      },
+    });
+    if (!mailbox) return null;
+    if (scope.governed && !scope.ids.includes(mailbox.id))
+      throw new NotFoundException('mailbox_not_found');
+    if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return null;
+    return mailbox;
+  }
+
   // ── 1. list_threads_with_contact ───────────────────────────────────────
 
   /**
@@ -845,15 +866,14 @@ export class EmailService {
         return this.overlayFilterThreads(tx, workspaceId, live, folder);
       }
 
-      // The message scope per folder. Disposition folders look at every thread
-      // the mailbox participates in (received + sent) and are then narrowed by
-      // the overlay; sent/drafts derive purely from the SoR direction/status.
-      const scope: Prisma.EmailMessageWhereInput =
-        folder === 'sent'
-          ? { fromAddress: addr, direction: EmailDirection.SENT }
-          : folder === 'drafts'
-            ? { fromAddress: addr, status: EmailMessageStatus.DRAFT }
-            : { OR: [{ fromAddress: addr }, { toAddress: addr }] };
+      // Folder membership is a MESSAGE property. Load every SoR message the
+      // mailbox participates in, then keep a thread when at least one message
+      // belongs to the requested folder. In particular, an outbound SENT-only
+      // thread is not an Inbox thread merely because its address appears in the
+      // thread's participants; a mixed received+sent thread remains in Inbox.
+      const scope: Prisma.EmailMessageWhereInput = {
+        OR: [{ fromAddress: addr }, { toAddress: addr }],
+      };
 
       const msgs = await tx.emailMessage.findMany({
         where: { workspaceId, threadId: { not: null }, ...scope },
@@ -870,6 +890,12 @@ export class EmailService {
           last: Date;
           snippet: string | null;
           participants: Set<string>;
+          messages: {
+            direction: EmailDirection;
+            status: EmailMessageStatus;
+            fromAddress: string | null;
+            toAddress: string | null;
+          }[];
         }
       >();
       for (const m of msgs) {
@@ -884,9 +910,23 @@ export class EmailService {
             last: when,
             snippet: m.preview ?? this.snippet(m.body),
             participants: new Set([m.toAddress].filter((a): a is string => !!a)),
+            messages: [
+              {
+                direction: m.direction,
+                status: m.status,
+                fromAddress: m.fromAddress,
+                toAddress: m.toAddress,
+              },
+            ],
           });
         } else {
           cur.count += 1;
+          cur.messages.push({
+            direction: m.direction,
+            status: m.status,
+            fromAddress: m.fromAddress,
+            toAddress: m.toAddress,
+          });
           if (m.toAddress) cur.participants.add(m.toAddress);
           if (when.getTime() > cur.last.getTime()) {
             cur.last = when;
@@ -911,6 +951,21 @@ export class EmailService {
 
       const visible = sorted.filter((t) => {
         const d = effective(t.id);
+        const hasInboxMessage = t.messages.some(
+          (message) =>
+            message.direction === EmailDirection.RECEIVED &&
+            message.toAddress?.toLowerCase() === addr.toLowerCase(),
+        );
+        const hasSentMessage = t.messages.some(
+          (message) =>
+            message.direction === EmailDirection.SENT &&
+            message.fromAddress?.toLowerCase() === addr.toLowerCase(),
+        );
+        const hasDraftMessage = t.messages.some(
+          (message) =>
+            (message.direction === EmailDirection.DRAFT || message.status === EmailMessageStatus.DRAFT) &&
+            message.fromAddress?.toLowerCase() === addr.toLowerCase(),
+        );
         switch (folder) {
           case 'archive':
             return d === MessageDisposition.ARCHIVE;
@@ -919,10 +974,15 @@ export class EmailService {
           case 'trash':
             return d === MessageDisposition.TRASH;
           case 'inbox':
-            // Inbox hides anything triaged out (archive / trash / spam).
-            return d === MessageDisposition.INBOX;
+            // Inbox hides anything triaged out (archive / trash / spam) and
+            // requires an actual received message in this mailbox.
+            return d === MessageDisposition.INBOX && hasInboxMessage;
+          case 'sent':
+            return hasSentMessage;
+          case 'drafts':
+            return hasDraftMessage;
           default:
-            return true; // sent / drafts: not disposition-filtered.
+            return true;
         }
       });
 
@@ -1884,6 +1944,25 @@ export class EmailService {
   }
 
   /** Resolve a mailbox by id inside the workspace + apply the member scope. */
+  async resolveMailboxIdForCaller(
+    workspaceId: string,
+    ucUid: string | null,
+    mailboxId?: string,
+    mailboxAddress?: string,
+  ): Promise<string | null> {
+    const id = mailboxId?.trim();
+    const address = mailboxAddress?.trim();
+    if (!id && !address) return null;
+
+    const mailbox = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
+      id
+        ? this.mailboxForCallerInTx(tx, workspaceId, ucUid, id)
+        : this.mailboxForCallerByAddressInTx(tx, workspaceId, ucUid, address!),
+    );
+    if (!mailbox) throw new NotFoundException('mailbox_not_found');
+    return mailbox.id;
+  }
+
   private async resolveMailboxForCaller(
     workspaceId: string,
     ucUid: string | null,
