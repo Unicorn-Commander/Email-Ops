@@ -75,6 +75,38 @@ describe('Brigade federation manifest (.well-known/mcps.json)', () => {
     }
   });
 
+  it('advertises the mailbox, folder, domain, and compose contracts shipped on 2026-11-06', () => {
+    const byName = new Map(
+      (manifest.tools as {
+        name: string;
+        description: string;
+        input_schema: { properties: Record<string, unknown> };
+      }[]).map((t) => [t.name, t]),
+    );
+    for (const name of ['list_threads', 'search_mail']) {
+      const tool = byName.get(name);
+      expect(tool?.description).toContain('mailbox_address');
+      expect(tool?.description).toContain('mailbox_id wins when both are passed');
+      expect(tool?.input_schema.properties).toHaveProperty('mailbox_address');
+    }
+    const folder = byName.get('create_folder')?.description ?? '';
+    expect(folder).toContain('{ id, created:true }');
+    expect(folder).toContain('rather than a silent created:false');
+    const remove = byName.get('remove_mail_domain')?.description ?? '';
+    expect(remove).toContain('409');
+    expect(remove).toContain('{ mailboxes }');
+    expect(remove).toContain('claim row');
+    const compose = byName.get('compose_email')?.description ?? '';
+    expect(compose).toContain('You are not allowed to send as that mailbox.');
+    expect(compose).toContain('no from_address');
+    const standing = byName.get('request_standing_approval')?.description ?? '';
+    expect(standing).toContain('PENDING_HUMAN');
+    expect(standing).toContain('human-only');
+    const accounts = byName.get('list_mail_accounts')?.description ?? '';
+    expect(accounts).toContain('is_default');
+    expect(accounts).not.toContain('{ address }');
+  });
+
   it('bundles a backend catalog copy that is identical to the static manifest (no drift)', () => {
     // The backend image ships only dist/ (no frontend static file), so the per-env
     // manifest route (mcp-manifest.controller.ts) serves the bundled
