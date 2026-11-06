@@ -166,7 +166,16 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
 
     await withMailboxPrincipalScope(['mailbox-alice'], async () => {
       await expect(makeTools().listMailAccounts(user, {})).resolves.toEqual({
-        accounts: [{ address: 'alice@owned.test' }],
+        accounts: [
+          {
+            id: 'mailbox-alice',
+            address: 'alice@owned.test',
+            display_name: 'Alice Example',
+            provider: 'james',
+            role: 'human',
+            is_default: true,
+          },
+        ],
       });
     });
     expect(mailboxes.listMailboxes).toHaveBeenCalledWith('ws-1', 'uc-user-1');
