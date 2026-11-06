@@ -1,4 +1,9 @@
-import { ScheduledSendState, SnoozedThreadState } from '@prisma/client';
+import {
+  AgentInboxState,
+  EmailMessageStatus,
+  ScheduledSendState,
+  SnoozedThreadState,
+} from '@prisma/client';
 import { EmailService } from '../email/email.service';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { PrismaService } from '../prisma/prisma.service';
@@ -423,5 +428,261 @@ describe('SchedulingService', () => {
     expect(second).toEqual({ snoozes: 0, scheduledSends: 0 });
     expect(firstOut).toEqual({ snoozes: 1, scheduledSends: 1 });
     expect(service.surfaceDueSnoozes).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires the due agent-inbox rows and skips older, future, and already-sent rows', async () => {
+    const now = new Date('2026-11-06T17:40:00.000Z');
+    const dueApprovedAt = new Date('2026-11-06T17:37:00.000Z');
+    const duePendingAt = new Date('2026-11-06T17:39:30.000Z');
+    const futureAt = new Date('2026-11-06T18:00:00.000Z');
+    const sentAt = new Date('2026-11-06T17:30:00.000Z');
+
+    function inboxRow(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'item-1',
+        workspaceId: WS,
+        state: AgentInboxState.APPROVED,
+        reviewedByUcUid: UC,
+        payload: {},
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        message: {
+          mailboxAccountId: 'mb-1',
+          status: EmailMessageStatus.PENDING_APPROVAL,
+          sendAt: null as Date | null,
+        },
+        ...overrides,
+      };
+    }
+
+    const oldRows = Array.from({ length: 200 }, (_, index) =>
+      inboxRow({
+        id: `old-${index}`,
+        createdAt: new Date(Date.UTC(2025, 0, 1, 0, index, 0)),
+        payload: { agent_principal: true },
+        message: {
+          mailboxAccountId: 'mb-old',
+          status: EmailMessageStatus.PENDING_APPROVAL,
+          sendAt: null,
+        },
+      }),
+    );
+    const dueApproved = inboxRow({
+      id: 'due-approved',
+      reviewedByUcUid: UC,
+      createdAt: new Date('2026-11-06T17:37:05.000Z'),
+      payload: {
+        sends_at: dueApprovedAt.toISOString(),
+        agent_principal: false,
+      },
+      message: {
+        mailboxAccountId: 'mb-due-a',
+        status: EmailMessageStatus.PENDING_APPROVAL,
+        sendAt: dueApprovedAt,
+      },
+    });
+    const duePending = inboxRow({
+      id: 'due-pending',
+      state: AgentInboxState.PENDING,
+      reviewedByUcUid: null,
+      createdAt: new Date('2026-11-06T17:39:35.000Z'),
+      payload: { sends_at: duePendingAt.toISOString() },
+      message: {
+        mailboxAccountId: 'mb-due-b',
+        status: EmailMessageStatus.PENDING_APPROVAL,
+        sendAt: duePendingAt,
+      },
+    });
+    const future = inboxRow({
+      id: 'future',
+      createdAt: new Date('2026-11-06T17:41:00.000Z'),
+      payload: { sends_at: futureAt.toISOString(), agent_principal: true },
+      message: {
+        mailboxAccountId: 'mb-future',
+        status: EmailMessageStatus.PENDING_APPROVAL,
+        sendAt: futureAt,
+      },
+    });
+    const alreadySent = inboxRow({
+      id: 'already-sent',
+      createdAt: new Date('2026-11-06T17:30:05.000Z'),
+      payload: { sends_at: sentAt.toISOString(), agent_principal: true },
+      message: {
+        mailboxAccountId: 'mb-sent',
+        status: EmailMessageStatus.SENT,
+        sendAt: sentAt,
+      },
+    });
+    const fixture = [...oldRows, alreadySent, future, duePending, dueApproved];
+
+    const findMany = jest.fn(
+      async (args: {
+        where?: {
+          state?: { in?: string[] } | string;
+          message?: {
+            is?: { status?: string; sendAt?: { lte?: Date } };
+            status?: string;
+            sendAt?: { lte?: Date };
+          };
+        };
+        orderBy?: { createdAt?: 'asc' | 'desc'; message?: { sendAt?: 'asc' | 'desc' } };
+        take?: number;
+      }) => {
+        const where = args.where ?? {};
+        let rows = fixture.slice();
+        const stateIn =
+          typeof where.state === 'object' && where.state ? where.state.in : undefined;
+        const stateEq = typeof where.state === 'string' ? where.state : undefined;
+        if (stateIn) rows = rows.filter((row) => stateIn.includes(row.state));
+        else if (stateEq) rows = rows.filter((row) => row.state === stateEq);
+
+        const messageFilter = where.message?.is ?? where.message;
+        if (messageFilter && (messageFilter.status || messageFilter.sendAt)) {
+          rows = rows.filter((row) => {
+            const message = row.message;
+            if (!message) return false;
+            if (messageFilter.status && message.status !== messageFilter.status) return false;
+            const lte = messageFilter.sendAt?.lte;
+            if (
+              lte &&
+              (!(message.sendAt instanceof Date) || message.sendAt.getTime() > lte.getTime())
+            ) {
+              return false;
+            }
+            return true;
+          });
+        }
+
+        if (args.orderBy?.createdAt === 'asc') {
+          rows.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        } else if (args.orderBy?.message?.sendAt === 'asc') {
+          rows.sort((a, b) => {
+            const aAt =
+              a.message?.sendAt instanceof Date
+                ? a.message.sendAt.getTime()
+                : Number.POSITIVE_INFINITY;
+            const bAt =
+              b.message?.sendAt instanceof Date
+                ? b.message.sendAt.getTime()
+                : Number.POSITIVE_INFINITY;
+            return aAt - bAt;
+          });
+        }
+        return rows.slice(0, args.take ?? rows.length);
+      },
+    );
+    const { service, email } = make({
+      systemClient: { agentInboxItem: { findMany } },
+    });
+    email.approveAgentInboxItem = jest.fn().mockResolvedValue({
+      inbox: { state: 'approved' },
+      message: { status: 'sent' },
+    });
+    const log = jest
+      .spyOn((service as unknown as { logger: { log: (m: string) => void } }).logger, 'log')
+      .mockImplementation(() => undefined);
+
+    const fired = await service.fireDueAgentInboxSends(now);
+
+    expect(fired).toBe(2);
+    expect(findMany).toHaveBeenCalledWith({
+      where: {
+        state: { in: [AgentInboxState.APPROVED, AgentInboxState.PENDING] },
+        message: {
+          is: {
+            status: EmailMessageStatus.PENDING_APPROVAL,
+            sendAt: { lte: now },
+          },
+        },
+      },
+      orderBy: { message: { sendAt: 'asc' } },
+      take: 50,
+      select: {
+        id: true,
+        workspaceId: true,
+        reviewedByUcUid: true,
+        payload: true,
+        message: { select: { mailboxAccountId: true, sendAt: true } },
+      },
+    });
+    expect(email.approveAgentInboxItem).toHaveBeenCalledTimes(2);
+    expect(email.approveAgentInboxItem).toHaveBeenNthCalledWith(
+      1,
+      WS,
+      UC,
+      'due-approved',
+      'scheduled send',
+      false,
+      false,
+    );
+    expect(email.approveAgentInboxItem).toHaveBeenNthCalledWith(
+      2,
+      WS,
+      null,
+      'due-pending',
+      'scheduled send',
+      false,
+      true,
+    );
+    expect((email.approveAgentInboxItem as jest.Mock).mock.calls.map((call) => call[2])).toEqual([
+      'due-approved',
+      'due-pending',
+    ]);
+    expect(log).toHaveBeenCalledWith(
+      'deferred agent send fired item=due-approved mailbox=mb-due-a sendAt=2026-11-06T17:37:00.000Z status=sent',
+    );
+    expect(log).toHaveBeenCalledWith(
+      'deferred agent send fired item=due-pending mailbox=mb-due-b sendAt=2026-11-06T17:39:30.000Z status=sent',
+    );
+    log.mockRestore();
+  });
+
+  it('warns and continues when one deferred agent send fails', async () => {
+    const now = new Date('2026-11-06T17:40:00.000Z');
+    const firstAt = new Date('2026-11-06T17:37:00.000Z');
+    const secondAt = new Date('2026-11-06T17:38:00.000Z');
+    const rows = [
+      {
+        id: 'due-fail',
+        workspaceId: WS,
+        state: AgentInboxState.APPROVED,
+        reviewedByUcUid: UC,
+        createdAt: firstAt,
+        payload: { sends_at: firstAt.toISOString(), agent_principal: true },
+        message: {
+          mailboxAccountId: 'mb-fail',
+          status: EmailMessageStatus.PENDING_APPROVAL,
+          sendAt: firstAt,
+        },
+      },
+      {
+        id: 'due-ok',
+        workspaceId: WS,
+        state: AgentInboxState.APPROVED,
+        reviewedByUcUid: UC,
+        createdAt: secondAt,
+        payload: { sends_at: secondAt.toISOString(), agent_principal: true },
+        message: {
+          mailboxAccountId: 'mb-ok',
+          status: EmailMessageStatus.PENDING_APPROVAL,
+          sendAt: secondAt,
+        },
+      },
+    ];
+    const findMany = jest.fn(async () => rows);
+    const { service, email } = make({ systemClient: { agentInboxItem: { findMany } } });
+    email.approveAgentInboxItem = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('engine down'))
+      .mockResolvedValueOnce({ inbox: { state: 'approved' }, message: { status: 'sent' } });
+    const warn = jest
+      .spyOn((service as unknown as { logger: { warn: (m: string) => void } }).logger, 'warn')
+      .mockImplementation(() => undefined);
+
+    const fired = await service.fireDueAgentInboxSends(now);
+
+    expect(fired).toBe(1);
+    expect(email.approveAgentInboxItem).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith('deferred agent send failed row=due-fail: engine down');
+    warn.mockRestore();
   });
 });

@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
   AgentInboxState,
+  EmailMessageStatus,
   MailboxAccount,
   Prisma,
   ScheduledSend,
@@ -328,12 +329,38 @@ export class SchedulingService {
     return sent;
   }
 
-  /** Auto-approve deferred agent drafts at sends_at; rejection removes them from this set. */
+  /**
+   * Send deferred agent drafts whose staged message is due.
+   *
+   * Compose stores sendAt and payload.sends_at while the item is still PENDING.
+   * Bulk approval moves the item to APPROVED, rewrites that pair, and leaves the
+   * message PENDING_APPROVAL. The due set is the message clock: the oldest inbox
+   * rows have no schedule, and a createdAt window never reaches today's sends.
+   * payload.sends_at is checked again below so a sendAt without a payload
+   * schedule is not fired. Rejection drops the item out of this state set.
+   */
   async fireDueAgentInboxSends(now = new Date(), take = 50): Promise<number> {
     const rows = await this.prisma.systemClient.agentInboxItem.findMany({
-      where: { state: { in: [AgentInboxState.PENDING, AgentInboxState.APPROVED] } },
-      take: take * 3,
-      orderBy: { createdAt: 'asc' },
+      where: {
+        // PENDING: compose deferred the draft. APPROVED: bulk approval paced it
+        // and the message has not been handed to the engine yet.
+        state: { in: [AgentInboxState.APPROVED, AgentInboxState.PENDING] },
+        message: {
+          is: {
+            status: EmailMessageStatus.PENDING_APPROVAL,
+            sendAt: { lte: now },
+          },
+        },
+      },
+      orderBy: { message: { sendAt: 'asc' } },
+      take,
+      select: {
+        id: true,
+        workspaceId: true,
+        reviewedByUcUid: true,
+        payload: true,
+        message: { select: { mailboxAccountId: true, sendAt: true } },
+      },
     });
     let sent = 0;
     for (const row of rows) {
@@ -343,7 +370,13 @@ export class SchedulingService {
           ? (payload as Record<string, unknown>)
           : {};
       const raw = payloadObject.sends_at;
-      if (typeof raw !== 'string' || !Number.isFinite(new Date(raw).getTime()) || new Date(raw) > now) continue;
+      if (
+        typeof raw !== 'string' ||
+        !Number.isFinite(new Date(raw).getTime()) ||
+        new Date(raw) > now
+      ) {
+        continue;
+      }
       try {
         const result = await this.email.approveAgentInboxItem(
           row.workspaceId,
@@ -353,7 +386,16 @@ export class SchedulingService {
           false,
           payloadObject.agent_principal !== false,
         );
-        if (result) sent += 1;
+        if (result) {
+          sent += 1;
+          const sendAt =
+            row.message?.sendAt instanceof Date ? row.message.sendAt.toISOString() : raw;
+          const mailboxId = row.message?.mailboxAccountId ?? 'none';
+          this.logger.log(
+            `deferred agent send fired item=${row.id} mailbox=${mailboxId} ` +
+              `sendAt=${sendAt} status=${result.message?.status ?? 'none'}`,
+          );
+        }
       } catch (err) {
         this.logger.warn(`deferred agent send failed row=${row.id}: ${(err as Error).message}`);
       }
