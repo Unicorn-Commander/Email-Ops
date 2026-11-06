@@ -16,6 +16,10 @@ export interface StandingApproval {
   expiresAt: string;
   approvedAt: string | null;
   revokedAt: string | null;
+  /** Derived from approvedAt/revokedAt. A pending row grants nothing. */
+  status?: "PENDING_HUMAN" | "APPROVED" | "REVOKED";
+  /** Set when an agent principal staged the request. */
+  requestedBy?: string | null;
   approval_url: string | null;
   usedToday: number;
 }
@@ -70,6 +74,7 @@ export const requestStandingApproval = (
     mailbox_id: string;
     subject: string;
     body_template: string;
+    placeholder_rules?: Record<string, string>;
     cap_per_day: number;
     expires_at: string;
     recipient_rules: { blockedDomains: string[]; allowedDomains: string[] };
