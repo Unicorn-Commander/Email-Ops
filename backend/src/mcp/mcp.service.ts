@@ -943,7 +943,8 @@ export class McpService {
       'request_standing_approval',
       {
         title: 'Request standing campaign approval',
-        description: 'Human session only. Stage an immutable campaign request for review; renewal or widening requires a new request and human approval.',
+        description:
+          'Stage an immutable campaign request for a human to approve. An agent principal may create it as PENDING_HUMAN; that request grants nothing until a human approves it. Renewal or widening requires a new request. Approve and revoke stay human-only.',
         inputSchema: {
           workspace_id: z.string().optional(), campaign_key: z.string().min(1).max(200),
           mailbox_id: z.string().min(1).max(200), body_template: z.string().min(1).max(100000),

@@ -1798,6 +1798,9 @@ model StandingApproval {
   capPerDay Int
   expiresAt DateTime
   createdBy String
+  // Set when an agent principal staged the row. Null for a human-created request.
+  // Pending is still approvedAt = null (status PENDING_HUMAN); this does not grant a send.
+  requestedBy String?
   createdAt DateTime @default(now())
   approvedBy String?
   approvedAt DateTime?
