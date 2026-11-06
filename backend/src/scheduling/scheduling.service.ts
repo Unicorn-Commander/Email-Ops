@@ -370,7 +370,13 @@ export class SchedulingService {
           ? (payload as Record<string, unknown>)
           : {};
       const raw = payloadObject.sends_at;
-      if (typeof raw !== 'string' || !Number.isFinite(new Date(raw).getTime()) || new Date(raw) > now) continue;
+      if (
+        typeof raw !== 'string' ||
+        !Number.isFinite(new Date(raw).getTime()) ||
+        new Date(raw) > now
+      ) {
+        continue;
+      }
       try {
         const result = await this.email.approveAgentInboxItem(
           row.workspaceId,
