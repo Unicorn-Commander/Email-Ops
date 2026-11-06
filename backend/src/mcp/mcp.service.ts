@@ -446,6 +446,9 @@ export class McpService {
           'Microsoft Graph, Gmail through the Gmail API, sovereign domains through Apache ' +
           'James (Postmark for the transactional high-rep lane). Omit from_address to use ' +
           'the agent’s own mailbox or the workspace default, as before. ' +
+          'A human caller may not pass from_address for an AGENT mailbox: the call is ' +
+          'refused with "You are not allowed to send as that mailbox." The agent-origin ' +
+          'path is external_source set to the agent key and no from_address. ' +
           'ATTACHMENTS: optional attachments are either {documentId} for an Email-Ops-stored document the caller may read, or ' +
           '{filename, contentType, contentBase64}. Defaults are at most 5 files, 10 MiB per file, 20 MiB total, and ' +
           'pdf/png/jpg/txt/csv/md/docx/xlsx; EMAIL_OPS_ATTACHMENT_* settings may tighten or extend these. ' +
@@ -504,7 +507,7 @@ export class McpService {
         title: 'List mailbox threads',
         description:
           'List the THREADS in a mailbox folder (inbox/archive/spam/trash/sent/drafts). ' +
-          'Pass either mailbox_id or mailbox_address for ONE mailbox; omit both for the UNIFIED inbox across every ' +
+          'Pass either mailbox_id or mailbox_address for ONE mailbox; mailbox_id wins when both are passed. Omit both for the UNIFIED inbox across every ' +
           'mailbox the caller can read (each thread then carries mailbox_id + ' +
           'mailbox_address). Optional q (full-text), limit (≤200, default 50), offset ' +
           '(paging). Read-only / member-level. Returns { threads, count, folder } — an ' +
@@ -573,7 +576,7 @@ export class McpService {
           'Full-text SEARCH a mailbox folder by query string q (subject/body/participants), ' +
           'applied through each provider’s native search — sovereign James, Gmail q, and ' +
           'Microsoft Graph $search for CONNECTED external accounts. Pass either mailbox_id or mailbox_address for ONE ' +
-          'mailbox; omit it to search across every readable mailbox (unified), external ' +
+          'mailbox; mailbox_id wins when both are passed. Omit both to search across every readable mailbox (unified), external ' +
           'accounts included. Optional folder (default inbox), limit (≤200, default 50), ' +
           'offset. Read-only / member-level. Returns { threads, count, q, search_supported, ' +
           'has_more, next_page_token }. When search_supported is false the provider could ' +
@@ -1270,8 +1273,8 @@ export class McpService {
         description:
           'Remove a domain from the mail engine (idempotent). OWNER-only. ' +
           'The domain must already be bound to the caller workspace. ' +
-          'The engine is changed only when no mailbox accounts use the domain; a successful ' +
-          'removal also deletes the workspace claim row. ' +
+          'A domain that still has mailbox accounts is refused with 409 and blockers ' +
+          '{ mailboxes }. A successful removal also deletes the workspace claim row. ' +
           'Returns { status:"ok"|"failed"|"engine_not_configured", result }.',
         inputSchema: {
           workspace_id: z.string().optional(),
