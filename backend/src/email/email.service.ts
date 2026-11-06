@@ -116,7 +116,10 @@ import {
 } from './autonomy';
 import { mapWithConcurrency, withTimeout } from '../common/async/concurrency';
 import { mayActThroughMailbox } from '../common/mailbox/mailbox-fence';
-import { resolveMailboxScope } from '../common/mailbox/mailbox-scope';
+import {
+  MailboxOutOfScopeException,
+  resolveMailboxScope,
+} from '../common/mailbox/mailbox-scope';
 import { ApprovalLinksService, kitTarget } from '../approvals/approval-links.service';
 import { StandingApprovalsService } from '../approvals/standing-approvals.service';
 import { ApprovalPendingNotice, StableNotifierService } from '../notify/stable-notifier.service';
@@ -518,8 +521,9 @@ export class EmailService {
 
   /**
    * Resolve one mailbox through the member scope before touching its provider.
-   * A governed request gets a deliberately indistinguishable 404 for a mailbox
-   * outside its scope. Every caller, governed or not, then passes main's
+   * A governed human request gets a deliberately indistinguishable 404 for a
+   * mailbox outside its scope. A mailbox-scoped PAT gets the stable 403 used by
+   * machine callers. Every caller, governed or not, then passes main's
    * private-HUMAN fence: scope narrows access and never widens it, so an ALL
    * member or a workspace OWNER still cannot read another member's HUMAN mailbox.
    */
@@ -532,8 +536,10 @@ export class EmailService {
     const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
     const mailbox = await tx.mailboxAccount.findFirst({ where: { id: mailboxId, workspaceId } });
     if (!mailbox) return null;
-    if (scope.governed && !scope.ids.includes(mailbox.id))
+    if (scope.governed && !scope.ids.includes(mailbox.id)) {
+      if (scope.patScoped) throw new MailboxOutOfScopeException();
       throw new NotFoundException('Mailbox not found.');
+    }
     if (!(await this.mayActThroughMailbox(mailbox, ucUid))) return null;
     return mailbox;
   }
@@ -2030,6 +2036,8 @@ export class EmailService {
             // Governed members must not learn whether the id was foreign or
             // nonexistent. Legacy direct callers keep the old send-as error for
             // an existing private mailbox, but never fall back to the default.
+            if (mailboxScope.patScoped && requestedMailbox)
+              throw new MailboxOutOfScopeException();
             if (mailboxScope.governed) throw new NotFoundException('Mailbox not found.');
             if (requestedMailbox)
               throw new ForbiddenException('You are not allowed to send as that mailbox.');
@@ -2048,6 +2056,7 @@ export class EmailService {
         ) {
           // Address routing is also a mailbox selection and must not bypass the
           // same 404 fence as the mailbox-id form.
+          if (mailboxScope.patScoped) throw new MailboxOutOfScopeException();
           throw new NotFoundException('Mailbox not found.');
         }
         // Send-as authorization: a human client may send AS a SHARED mailbox or one
@@ -2726,6 +2735,14 @@ export class EmailService {
       await tx.$queryRaw`SELECT "kitId" FROM "agent_send_kits" WHERE "workspaceId" = ${workspaceId} AND "kitId" = ${input.kitId} FOR UPDATE`;
       const sendKitAddresses = await this.visibleSendKitAddresses(tx, workspaceId, proposedBy);
       if (!this.sendKitAddressVisible(definition.fromAddress, sendKitAddresses)) {
+        const scope = await resolveMailboxScope(tx, workspaceId, proposedBy);
+        if (scope.patScoped) {
+          const mailbox = await tx.mailboxAccount.findFirst({
+            where: { workspaceId, emailAddress: { equals: definition.fromAddress, mode: 'insensitive' } },
+            select: { id: true },
+          });
+          if (mailbox) throw new MailboxOutOfScopeException();
+        }
         throw new NotFoundException('Mailbox not found.');
       }
       const existing = await tx.agentSendKit.findFirst({
@@ -4421,6 +4438,14 @@ export class EmailService {
           throw new NotFoundException('The proposed send kit was not found in this workspace.');
         }
         if (!this.sendKitAddressVisible(definition.fromAddress, sendKitAddresses)) {
+          const scope = await resolveMailboxScope(tx, workspaceId, approvedBy);
+          if (scope.patScoped) {
+            const mailbox = await tx.mailboxAccount.findFirst({
+              where: { workspaceId, emailAddress: { equals: definition.fromAddress, mode: 'insensitive' } },
+              select: { id: true },
+            });
+            if (mailbox) throw new MailboxOutOfScopeException();
+          }
           throw new NotFoundException('Mailbox not found.');
         }
         const approvedAt = new Date();
@@ -5439,7 +5464,7 @@ export class EmailService {
     tx: WorkspaceTxClient,
     workspaceId: string,
     fromAddress: string | null | undefined,
-    scope?: { ids: string[]; governed: boolean },
+    scope?: { ids: string[]; governed: boolean; patScoped?: boolean },
   ) {
     // autonomy's normalizeAddress is the superset (it also unwraps
     // `Name <addr@host>`), so a display-name form routes correctly too.
@@ -5449,6 +5474,7 @@ export class EmailService {
     const mailboxes = await tx.mailboxAccount.findMany({ where: { workspaceId } });
     const matching = mailboxes.find((m) => normalizeAddress(m.emailAddress) === wanted);
     if (scope?.governed && matching && !scope.ids.includes(matching.id)) {
+      if (scope.patScoped) throw new MailboxOutOfScopeException();
       throw new NotFoundException('Mailbox not found.');
     }
     const route = routeFromAddress(wanted, mailboxes);
@@ -5468,6 +5494,7 @@ export class EmailService {
     );
     const mailbox = mailboxes.find((m) => m.id === route.mailbox.id) ?? null;
     if (scope?.governed && mailbox && !scope.ids.includes(mailbox.id)) {
+      if (scope.patScoped) throw new MailboxOutOfScopeException();
       throw new NotFoundException('Mailbox not found.');
     }
     return mailbox;

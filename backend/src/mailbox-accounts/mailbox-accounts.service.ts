@@ -28,7 +28,11 @@ import {
 } from '@prisma/client';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 import { roleAtLeast } from '../common/workspace/role-rank';
-import { assertMailboxVisible, resolveMailboxScope } from '../common/mailbox/mailbox-scope';
+import {
+  assertMailboxVisible,
+  MailboxOutOfScopeException,
+  resolveMailboxScope,
+} from '../common/mailbox/mailbox-scope';
 import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
 import { DeviceConfigService, DeviceConnectionSettings, ManualClientSettings } from './device-config.service';
 import { CreateMailboxInput, MailboxView, UpdateMailboxInput } from './mailbox-accounts.types';
@@ -66,7 +70,11 @@ export class MailboxAccountsService {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       const mb = await tx.mailboxAccount.findFirst({ where: { id, workspaceId } });
-      if (scope.governed && (!mb || !scope.ids.includes(id))) return null;
+      if (scope.governed && mb && !scope.ids.includes(id)) {
+        if (scope.patScoped) throw new MailboxOutOfScopeException();
+        return null;
+      }
+      if (scope.governed && !mb) return null;
       return mb ? this.toViewOne(tx, mb) : null;
     });
   }
@@ -285,7 +293,10 @@ export class MailboxAccountsService {
       const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       const existing = await tx.mailboxAccount.findFirst({ where: { id, workspaceId } });
       if (!existing) return null;
-      if (scope.governed && !scope.ids.includes(existing.id)) return null;
+      if (scope.governed && !scope.ids.includes(existing.id)) {
+        if (scope.patScoped) throw new MailboxOutOfScopeException();
+        return null;
+      }
 
       // Changing ownership is an administrative action even when the caller is
       // otherwise allowed to edit the mailbox through a policy path. Keep the

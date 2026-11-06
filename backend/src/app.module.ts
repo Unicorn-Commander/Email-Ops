@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import {
   credentialTracker,
   ipTracker,
@@ -42,6 +42,7 @@ import { TrustedCorrespondentsModule } from './trusted-correspondents/trusted-co
 import { NotifyModule } from './notify/notify.module';
 import { CalendarModule } from './calendar/calendar.module';
 import { UnsubscribeModule } from './unsubscribe/unsubscribe.module';
+import { MailboxPrincipalInterceptor } from './common/mailbox/mailbox-principal';
 
 @Module({
   imports: [
@@ -153,6 +154,10 @@ import { UnsubscribeModule } from './unsubscribe/unsubscribe.module';
     {
       provide: APP_GUARD,
       useClass: ProfiledThrottlerGuard,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: MailboxPrincipalInterceptor,
     },
   ],
 })
