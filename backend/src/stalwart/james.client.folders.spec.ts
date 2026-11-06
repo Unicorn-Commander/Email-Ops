@@ -312,7 +312,7 @@ describe('JamesClient listFolderThreads with an explicit custom-folder id', () =
       return jsonResponse({
         methodResponses: [
           ['Email/query', { ids: ['em-1'], total: 1 }, '0'],
-          ['Email/get', { list: [{ id: 'em-1', threadId: 'th-1', subject: 'In Projects', from: [{ email: 'a@x.test' }], receivedAt: '2026-07-17T00:00:00Z', keywords: { $seen: true } }] }, '1'],
+          ['Email/get', { list: [{ id: 'em-1', threadId: 'th-1', subject: 'In Projects', from: [{ email: 'a@x.test' }], receivedAt: '2026-07-17T00:00:00Z', keywords: { $seen: true }, mailboxIds: { 'mbx-proj': true } }] }, '1'],
           ['Thread/get', { list: [{ id: 'th-1', emailIds: ['em-1'] }] }, '2'],
         ],
       });

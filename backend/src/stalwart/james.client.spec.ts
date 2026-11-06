@@ -321,6 +321,7 @@ describe('JamesClient', () => {
                     receivedAt: '2026-01-01T00:00:00Z',
                     preview: 'hey',
                     keywords: {},
+                    mailboxIds: { 'mbx-archive-1': true },
                     hasAttachment: true,
                   },
                 ],
@@ -364,6 +365,83 @@ describe('JamesClient', () => {
       });
       expect(queryCall.position).toBe(0);
       expect(queryCall.limit).toBe(20);
+    });
+
+    it('filters collapsed threads by message mailbox membership', async () => {
+      const fetchSpy = jest.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/session')) return jsonResponse(SESSION);
+        const body = JSON.parse((init as RequestInit).body as string);
+        const methods = body.methodCalls.map((c: any[]) => c[0]);
+        if (methods.length === 1 && methods[0] === 'Mailbox/query') {
+          return jsonResponse({ methodResponses: [['Mailbox/query', { ids: ['mbx-inbox-1'] }, '0']] });
+        }
+        if (methods.length === 1 && methods[0] === 'Email/get') {
+          return jsonResponse({
+            methodResponses: [
+              [
+                'Email/get',
+                {
+                  list: [
+                    { id: 'sent-1', threadId: 'thread-sent', mailboxIds: { 'mbx-sent-1': true } },
+                    { id: 'mixed-inbox-1', threadId: 'thread-mixed', mailboxIds: { 'mbx-inbox-1': true } },
+                    { id: 'mixed-sent-1', threadId: 'thread-mixed', mailboxIds: { 'mbx-sent-1': true } },
+                  ],
+                },
+                '0',
+              ],
+            ],
+          });
+        }
+        return jsonResponse({
+          methodResponses: [
+            ['Email/query', { ids: ['sent-1', 'mixed-sent-1'], total: 2 }, '0'],
+            [
+              'Email/get',
+              {
+                list: [
+                  {
+                    id: 'sent-1',
+                    threadId: 'thread-sent',
+                    subject: 'Sent-only',
+                    receivedAt: '2026-01-02T00:00:00Z',
+                    keywords: { $seen: true },
+                    mailboxIds: { 'mbx-sent-1': true },
+                  },
+                  {
+                    id: 'mixed-sent-1',
+                    threadId: 'thread-mixed',
+                    subject: 'Mixed',
+                    receivedAt: '2026-01-01T00:00:00Z',
+                    keywords: { $seen: true },
+                    mailboxIds: { 'mbx-sent-1': true },
+                  },
+                ],
+              },
+              '1',
+            ],
+            [
+              'Thread/get',
+              {
+                list: [
+                  { id: 'thread-sent', emailIds: ['sent-1'] },
+                  { id: 'thread-mixed', emailIds: ['mixed-inbox-1', 'mixed-sent-1'] },
+                ],
+              },
+              '2',
+            ],
+          ],
+        });
+      });
+      global.fetch = fetchSpy as any;
+      const client = new JamesClient(makeConfig(CONFIGURED));
+
+      const result = await client.listFolderThreads('desk@example.test', {
+        folder: 'inbox',
+        limit: 20,
+        offset: 0,
+      });
+
+      expect(result.threads.map((thread) => thread.id)).toEqual(['thread-mixed']);
     });
 
     it('pollInbound baselines on the first poll (captures cursor, returns no backlog)', async () => {

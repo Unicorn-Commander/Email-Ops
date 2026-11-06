@@ -504,7 +504,7 @@ export class McpService {
         title: 'List mailbox threads',
         description:
           'List the THREADS in a mailbox folder (inbox/archive/spam/trash/sent/drafts). ' +
-          'Pass mailbox_id for ONE mailbox; omit it for the UNIFIED inbox across every ' +
+          'Pass either mailbox_id or mailbox_address for ONE mailbox; omit both for the UNIFIED inbox across every ' +
           'mailbox the caller can read (each thread then carries mailbox_id + ' +
           'mailbox_address). Optional q (full-text), limit (≤200, default 50), offset ' +
           '(paging). Read-only / member-level. Returns { threads, count, folder } — an ' +
@@ -512,6 +512,7 @@ export class McpService {
         inputSchema: {
           workspace_id: z.string().optional(),
           mailbox_id: z.string().optional(),
+          mailbox_address: z.string().min(3).max(320).optional(),
           folder: MAIL_FOLDER.optional(),
           q: z.string().max(500).optional(),
           limit: z.number().int().min(1).max(200).optional(),
@@ -571,7 +572,7 @@ export class McpService {
         description:
           'Full-text SEARCH a mailbox folder by query string q (subject/body/participants), ' +
           'applied through each provider’s native search — sovereign James, Gmail q, and ' +
-          'Microsoft Graph $search for CONNECTED external accounts. Pass mailbox_id for ONE ' +
+          'Microsoft Graph $search for CONNECTED external accounts. Pass either mailbox_id or mailbox_address for ONE ' +
           'mailbox; omit it to search across every readable mailbox (unified), external ' +
           'accounts included. Optional folder (default inbox), limit (≤200, default 50), ' +
           'offset. Read-only / member-level. Returns { threads, count, q, search_supported, ' +
@@ -581,6 +582,7 @@ export class McpService {
         inputSchema: {
           workspace_id: z.string().optional(),
           mailbox_id: z.string().optional(),
+          mailbox_address: z.string().min(3).max(320).optional(),
           q: z.string().min(1).max(500),
           folder: MAIL_FOLDER.optional(),
           limit: z.number().int().min(1).max(200).optional(),
@@ -1232,7 +1234,9 @@ export class McpService {
         title: 'List mail engine accounts',
         description:
           'List only engine accounts (mailbox logins) under the caller workspace’s bound ' +
-          'domains. Read-only / member-level. Returns { accounts: [{ address }] } or ' +
+          'domains. Each account includes id, address, display_name, provider, role ' +
+          '(human/shared/agent), and is_default. Read-only / member-level. Returns ' +
+          '{ accounts: [...] } or ' +
           '{ status:"engine_not_configured" } when no WebAdmin endpoint is wired.',
         inputSchema: {
           workspace_id: z.string().optional(),

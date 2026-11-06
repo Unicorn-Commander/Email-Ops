@@ -318,6 +318,101 @@ describe('EmailOpsTools', () => {
     });
   });
 
+  describe('mailbox_address resolution', () => {
+    function toolsWith(email: Partial<EmailService>): EmailOpsTools {
+      const m = { resolveAndAuthorize: jest.fn().mockResolvedValue('ws-1') } as any;
+      return new EmailOpsTools(
+        m,
+        email as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+      );
+    }
+
+    it('resolves an address before listing one mailbox', async () => {
+      const email: Partial<EmailService> = {
+        resolveMailboxIdForCaller: jest.fn().mockResolvedValue('mailbox-1'),
+        listMailboxInbox: jest.fn().mockResolvedValue([{ id: 'thread-1' }]),
+      };
+      const result = await toolsWith(email).listThreads({} as any, {
+        workspace_id: 'ws-1',
+        mailbox_address: 'desk@example.test',
+      });
+
+      expect(result).toMatchObject({ threads: [{ id: 'thread-1' }], count: 1, folder: 'inbox' });
+      expect(email.resolveMailboxIdForCaller).toHaveBeenCalledWith(
+        'ws-1',
+        '',
+        undefined,
+        'desk@example.test',
+      );
+      expect(email.listMailboxInbox).toHaveBeenCalledWith(
+        'ws-1',
+        '',
+        'mailbox-1',
+        undefined,
+        'inbox',
+        null,
+        undefined,
+      );
+    });
+
+    it('resolves an address before searching one mailbox', async () => {
+      const email: Partial<EmailService> = {
+        resolveMailboxIdForCaller: jest.fn().mockResolvedValue('mailbox-1'),
+        listMailboxInboxPage: jest.fn().mockResolvedValue({
+          threads: [{ id: 'thread-1' }],
+          nextPageToken: null,
+          hasMore: false,
+          searchSupported: true,
+        }),
+      };
+      const result = await toolsWith(email).searchMail({} as any, {
+        workspace_id: 'ws-1',
+        mailbox_address: 'desk@example.test',
+        q: 'invoice',
+      });
+
+      expect(result.threads).toEqual([{ id: 'thread-1' }]);
+      expect(email.resolveMailboxIdForCaller).toHaveBeenCalledWith(
+        'ws-1',
+        '',
+        undefined,
+        'desk@example.test',
+      );
+      expect(email.listMailboxInboxPage).toHaveBeenCalledWith(
+        'ws-1',
+        '',
+        'mailbox-1',
+        undefined,
+        'inbox',
+        'invoice',
+        undefined,
+      );
+    });
+
+    it('surfaces mailbox_not_found from the scoped resolver', async () => {
+      const email: Partial<EmailService> = {
+        resolveMailboxIdForCaller: jest
+          .fn()
+          .mockRejectedValue(new NotFoundException('mailbox_not_found')),
+      };
+
+      await expect(
+        toolsWith(email).listThreads({} as any, {
+          workspace_id: 'ws-1',
+          mailbox_address: 'missing@example.test',
+        }),
+      ).rejects.toThrow('mailbox_not_found');
+    });
+  });
+
   describe('set_disposition / bulk_disposition — real moves, honest failures', () => {
     function toolsWith(email: Partial<EmailService>): EmailOpsTools {
       const m = { resolveAndAuthorize: jest.fn().mockResolvedValue('ws-1') } as any;

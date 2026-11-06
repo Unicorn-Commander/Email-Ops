@@ -488,6 +488,7 @@ export class EmailOpsTools {
     args: {
       workspace_id?: string;
       mailbox_id?: string;
+      mailbox_address?: string;
       folder?: string;
       q?: string;
       limit?: number;
@@ -498,11 +499,16 @@ export class EmailOpsTools {
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
     const folder = (args.folder ?? 'inbox') as MailFolder;
     const q = args.q?.trim() ? args.q : null;
-    const threads = args.mailbox_id
+    const mailboxId = args.mailbox_id
+      ? args.mailbox_id
+      : args.mailbox_address
+        ? await this.email.resolveMailboxIdForCaller(workspaceId, ucUid, undefined, args.mailbox_address)
+        : undefined;
+    const threads = mailboxId
       ? await this.email.listMailboxInbox(
           workspaceId,
           ucUid,
-          args.mailbox_id,
+          mailboxId,
           args.limit,
           folder,
           q,
@@ -627,6 +633,7 @@ export class EmailOpsTools {
     args: {
       workspace_id?: string;
       mailbox_id?: string;
+      mailbox_address?: string;
       q: string;
       folder?: string;
       limit?: number;
@@ -643,11 +650,16 @@ export class EmailOpsTools {
     const workspaceId = await this.resolve(user, args.workspace_id);
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
     const folder = (args.folder ?? 'inbox') as MailFolder;
-    if (args.mailbox_id) {
+    const mailboxId = args.mailbox_id
+      ? args.mailbox_id
+      : args.mailbox_address
+        ? await this.email.resolveMailboxIdForCaller(workspaceId, ucUid, undefined, args.mailbox_address)
+        : undefined;
+    if (mailboxId) {
       const page = await this.email.listMailboxInboxPage(
         workspaceId,
         ucUid,
-        args.mailbox_id,
+        mailboxId,
         args.limit,
         folder,
         args.q,
@@ -1172,24 +1184,43 @@ export class EmailOpsTools {
       ucUidOf(user as WithWorkspaceClaim),
     );
     if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
-    const owned = new Set(bindings.map((binding) => binding.domain));
+    const owned = new Set(bindings.map((binding) => binding.domain.toLowerCase()));
+    // A mailbox-scoped PAT (#59) only ever sees the mailboxes on its allowlist.
     const patScope = currentMailboxPrincipalScope();
-    const scopedAddresses = patScope?.mailboxIds.length
-      ? new Set(
-          (await this.mailboxes.listMailboxes(workspaceId, ucUidOf(user as WithWorkspaceClaim))).map(
-            (mailbox) => mailbox.email_address.trim().toLowerCase(),
-          ),
-        )
-      : null;
-    const accounts = (await this.admin.listAccounts()).filter((item) => {
+    const scopedIds = patScope?.mailboxIds.length ? new Set(patScope.mailboxIds) : null;
+    const engineAccounts = (await this.admin.listAccounts()).filter((item) => {
       try {
-        return (
-          owned.has(this.mailDomains.domainOf(item.address)) &&
-          (scopedAddresses === null || scopedAddresses.has(item.address.trim().toLowerCase()))
-        );
+        return owned.has(this.mailDomains.domainOf(item.address).toLowerCase());
       } catch {
         return false;
       }
+    });
+    const mailboxes = await this.mailboxes.listMailboxes(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+    );
+    const byAddress = new Map(
+      mailboxes
+        .filter((mailbox) => scopedIds === null || scopedIds.has(mailbox.id))
+        .map((mailbox) => [mailbox.email_address.toLowerCase(), mailbox]),
+    );
+    const seen = new Set<string>();
+    const accounts = engineAccounts.flatMap((item) => {
+      const address = item.address.trim();
+      const key = address.toLowerCase();
+      const mailbox = byAddress.get(key);
+      if (!mailbox || seen.has(key)) return [];
+      seen.add(key);
+      return [
+        {
+          id: mailbox.id,
+          address: mailbox.email_address,
+          display_name: mailbox.display_name,
+          provider: mailbox.provider,
+          role: mailbox.owner_kind.toLowerCase(),
+          is_default: mailbox.is_default,
+        },
+      ];
     });
     return { accounts };
   }

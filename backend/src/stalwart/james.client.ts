@@ -48,6 +48,7 @@ import { ConfigService } from '@nestjs/config';
 import { StalwartPort } from './stalwart.port';
 import { parseSearchQuery, buildJmapFilter } from './search-query';
 import { extractJamesMimePart } from './james.mime';
+import { threadHasMessageInMailbox } from './folder-predicate';
 import {
   StalwartAttachment,
   StalwartBlobDownload,
@@ -642,7 +643,7 @@ export class JamesClient extends StalwartPort {
         {
           '#ids': { resultOf: '0', name: 'Email/query', path: '/ids' },
           properties: [
-            'id', 'threadId', 'subject', 'from', 'to', 'receivedAt', 'preview', 'keywords', 'hasAttachment',
+            'id', 'threadId', 'subject', 'from', 'to', 'receivedAt', 'preview', 'keywords', 'mailboxIds', 'hasAttachment',
           ],
         },
         '1',
@@ -661,11 +662,65 @@ export class JamesClient extends StalwartPort {
         if (typeof id === 'string' && Array.isArray(ids)) countByThread.set(id, ids.length);
       }
     }
+
+    // Do not trust the collapsed Thread projection to apply the folder predicate
+    // to every message. Fetch membership for every message in each candidate
+    // thread, then keep the thread iff one message is actually in the requested
+    // folder mailbox. The extra Email/get is only needed for multi-message
+    // threads; the common one-message path stays at the original three calls.
+    const threadIdsByMessageId = new Map<string, string>();
+    const messageIdsByThread = new Map<string, string[]>();
+    if (Array.isArray(threadList)) {
+      for (const t of threadList) {
+        const threadId = (t as any)?.id;
+        const ids = Array.isArray((t as any)?.emailIds)
+          ? (t as any).emailIds.filter((id: unknown): id is string => typeof id === 'string')
+          : [];
+        if (typeof threadId !== 'string') continue;
+        messageIdsByThread.set(threadId, ids);
+        for (const id of ids) threadIdsByMessageId.set(id, threadId);
+      }
+    }
+    for (const email of emails) {
+      const messageId = (email as any)?.id;
+      const threadId = (email as any)?.threadId;
+      if (typeof messageId !== 'string' || typeof threadId !== 'string') continue;
+      threadIdsByMessageId.set(messageId, threadId);
+      if (!messageIdsByThread.has(threadId)) messageIdsByThread.set(threadId, [messageId]);
+    }
+
+    const allMessageIds = [...new Set([...messageIdsByThread.values()].flat())];
+    const representativeIds = new Set(
+      emails
+        .map((email: any) => email?.id)
+        .filter((id: unknown): id is string => typeof id === 'string'),
+    );
+    let membershipEmails = emails;
+    if (allMessageIds.some((id) => !representativeIds.has(id))) {
+      const full = await this.getEmailListById(mailbox, allMessageIds, ['id', 'threadId', 'mailboxIds']);
+      if (full) membershipEmails = full;
+    }
+    const messagesByThread = new Map<string, any[]>();
+    for (const email of membershipEmails) {
+      const messageId = (email as any)?.id;
+      const threadId =
+        typeof (email as any)?.threadId === 'string'
+          ? (email as any).threadId
+          : typeof messageId === 'string'
+            ? threadIdsByMessageId.get(messageId)
+            : undefined;
+      if (!threadId) continue;
+      const messages = messagesByThread.get(threadId) ?? [];
+      messages.push(email);
+      messagesByThread.set(threadId, messages);
+    }
+
     const threads: StalwartThread[] = [];
     for (const m of emails) {
       if (!m || typeof m !== 'object') continue;
       const threadId = (m as any).threadId;
       if (typeof threadId !== 'string' || !threadId) continue;
+      if (!threadHasMessageInMailbox(messagesByThread.get(threadId) ?? [m], mailboxId)) continue;
       const keywords = (m as any).keywords ?? {};
       threads.push({
         id: threadId,
@@ -756,11 +811,13 @@ export class JamesClient extends StalwartPort {
   /** Return the requested Email/get list, or null when the JMAP call failed. */
   private async getEmailListById(
     mailbox: string,
-    messageId: string,
+    messageId: string | readonly string[],
     properties: readonly string[],
     fetchBodies = false,
   ): Promise<any[] | null> {
-    const args: Record<string, unknown> = { ids: [messageId], properties: [...properties] };
+    const ids = Array.isArray(messageId) ? [...messageId] : [messageId];
+    if (ids.length === 0) return [];
+    const args: Record<string, unknown> = { ids, properties: [...properties] };
     if (fetchBodies) {
       args.fetchHTMLBodyValues = true;
       args.fetchTextBodyValues = true;
