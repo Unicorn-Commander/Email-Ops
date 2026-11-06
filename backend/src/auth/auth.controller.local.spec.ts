@@ -58,3 +58,37 @@ describe('AuthController local login', () => {
     expect(controller.localLoginEnabled()).toEqual({ enabled: false });
   });
 });
+
+describe('AuthController current-user profile', () => {
+  it('returns the avatarUrl field from /auth/me', async () => {
+    const controller = new AuthController(
+      {} as any,
+      {} as any,
+      {} as any,
+      { getUserAvatarUrl: jest.fn() } as any,
+      { user: { update: jest.fn() } } as any,
+    );
+    const user = {
+      id: 'avatar-user-1',
+      email: 'casey@example.test',
+      username: 'casey',
+      firstName: 'Casey',
+      lastName: 'Example',
+      avatarUrl: 'https://cdn.example.test/avatars/casey.png',
+      isActive: true,
+      lastLoginAt: null,
+      createdAt: new Date('2026-11-05T12:00:00.000Z'),
+    } as any;
+
+    const response = await controller.getMe(user);
+
+    expect(response).toEqual(
+      expect.objectContaining({
+        id: 'avatar-user-1',
+        email: 'casey@example.test',
+        avatarUrl: 'https://cdn.example.test/avatars/casey.png',
+      }),
+    );
+    expect(response).not.toHaveProperty('picture');
+  });
+});

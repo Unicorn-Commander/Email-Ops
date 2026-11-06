@@ -50,6 +50,24 @@ describe('KeycloakStrategy.validate', () => {
     expect(authService.storeKcRefreshToken).toHaveBeenCalledWith({ id: 'u1' }, 'refresh-token');
   });
 
+  it('retains ID-token picture claims while merging current userinfo attributes', async () => {
+    const picture = 'https://cdn.example.test/avatars/user.png';
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      json: async () => ({ sub: 'kc-sub', email: 'user@example.test', email_verified: true }),
+    });
+    (authService.validateKeycloakUser as jest.Mock).mockResolvedValue({ id: 'u1' });
+
+    const strategy = new KeycloakStrategy(config, authService);
+    await strategy.validate('access-token', 'refresh-token', { picture });
+
+    expect(authService.validateKeycloakUser).toHaveBeenCalledWith(
+      'kc-sub',
+      expect.objectContaining({ picture }),
+      'access-token',
+    );
+  });
+
   it('boots when the self-host compose passes blank SSO settings', () => {
     // ConfigService.get returns '' (not the default) for a variable set to empty.
     const blank = { get: () => '' } as unknown as ConfigService;

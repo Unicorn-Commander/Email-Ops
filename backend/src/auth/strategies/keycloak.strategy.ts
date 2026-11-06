@@ -48,13 +48,19 @@ export class KeycloakStrategy extends PassportStrategy(Strategy, 'keycloak') {
   async validate(accessToken: string, refreshToken: string, profile: any): Promise<any> {
     // passport-oauth2 does not fetch userinfo automatically, so we call the
     // Keycloak userinfo endpoint to get the full profile (sub, email, names).
-    let userProfile = profile;
+    // Passport's profile contains the ID-token claims, while Keycloak's
+    // userinfo response is authoritative for the current user attributes. Keep
+    // both so a picture claim exposed by either source reaches the upsert.
+    let userProfile = profile && typeof profile === 'object' ? { ...profile } : {};
     try {
       const response = await fetch(this.userinfoURL, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (response.ok) {
-        userProfile = await response.json();
+        const userinfo = await response.json();
+        if (userinfo && typeof userinfo === 'object') {
+          userProfile = { ...userProfile, ...userinfo };
+        }
       } else {
         this.logger.warn(
           `Failed to fetch userinfo from Keycloak: ${response.status} ${response.statusText}`,
