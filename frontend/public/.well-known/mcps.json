@@ -522,7 +522,7 @@
     },
     {
       "name": "list_threads",
-      "description": "List the THREADS in a mailbox folder (inbox/archive/spam/trash/sent/drafts). Pass either mailbox_id or mailbox_address for ONE mailbox; omit both for the UNIFIED inbox across every mailbox the caller can read (each thread then carries mailbox_id + mailbox_address). Optional q (full-text), limit (≤200, default 50), offset (paging). Read-only / member-level. Returns { threads, count, folder } — an empty list when the mail engine is dormant (never a 500).",
+      "description": "List the THREADS in a mailbox folder (inbox/archive/spam/trash/sent/drafts). Pass either mailbox_id or mailbox_address for ONE mailbox (mailbox_id wins when both are passed); omit both for the UNIFIED inbox across every mailbox the caller can read (each thread then carries mailbox_id + mailbox_address). Optional q (full-text), limit (≤200, default 50), offset (paging). Read-only / member-level. Returns { threads, count, folder } — an empty list when the mail engine is dormant (never a 500).",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -637,7 +637,7 @@
     },
     {
       "name": "search_mail",
-      "description": "Full-text SEARCH a mailbox folder by query string q (subject/body/participants), applied through each provider’s native search — sovereign James, Gmail q, and Microsoft Graph $search for CONNECTED external accounts. Pass either mailbox_id or mailbox_address for ONE mailbox; omit it to search across every readable mailbox (unified), external accounts included. Optional folder (default inbox), limit (≤200, default 50), offset. Read-only / member-level. Returns { threads, count, q, search_supported, has_more, next_page_token }. When search_supported is false the provider could not express the query, so an empty list means “could not filter”, NOT “no matches” — do not treat it as authoritative.",
+      "description": "Full-text SEARCH a mailbox folder by query string q (subject/body/participants), applied through each provider’s native search — sovereign James, Gmail q, and Microsoft Graph $search for CONNECTED external accounts. Pass either mailbox_id or mailbox_address for ONE mailbox (mailbox_id wins when both are passed); omit it to search across every readable mailbox (unified), external accounts included. Optional folder (default inbox), limit (≤200, default 50), offset. Read-only / member-level. Returns { threads, count, q, search_supported, has_more, next_page_token }. When search_supported is false the provider could not express the query, so an empty list means “could not filter”, NOT “no matches” — do not treat it as authoritative.",
       "input_schema": {
         "type": "object",
         "properties": {
