@@ -10,6 +10,7 @@ import {
   redactSecrets,
   PATS_PATH,
   rowExpiresAt,
+  rowMailboxIds,
   rowScopes,
 } from '../../lib/patForm';
 
@@ -33,7 +34,7 @@ describe('API token form', () => {
     );
   });
 
-  it('posts name, scopes, and expires_in_days', () => {
+  it('posts name, scopes, expiry, and an optional mailbox allowlist', () => {
     const body = buildCreatePatBody({
       name: '  Northwind reader  ',
       scopes: ['mail:read', 'agent-inbox:read', 'mail:read'],
@@ -47,6 +48,19 @@ describe('API token form', () => {
       expires_in_days: 90,
     });
     assert.equal('expiresInDays' in body, false);
+
+    const scoped = buildCreatePatBody({
+      name: 'James desk',
+      scopes: ['mail:read', 'mail:write'],
+      expiresInDays: 90,
+      mailboxIds: [' mailbox-a ', 'mailbox-a', 'mailbox-b'],
+    });
+    assert.deepEqual(scoped, {
+      name: 'James desk',
+      scopes: ['mail:read', 'mail:write'],
+      expires_in_days: 90,
+      mailbox_ids: ['mailbox-a', 'mailbox-b'],
+    });
   });
 
   it('rejects an empty name, no scopes, and an expiry outside 1–365', () => {
@@ -83,6 +97,8 @@ describe('API token form', () => {
     const remembered = { scopes: ['mail:read'], expires_at: '2027-01-24T15:00:00.000Z' };
     assert.deepEqual(rowScopes(item, remembered), ['mail:read']);
     assert.equal(rowExpiresAt(item, remembered), remembered.expires_at);
+    assert.deepEqual(rowMailboxIds(item, remembered), []);
+    assert.deepEqual(rowMailboxIds({ ...item, mailbox_ids: ['mailbox-a'] }), ['mailbox-a']);
     assert.deepEqual(
       rowScopes({ ...item, scopes: ['agent-inbox:read'] }, remembered),
       ['agent-inbox:read'],

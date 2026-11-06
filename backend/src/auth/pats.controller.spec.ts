@@ -27,6 +27,7 @@ function makeController() {
     token: 'eo_pat_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
     tokenPrefix: 'eo_pat_XXXXX',
     scopes: opts.scopes,
+    mailboxIds: opts.mailboxIds ?? [],
     expiresAt: opts.expiresAt,
     createdAt: new Date(),
   }));
@@ -91,6 +92,20 @@ describe('PatsController — mint contract', () => {
     expect(createPat.mock.calls[0][2].scopes).toEqual(['*']);
   });
 
+  it('passes a selected mailbox allowlist through to the mint service and response', async () => {
+    const { controller, createPat } = makeController();
+
+    const res = await controller.create(req, user, {
+      name: 'james desk',
+      scopes: ['mail:read', 'mail:write'],
+      mailbox_ids: ['mailbox-a', 'mailbox-b'],
+      expires_in_days: 90,
+    } as CreatePatDto);
+
+    expect(createPat.mock.calls[0][2].mailboxIds).toEqual(['mailbox-a', 'mailbox-b']);
+    expect(res.mailbox_ids).toEqual(['mailbox-a', 'mailbox-b']);
+  });
+
   describe('CreatePatDto validation', () => {
     it('REJECTS an omitted scopes field (no silent wildcard)', async () => {
       await expect(errorsFor({ name: 'x' })).resolves.toContain('scopes');
@@ -111,6 +126,15 @@ describe('PatsController — mint contract', () => {
     it('ACCEPTS an explicit scope list', async () => {
       await expect(errorsFor({ name: 'x', scopes: ['mail:read'] })).resolves.toEqual([]);
       await expect(errorsFor({ name: 'x', scopes: ['*'] })).resolves.toEqual([]);
+    });
+
+    it('ACCEPTS a mailbox id list and REJECTS non-string entries', async () => {
+      await expect(
+        errorsFor({ name: 'x', scopes: ['mail:read'], mailbox_ids: ['mailbox-a'] }),
+      ).resolves.toEqual([]);
+      await expect(
+        errorsFor({ name: 'x', scopes: ['mail:read'], mailbox_ids: [42] }),
+      ).resolves.toContain('mailbox_ids');
     });
 
     it(`REJECTS expires_in_days beyond ${PAT_MAX_EXPIRY_DAYS}`, async () => {

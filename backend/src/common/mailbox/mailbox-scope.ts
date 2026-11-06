@@ -1,8 +1,28 @@
-import { NotFoundException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { MailboxScope, MembershipStatus, WorkspaceRole } from '@prisma/client';
 import { assertMayActThroughMailbox } from './mailbox-fence';
+import { currentMailboxPrincipalScope } from './mailbox-principal';
 
 export type MailboxScopeDb = Parameters<typeof resolveMailboxScope>[0];
+export interface ResolvedMailboxScope {
+  ids: string[];
+  governed: boolean;
+  unrestricted: boolean;
+  /** True only when a non-empty PAT allowlist narrowed the normal user scope. */
+  patScoped?: boolean;
+}
+
+/** Stable machine-readable denial for a PAT selecting a mailbox outside its allowlist. */
+export class MailboxOutOfScopeException extends ForbiddenException {
+  constructor() {
+    super({
+      statusCode: 403,
+      error: 'Forbidden',
+      code: 'mailbox_out_of_scope',
+      message: 'mailbox_out_of_scope',
+    });
+  }
+}
 
 /**
  * The one mailbox visibility resolver used by human mail, MCP, and mailbox
@@ -18,11 +38,42 @@ export async function resolveMailboxScope(
   db: {
     membership?: { findUnique: (args: any) => Promise<any>; findFirst?: (args: any) => Promise<any> };
     user?: { findFirst: (args: any) => Promise<{ id: string; keycloakId: string | null } | null> };
-    mailboxAccount?: { findMany?: (args: any) => Promise<Array<{ id: string }> | undefined> };
+    mailboxAccount?: {
+      findMany?: (args: any) => Promise<
+        Array<{ id: string; ownerKind?: string; ownerKey?: string | null }> | undefined
+      >;
+    };
   },
   workspaceId: string,
   userKey: string | null,
-): Promise<{ ids: string[]; governed: boolean; unrestricted: boolean }> {
+): Promise<ResolvedMailboxScope> {
+  const patScope = currentMailboxPrincipalScope();
+  const narrowToPat = async (scope: ResolvedMailboxScope): Promise<ResolvedMailboxScope> => {
+    if (!patScope || patScope.mailboxIds.length === 0) return scope;
+    const allowed = new Set(patScope.mailboxIds);
+    const rows =
+      (await db.mailboxAccount?.findMany?.({
+        where: { workspaceId, id: { in: scope.ids.filter((id) => allowed.has(id)) } },
+        select: { id: true, ownerKind: true, ownerKey: true },
+      })) ?? [];
+    const callerKeys = new Set(keys);
+    const currentlyUsable = new Set(
+      rows
+        .filter(
+          (row) =>
+            row.ownerKind !== 'HUMAN' ||
+            (!!row.ownerKey && callerKeys.has(row.ownerKey)),
+        )
+        .map((row) => row.id),
+    );
+    return {
+      ...scope,
+      ids: scope.ids.filter((id) => allowed.has(id) && currentlyUsable.has(id)),
+      governed: true,
+      unrestricted: false,
+      patScoped: true,
+    };
+  };
   const keys = new Set<string>();
   if (userKey?.trim()) keys.add(userKey.trim());
   if (userKey?.trim() && db.user?.findFirst) {
@@ -58,9 +109,10 @@ export async function resolveMailboxScope(
 
   // No membership is an auth-layer concern. Keep the old single-tenant service
   // behavior here; a guarded tenancy-on request never reaches this fallback.
-  if (!membership) return { ids: await all(), governed: false, unrestricted: true };
+  if (!membership)
+    return narrowToPat({ ids: await all(), governed: false, unrestricted: true });
   if (membership.status !== MembershipStatus.ACTIVE) {
-    return { ids: [], governed: true, unrestricted: false };
+    return narrowToPat({ ids: [], governed: true, unrestricted: false });
   }
 
   // ADMIN/OWNER always retain workspace-wide visibility, independent of the
@@ -74,7 +126,7 @@ export async function resolveMailboxScope(
     // `unrestricted`: workspace-wide visibility. These members also see agent-inbox
     // email drafts staged without a mailbox (a workspace that has not connected
     // one yet). OWNED members never do.
-    return { ids: await all(), governed: true, unrestricted: true };
+    return narrowToPat({ ids: await all(), governed: true, unrestricted: true });
   }
 
   // There is currently no human-manager relation for Agent rows. Agent.manager-
@@ -89,7 +141,7 @@ export async function resolveMailboxScope(
     },
     select: { id: true },
   })) ?? [];
-  return { ids: owned.map((row) => row.id), governed: true, unrestricted: false };
+  return narrowToPat({ ids: owned.map((row) => row.id), governed: true, unrestricted: false });
 }
 
 /** The public resolver named by the mailbox-scope contract. */
@@ -103,10 +155,11 @@ export async function visibleMailboxIds(
 
 /**
  * Guard an already-loaded mailbox for auxiliary mailbox surfaces (contacts,
- * signatures, vacation, rules, and management). Governed members get a 404
- * for an out-of-scope id. Every caller, governed or not, still passes the
- * HUMAN-owner fence (ForbiddenException), exactly as on main: scope narrows
- * access and never widens it.
+ * signatures, vacation, rules, and management). Governed human members get a
+ * 404 for an out-of-scope id; a mailbox-scoped PAT gets the stable 403. Every
+ * caller, governed or not, still passes the HUMAN-owner fence
+ * (ForbiddenException), exactly as on main: scope narrows access and never
+ * widens it.
  */
 export async function assertMailboxVisible(
   db: MailboxScopeDb,
@@ -115,7 +168,10 @@ export async function assertMailboxVisible(
   mailbox: { id: string; ownerKind: string; ownerKey: string | null },
 ): Promise<void> {
   const scope = await resolveMailboxScope(db, workspaceId, userKey);
-  if (scope.governed && !scope.ids.includes(mailbox.id)) throw new NotFoundException('Mailbox not found.');
+  if (scope.governed && !scope.ids.includes(mailbox.id)) {
+    if (scope.patScoped) throw new MailboxOutOfScopeException();
+    throw new NotFoundException('Mailbox not found.');
+  }
   await assertMayActThroughMailbox(
     db as unknown as { user: { findFirst: (args: any) => Promise<any> } },
     mailbox,

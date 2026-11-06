@@ -23,6 +23,8 @@ export type PatScope = (typeof KNOWN_SCOPES)[number];
 export interface PatRecord {
   /** Scope strings the token holds (may include `*` / `prefix:*` wildcards). */
   scopes: string[];
+  /** Mailbox account ids allowed to the token; omitted/empty preserves legacy reach. */
+  mailboxIds?: string[];
   /** ISO expiry; null = never expires. */
   expiresAt: string | null;
   /** ISO revocation stamp; null = active. */

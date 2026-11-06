@@ -7,8 +7,8 @@ export const PAT_SCOPES = [
   { id: 'mail:read', label: 'Read mail', detail: 'List threads and read messages.' },
   {
     id: 'mail:write',
-    label: 'Send and change mail',
-    detail: 'Lets an agent send mail.',
+    label: 'Compose and change mail',
+    detail: 'Stage drafts and make mail changes; sending also requires approval.',
     warnsSend: true,
   },
   { id: 'agent-inbox:read', label: 'Read the approval queue', detail: 'See drafts waiting for you.' },
@@ -37,12 +37,15 @@ export interface CreatePatBody {
   name: string;
   scopes: string[];
   expires_in_days: number;
+  /** Empty means every mailbox visible to the signed-in human. */
+  mailbox_ids?: string[];
 }
 
 export function buildCreatePatBody(input: {
   name: string;
   scopes: readonly string[];
   expiresInDays: number;
+  mailboxIds?: readonly string[];
 }): CreatePatBody | { error: string } {
   const name = input.name.trim();
   if (!name) return { error: 'Name the token.' };
@@ -53,7 +56,13 @@ export function buildCreatePatBody(input: {
   if (!Number.isInteger(days) || days < 1 || days > MAX_EXPIRES_IN_DAYS) {
     return { error: `Expiry must be a whole number of days from 1 to ${MAX_EXPIRES_IN_DAYS}.` };
   }
-  return { name, scopes, expires_in_days: days };
+  const mailboxIds = [...new Set((input.mailboxIds ?? []).map((id) => id.trim()).filter(Boolean))];
+  return {
+    name,
+    scopes,
+    expires_in_days: days,
+    ...(mailboxIds.length > 0 ? { mailbox_ids: mailboxIds } : {}),
+  };
 }
 
 export function isCreatePatBody(value: CreatePatBody | { error: string }): value is CreatePatBody {
@@ -70,6 +79,7 @@ export interface PatListItem {
   name: string;
   token_prefix?: string | null;
   scopes?: string[] | null;
+  mailbox_ids?: string[] | null;
   created_at?: string | null;
   expires_at?: string | null;
   last_used_at?: string | null;
@@ -79,6 +89,7 @@ export interface PatListItem {
 export interface RememberedPatMeta {
   scopes: string[];
   expires_at: string | null;
+  mailbox_ids?: string[];
 }
 
 /**
@@ -96,4 +107,9 @@ export function rowExpiresAt(item: PatListItem, remembered?: RememberedPatMeta):
   if (typeof item.expires_at === 'string' && item.expires_at.length > 0) return item.expires_at;
   if (remembered?.expires_at) return remembered.expires_at;
   return null;
+}
+
+export function rowMailboxIds(item: PatListItem, remembered?: RememberedPatMeta): string[] {
+  if (Array.isArray(item.mailbox_ids)) return item.mailbox_ids;
+  return remembered?.mailbox_ids ?? [];
 }

@@ -88,6 +88,7 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     const augmented = record.user as PatAuthenticatedUser;
     augmented.__patAuth = {
       scopes: record.scopes,
+      ...(record.mailboxIds?.length ? { mailboxIds: record.mailboxIds } : {}),
       expiresAt: record.expiresAt,
       revokedAt: record.revokedAt,
     };

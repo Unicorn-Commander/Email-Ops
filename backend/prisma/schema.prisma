@@ -585,6 +585,9 @@ model PersonalAccessToken {
   tokenHash   String    @unique
   tokenPrefix String
   scopes      String[]  @default([])
+  // Empty means the token retains the legacy workspace-visible mailbox set;
+  // otherwise requests are narrowed to these mailbox account ids.
+  mailboxIds  String[]  @default([])
   expiresAt   DateTime?
   lastUsedAt  DateTime?
   createdAt   DateTime  @default(now())

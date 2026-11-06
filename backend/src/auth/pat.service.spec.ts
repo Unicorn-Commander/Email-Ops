@@ -35,6 +35,7 @@ function makePrisma(users: Record<string, { id: string; isActive: boolean }>) {
           tokenHash: data.tokenHash,
           tokenPrefix: data.tokenPrefix,
           scopes: data.scopes,
+          mailboxIds: data.mailboxIds ?? [],
           expiresAt: data.expiresAt,
           lastUsedAt: null as Date | null,
           createdAt: new Date(),
@@ -150,6 +151,29 @@ describe('PatService', () => {
       scopes: ['mail:read', 'mail:*', 'agent-inbox:approve'],
       expiresAt: expiresAt.toISOString(),
     });
+  });
+
+  it('normalizes a mailbox allowlist and preserves an empty list as unscoped', async () => {
+    const { prisma, store } = makePrisma({ u1: { id: 'u1', isActive: true } });
+    const svc = new PatService(prisma);
+
+    const minted = await svc.createPat('u1', 'mailbox-agent', {
+      scopes: ['mail:read'],
+      mailboxIds: [' mailbox-a ', 'mailbox-a', 'mailbox-b'],
+      expiresAt: VALID_OPTS().expiresAt,
+    });
+
+    expect(store.get(minted.id)).toMatchObject({ mailboxIds: ['mailbox-a', 'mailbox-b'] });
+    await expect(svc.resolvePatRecord(minted.token)).resolves.toMatchObject({
+      mailboxIds: ['mailbox-a', 'mailbox-b'],
+    });
+
+    const unscoped = await svc.createPat('u1', 'legacy-agent', {
+      scopes: ['mail:read'],
+      mailboxIds: [],
+      expiresAt: VALID_OPTS().expiresAt,
+    });
+    expect(unscoped.mailboxIds).toEqual([]);
   });
 
   it('rejects unknown, malformed, and unknown-prefix wildcard scopes', async () => {
