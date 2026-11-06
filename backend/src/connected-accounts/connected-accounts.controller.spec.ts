@@ -15,7 +15,7 @@ describe('ConnectedAccountsController', () => {
       username: 'aaron',
       firstName: 'Aaron',
       lastName: 'S',
-      picture: null,
+      avatarUrl: null,
       keycloakId: 'kc-sub-aaron',
       passwordHash: null,
       kcRefreshTokenEnc: null,
