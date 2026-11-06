@@ -27,8 +27,10 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiProperty, ApiResponse, ApiTags } from '@nestjs/swagger';
 import {
   ArrayNotEmpty,
+  ArrayMaxSize,
   IsArray,
   IsInt,
+  IsOptional,
   IsString,
   Max,
   MaxLength,
@@ -66,6 +68,18 @@ export class CreatePatDto {
   @ArrayNotEmpty()
   @IsString({ each: true })
   scopes!: string[];
+
+  /** Optional mailbox account id allowlist. Omit or pass [] for all mailboxes. */
+  @ApiProperty({
+    required: false,
+    description: 'Mailbox account ids this token may use. Omit or pass [] for all visible mailboxes.',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(200)
+  @IsString({ each: true })
+  mailbox_ids?: string[];
 
   /**
    * Optional lifetime in days. Omitted → PAT_DEFAULT_EXPIRY_DAYS. A
@@ -124,6 +138,7 @@ export class PatsController {
         : new Date(Date.now() + body.expires_in_days * PAT_DAY_MS);
     const minted = await this.pats.createPat(user.id, body.name, {
       scopes: body.scopes,
+      mailboxIds: body.mailbox_ids,
       expiresAt,
     });
     return {
@@ -132,6 +147,7 @@ export class PatsController {
       token: minted.token,
       token_prefix: minted.tokenPrefix,
       scopes: minted.scopes,
+      mailbox_ids: minted.mailboxIds,
       expires_at: minted.expiresAt,
       created_at: minted.createdAt,
     };
@@ -149,6 +165,9 @@ export class PatsController {
         id: t.id,
         name: t.name,
         token_prefix: t.tokenPrefix,
+        scopes: t.scopes,
+        mailbox_ids: t.mailboxIds,
+        expires_at: t.expiresAt,
         last_used_at: t.lastUsedAt,
         created_at: t.createdAt,
         revoked_at: t.revokedAt,

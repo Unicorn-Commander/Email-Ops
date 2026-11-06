@@ -36,6 +36,7 @@ export interface MintedPat {
   token: string;
   tokenPrefix: string;
   scopes: string[];
+  mailboxIds: string[];
   expiresAt: Date;
   createdAt: Date;
 }
@@ -47,6 +48,8 @@ export interface CreatePatOptions {
    * for deliberately.
    */
   scopes: string[];
+  /** Optional mailbox allowlist. Empty means all mailboxes visible to the user. */
+  mailboxIds?: string[];
   /** REQUIRED. A never-expiring PAT cannot be minted (max PAT_MAX_EXPIRY_DAYS). */
   expiresAt: Date;
 }
@@ -54,13 +57,22 @@ export interface CreatePatOptions {
 export interface ResolvedPatRecord {
   user: User;
   scopes: string[];
+  mailboxIds: string[];
   expiresAt: string | null;
   revokedAt: string | null;
 }
 
 export type PatSummary = Pick<
   PersonalAccessToken,
-  'id' | 'name' | 'tokenPrefix' | 'lastUsedAt' | 'createdAt' | 'revokedAt'
+  | 'id'
+  | 'name'
+  | 'tokenPrefix'
+  | 'scopes'
+  | 'mailboxIds'
+  | 'expiresAt'
+  | 'lastUsedAt'
+  | 'createdAt'
+  | 'revokedAt'
 >;
 
 /**
@@ -115,13 +127,14 @@ export class PatService {
    */
   async createPat(userId: string, name: string, opts: CreatePatOptions): Promise<MintedPat> {
     const scopes = PatService.normalizeScopes(opts?.scopes);
+    const mailboxIds = PatService.normalizeMailboxIds(opts?.mailboxIds);
     const expiresAt = PatService.normalizeExpiry(opts?.expiresAt);
     const plaintext = `${PAT_PREFIX}${PatService.randomBody(PAT_BODY_LENGTH)}`;
     const tokenHash = PatService.hash(plaintext);
     const tokenPrefix = plaintext.slice(0, PAT_DISPLAY_PREFIX_LENGTH);
 
     const row = await this.prisma.personalAccessToken.create({
-      data: { userId, name, tokenHash, tokenPrefix, scopes, expiresAt },
+      data: { userId, name, tokenHash, tokenPrefix, scopes, mailboxIds, expiresAt },
     });
 
     return {
@@ -130,6 +143,7 @@ export class PatService {
       token: plaintext,
       tokenPrefix: row.tokenPrefix,
       scopes,
+      mailboxIds,
       expiresAt,
       createdAt: row.createdAt,
     };
@@ -179,6 +193,25 @@ export class PatService {
       );
     }
 
+    return normalized;
+  }
+
+  private static normalizeMailboxIds(mailboxIds: string[] | null | undefined): string[] {
+    if (mailboxIds == null) return [];
+    if (!Array.isArray(mailboxIds)) {
+      throw new BadRequestException('PAT mailbox_ids must be an array');
+    }
+    if (mailboxIds.length > 200) {
+      throw new BadRequestException('PAT mailbox_ids must contain at most 200 mailbox ids');
+    }
+    const normalized: string[] = [];
+    for (const raw of mailboxIds) {
+      if (typeof raw !== 'string' || raw.trim().length === 0) {
+        throw new BadRequestException('PAT mailbox_ids must contain non-empty strings');
+      }
+      const id = raw.trim();
+      if (!normalized.includes(id)) normalized.push(id);
+    }
     return normalized;
   }
 
@@ -234,6 +267,9 @@ export class PatService {
     const resolved: ResolvedPatRecord = {
       user: record.user,
       scopes: record.scopes,
+      // Tokens minted before mailbox scoping have no column value in older
+      // fixtures/clients; treat that shape exactly like an empty allowlist.
+      mailboxIds: Array.isArray(record.mailboxIds) ? record.mailboxIds : [],
       expiresAt: record.expiresAt?.toISOString() ?? null,
       revokedAt: record.revokedAt?.toISOString() ?? null,
     };
@@ -317,6 +353,9 @@ export class PatService {
         id: true,
         name: true,
         tokenPrefix: true,
+        scopes: true,
+        mailboxIds: true,
+        expiresAt: true,
         lastUsedAt: true,
         createdAt: true,
         revokedAt: true,
