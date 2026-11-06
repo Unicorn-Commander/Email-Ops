@@ -242,6 +242,8 @@ The Docker profile uses [`.env.selfhost.example`](.env.selfhost.example). Source
 | `INBOUND_WATCHER_ENABLED`, `AGENT_REPLY_RUNTIME_ENABLED` | Inbound JMAP polling and the agent-reply drafter. Both default off. The reply runtime stages drafts; it does not send. |
 | `NEXT_PUBLIC_API_URL` | Frontend API base URL when the browser should not use the local Next.js rewrite. |
 
+Request throttling is configurable with `THROTTLE_SESSION_SHORT=300`, `THROTTLE_SESSION_LONG=5000`, `THROTTLE_CREDENTIAL_SHORT=20`, `THROTTLE_CREDENTIAL_LONG=200`, and `THROTTLE_IP_PER_MIN=200`; browser sessions use the session pair while PAT, MCP bearer, and anonymous callers retain the strict pair. Health checks use `HEALTH_RSS_LIMIT_MB=1536` and `HEALTH_HEAP_LIMIT_MB=200` (MB), and log the configured limits once at startup.
+
 ## Architecture
 
 ```mermaid

@@ -1,4 +1,5 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import { SKIP_ALL_THROTTLERS } from '../auth/identity-throttle';
@@ -11,11 +12,24 @@ import { PrismaHealthIndicator } from './prisma.health';
 @SkipThrottle(SKIP_ALL_THROTTLERS)
 @Controller('health')
 export class HealthController {
+  private readonly logger = new Logger(HealthController.name);
+  private readonly heapLimitBytes: number;
+  private readonly rssLimitBytes: number;
+
   constructor(
     private health: HealthCheckService,
     private memory: MemoryHealthIndicator,
     private prismaHealth: PrismaHealthIndicator,
-  ) {}
+    config: ConfigService,
+  ) {
+    const heapLimitMb = readPositiveMegabytes(config, 'HEALTH_HEAP_LIMIT_MB', 200);
+    const rssLimitMb = readPositiveMegabytes(config, 'HEALTH_RSS_LIMIT_MB', 1536);
+    this.heapLimitBytes = heapLimitMb * 1024 * 1024;
+    this.rssLimitBytes = rssLimitMb * 1024 * 1024;
+    this.logger.log(
+      `Health memory limits configured: heap=${heapLimitMb} MB, rss=${rssLimitMb} MB`,
+    );
+  }
 
   @Get()
   @HealthCheck()
@@ -25,8 +39,8 @@ export class HealthController {
   check() {
     return this.health.check([
       () => this.prismaHealth.isHealthy('database'),
-      () => this.memory.checkHeap('memory_heap', 200 * 1024 * 1024), // 200MB
-      () => this.memory.checkRSS('memory_rss', 400 * 1024 * 1024), // 400MB
+      () => this.memory.checkHeap('memory_heap', this.heapLimitBytes),
+      () => this.memory.checkRSS('memory_rss', this.rssLimitBytes),
     ]);
   }
 
@@ -45,4 +59,11 @@ export class HealthController {
   readiness() {
     return this.health.check([() => this.prismaHealth.isHealthy('database')]);
   }
+}
+
+function readPositiveMegabytes(config: ConfigService, name: string, fallback: number): number {
+  const raw = config.get<string>(name);
+  if (raw == null || !/^\d+$/.test(String(raw).trim())) return fallback;
+  const value = Number(String(raw).trim());
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
