@@ -14,6 +14,8 @@ import { TEST_DATABASE_URL } from '../../test/test-db';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
+import { withMailboxPrincipalScope } from '../common/mailbox/mailbox-principal';
+import { MailboxOutOfScopeException } from '../common/mailbox/mailbox-scope';
 import { EmailService } from './email.service';
 
 /**
@@ -227,6 +229,63 @@ describe('EmailService member mailbox scope (integration)', () => {
     // nothing (the fence), not that member's mail.
     const foreign = await service.listMailboxInbox(workspaceId, allMember, otherMailboxId);
     expect(foreign).toHaveLength(0);
+  });
+
+  it('a mailbox-scoped PAT cannot list, search, or compose from another mailbox while an unscoped PAT keeps legacy reach', async () => {
+    const patMailbox = await prisma.mailboxAccount.create({
+      data: {
+        workspaceId,
+        emailAddress: 'pat-scope-a@example.test',
+        provider: 'gmail',
+        kind: 'gmail',
+        ownerKind: MailboxOwnerKind.HUMAN,
+        ownerKey: allMember,
+      },
+    });
+
+    await withMailboxPrincipalScope([patMailbox.id], async () => {
+      await expect(
+        service.listMailboxInbox(workspaceId, allMember, patMailbox.id),
+      ).resolves.toHaveLength(1);
+      await expect(
+        service.listMailboxInbox(workspaceId, allMember, sharedMailboxId),
+      ).rejects.toBeInstanceOf(MailboxOutOfScopeException);
+      await expect(
+        service.listMailboxInbox(workspaceId, allMember, sharedMailboxId, 50, 'inbox', 'scope'),
+      ).rejects.toBeInstanceOf(MailboxOutOfScopeException);
+      await expect(
+        service.composeEmail(workspaceId, allMember, {
+          contactId: null,
+          toAddress: 'recipient@example.test',
+          subject: 'out of scope',
+          body: 'must remain staged nowhere',
+          mode: 'draft',
+          externalSource: 'scope-pat-test',
+          externalRef: `pat-foreign-${randomUUID()}`,
+          fromMailboxAccountId: sharedMailboxId,
+        }),
+      ).rejects.toBeInstanceOf(MailboxOutOfScopeException);
+    });
+
+    await withMailboxPrincipalScope([], async () => {
+      await expect(
+        service.listMailboxInbox(workspaceId, allMember, sharedMailboxId),
+      ).resolves.toHaveLength(1);
+      await expect(
+        service.listMailboxInbox(workspaceId, allMember, sharedMailboxId, 50, 'inbox', 'scope'),
+      ).resolves.toHaveLength(1);
+      const draft = await service.composeEmail(workspaceId, allMember, {
+        contactId: null,
+        toAddress: 'recipient@example.test',
+        subject: 'unscoped draft',
+        body: 'legacy reach remains',
+        mode: 'draft',
+        externalSource: 'scope-pat-test',
+        externalRef: `pat-unscoped-${randomUUID()}`,
+        fromMailboxAccountId: sharedMailboxId,
+      });
+      expect(draft.from_address).toBe('shared-scope@example.test');
+    });
   });
 
   it('hides agent-inbox drafts staged from another mailbox from OWNED list/approve/reject', async () => {

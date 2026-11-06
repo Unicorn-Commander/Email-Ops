@@ -1,6 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 import { User, WorkspaceRole } from '@prisma/client';
 import { MembershipService } from '../common/workspace/membership.service';
+import { withMailboxPrincipalScope } from '../common/mailbox/mailbox-principal';
 import { MailDomainService } from '../mail-engine-admin/mail-domain.service';
 import { DEFAULT_MAILBOX_QUOTA_BYTES } from '../mail-engine-admin/mail-engine-admin.constants';
 import { MailEngineAdminPort } from '../mail-engine-admin/mail-engine-admin.port';
@@ -68,6 +69,10 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
     canonicalDomain: jest.fn((domain: string) => domain.trim().replace(/\.$/, '').toLowerCase()),
   } as unknown as MailDomainService;
 
+  const mailboxes = {
+    listMailboxes: jest.fn().mockResolvedValue([{ email_address: 'alice@owned.test' }]),
+  };
+
   function makeTools(): EmailOpsTools {
     return new EmailOpsTools(
       membership,
@@ -75,7 +80,7 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
       {} as never,
       {} as never,
       {} as never,
-      {} as never,
+      mailboxes as never,
       {} as never,
       {} as never,
       admin,
@@ -102,6 +107,9 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
     (mailDomains.bindDomain as jest.Mock).mockResolvedValue(binding);
     (mailDomains.listDomains as jest.Mock).mockResolvedValue([binding]);
     (mailDomains.assertWorkspaceOwnsDomain as jest.Mock).mockResolvedValue(binding);
+    (mailboxes.listMailboxes as jest.Mock).mockResolvedValue([
+      { email_address: 'alice@owned.test' },
+    ]);
   });
 
   it('binds ensure_mail_domain before provisioning the canonical domain', async () => {
@@ -130,6 +138,20 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
       accounts: [{ address: 'alice@owned.test' }],
     });
     expect(mailDomains.listDomains).toHaveBeenCalledWith('ws-1', 'uc-user-1');
+  });
+
+  it('filters engine accounts through a scoped PAT mailbox allowlist', async () => {
+    (admin.listAccounts as jest.Mock).mockResolvedValue([
+      { address: 'alice@owned.test' },
+      { address: 'bob@owned.test' },
+    ]);
+
+    await withMailboxPrincipalScope(['mailbox-alice'], async () => {
+      await expect(makeTools().listMailAccounts(user, {})).resolves.toEqual({
+        accounts: [{ address: 'alice@owned.test' }],
+      });
+    });
+    expect(mailboxes.listMailboxes).toHaveBeenCalledWith('ws-1', 'uc-user-1');
   });
 
   it('reads one domain verification state, including TXT instructions', async () => {
