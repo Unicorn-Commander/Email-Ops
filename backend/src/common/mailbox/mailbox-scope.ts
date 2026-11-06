@@ -155,10 +155,11 @@ export async function visibleMailboxIds(
 
 /**
  * Guard an already-loaded mailbox for auxiliary mailbox surfaces (contacts,
- * signatures, vacation, rules, and management). Governed members get a 404
- * for an out-of-scope id. Every caller, governed or not, still passes the
- * HUMAN-owner fence (ForbiddenException), exactly as on main: scope narrows
- * access and never widens it.
+ * signatures, vacation, rules, and management). Governed human members get a
+ * 404 for an out-of-scope id; a mailbox-scoped PAT gets the stable 403. Every
+ * caller, governed or not, still passes the HUMAN-owner fence
+ * (ForbiddenException), exactly as on main: scope narrows access and never
+ * widens it.
  */
 export async function assertMailboxVisible(
   db: MailboxScopeDb,
