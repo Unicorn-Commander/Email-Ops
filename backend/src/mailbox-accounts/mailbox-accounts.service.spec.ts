@@ -82,6 +82,22 @@ describe('MailboxAccountsService (workspace default mailbox)', () => {
     });
   });
 
+  it('without is_default, the first mailbox is the default and a second one is not', async () => {
+    const first = make({ workspaceDefault: null });
+    await first.service.createMailbox(WS, 'user-1', { emailAddress: 'first@example.com' });
+    expect(first.tx.mailboxAccount.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ emailAddress: 'first@example.com', isDefault: true }),
+    });
+
+    const held = row({ id: 'mb-first', emailAddress: 'first@example.com', isDefault: true });
+    const second = make({ workspaceDefault: held });
+    await second.service.createMailbox(WS, 'user-1', { emailAddress: 'second@example.com' });
+    expect(second.tx.mailboxAccount.updateMany).not.toHaveBeenCalled();
+    expect(second.tx.mailboxAccount.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ emailAddress: 'second@example.com', isDefault: false }),
+    });
+  });
+
   it('setting a new mailbox default clears the prior holder before create', async () => {
     const oldDefault = row({ id: 'mb-old', isDefault: true });
     const { service, tx } = make({ existing: null, workspaceDefault: oldDefault });

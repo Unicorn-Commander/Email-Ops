@@ -355,7 +355,9 @@ export class MailboxAccountsController {
       ownerKind,
       ownerKey: body.owner_key ?? null,
       postmarkLane: body.postmark_lane,
-      isDefault: body.is_default,
+      // Absent leaves createMailbox's first-mailbox rule. True reuses the
+      // transactional demotion inside createMailbox; it is not a second path.
+      ...(body.is_default !== undefined ? { isDefault: body.is_default } : {}),
     };
     const decision = await this.policy.authorize(workspaceId, ucUid, role, action, { isSelfOwnMailbox });
     if (decision === 'requires_approval') {
