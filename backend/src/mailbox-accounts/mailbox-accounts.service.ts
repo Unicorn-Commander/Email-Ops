@@ -151,7 +151,21 @@ export class MailboxAccountsService {
   ): Promise<MailboxView> {
     const created = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const ownerKind = input.ownerKind ?? MailboxOwnerKind.SHARED;
+      const existingDefault = await tx.mailboxAccount.findFirst({
+        where: { workspaceId, isDefault: true },
+        select: { id: true },
+      });
+      // A workspace gets one fallback identity as soon as its first mailbox is
+      // registered. An explicit true also atomically hands the flag to the new
+      // row; an explicit false preserves the current holder when one exists.
+      const makeDefault = input.isDefault === true || !existingDefault;
       try {
+        if (makeDefault) {
+          await tx.mailboxAccount.updateMany({
+            where: { workspaceId, isDefault: true },
+            data: { isDefault: false },
+          });
+        }
         const row = await tx.mailboxAccount.create({
           data: {
             workspaceId,
@@ -161,7 +175,8 @@ export class MailboxAccountsService {
             ownerKey: input.ownerKey ?? null,
             kind: ownerKind.toLowerCase(),
             postmarkLane: input.postmarkLane ?? false,
-            // provisionState defaults REGISTERED; isDefault false; active true.
+            isDefault: makeDefault,
+            // provisionState defaults REGISTERED; active defaults true.
           },
         });
         await this.recordAction(tx, workspaceId, AgentActionKind.MAILBOX_CREATED, ucUid, row.emailAddress);
@@ -251,6 +266,17 @@ export class MailboxAccountsService {
       : null;
     const ownerKey = owner?.keycloakId ?? owner?.id ?? ucUid;
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const existingDefault = await tx.mailboxAccount.findFirst({
+        where: { workspaceId, isDefault: true },
+        select: { id: true },
+      });
+      const makeDefault = !existingDefault;
+      if (makeDefault) {
+        await tx.mailboxAccount.updateMany({
+          where: { workspaceId, isDefault: true },
+          data: { isDefault: false },
+        });
+      }
       const mb = await tx.mailboxAccount.upsert({
         where: { workspaceId_emailAddress: { workspaceId, emailAddress: input.emailAddress } },
         create: {
@@ -262,6 +288,7 @@ export class MailboxAccountsService {
           ownerKey,
           kind: input.provider,
           postmarkLane: false,
+          isDefault: makeDefault,
         },
         update: {
           provider: input.provider,
@@ -269,6 +296,7 @@ export class MailboxAccountsService {
           ownerKey,
           kind: input.provider,
           active: true,
+          ...(makeDefault ? { isDefault: true } : {}),
         },
       });
       await this.recordAction(
@@ -341,11 +369,116 @@ export class MailboxAccountsService {
       if (patch.ownerKey !== undefined) data.ownerKey = patch.ownerKey;
       if (patch.postmarkLane !== undefined) data.postmarkLane = patch.postmarkLane;
       if (patch.active !== undefined) data.active = patch.active;
+      if (patch.isDefault !== undefined) data.isDefault = patch.isDefault;
       if (Object.keys(data).length === 0) return this.toViewOne(tx, existing);
+
+      if (
+        patch.isDefault === true &&
+        (patch.active === false || (!existing.active && patch.active !== true))
+      ) {
+        throw new BadRequestException('An inactive mailbox cannot be the workspace default.');
+      }
+
+      // Removing or parking the current default must promote another active
+      // mailbox in the same transaction, so sends never fall into a default-less
+      // workspace. A caller can still set a different mailbox directly.
+      const needsReplacement =
+        existing.isDefault &&
+        (patch.isDefault === false || (patch.active === false && patch.isDefault !== true));
+      const replacement = needsReplacement
+        ? await tx.mailboxAccount.findFirst({
+            where: { workspaceId, id: { not: existing.id }, active: true },
+            orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+            select: { id: true },
+          })
+        : null;
+      if (needsReplacement && !replacement) {
+        throw new ConflictException(
+          'The workspace must keep one active default mailbox; set another mailbox first.',
+        );
+      }
+      if (replacement) data.isDefault = false;
+
+      if (patch.isDefault === true || replacement) {
+        await tx.mailboxAccount.updateMany({
+          where: { workspaceId, isDefault: true },
+          data: { isDefault: false },
+        });
+        if (replacement) {
+          await tx.mailboxAccount.update({
+            where: { id: replacement.id },
+            data: { isDefault: true },
+          });
+        }
+      }
 
       const updated = await tx.mailboxAccount.update({ where: { id: existing.id }, data });
       await this.recordAction(tx, workspaceId, AgentActionKind.MAILBOX_UPDATED, ucUid, updated.emailAddress);
       return this.toViewOne(tx, updated);
+    });
+  }
+
+  /**
+   * Delete only an unreferenced registry row. Engine account teardown remains
+   * an explicit control-plane action; deleting the SoR row must never orphan
+   * messages, agent bindings, or approved send identities.
+   */
+  async deleteMailbox(
+    workspaceId: string,
+    ucUid: string | null,
+    id: string,
+  ): Promise<{ id: string; deleted: true } | null> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+      const mailbox = await tx.mailboxAccount.findFirst({ where: { id, workspaceId } });
+      if (!mailbox || (scope.governed && !scope.ids.includes(mailbox.id))) return null;
+
+      const messages = await tx.emailMessage.findMany({
+        where: { workspaceId, mailboxAccountId: mailbox.id },
+        select: { threadId: true },
+      });
+      const blockers: Record<string, number> = {};
+      if (messages.length) blockers.messages = messages.length;
+      const threadCount = new Set(
+        messages.map((message) => message.threadId).filter((threadId): threadId is string => !!threadId),
+      ).size;
+      if (threadCount) blockers.threads = threadCount;
+
+      const agentCount = await tx.agent.count({
+        where: {
+          workspaceId,
+          OR: [
+            { mailboxAccountId: mailbox.id },
+            { mailboxes: { some: { mailboxAccountId: mailbox.id } } },
+          ],
+        },
+      });
+      if (agentCount) blockers.agents = agentCount;
+
+      const kitCount = await tx.agentSendKit.count({
+        where: {
+          workspaceId,
+          fromAddress: { equals: mailbox.emailAddress, mode: 'insensitive' },
+        },
+      });
+      if (kitCount) blockers.kits = kitCount;
+
+      // This relation is RESTRICT rather than CASCADE in Prisma, so expose it
+      // as a blocker before attempting the delete instead of returning a 500.
+      const standingApprovalCount = await tx.standingApproval.count({
+        where: { workspaceId, mailboxId: mailbox.id },
+      });
+      if (standingApprovalCount) blockers.standing_approvals = standingApprovalCount;
+
+      if (Object.keys(blockers).length) {
+        throw new ConflictException({
+          message: 'Mailbox cannot be deleted while it is still referenced.',
+          blockers,
+        });
+      }
+
+      await tx.mailboxAccount.delete({ where: { id: mailbox.id } });
+      return { id: mailbox.id, deleted: true as const };
     });
   }
 

@@ -56,6 +56,7 @@ class CreateMailboxDto {
   @IsOptional() @IsEnum(MailboxOwnerKind) owner_kind?: MailboxOwnerKind;
   @IsOptional() @IsString() @MaxLength(255) owner_key?: string;
   @IsOptional() @IsBoolean() postmark_lane?: boolean;
+  @IsOptional() @IsBoolean() is_default?: boolean;
 }
 
 class ConnectMailboxDto {
@@ -72,6 +73,7 @@ class UpdateMailboxDto {
   @IsOptional() @IsString() @MaxLength(255) owner_key?: string | null;
   @IsOptional() @IsBoolean() postmark_lane?: boolean;
   @IsOptional() @IsBoolean() active?: boolean;
+  @IsOptional() @IsBoolean() is_default?: boolean;
 }
 
 class SaveSignatureDto {
@@ -353,6 +355,7 @@ export class MailboxAccountsController {
       ownerKind,
       ownerKey: body.owner_key ?? null,
       postmarkLane: body.postmark_lane,
+      isDefault: body.is_default,
     };
     const decision = await this.policy.authorize(workspaceId, ucUid, role, action, { isSelfOwnMailbox });
     if (decision === 'requires_approval') {
@@ -436,6 +439,7 @@ export class MailboxAccountsController {
     if (body.owner_key !== undefined) patch.ownerKey = body.owner_key;
     if (body.postmark_lane !== undefined) patch.postmarkLane = body.postmark_lane;
     if (body.active !== undefined) patch.active = body.active;
+    if (body.is_default !== undefined) patch.isDefault = body.is_default;
 
     const decision = await this.policy.authorize(workspaceId, ucUid, role, action);
     if (decision === 'requires_approval') {
@@ -450,5 +454,28 @@ export class MailboxAccountsController {
     const updated = await this.mailboxes.updateMailbox(workspaceId, ucUid, id, patch);
     if (!updated) throw new NotFoundException('Mailbox not found in this workspace.');
     return updated;
+  }
+
+  @Delete(':id')
+  @ApiOperation({ summary: 'Delete an unreferenced mailbox registry row (OWNER-only).' })
+  @ApiResponse({ status: 403, description: 'Only a workspace owner may delete a mailbox.' })
+  @ApiResponse({ status: 409, description: 'The mailbox is still referenced by mail or agent state.' })
+  @ApiResponse({ status: 404, description: 'No such mailbox in this workspace.' })
+  async remove(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @WorkspaceRoleParam() role: WorkspaceRole,
+    @Param('id') id: string,
+  ) {
+    if (role !== WorkspaceRole.OWNER) {
+      throw new ForbiddenException('Only a workspace owner may delete a mailbox.');
+    }
+    const deleted = await this.mailboxes.deleteMailbox(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      id,
+    );
+    if (!deleted) throw new NotFoundException('Mailbox not found in this workspace.');
+    return deleted;
   }
 }

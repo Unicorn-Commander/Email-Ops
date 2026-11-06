@@ -407,9 +407,10 @@ export function useMailClient(): UseMailClient {
       try {
         const res = await listMailMailboxes(activeWorkspace.workspace_id);
         if (!alive) return;
-        setMailboxes(res.items);
+        const activeMailboxes = res.items.filter((mailbox) => mailbox.active !== false);
+        setMailboxes(activeMailboxes);
         // Default to the first mailbox (matches the prompt's spec).
-        setSelectedMailboxId(res.items[0]?.id ?? null);
+        setSelectedMailboxId(activeMailboxes[0]?.id ?? null);
         setError(null);
         setLoad('ready');
       } catch (err) {

@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { User, WorkspaceRole } from '@prisma/client';
 import { MembershipService } from '../common/workspace/membership.service';
 import { withMailboxPrincipalScope } from '../common/mailbox/mailbox-principal';
@@ -54,6 +54,8 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
     bindDomain: jest.fn().mockResolvedValue(binding),
     listDomains: jest.fn().mockResolvedValue([binding]),
     assertWorkspaceOwnsDomain: jest.fn().mockResolvedValue(binding),
+    assertDomainUnused: jest.fn().mockResolvedValue(binding),
+    deleteDomainClaim: jest.fn().mockResolvedValue(binding),
     getDomainVerification: jest.fn().mockResolvedValue({
       id: 'domain-1',
       domain: 'owned.test',
@@ -118,6 +120,8 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
         is_default: true,
       },
     ]);
+    (mailDomains.assertDomainUnused as jest.Mock).mockResolvedValue(binding);
+    (mailDomains.deleteDomainClaim as jest.Mock).mockResolvedValue(binding);
   });
 
   it('binds ensure_mail_domain before provisioning the canonical domain', async () => {
@@ -243,5 +247,30 @@ describe('EmailOpsTools mail-engine admin tenancy', () => {
     });
     expect(mailDomains.bindDomain).toHaveBeenCalled();
     expect(admin.ensureDomain).not.toHaveBeenCalled();
+  });
+
+  it('removes the engine domain and then deletes the workspace claim', async () => {
+    await expect(
+      makeTools().removeMailDomain(user, { domain: 'owned.test' }),
+    ).resolves.toMatchObject({ status: 'ok' });
+
+    expect(mailDomains.assertDomainUnused).toHaveBeenCalledWith('ws-1', 'uc-user-1', 'domain-1');
+    expect(admin.removeDomain).toHaveBeenCalledWith('owned.test');
+    expect(mailDomains.deleteDomainClaim).toHaveBeenCalledWith('ws-1', 'uc-user-1', 'domain-1');
+    expect((admin.removeDomain as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      (mailDomains.deleteDomainClaim as jest.Mock).mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not touch the engine when mailbox use blocks domain removal', async () => {
+    (mailDomains.assertDomainUnused as jest.Mock).mockRejectedValueOnce(
+      new ConflictException({ blockers: { mailboxes: 1 } }),
+    );
+
+    await expect(
+      makeTools().removeMailDomain(user, { domain: 'owned.test' }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(admin.removeDomain).not.toHaveBeenCalled();
+    expect(mailDomains.deleteDomainClaim).not.toHaveBeenCalled();
   });
 });

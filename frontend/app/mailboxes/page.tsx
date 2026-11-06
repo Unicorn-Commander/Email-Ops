@@ -79,12 +79,14 @@ const OWNER: Record<MailboxOwnerKind, { label: string; tone: BadgeVariant; hint:
 };
 
 const OWNER_ORDER: MailboxOwnerKind[] = ['HUMAN', 'AGENT', 'SHARED'];
+type MailboxGroupKind = MailboxOwnerKind | 'PARKED';
 
 /** The section heading for each owner group. */
-const GROUP_HEADING: Record<MailboxOwnerKind, string> = {
+const GROUP_HEADING: Record<MailboxGroupKind, string> = {
   HUMAN: 'Mine / Human',
   AGENT: 'Agents',
   SHARED: 'Shared',
+  PARKED: 'Parked',
 };
 
 /** Provisioning state → human copy + badge tone. */
@@ -221,13 +223,17 @@ export default function MailboxesPage() {
 
   const activeCount = useMemo(() => items.filter((m) => m.active).length, [items]);
 
-  // Group by owner kind, preserving OWNER_ORDER (empty groups are dropped).
+  // Active rows stay in the owner groups; parked rows remain visible in their
+  // own registry group without leaking into the active sending surface.
   const groups = useMemo(
-    () =>
-      OWNER_ORDER.map((kind) => ({
+    () => {
+      const activeGroups = OWNER_ORDER.map((kind) => ({
         kind,
-        rows: items.filter((m) => m.owner_kind === kind),
-      })).filter((g) => g.rows.length > 0),
+        rows: items.filter((m) => m.active && m.owner_kind === kind),
+      })).filter((g) => g.rows.length > 0);
+      const parked = items.filter((m) => !m.active);
+      return parked.length ? [...activeGroups, { kind: 'PARKED' as const, rows: parked }] : activeGroups;
+    },
     [items],
   );
 
@@ -354,7 +360,7 @@ function MailboxCard({
   const confirm = useConfirm();
   const owner = OWNER[mailbox.owner_kind];
   const provision = PROVISION[mailbox.provision_state];
-  const [busy, setBusy] = useState<null | 'name' | 'active'>(null);
+  const [busy, setBusy] = useState<null | 'name' | 'active' | 'default'>(null);
   const [cardError, setCardError] = useState<string | null>(null);
 
   // Inline rename: a small edit affordance over display_name.
@@ -401,6 +407,14 @@ function MailboxCard({
     setCardError(null);
     const res = await onUpdate({ active: !mailbox.active });
     if (!res.ok) setCardError(res.error ?? 'Could not update the mailbox.');
+    setBusy(null);
+  }
+
+  async function handleMakeDefault() {
+    setBusy('default');
+    setCardError(null);
+    const res = await onUpdate({ is_default: true });
+    if (!res.ok) setCardError(res.error ?? 'Could not make this the default mailbox.');
     setBusy(null);
   }
 
@@ -520,8 +534,18 @@ function MailboxCard({
                 : 'Activating…'
               : mailbox.active
                 ? 'Deactivate'
-                : 'Activate'}
+              : 'Activate'}
           </Button>
+          {!mailbox.is_default && (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={busy !== null || !mailbox.active}
+              onClick={() => void handleMakeDefault()}
+            >
+              {busy === 'default' ? 'Saving…' : 'Set as default'}
+            </Button>
+          )}
         </div>
       </div>
     </Card>
@@ -542,6 +566,7 @@ function CreateMailboxDialog({
   const [ownerKind, setOwnerKind] = useState<MailboxOwnerKind>(DEFAULT_OWNER_KIND);
   const [ownerKey, setOwnerKey] = useState('');
   const [postmarkLane, setPostmarkLane] = useState(false);
+  const [makeDefault, setMakeDefault] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -551,6 +576,7 @@ function CreateMailboxDialog({
     setOwnerKind(DEFAULT_OWNER_KIND);
     setOwnerKey('');
     setPostmarkLane(false);
+    setMakeDefault(true);
     setFormError(null);
     setSubmitting(false);
   }
@@ -576,6 +602,7 @@ function CreateMailboxDialog({
       owner_kind: ownerKind,
       ...(ownerKey.trim() ? { owner_key: ownerKey.trim() } : {}),
       postmark_lane: postmarkLane,
+      is_default: makeDefault,
     });
     if (res.ok) {
       reset();
@@ -681,6 +708,20 @@ function CreateMailboxDialog({
             Use the Postmark transactional lane
             <span className="mt-0.5 block text-[11px] text-muted">
               Route this mailbox&rsquo;s mail through the Postmark transactional stream.
+            </span>
+          </span>
+        </label>
+        <label className="flex items-start gap-2.5">
+          <input
+            type="checkbox"
+            checked={makeDefault}
+            onChange={(event) => setMakeDefault(event.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0 rounded border-border accent-[rgb(var(--accent))]"
+          />
+          <span className="text-xs leading-5 text-secondary">
+            Make this the workspace default
+            <span className="mt-0.5 block text-[11px] text-muted">
+              The default is used when a send does not specify a mailbox.
             </span>
           </span>
         </label>

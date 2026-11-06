@@ -804,7 +804,12 @@ export class EmailOpsTools {
       args.name,
       args.parent_id?.trim() || null,
     );
-    return { id: created?.id ?? null, created: !!created };
+    if (!created) {
+      throw new ServiceUnavailableException(
+        'The mail engine cannot create folders for this mailbox right now.',
+      );
+    }
+    return { id: created.id, created: true };
   }
 
   /** Rename a custom folder. */
@@ -1264,8 +1269,20 @@ export class EmailOpsTools {
       ucUidOf(user as WithWorkspaceClaim),
       args.domain,
     );
+    await this.mailDomains.assertDomainUnused(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      binding.id,
+    );
     if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
     const result = await this.admin.removeDomain(binding.domain);
+    if (result.provisioned) {
+      await this.mailDomains.deleteDomainClaim(
+        workspaceId,
+        ucUidOf(user as WithWorkspaceClaim),
+        binding.id,
+      );
+    }
     return { status: result.provisioned ? 'ok' : 'failed', result };
   }
 

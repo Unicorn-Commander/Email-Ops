@@ -13,7 +13,7 @@ import { randomBytes } from 'crypto';
 import { promises as dns } from 'node:dns';
 import { domainToASCII } from 'url';
 import { BUSINESS_TIME_ZONE } from '../common/business-time';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
 
 export const MAIL_DOMAIN_DNS_RESOLVER = Symbol('MAIL_DOMAIN_DNS_RESOLVER');
 
@@ -220,6 +220,46 @@ export class MailDomainService {
     return owned;
   }
 
+  /** Fail before engine teardown when a mailbox still claims this domain. */
+  async assertDomainUnused(
+    workspaceId: string,
+    ucUid: string | null,
+    id: string,
+  ): Promise<MailDomain> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const row = await tx.mailDomain.findFirst({ where: { id, workspaceId } });
+      if (!row) throw new NotFoundException('Mail domain not found in this workspace.');
+      const mailboxCount = await this.mailboxCountForDomain(tx, workspaceId, row.domain);
+      if (mailboxCount) {
+        throw new ConflictException({
+          message: 'Mail domain cannot be removed while mailbox accounts use it.',
+          blockers: { mailboxes: mailboxCount },
+        });
+      }
+      return row;
+    });
+  }
+
+  /** Delete the claim after the engine has confirmed the domain was removed. */
+  async deleteDomainClaim(
+    workspaceId: string,
+    ucUid: string | null,
+    id: string,
+  ): Promise<MailDomain> {
+    return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const row = await tx.mailDomain.findFirst({ where: { id, workspaceId } });
+      if (!row) throw new NotFoundException('Mail domain not found in this workspace.');
+      const mailboxCount = await this.mailboxCountForDomain(tx, workspaceId, row.domain);
+      if (mailboxCount) {
+        throw new ConflictException({
+          message: 'Mail domain cannot be removed while mailbox accounts use it.',
+          blockers: { mailboxes: mailboxCount },
+        });
+      }
+      return tx.mailDomain.delete({ where: { id: row.id } });
+    });
+  }
+
   /** Extract and canonicalize the domain portion of a mailbox address. */
   domainOf(address: string): string {
     const value = address.trim();
@@ -326,6 +366,19 @@ export class MailDomainService {
 
   private recordName(domain: string): string {
     return `_emailops-verify.${domain}`;
+  }
+
+  private async mailboxCountForDomain(
+    tx: WorkspaceTxClient,
+    workspaceId: string,
+    domain: string,
+  ): Promise<number> {
+    return tx.mailboxAccount.count({
+      where: {
+        workspaceId,
+        emailAddress: { endsWith: `@${domain}`, mode: 'insensitive' },
+      },
+    });
   }
 
   private assertVerificationRole(role: WorkspaceRole): void {

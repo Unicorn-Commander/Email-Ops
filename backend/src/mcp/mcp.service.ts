@@ -663,8 +663,8 @@ export class McpService {
         title: 'Create a custom folder',
         description:
           'Create a custom folder in a mailbox, optionally nested under parent_id. ' +
-          'Member-level write. Returns { id, created } — created:false when the engine ' +
-          'is dormant or the mailbox is external (no throw).',
+          'Member-level write. Returns { id, created:true } on success; engine failures ' +
+          'are returned as errors rather than a silent created:false response.',
         inputSchema: {
           workspace_id: z.string().optional(),
           mailbox_id: z.string().min(1),
@@ -1270,7 +1270,8 @@ export class McpService {
         description:
           'Remove a domain from the mail engine (idempotent). OWNER-only. ' +
           'The domain must already be bound to the caller workspace. ' +
-          'Call only when you are certain no active accounts remain under this domain. ' +
+          'The engine is changed only when no mailbox accounts use the domain; a successful ' +
+          'removal also deletes the workspace claim row. ' +
           'Returns { status:"ok"|"failed"|"engine_not_configured", result }.',
         inputSchema: {
           workspace_id: z.string().optional(),
