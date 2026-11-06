@@ -38,6 +38,15 @@ class McpProbeController {
   }
 }
 
+@Controller('rest-probe')
+class RestProbeController {
+  @All()
+  @UseGuards(JwtAuthGuard)
+  handle(@Req() request: any) {
+    return { ok: Boolean(request.user) };
+  }
+}
+
 type HttpResult = {
   status: number;
   headers: Record<string, string>;
@@ -110,7 +119,7 @@ describe('Email-Ops MCP OAuth discovery and resource-server boundary', () => {
   beforeAll(async () => {
     const module = await Test.createTestingModule({
       imports: [PassportModule.register({ defaultStrategy: 'jwt' })],
-      controllers: [OAuthDiscoveryController, McpProbeController],
+      controllers: [OAuthDiscoveryController, McpProbeController, RestProbeController],
       providers: [
         OAuthDiscoveryService,
         JwtStrategy,
@@ -258,7 +267,9 @@ describe('Email-Ops MCP OAuth discovery and resource-server boundary', () => {
     });
     expect(response.status).toBe(401);
 
-    expect(response.headers['www-authenticate']).toContain('error="invalid_token"');
+    expect(response.headers['www-authenticate']).toBe(
+      'Bearer realm="email-ops-mcp", resource_metadata="https://email-ops.example.test/.well-known/oauth-protected-resource/api/v1/mcp", error="invalid_token"',
+    );
     expect(JSON.stringify(response.body)).not.toContain('malformed-credential');
   });
 
@@ -291,6 +302,54 @@ describe('Email-Ops MCP OAuth discovery and resource-server boundary', () => {
     expect(authService.validateJwtPayload).toHaveBeenCalled();
   });
 
+  it('returns 403 insufficient_scope for a signed-in user without Email-Ops access on REST and MCP', async () => {
+    (authService.validateJwtPayload as jest.Mock)
+      .mockRejectedValueOnce(new NoWorkspaceAccessException())
+      .mockRejectedValueOnce(new NoWorkspaceAccessException());
+    const now = Math.floor(Date.now() / 1000);
+    const token = jwt.sign(
+      {
+        sub: 'fictional-unprovisioned-rest-mcp',
+        email: 'unprovisioned@example.test',
+        iss: realmIssuer,
+        azp: 'email-ops',
+        aud: 'account',
+        iat: now - 10,
+        exp: now + 300,
+      },
+      keyPair.privateKey,
+      { algorithm: 'RS256', keyid: 'synthetic-jwks-key' },
+    );
+    const expectedBody = {
+      error: 'no_workspace_access',
+      message: 'You are signed in but have no Email-Ops access. Contact your administrator.',
+    };
+
+    const restResponse = await httpRequest('/api/v1/rest-probe', {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(restResponse.status).toBe(403);
+    expect(restResponse.headers['www-authenticate']).toBe(
+      'Bearer realm="email-ops-mcp", error="insufficient_scope", error_description="no Email-Ops access"',
+    );
+    expect(restResponse.body).toEqual(expectedBody);
+
+    const mcpResponse = await httpRequest('/api/v1/mcp', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: mcpBody(),
+    });
+    expect(mcpResponse.status).toBe(403);
+    expect(mcpResponse.headers['www-authenticate']).toBe(
+      'Bearer realm="email-ops-mcp", resource_metadata="https://email-ops.example.test/.well-known/oauth-protected-resource/api/v1/mcp", error="insufficient_scope", error_description="no Email-Ops access"',
+    );
+    expect(mcpResponse.body).toEqual(expectedBody);
+  });
+
   it('returns a verified-user 403 when the user has no active workspace membership', async () => {
     membershipServiceMock.listActiveMemberships.mockResolvedValueOnce([]);
     const now = Math.floor(Date.now() / 1000);
@@ -318,12 +377,11 @@ describe('Email-Ops MCP OAuth discovery and resource-server boundary', () => {
 
     expect(response.status).toBe(403);
     expect(response.headers['www-authenticate']).toBe(
-      'Bearer realm="email-ops-mcp", resource_metadata="https://email-ops.example.test/.well-known/oauth-protected-resource/api/v1/mcp", error="insufficient_scope", error_description="no workspace access"',
+      'Bearer realm="email-ops-mcp", resource_metadata="https://email-ops.example.test/.well-known/oauth-protected-resource/api/v1/mcp", error="insufficient_scope", error_description="no Email-Ops access"',
     );
     expect(response.body).toEqual({
       error: 'no_workspace_access',
-      message:
-        'Your account is verified but has no workspace in Email-Ops yet. Ask your workspace admin for an invite.',
+      message: 'You are signed in but have no Email-Ops access. Contact your administrator.',
     });
   });
 
@@ -356,12 +414,11 @@ describe('Email-Ops MCP OAuth discovery and resource-server boundary', () => {
 
     expect(response.status).toBe(403);
     expect(response.headers['www-authenticate']).toContain(
-      'error="insufficient_scope", error_description="no workspace access"',
+      'error="insufficient_scope", error_description="no Email-Ops access"',
     );
     expect(response.body).toEqual({
       error: 'no_workspace_access',
-      message:
-        'Your account is verified but has no workspace in Email-Ops yet. Ask your workspace admin for an invite.',
+      message: 'You are signed in but have no Email-Ops access. Contact your administrator.',
     });
   });
 
@@ -388,6 +445,9 @@ describe('Email-Ops MCP OAuth discovery and resource-server boundary', () => {
       body: mcpBody(),
     });
     expect(wrongIssuerResponse.status).toBe(401);
+    expect(wrongIssuerResponse.headers['www-authenticate']).toBe(
+      'Bearer realm="email-ops-mcp", resource_metadata="https://email-ops.example.test/.well-known/oauth-protected-resource/api/v1/mcp", error="invalid_token"',
+    );
 
     const expired = jwt.sign(
       {
@@ -410,6 +470,9 @@ describe('Email-Ops MCP OAuth discovery and resource-server boundary', () => {
       body: mcpBody(),
     });
     expect(expiredResponse.status).toBe(401);
+    expect(expiredResponse.headers['www-authenticate']).toBe(
+      'Bearer realm="email-ops-mcp", resource_metadata="https://email-ops.example.test/.well-known/oauth-protected-resource/api/v1/mcp", error="invalid_token"',
+    );
   });
 
   it('rejects a signed Keycloak token with a wrong audience when enforcement is enabled', async () => {

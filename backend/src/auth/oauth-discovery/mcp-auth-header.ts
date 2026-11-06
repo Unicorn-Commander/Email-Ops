@@ -45,17 +45,23 @@ export function setMcpUnauthorizedHeader(
   );
 }
 
-/** Add the RFC 9728 insufficient-scope challenge for a verified user without a workspace. */
+/** Add the RFC 6750 insufficient-scope challenge for a signed-in user without Email-Ops access. */
 export function setMcpInsufficientScopeHeader(
   request: Request,
   response: Response,
   config?: ConfigReader,
 ): void {
-  if (!isMcpRequest(request)) return;
+  if (isMcpRequest(request)) {
+    const metadataUrl = `${resolvePublicOrigin(request, config)}${PROTECTED_RESOURCE_PATH}${MCP_PATH}`;
+    response.setHeader(
+      'WWW-Authenticate',
+      `Bearer realm="${MCP_REALM}", resource_metadata="${metadataUrl}", error="insufficient_scope", error_description="no Email-Ops access"`,
+    );
+    return;
+  }
 
-  const metadataUrl = `${resolvePublicOrigin(request, config)}${PROTECTED_RESOURCE_PATH}${MCP_PATH}`;
   response.setHeader(
     'WWW-Authenticate',
-    `Bearer realm="${MCP_REALM}", resource_metadata="${metadataUrl}", error="insufficient_scope", error_description="no workspace access"`,
+    `Bearer realm="${MCP_REALM}", error="insufficient_scope", error_description="no Email-Ops access"`,
   );
 }

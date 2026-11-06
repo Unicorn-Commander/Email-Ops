@@ -2,8 +2,7 @@ import { ForbiddenException } from '@nestjs/common';
 
 export const NO_WORKSPACE_ACCESS_RESPONSE = {
   error: 'no_workspace_access',
-  message:
-    'Your account is verified but has no workspace in Email-Ops yet. Ask your workspace admin for an invite.',
+  message: 'You are signed in but have no Email-Ops access. Contact your administrator.',
 } as const;
 
 /** A verified identity that has not been provisioned into an Email-Ops workspace. */
