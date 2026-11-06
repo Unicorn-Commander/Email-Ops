@@ -354,6 +354,13 @@ export class SchedulingService {
       },
       orderBy: { message: { sendAt: 'asc' } },
       take,
+      select: {
+        id: true,
+        workspaceId: true,
+        reviewedByUcUid: true,
+        payload: true,
+        message: { select: { mailboxAccountId: true, sendAt: true } },
+      },
     });
     let sent = 0;
     for (const row of rows) {
@@ -373,7 +380,16 @@ export class SchedulingService {
           false,
           payloadObject.agent_principal !== false,
         );
-        if (result) sent += 1;
+        if (result) {
+          sent += 1;
+          const sendAt =
+            row.message?.sendAt instanceof Date ? row.message.sendAt.toISOString() : raw;
+          const mailboxId = row.message?.mailboxAccountId ?? 'none';
+          this.logger.log(
+            `deferred agent send fired item=${row.id} mailbox=${mailboxId} ` +
+              `sendAt=${sendAt} status=${result.message?.status ?? 'none'}`,
+          );
+        }
       } catch (err) {
         this.logger.warn(`deferred agent send failed row=${row.id}: ${(err as Error).message}`);
       }
