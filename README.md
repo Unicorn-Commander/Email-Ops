@@ -24,6 +24,13 @@
   <img src="docs/screenshots/mail.webp" width="1200" alt="Email-Ops unified inbox showing workspace mailboxes, threads, and agent activity">
 </p>
 
+## Watch the demo
+
+<p align="center">
+  <a href="https://unicorncommander.com/products/email-ops"><img src="https://unicorncommander.com/media/products/email-ops/demo-poster.jpg" width="100%" alt="Email-Ops demo video: click to watch on the product page"></a>
+</p>
+<p align="center"><sub>94 seconds on a synthetic company. Nothing was sent. Narrated in a machine voice rendered on our own hardware. <a href="https://unicorncommander.com/products/email-ops">Watch it on the product page</a>.</sub></p>
+
 ## What is Email-Ops?
 
 Email-Ops is the mailbox, thread, and agent-inbox surface for the Unicorn Commander suite. It gives teams a unified view of their mail, lets agents triage and draft work, and puts outbound decisions in a human approval queue. Agents prepare mail. At the default autonomy level, internal mail can send on its own and any external recipient waits for approval. Unattended sends are written to the audit log. It is self-hostable, workspace-scoped, and connects to the rest of the suite through shared identity and an authenticated MCP contract rather than copying mail into every cockpit.
