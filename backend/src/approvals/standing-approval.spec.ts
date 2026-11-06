@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { EmailService } from '../email/email.service';
 import { buildAgentSendKitDefinition } from '../email/agent-send-kit';
+import { agentRequesterLabel } from './human-approval';
 import { StandingApprovalsService } from './standing-approvals.service';
 import {
   assertStandingExpiry,
@@ -8,6 +9,7 @@ import {
   recipientRules,
   standingBinding,
   standingRefusalReason,
+  standingStatus,
   standingTemplate,
   standingTemplateSha256,
 } from './standing-approval';
@@ -333,6 +335,20 @@ describe('standing cap reservations and existing kit fallback', () => {
     expect(results.filter(Boolean)).toHaveLength(2);
     expect(rows).toHaveLength(2);
   });
+
+  it('only loads approved grants when reserving a send', async () => {
+    const h = harness();
+    await h.standing.reserve(h.tx, 'workspace-1', message());
+    expect(h.tx.standingApproval.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          workspaceId: 'workspace-1',
+          approvedAt: { not: null },
+          revokedAt: null,
+        }),
+      }),
+    );
+  });
 });
 
 describe('human campaign lifecycle', () => {
@@ -380,6 +396,8 @@ describe('human campaign lifecycle', () => {
     const result = await h.service.request('workspace-1', h.user, h.input);
     expect(result).toMatchObject({
       approvedAt: null,
+      status: 'PENDING_HUMAN',
+      requestedBy: null,
       fromAddress: 'team@example.org',
       capPerDay: 5,
       templateSha256: standingTemplateSha256(definition),
@@ -452,6 +470,62 @@ describe('human campaign lifecycle', () => {
       where: { id: h.row.id, workspaceId: 'workspace-1', revokedAt: null },
       data: { revokedAt: NOW, revokedBy: 'reviewer-sub' },
     });
+  });
+
+  it('an agent request stays pending until a human approves it, and the agent cannot approve', async () => {
+    const h = lifecycle();
+    const agent: any = {
+      id: 'human-1',
+      keycloakId: 'owner-sub',
+      username: 'fictional-agent',
+      firstName: 'Fictional',
+      lastName: 'Agent',
+      isActive: true,
+      __patAuth: { scopes: ['agent-inbox:approve'] },
+    };
+    const created = await h.service.request('workspace-1', agent, h.input);
+    expect(created).toMatchObject({
+      status: 'PENDING_HUMAN',
+      approvedAt: null,
+      requestedBy: 'fictional-agent',
+      createdBy: 'owner-sub',
+    });
+    expect(standingStatus(created)).toBe('PENDING_HUMAN');
+    expect(
+      standingRefusalReason(
+        { ...h.row, approvedAt: null, requestedBy: 'fictional-agent' },
+        message(),
+        0,
+        NOW,
+      ),
+    ).toBe('not_approved');
+    await expect(
+      h.service.approve('workspace-1', agent, h.row.id, standingBinding(h.row).definitionSha256),
+    ).rejects.toThrow(ForbiddenException);
+    await expect(h.service.revoke('workspace-1', agent, h.row.id)).rejects.toThrow(
+      ForbiddenException,
+    );
+    expect(h.tx.standingApproval.updateMany).not.toHaveBeenCalled();
+    await expect(
+      h.service.approve(
+        'workspace-1',
+        h.user,
+        h.row.id,
+        standingBinding(h.row).definitionSha256,
+      ),
+    ).resolves.toMatchObject({ approved: true });
+    expect(standingRefusalReason(approval({ approvedAt: NOW }), message(), 0, NOW)).toBeNull();
+    expect(agentRequesterLabel(agent)).toBe('fictional-agent');
+    expect(
+      agentRequesterLabel({
+        __isFederationActor: true,
+        __federationActor: 'fictional-ops',
+        username: 'person@example.com',
+      } as any),
+    ).toBe('fictional-ops');
+    expect(agentRequesterLabel({ __patAuth: {}, username: 'person@example.com' } as any)).toBe(
+      'agent',
+    );
   });
 
   it('cannot approve or revoke a campaign outside the workspace', async () => {

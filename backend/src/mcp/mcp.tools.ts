@@ -79,7 +79,7 @@ import { MailRuleView } from '../mail-rules/mail-rules.types';
 import { TrustedCorrespondentsService } from '../trusted-correspondents/trusted-correspondents.service';
 import { TrustedCorrespondentView } from '../email/email.types';
 import { StandingApprovalsService, StandingRequest } from '../approvals/standing-approvals.service';
-import { assertHumanApproval } from '../approvals/human-approval';
+import { assertHumanApproval, isAgentPrincipal } from '../approvals/human-approval';
 import {
   HardBounceSweepResult,
   SuppressionService,
@@ -956,8 +956,10 @@ export class EmailOpsTools {
   }
 
   async requestStandingApproval(user: User, args: StandingRequest & { workspace_id?: string }) {
-    assertHumanApproval(user);
-    const workspace = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    // Agents stage PENDING_HUMAN. The row grants nothing until a human approves it.
+    const workspace = isAgentPrincipal(user)
+      ? await this.membership.resolveAndAuthorize(user, args.workspace_id ?? null)
+      : await this.membership.assertCanReviewInbox(user, args.workspace_id);
     return this.standing!.request(workspace, user, args);
   }
 

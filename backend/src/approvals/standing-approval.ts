@@ -99,6 +99,18 @@ export function assertStandingExpiry(expiresAt: Date, now = new Date()): void {
   }
 }
 
+/** Pending is the existing unapproved row. It grants nothing until a human sets approvedAt. */
+export type StandingStatus = 'PENDING_HUMAN' | 'APPROVED' | 'REVOKED';
+
+export function standingStatus(row: {
+  approvedAt: Date | null;
+  revokedAt: Date | null;
+}): StandingStatus {
+  if (row.revokedAt) return 'REVOKED';
+  if (row.approvedAt) return 'APPROVED';
+  return 'PENDING_HUMAN';
+}
+
 export interface StandingRecord {
   id: string;
   workspaceId: string;

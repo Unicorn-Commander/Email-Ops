@@ -11,13 +11,14 @@ import { assertMailboxVisible, resolveMailboxScope } from '../common/mailbox/mai
 import { ucUidOf } from '../common/workspace/workspace.util';
 import { businessDayWindow } from '../common/business-time';
 import { StableNotifierService } from '../notify/stable-notifier.service';
-import { assertHumanApproval } from './human-approval';
+import { agentRequesterLabel, assertHumanApproval, isAgentPrincipal } from './human-approval';
 import { ApprovalLinksService, standingTarget } from './approval-links.service';
 import {
   assertStandingExpiry,
   recipientRules,
   standingBinding,
   standingRefusalReason,
+  standingStatus,
   standingTemplate,
   standingTemplateSha256,
 } from './standing-approval';
@@ -43,8 +44,10 @@ export class StandingApprovalsService {
   ) {}
 
   async request(workspaceId: string, user: User, input: StandingRequest) {
-    assertHumanApproval(user);
+    // Humans and agent principals may stage a request. It stays pending until
+    // a human approves it. Approve and revoke keep assertHumanApproval.
     const uid = ucUidOf(user);
+    const requestedBy = isAgentPrincipal(user) ? agentRequesterLabel(user) : null;
     const now = new Date();
     const expiresAt = new Date(input.expires_at);
     assertStandingExpiry(expiresAt, now);
@@ -89,6 +92,7 @@ export class StandingApprovalsService {
           capPerDay: input.cap_per_day,
           expiresAt,
           createdBy: uid,
+          requestedBy,
           createdAt: now,
         },
       });
@@ -134,6 +138,8 @@ export class StandingApprovalsService {
     });
     return {
       ...row,
+      status: standingStatus(row),
+      requestedBy: row.requestedBy ?? null,
       ...standingBinding(row),
       usedToday,
       approval_url:

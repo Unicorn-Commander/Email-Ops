@@ -2706,7 +2706,7 @@
     },
     {
       "name": "request_standing_approval",
-      "description": "Human-only campaign request; agents cannot create, renew or widen standing approvals.",
+      "description": "Stage an immutable campaign request. An agent principal may create it as PENDING_HUMAN; it grants nothing until a human approves it. Renewal or widening requires a new request. Approve and revoke stay human-only.",
       "input_schema": {
         "type": "object",
         "properties": {

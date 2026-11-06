@@ -18,7 +18,7 @@ import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decora
 import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
 import { MembershipService } from '../common/workspace/membership.service';
 import { ExplicitCredentialGuard } from '../auth/guards/explicit-credential.guard';
-import { assertHumanApproval } from './human-approval';
+import { assertHumanApproval, isAgentPrincipal } from './human-approval';
 import { StandingApprovalsService, StandingRequest } from './standing-approvals.service';
 
 export class StandingRequestDto implements StandingRequest {
@@ -49,14 +49,24 @@ export class StandingApprovalsController {
     private readonly membership: MembershipService,
   ) {}
 
-  private async authorize(user: User, workspaceId: string) {
+  /** Approve, revoke, and list stay human-only. */
+  private async authorizeReview(user: User, workspaceId: string) {
     assertHumanApproval(user);
     await this.membership.assertCanReviewInbox(user, workspaceId);
   }
 
+  /** An agent may stage a pending request. A human still needs review authority. */
+  private async authorizeRequest(user: User, workspaceId: string) {
+    if (isAgentPrincipal(user)) {
+      await this.membership.resolveAndAuthorize(user, workspaceId);
+      return;
+    }
+    await this.authorizeReview(user, workspaceId);
+  }
+
   @Get()
   async list(@ResolvedWorkspace() ws: string, @CurrentUser() user: User) {
-    await this.authorize(user, ws);
+    await this.authorizeReview(user, ws);
     return { items: await this.standing.list(ws, user) };
   }
 
@@ -66,7 +76,7 @@ export class StandingApprovalsController {
     @CurrentUser() user: User,
     @Body() body: StandingRequestDto,
   ) {
-    await this.authorize(user, ws);
+    await this.authorizeRequest(user, ws);
     return this.standing.request(ws, user, body);
   }
 
@@ -77,7 +87,7 @@ export class StandingApprovalsController {
     @Param('id') id: string,
     @Body() body: StandingApproveDto,
   ) {
-    await this.authorize(user, ws);
+    await this.authorizeReview(user, ws);
     return this.standing.approve(ws, user, id, body.definition_sha256);
   }
 
@@ -87,7 +97,7 @@ export class StandingApprovalsController {
     @CurrentUser() user: User,
     @Param('id') id: string,
   ) {
-    await this.authorize(user, ws);
+    await this.authorizeReview(user, ws);
     return this.standing.revoke(ws, user, id);
   }
 }

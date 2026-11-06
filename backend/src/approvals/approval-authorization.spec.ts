@@ -26,7 +26,7 @@ const agents = [
 
 describe('all approval authority routes refuse agent identities', () => {
   it.each(agents)(
-    '%s receives 403 on every standing REST and MCP operation and legacy kit approval',
+    '%s receives 403 on standing approve, revoke, list, and legacy kit approval',
     async (_label, tag) => {
       const user: any = { ...human, ...tag };
       const service: any = {
@@ -54,13 +54,11 @@ describe('all approval authority routes refuse agent identities', () => {
       const phone = new ApprovalController({} as any, {} as any, service, {} as any, membership);
       const operations = [
         () => controller.list('workspace-1', user),
-        () => controller.request('workspace-1', user, {} as any),
         () =>
           controller.approve('workspace-1', user, 'approval-1', {
             definition_sha256: '0'.repeat(64),
           }),
         () => controller.revoke('workspace-1', user, 'approval-1'),
-        () => mcp.requestStandingApproval(user, {} as any),
         () => mcp.listStandingApprovals(user, {}),
         () =>
           mcp.approveStandingApproval(user, {
@@ -85,6 +83,58 @@ describe('all approval authority routes refuse agent identities', () => {
   );
 
   it.each(agents)(
+    '%s may stage a pending standing request over REST and MCP and still cannot approve it',
+    async (_label, tag) => {
+      const user: any = { ...human, ...tag, username: 'fictional-agent' };
+      const service: any = {
+        request: jest.fn().mockResolvedValue({ status: 'PENDING_HUMAN', approvedAt: null }),
+        list: jest.fn(),
+        approve: jest.fn(),
+        revoke: jest.fn(),
+      };
+      const membership: any = {
+        assertCanReviewInbox: jest.fn().mockResolvedValue('workspace-1'),
+        resolveAndAuthorize: jest.fn().mockResolvedValue('workspace-1'),
+      };
+      const controller = new StandingApprovalsController(service, membership);
+      const mcp = new EmailOpsTools(
+        membership,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        service,
+      );
+      await expect(controller.request('workspace-1', user, {} as any)).resolves.toMatchObject({
+        status: 'PENDING_HUMAN',
+      });
+      await expect(mcp.requestStandingApproval(user, {} as any)).resolves.toMatchObject({
+        status: 'PENDING_HUMAN',
+      });
+      expect(membership.resolveAndAuthorize).toHaveBeenCalled();
+      expect(membership.assertCanReviewInbox).not.toHaveBeenCalled();
+      expect(service.request).toHaveBeenCalledTimes(2);
+      await expect(
+        controller.approve('workspace-1', user, 'approval-1', {
+          definition_sha256: '0'.repeat(64),
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(
+        mcp.approveStandingApproval(user, {
+          id: 'approval-1',
+          definition_sha256: '0'.repeat(64),
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(service.approve).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(agents)(
     '%s is also refused by the underlying grant/session services',
     async (_label, tag) => {
       const user: any = { ...human, ...tag };
@@ -92,7 +142,6 @@ describe('all approval authority routes refuse agent identities', () => {
       const standing = new StandingApprovalsService(prisma, {} as any, {} as any);
       const sessions = new ApprovalSessionService(prisma, {} as any);
       for (const operation of [
-        () => standing.request('workspace-1', user, {} as any),
         () => standing.approve('workspace-1', user, 'approval-1', '0'.repeat(64)),
         () => standing.approveInTx({} as any, 'workspace-1', user, {} as any, '0'.repeat(64)),
         () => standing.revoke('workspace-1', user, 'approval-1'),
