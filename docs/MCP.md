@@ -145,11 +145,25 @@ gate re-derived server-side from the verified token).
 
 | Tool Name | Purpose | Key Parameters | Read-Only |
 | :--- | :--- | :--- | :--- |
-| `list_threads` | List threads in a mailbox folder | `workspace_id?`, `mailbox_id?`, `folder?`, `q?`, `limit?`, `offset?` | Yes |
+| `list_threads` | List threads in a mailbox folder | `workspace_id?`, `mailbox_id?`, `mailbox_address?`, `folder?`, `q?`, `limit?`, `offset?` | Yes |
 | `get_thread` | Get full thread messages with bodies | `workspace_id?`, `thread_id`, `mailbox_id?` | Yes |
-| `search_mail` | Full-text search over mailboxes | `workspace_id?`, `mailbox_id?`, `q`, `folder?`, `limit?`, `offset?` | Yes |
+| `search_mail` | Full-text search over mailboxes | `workspace_id?`, `mailbox_id?`, `mailbox_address?`, `q`, `folder?`, `limit?`, `offset?` | Yes |
 | `set_read` | Mark thread read/unread | `workspace_id?`, `thread_id`, `read`, `mailbox_id?` | No |
 | `bulk_disposition` | Bulk-triage threads into a folder | `workspace_id?`, `thread_ids[]`, `disposition` | No |
+
+`list_threads` and `search_mail` take either `mailbox_id` or `mailbox_address`
+for one mailbox. `mailbox_id` wins when both are passed. Omit both for the
+unified inbox across every mailbox the caller can read.
+
+### Custom folders
+
+| Tool Name | Purpose | Key Parameters | Read-Only |
+| :--- | :--- | :--- | :--- |
+| `create_folder` | Create a custom folder, optionally nested | `workspace_id?`, `mailbox_id`, `name`, `parent_id?` | No |
+
+`create_folder` returns `{ id, created: true }` on success. Engine failures,
+including a dormant engine or an external mailbox, come back as errors. The
+tool does not answer `created: false`.
 
 ### Member mailbox scope
 
@@ -169,7 +183,12 @@ it exists.
 | :--- | :--- | :--- | :--- |
 | `list_threads_with_contact` | List threads with a contact | `workspace_id?`, `contact_id` | Yes |
 | `list_thread_messages` | List thread messages (previews) | `workspace_id?`, `thread_id` | Yes |
-| `compose_email` | Compose outbound email | previous fields plus `attachments?` (`documentId` for a readable Email-Ops document, or `filename`, `contentType`, `contentBase64`; defaults max 5 files / 10 MiB each / 20 MiB total; allowed pdf/png/jpg/txt/csv/md/docx/xlsx), `send_at?` (drafts, +5m to 14d), `kit_id?` | No |
+| `compose_email` | Compose outbound email | previous fields plus `attachments?` (`documentId` for a readable Email-Ops document, or `filename`, `contentType`, `contentBase64`; defaults max 5 files / 10 MiB each / 20 MiB total; allowed pdf/png/jpg/txt/csv/md/docx/xlsx), `send_at?` (drafts, +5m to 14d), `kit_id?`, `from_address?` | No |
+
+A human caller may not pass `from_address` for an AGENT mailbox. Compose
+refuses that call with "You are not allowed to send as that mailbox." The
+agent-origin path is `external_source` set to the agent key and no
+`from_address`; the registered agent then sends from its own primary mailbox.
 
 ### Agent Inbox (Human-in-the-Loop)
 
@@ -227,11 +246,27 @@ workspace REST `DELETE /api/v1/workspaces/:workspaceId/suppressions/:id` route.
 | Tool Name | Purpose | Key Parameters | Read-Only |
 | :--- | :--- | :--- | :--- |
 | `list_mail_domains` | List served domains | `workspace_id?` | Yes |
-| `list_mail_accounts` | List hosted accounts | `workspace_id?` | Yes |
+| `list_mail_accounts` | List hosted accounts (`id`, address, role, `is_default`) | `workspace_id?` | Yes |
 | `ensure_mail_domain` | Add domain to engine | `workspace_id?`, `domain` | No |
-| `remove_mail_domain` | Remove domain from engine | `workspace_id?`, `domain` | No |
+| `remove_mail_domain` | Remove an unused domain and its workspace claim | `workspace_id?`, `domain` | No |
 | `set_mailbox_quota` | Set storage quota | `workspace_id?`, `address`, `quota_bytes` | No |
 | `remove_mailbox_engine` | Remove engine account | `workspace_id?`, `address` | No |
+
+`remove_mail_domain` is owner-only. A domain that still has mailbox accounts is
+refused with 409 and blockers `{ mailboxes }`. A successful engine removal
+deletes the workspace claim row.
+
+Mailbox registry writes that are not MCP tools:
+`POST /api/v1/workspaces/:workspaceId/mailboxes` and
+`PATCH /api/v1/workspaces/:workspaceId/mailboxes/:id` accept `is_default`.
+The workspace keeps one default: the first mailbox becomes it,
+an explicit `true` moves it, and clearing or parking the current default
+promotes another active mailbox or returns 409 when none remains. An inactive
+mailbox cannot be the default.
+`DELETE /api/v1/workspaces/:workspaceId/mailboxes/:id` is owner-only and
+returns `{ id, deleted: true }`. A mailbox still referenced by messages,
+threads, agents, kits, or standing approvals returns 409 with those blockers.
+That delete does not remove the engine account.
 
 ### Connected-Account Cleaner (Gmail / Microsoft)
 
