@@ -86,6 +86,7 @@ import {
   SuppressionView,
 } from '../unsubscribe/suppression.service';
 import { enforceExtraScope, PatTaggedIdentity } from './mcp-scopes';
+import { currentMailboxPrincipalScope } from '../common/mailbox/mailbox-principal';
 
 /**
  * get_attachment size cap: bytes ride the JSON-RPC response as base64 (~4/3
@@ -1172,9 +1173,20 @@ export class EmailOpsTools {
     );
     if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
     const owned = new Set(bindings.map((binding) => binding.domain));
+    const patScope = currentMailboxPrincipalScope();
+    const scopedAddresses = patScope?.mailboxIds.length
+      ? new Set(
+          (await this.mailboxes.listMailboxes(workspaceId, ucUidOf(user as WithWorkspaceClaim))).map(
+            (mailbox) => mailbox.email_address.trim().toLowerCase(),
+          ),
+        )
+      : null;
     const accounts = (await this.admin.listAccounts()).filter((item) => {
       try {
-        return owned.has(this.mailDomains.domainOf(item.address));
+        return (
+          owned.has(this.mailDomains.domainOf(item.address)) &&
+          (scopedAddresses === null || scopedAddresses.has(item.address.trim().toLowerCase()))
+        );
       } catch {
         return false;
       }

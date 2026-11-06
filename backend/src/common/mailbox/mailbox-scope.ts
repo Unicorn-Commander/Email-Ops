@@ -38,18 +38,37 @@ export async function resolveMailboxScope(
   db: {
     membership?: { findUnique: (args: any) => Promise<any>; findFirst?: (args: any) => Promise<any> };
     user?: { findFirst: (args: any) => Promise<{ id: string; keycloakId: string | null } | null> };
-    mailboxAccount?: { findMany?: (args: any) => Promise<Array<{ id: string }> | undefined> };
+    mailboxAccount?: {
+      findMany?: (args: any) => Promise<
+        Array<{ id: string; ownerKind?: string; ownerKey?: string | null }> | undefined
+      >;
+    };
   },
   workspaceId: string,
   userKey: string | null,
 ): Promise<ResolvedMailboxScope> {
   const patScope = currentMailboxPrincipalScope();
-  const narrowToPat = (scope: ResolvedMailboxScope): ResolvedMailboxScope => {
+  const narrowToPat = async (scope: ResolvedMailboxScope): Promise<ResolvedMailboxScope> => {
     if (!patScope || patScope.mailboxIds.length === 0) return scope;
     const allowed = new Set(patScope.mailboxIds);
+    const rows =
+      (await db.mailboxAccount?.findMany?.({
+        where: { workspaceId, id: { in: scope.ids.filter((id) => allowed.has(id)) } },
+        select: { id: true, ownerKind: true, ownerKey: true },
+      })) ?? [];
+    const callerKeys = new Set(keys);
+    const currentlyUsable = new Set(
+      rows
+        .filter(
+          (row) =>
+            row.ownerKind !== 'HUMAN' ||
+            (!!row.ownerKey && callerKeys.has(row.ownerKey)),
+        )
+        .map((row) => row.id),
+    );
     return {
       ...scope,
-      ids: scope.ids.filter((id) => allowed.has(id)),
+      ids: scope.ids.filter((id) => allowed.has(id) && currentlyUsable.has(id)),
       governed: true,
       unrestricted: false,
       patScoped: true,
@@ -90,7 +109,8 @@ export async function resolveMailboxScope(
 
   // No membership is an auth-layer concern. Keep the old single-tenant service
   // behavior here; a guarded tenancy-on request never reaches this fallback.
-  if (!membership) return narrowToPat({ ids: await all(), governed: false, unrestricted: true });
+  if (!membership)
+    return narrowToPat({ ids: await all(), governed: false, unrestricted: true });
   if (membership.status !== MembershipStatus.ACTIVE) {
     return narrowToPat({ ids: [], governed: true, unrestricted: false });
   }
