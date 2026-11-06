@@ -1,8 +1,14 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
-import { credentialTracker, ipTracker } from './auth/identity-throttle';
+import {
+  credentialTracker,
+  ipTracker,
+  ProfiledThrottlerGuard,
+  throttleIpLimit,
+  throttleProfile,
+} from './auth/identity-throttle';
 
 import { PrismaModule } from './prisma/prisma.module';
 import { WorkspaceModule } from './common/workspace/workspace.module';
@@ -45,14 +51,25 @@ import { UnsubscribeModule } from './unsubscribe/unsubscribe.module';
       envFilePath: '.env',
     }),
 
-    // Rate limiting. short/long are PER CREDENTIAL (JWT/PAT digest, else IP)
-    // so MCP agents on the same NAT do not share one 20/60s bucket with the
-    // cockpit. `ip` is a high per-IP ceiling so rotating junk Bearers cannot
-    // unbounded-DoS. SkipThrottle maps must name all three (see SKIP_ALL_THROTTLERS).
+    // Rate limiting. Browser sessions get their own env-configured profile;
+    // PAT/MCP/anonymous callers retain the strict credential profile. short/long
+    // are per credential (JWT/PAT digest or session-cookie digest, else IP), and
+    // ip is the per-IP ceiling. SkipThrottle maps must name all three (see
+    // SKIP_ALL_THROTTLERS).
     ThrottlerModule.forRoot([
-      { name: 'short', ttl: 60000, limit: 20, getTracker: credentialTracker },
-      { name: 'long', ttl: 3600000, limit: 200, getTracker: credentialTracker },
-      { name: 'ip', ttl: 60000, limit: 200, getTracker: ipTracker },
+      {
+        name: 'short',
+        ttl: 60000,
+        limit: (context) => throttleProfile(context.switchToHttp().getRequest()).short,
+        getTracker: credentialTracker,
+      },
+      {
+        name: 'long',
+        ttl: 3600000,
+        limit: (context) => throttleProfile(context.switchToHttp().getRequest()).long,
+        getTracker: credentialTracker,
+      },
+      { name: 'ip', ttl: 60000, limit: () => throttleIpLimit(), getTracker: ipTracker },
     ]),
 
     // Core tenancy + identity.
@@ -135,7 +152,7 @@ import { UnsubscribeModule } from './unsubscribe/unsubscribe.module';
     // Rate limiting globally via guard.
     {
       provide: APP_GUARD,
-      useClass: ThrottlerGuard,
+      useClass: ProfiledThrottlerGuard,
     },
   ],
 })
