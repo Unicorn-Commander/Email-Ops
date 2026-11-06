@@ -136,6 +136,11 @@ describe('Brigade federation manifest (.well-known/mcps.json)', () => {
       expect(tool?.input_schema.required ?? []).not.toContain('mailbox_address');
     }
 
+    const provision = byName.get('provision_mailbox');
+    expect(provision?.description).toContain('is_default');
+    expect(provision?.input_schema.properties.is_default).toEqual({ type: 'boolean' });
+    expect(provision?.input_schema.required ?? []).not.toContain('is_default');
+
     const request = byName.get('request_standing_approval');
     expect(request?.description).toContain('PENDING_HUMAN');
     expect(request?.description).toContain('grants nothing until a human approves');

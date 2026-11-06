@@ -307,13 +307,17 @@ export class McpService {
           'role — so this only does what that user is allowed to. Returns {status:"created", ' +
           'mailbox} when applied, or {status:"pending_approval", request} when the policy ' +
           'requires an approver (a human approves it in the Mailboxes view). owner_kind ' +
-          'AGENT is the higher-trust send-identity path (admin by default).',
+          'AGENT is the higher-trust send-identity path (admin by default). Optional ' +
+          'is_default true makes the new mailbox the workspace default through the same ' +
+          'transaction that demotes the previous default. When is_default is omitted, the ' +
+          'first mailbox in the workspace becomes the default and a later one does not.',
         inputSchema: {
           workspace_id: z.string().optional(),
           email_address: z.string(),
           display_name: z.string().optional(),
           owner_kind: z.enum(['HUMAN', 'AGENT', 'SHARED']).optional(),
           owner_key: z.string().optional(),
+          is_default: z.boolean().optional(),
         },
       },
       async (args: any) => wrap(await tools.provisionMailbox(user, args)),

@@ -152,7 +152,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "provision_mailbox",
-      "description": "Create a mailbox (human / agent / shared) by talking to an agent. Runs AS the calling user: the workspace provisioning policy is enforced with the user’s own role — so this only does what that user is allowed to. Returns {status:\"created\", mailbox} when applied, or {status:\"pending_approval\", request} when the policy requires an approver (a human approves it in the Mailboxes view). owner_kind AGENT is the higher-trust send-identity path (admin by default).",
+      "description": "Create a mailbox (human / agent / shared) by talking to an agent. Runs AS the calling user: the workspace provisioning policy is enforced with the user’s own role — so this only does what that user is allowed to. Returns {status:\"created\", mailbox} when applied, or {status:\"pending_approval\", request} when the policy requires an approver (a human approves it in the Mailboxes view). owner_kind AGENT is the higher-trust send-identity path (admin by default). Optional is_default true makes the new mailbox the workspace default through the same transaction that demotes the previous default. When is_default is omitted, the first mailbox in the workspace becomes the default and a later one does not.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -175,6 +175,9 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
           },
           "owner_key": {
             "type": "string"
+          },
+          "is_default": {
+            "type": "boolean"
           }
         },
         "required": [

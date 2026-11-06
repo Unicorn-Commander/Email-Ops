@@ -154,6 +154,8 @@ export class EmailOpsTools {
       display_name?: string;
       owner_kind?: string;
       owner_key?: string;
+      /** When true, the new mailbox becomes the workspace default (same path as REST create). */
+      is_default?: boolean;
     },
   ): Promise<{ status: string; mailbox?: unknown; request?: unknown }> {
     const ucUid = ucUidOf(user as WithWorkspaceClaim);
@@ -172,6 +174,9 @@ export class EmailOpsTools {
       displayName: args.display_name ?? null,
       ownerKind,
       ownerKey: args.owner_key ?? null,
+      // Absent leaves createMailbox's first-mailbox rule. An explicit boolean
+      // rides the same transactional demotion as POST/PATCH /mailboxes.
+      ...(args.is_default !== undefined ? { isDefault: args.is_default } : {}),
     };
     // Commercial gate: hosting a mailbox on our own mail server is the metered
     // add-on (`email-ops:mailbox`). Checked BEFORE the provisioning-policy
