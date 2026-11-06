@@ -790,7 +790,7 @@ export class McpService {
         inputSchema: {
           workspace_id: z.string().optional(),
           provider: z.enum(['gmail', 'microsoft']),
-          criteria: z.record(z.unknown()).optional(),
+          criteria: z.record(z.string(), z.unknown()).optional(),
         },
       },
       async (args: any) => wrap(await connectedTools.planCleanup(user, args)),
@@ -805,7 +805,7 @@ export class McpService {
         inputSchema: {
           workspace_id: z.string().optional(),
           provider: z.enum(['gmail', 'microsoft']),
-          criteria: z.record(z.unknown()).optional(),
+          criteria: z.record(z.string(), z.unknown()).optional(),
         },
       },
       async (args: any) => wrap(await connectedTools.cleanTrash(user, args)),
@@ -820,7 +820,7 @@ export class McpService {
         inputSchema: {
           workspace_id: z.string().optional(),
           provider: z.enum(['gmail', 'microsoft']),
-          criteria: z.record(z.unknown()).optional(),
+          criteria: z.record(z.string(), z.unknown()).optional(),
         },
       },
       async (args: any) => wrap(await connectedTools.cleanDelete(user, args)),
@@ -835,7 +835,7 @@ export class McpService {
         inputSchema: {
           workspace_id: z.string().optional(),
           provider: z.enum(['gmail', 'microsoft']),
-          criteria: z.record(z.unknown()).optional(),
+          criteria: z.record(z.string(), z.unknown()).optional(),
         },
       },
       async (args: any) => wrap(await connectedTools.organizeMessages(user, args)),
@@ -957,7 +957,7 @@ export class McpService {
         inputSchema: {
           workspace_id: z.string().optional(), campaign_key: z.string().min(1).max(200),
           mailbox_id: z.string().min(1).max(200), body_template: z.string().min(1).max(100000),
-          subject: z.string().min(1).max(500), placeholder_rules: z.record(z.string()).optional(),
+          subject: z.string().min(1).max(500), placeholder_rules: z.record(z.string(), z.string()).optional(),
           optional_lines: z.array(z.number().int().nonnegative()).max(100).optional(),
           cap_per_day: z.number().int().min(1).max(100000), expires_at: z.string().datetime(),
           recipient_rules: z.object({ blockedDomains: z.array(z.string()).max(200).optional(), allowedDomains: z.array(z.string()).max(200).optional() }).strict().optional(),
@@ -997,7 +997,7 @@ export class McpService {
           kit_id: z.string().min(1).max(200),
           title: z.string().min(1).max(200),
           body_template: z.string().max(100000),
-          placeholder_rules: z.record(z.string()).optional(),
+          placeholder_rules: z.record(z.string(), z.string()).optional(),
           optional_lines: z.array(z.number().int().nonnegative()).max(100).optional(),
           subjects: z.array(z.string().min(1).max(500)).min(1).max(100),
           recipients: z.array(z.string().min(1).max(320)).min(1).max(1000),
@@ -1051,7 +1051,7 @@ export class McpService {
           kit_id: z.string().min(1).max(200),
           template_sha256: z.string().length(64),
           body_template: z.string().max(100000).optional(),
-          placeholder_rules: z.record(z.string()).optional(),
+          placeholder_rules: z.record(z.string(), z.string()).optional(),
           optional_lines: z.array(z.number().int().nonnegative()).max(100).optional(),
           subjects: z.array(z.string().min(1).max(500)).min(1).max(100).optional(),
           recipients: z.array(z.string().min(1).max(320)).min(1).max(1000).optional(),
@@ -1159,7 +1159,7 @@ export class McpService {
           'unsubscribe token values are returned.',
         inputSchema: {
           workspace_id: z.string().optional(),
-          email: z.string().email().optional(),
+          email: z.email().optional(),
           reason: z.enum(['UNSUBSCRIBED', 'BOUNCED', 'COMPLAINT', 'MANUAL']).optional(),
         },
       },
@@ -1176,7 +1176,7 @@ export class McpService {
           'unsuppress tool; a signed-in human uses the REST DELETE route.',
         inputSchema: {
           workspace_id: z.string().optional(),
-          email: z.string().email(),
+          email: z.email(),
           note: z.string().max(2000).optional(),
         },
       },
@@ -1300,7 +1300,7 @@ export class McpService {
           '{ status:"ok"|"failed"|"engine_not_configured", result }.',
         inputSchema: {
           workspace_id: z.string().optional(),
-          address: z.string().email(),
+          address: z.email(),
           quota_bytes: z.number().int().nonnegative().nullable().optional(),
         },
       },
@@ -1320,7 +1320,7 @@ export class McpService {
           'Returns { status:"ok"|"failed"|"engine_not_configured", result }.',
         inputSchema: {
           workspace_id: z.string().optional(),
-          address: z.string().email(),
+          address: z.email(),
         },
       },
       async (args: any) => wrap(await tools.removeMailboxEngine(user, args)),
@@ -1628,7 +1628,7 @@ export class McpService {
           // match/actions are rule-engine JSON; zod pins only the container types —
           // the service is the real validator (parseMatch/parseActions + policy
           // checks), exactly as on the REST DTO.
-          match: z.record(z.unknown()),
+          match: z.record(z.string(), z.unknown()),
           actions: z.array(z.unknown()),
           enabled: z.boolean().optional(),
           priority: z.number().int().optional(),
@@ -1652,7 +1652,7 @@ export class McpService {
           mailbox_id: z.string().min(1),
           rule_id: z.string().min(1),
           name: z.string().min(1).max(120).optional(),
-          match: z.record(z.unknown()).optional(),
+          match: z.record(z.string(), z.unknown()).optional(),
           actions: z.array(z.unknown()).optional(),
           enabled: z.boolean().optional(),
           priority: z.number().int().optional(),

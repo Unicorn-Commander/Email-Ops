@@ -1,13 +1,11 @@
-import { ExecutionContext, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import {
   InjectThrottlerOptions,
   InjectThrottlerStorage,
-  ThrottlerGenerateKeyFunction,
-  ThrottlerGetTrackerFunction,
   ThrottlerGuard,
   ThrottlerModuleOptions,
-  ThrottlerOptions,
+  ThrottlerRequest,
   ThrottlerStorage,
 } from '@nestjs/throttler';
 import { createHash } from 'crypto';
@@ -188,14 +186,8 @@ export class ProfiledThrottlerGuard extends ThrottlerGuard {
     super(options, storageService, reflector);
   }
 
-  protected async handleRequest(
-    context: ExecutionContext,
-    limit: number,
-    ttl: number,
-    throttler: ThrottlerOptions,
-    getTracker: ThrottlerGetTrackerFunction,
-    generateKey: ThrottlerGenerateKeyFunction,
-  ): Promise<boolean> {
+  protected async handleRequest(requestProps: ThrottlerRequest): Promise<boolean> {
+    const { context, limit, throttler } = requestProps;
     const { req } = this.getRequestResponse(context);
     const profile = throttleProfile(req);
     const profileLimit =
@@ -208,6 +200,6 @@ export class ProfiledThrottlerGuard extends ThrottlerGuard {
       profileLimit === undefined && throttler.name !== 'ip'
         ? limit
         : Math.min(profileLimit ?? throttleIpLimit(), limit);
-    return super.handleRequest(context, effectiveLimit, ttl, throttler, getTracker, generateKey);
+    return super.handleRequest({ ...requestProps, limit: effectiveLimit });
   }
 }

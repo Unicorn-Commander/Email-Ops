@@ -41,7 +41,11 @@ const INTEGRATION_SPECS = [
 const base = {
   rootDir: 'src',
   moduleFileExtensions: ['js', 'json', 'ts'],
-  transform: { '^.+\\.(t|j)s$': 'ts-jest' },
+  transform: {
+    '^.+\\.ts$': 'ts-jest',
+    '^.+\\.js$': '<rootDir>/../jest-esm-transformer.cjs',
+  },
+  transformIgnorePatterns: [],
   testEnvironment: 'node',
 };
 
