@@ -1717,7 +1717,7 @@ export class JamesClient extends StalwartPort {
       }));
   }
 
-  /** Create a user folder (`role: null` Mailbox). Returns the new id, or null. */
+  /** Create a user folder (`role: null` Mailbox). Engine failures are explicit. */
   async createFolder(mailbox: string, name: string, parentId?: string | null): Promise<{ id: string } | null> {
     if (!this.jmapUrl) return null;
     const create: Record<string, unknown> = { name, role: null };
@@ -1725,10 +1725,16 @@ export class JamesClient extends StalwartPort {
     const responses = await this.jmap([
       ['Mailbox/set', { create: { newFolder: create } }, '0'],
     ], mailbox);
-    if (!responses) return null;
-    const created = this.named(responses, 'Mailbox/set')?.created?.newFolder;
+    if (!responses) {
+      throw new Error('James folder creation failed: no response from engine');
+    }
+    const result = this.named(responses, 'Mailbox/set');
+    const created = result?.created?.newFolder;
     const id = typeof created?.id === 'string' ? created.id : null;
-    return id ? { id } : null;
+    if (id) return { id };
+    const failure = result?.notCreated?.newFolder ?? this.named(responses, 'error');
+    const type = failure && typeof failure.type === 'string' ? failure.type : 'unknown';
+    throw new Error(`James folder creation failed: ${type}`);
   }
 
   /** Rename a folder. True iff the engine reports the id updated. */

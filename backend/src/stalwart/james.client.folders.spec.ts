@@ -165,11 +165,13 @@ describe('JamesClient folder CRUD', () => {
       expect(create[Object.keys(create)[0]].parentId).toBe('mbx-proj');
     });
 
-    it('returns null when the engine does not create it', async () => {
+    it('surfaces the engine error when the engine does not create it', async () => {
       const fetchSpy = mockFolderFetch({ createdId: null });
       global.fetch = fetchSpy as any;
       const client = new JamesClient(makeConfig(CONFIGURED));
-      await expect(client.createFolder(MBX, 'Projects')).resolves.toBeNull();
+      await expect(client.createFolder(MBX, 'Projects')).rejects.toThrow(
+        'James folder creation failed: invalidProperties',
+      );
     });
   });
 

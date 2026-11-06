@@ -804,7 +804,12 @@ export class EmailOpsTools {
       args.name,
       args.parent_id?.trim() || null,
     );
-    return { id: created?.id ?? null, created: !!created };
+    if (!created) {
+      throw new ServiceUnavailableException(
+        'The mail engine cannot create folders for this mailbox right now.',
+      );
+    }
+    return { id: created.id, created: true };
   }
 
   /** Rename a custom folder. */

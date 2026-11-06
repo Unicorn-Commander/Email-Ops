@@ -663,8 +663,8 @@ export class McpService {
         title: 'Create a custom folder',
         description:
           'Create a custom folder in a mailbox, optionally nested under parent_id. ' +
-          'Member-level write. Returns { id, created } — created:false when the engine ' +
-          'is dormant or the mailbox is external (no throw).',
+          'Member-level write. Returns { id, created:true } on success; engine failures ' +
+          'are returned as errors rather than a silent created:false response.',
         inputSchema: {
           workspace_id: z.string().optional(),
           mailbox_id: z.string().min(1),

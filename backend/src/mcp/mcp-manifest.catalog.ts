@@ -758,7 +758,7 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
     },
     {
       "name": "create_folder",
-      "description": "Create a custom folder in a mailbox, optionally nested under parent_id. Member-level write; runs AS the calling user. Returns { id, created } - created:false when the engine is dormant or the mailbox is external (never a 500).",
+      "description": "Create a custom folder in a mailbox, optionally nested under parent_id. Member-level write; runs AS the calling user. Returns { id, created:true } on success; engine failures are returned as errors.",
       "input_schema": {
         "type": "object",
         "properties": {
