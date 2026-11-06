@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * The shared account avatar — the Keycloak `picture` photo (suite avatar spine)
+ * The shared account avatar — the signed-in user's Keycloak photo (suite avatar spine)
  * when we have one, else gradient initials. Used by the AccountMenu in every
  * shell so the signed-in identity looks the same on /mail and the other pages.
  */
@@ -21,11 +21,11 @@ export function initialsOf(user: EmailOpsUser | null): string {
 /** Avatar disc — the Keycloak photo when we have one, else gradient initials. */
 export function Avatar({ user, size }: { user: EmailOpsUser | null; size: number }) {
   const cls = 'shrink-0 overflow-hidden rounded-full';
-  if (user?.picture) {
+  if (user?.avatarUrl) {
     return (
       // eslint-disable-next-line @next/next/no-img-element
       <img
-        src={user.picture}
+        src={user.avatarUrl}
         alt=""
         width={size}
         height={size}

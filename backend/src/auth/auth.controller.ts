@@ -120,6 +120,17 @@ export class AuthController {
     });
   }
 
+  @Get('me')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get current user profile' })
+  @ApiResponse({ status: 200, description: 'Returns user profile' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  async getMe(@CurrentUser() user: User) {
+    return this.currentUserProfile(user);
+  }
+
+  /** Backwards-compatible alias for clients that still call /auth/profile. */
   @Get('profile')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
@@ -127,15 +138,19 @@ export class AuthController {
   @ApiResponse({ status: 200, description: 'Returns user profile' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   async getProfile(@CurrentUser() user: User) {
-    // Resolve the avatar photo. It's captured at login, but already-signed-in
-    // users have none stored yet — live-fetch the Keycloak `picture` claim once
-    // and cache it so the photo appears without forcing a re-login.
-    let picture = user.picture ?? null;
-    if (!picture) {
-      picture = await this.broker.getUserPicture(user).catch(() => null);
-      if (picture) {
+    return this.currentUserProfile(user);
+  }
+
+  private async currentUserProfile(user: User) {
+    // Resolve the avatar photo. It is captured at login, but already-signed-in
+    // users may have no stored value yet — live-fetch the Keycloak userinfo
+    // claim once and cache it so the photo appears without a forced re-login.
+    let avatarUrl = user.avatarUrl ?? null;
+    if (!avatarUrl) {
+      avatarUrl = await this.broker.getUserAvatarUrl(user).catch(() => null);
+      if (avatarUrl) {
         await this.prisma.user
-          .update({ where: { id: user.id }, data: { picture } })
+          .update({ where: { id: user.id }, data: { avatarUrl } })
           .catch(() => undefined);
       }
     }
@@ -145,7 +160,7 @@ export class AuthController {
       username: user.username,
       firstName: user.firstName,
       lastName: user.lastName,
-      picture,
+      avatarUrl,
       isActive: user.isActive,
       lastLoginAt: user.lastLoginAt,
       createdAt: user.createdAt,

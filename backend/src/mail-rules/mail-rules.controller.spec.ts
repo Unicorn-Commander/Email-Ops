@@ -21,7 +21,7 @@ describe('MailRulesController', () => {
       username: 'aaron',
       firstName: 'Aaron',
       lastName: 'S',
-      picture: null,
+      avatarUrl: null,
       keycloakId: 'kc-aaron',
       passwordHash: null,
       kcRefreshTokenEnc: null,

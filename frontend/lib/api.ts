@@ -359,12 +359,17 @@ export interface EmailOpsUser {
   username: string;
   firstName: string;
   lastName: string;
-  /** Avatar URL from the Keycloak `picture` claim (suite avatar spine). */
-  picture?: string | null;
+  /** HTTPS avatar URL from the signed-in user's Keycloak profile claims. */
+  avatarUrl?: string | null;
 }
 
+export async function fetchMe(token?: string): Promise<EmailOpsUser> {
+  return apiGet<EmailOpsUser>('/auth/me', token);
+}
+
+/** Backwards-compatible name for callers that still think of this as a profile fetch. */
 export async function fetchProfile(token?: string): Promise<EmailOpsUser> {
-  return apiGet<EmailOpsUser>('/auth/profile', token);
+  return fetchMe(token);
 }
 
 export interface MyWorkspace {

@@ -8,6 +8,7 @@ import { DEFAULT_WORKSPACE_FALLBACK } from '../common/workspace/workspace.util';
 import { NoWorkspaceAccessException } from './no-workspace-access.exception';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { PAT_PREFIX } from './pat.service';
+import { avatarUrlFromClaims } from './avatar-url';
 import {
   emailOpsEntitlementsEnabled,
   OrgEntitlement,
@@ -264,12 +265,10 @@ export class AuthService implements OnModuleInit {
     options?: KeycloakValidationOptions,
   ): Promise<User> {
     const email: string | undefined = profile?.email;
-    // The Keycloak `picture` claim (suite avatar spine) — only trust an absolute
-    // URL, and never null out a stored photo on a login whose userinfo omits it.
-    const picture: string | null =
-      typeof profile?.picture === 'string' && /^https?:\/\//.test(profile.picture)
-        ? profile.picture
-        : null;
+    // OIDC `picture` is the primary source; Keycloak user-attribute mappers may
+    // expose `avatar_url` or a nested attribute instead. Normalize at the auth
+    // boundary so every login path persists the same safe value.
+    const avatarUrl = avatarUrlFromClaims(profile);
 
     // 1. keycloakId / sub first (the canonical, unique key).
     let user = await this.prisma.user.findUnique({ where: { keycloakId } });
@@ -416,7 +415,7 @@ export class AuthService implements OnModuleInit {
           username,
           firstName: profile?.given_name || profile?.firstName || '',
           lastName: profile?.family_name || profile?.lastName || '',
-          picture,
+          avatarUrl,
           keycloakId,
         },
       });
@@ -431,7 +430,7 @@ export class AuthService implements OnModuleInit {
 
     user = await this.prisma.user.update({
       where: { id: user.id },
-      data: { lastLoginAt: new Date(), ...(picture ? { picture } : {}) },
+      data: { lastLoginAt: new Date(), avatarUrl },
     });
     return user;
   }
@@ -450,10 +449,7 @@ export class AuthService implements OnModuleInit {
             username: profile?.preferred_username || profile?.username || email.trim(),
             firstName: profile?.given_name || profile?.firstName || '',
             lastName: profile?.family_name || profile?.lastName || '',
-            picture:
-              typeof profile?.picture === 'string' && /^https?:\/\//.test(profile.picture)
-                ? profile.picture
-                : null,
+            avatarUrl: avatarUrlFromClaims(profile),
             keycloakId,
           },
         }),
@@ -484,6 +480,7 @@ export class AuthService implements OnModuleInit {
         id: user.id,
         email: user.email,
         username: user.username,
+        avatarUrl: user.avatarUrl ?? null,
         firstName: user.firstName,
         lastName: user.lastName,
       },
@@ -590,6 +587,9 @@ export class AuthService implements OnModuleInit {
         preferred_username: payload.preferred_username,
         given_name: payload.given_name,
         family_name: payload.family_name,
+        picture: payload.picture,
+        avatar_url: payload.avatar_url,
+        attributes: payload.attributes,
       };
       const humanRealmToken =
         isKeycloakRealmToken &&

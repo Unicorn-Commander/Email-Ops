@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { User } from '@prisma/client';
 import { createHash, randomUUID } from 'crypto';
 import { AuthService } from './auth.service';
+import { avatarUrlFromClaims } from './avatar-url';
 import { decrypt } from '../connected-accounts/crypto';
 
 type IdpAlias = 'google' | 'microsoft';
@@ -109,12 +110,12 @@ export class KeycloakBrokerService {
   }
 
   /**
-   * Fetch the user's `picture` claim live from Keycloak userinfo (suite avatar
+   * Fetch the user's avatar claim live from Keycloak userinfo (suite avatar
    * spine). Uses the stored KC refresh token → access token → userinfo, so the
    * photo resolves for an already-signed-in user without a re-login. Returns
-   * null when no token is stored, the refresh fails, or no picture is set.
+   * null when no token is stored, the refresh fails, or no avatar is set.
    */
-  async getUserPicture(user: User): Promise<string | null> {
+  async getUserAvatarUrl(user: User): Promise<string | null> {
     const refreshToken = this.loadRefreshToken(user.kcRefreshTokenEnc);
     if (!refreshToken) return null;
 
@@ -136,8 +137,7 @@ export class KeycloakBrokerService {
         return null;
       }
       const payload = (await res.json()) as Record<string, unknown>;
-      const picture = this.extractString(payload, ['picture', 'avatar_url']);
-      return picture && /^https?:\/\//.test(picture) ? picture : null;
+      return avatarUrlFromClaims(payload);
     } catch (err) {
       this.logger.warn(`Keycloak userinfo fetch failed: ${(err as Error).message}`);
       return null;
