@@ -63,15 +63,21 @@ describe('AuthService.validateKeycloakUser — identity resolution (integration)
     expect(reread?.keycloakId).toBe(sub); // persisted
   });
 
-  it('re-login resolves by keycloakId FIRST and never re-reads/overwrites email', async () => {
+  it('re-login resolves by keycloakId FIRST and refreshes the verified email claim', async () => {
     const e = email('relogin');
     const sub = 'kc-i-relogin-' + seq;
     await prisma.user.create({ data: { id: randomUUID(), email: e, username: e, keycloakId: sub } });
 
-    // A second login with the SAME sub but a *different* email claim must return
-    // the existing row unchanged (step 1 short-circuits; email is not a key here).
-    const resolved = await service.validateKeycloakUser(sub, { email: 'spoofed@itest.test' });
-    expect(resolved.email).toBe(e);
+    // A second login with the SAME sub and a *different* verified email claim
+    // updates the identity fields on that row. The changed email is never used
+    // to resolve a different user.
+    const resolved = await service.validateKeycloakUser(sub, {
+      email: 'spoofed@itest.test',
+      email_verified: true,
+      preferred_username: `relogin-handle-${seq}`,
+    });
+    expect(resolved.email).toBe('spoofed@itest.test');
+    expect(resolved.username).toBe(`relogin-handle-${seq}`);
     expect(resolved.keycloakId).toBe(sub);
   });
 

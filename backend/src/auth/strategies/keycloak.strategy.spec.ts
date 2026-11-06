@@ -68,6 +68,32 @@ describe('KeycloakStrategy.validate', () => {
     );
   });
 
+  it('returns the refreshed email and username from the browser callback path', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        sub: 'kc-sub',
+        email: 'new.address@example.test',
+        preferred_username: 'new-handle',
+        email_verified: true,
+      }),
+    });
+    (authService.validateKeycloakUser as jest.Mock).mockResolvedValue({
+      id: 'u1',
+      email: 'new.address@example.test',
+      username: 'new-handle',
+    });
+
+    const strategy = new KeycloakStrategy(config, authService);
+    await expect(
+      strategy.validate('access-token', 'refresh-token', { sub: 'kc-sub' }),
+    ).resolves.toMatchObject({
+      id: 'u1',
+      email: 'new.address@example.test',
+      username: 'new-handle',
+    });
+  });
+
   it('boots when the self-host compose passes blank SSO settings', () => {
     // ConfigService.get returns '' (not the default) for a variable set to empty.
     const blank = { get: () => '' } as unknown as ConfigService;

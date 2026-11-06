@@ -21,6 +21,16 @@ const LOCAL_PASSWORD_KEY_LENGTH = 64;
 const LOCAL_PASSWORD_SALT_LENGTH = 16;
 const LOCAL_PASSWORD_SCRYPT_OPTIONS = { N: 16_384, r: 8, p: 1 } as const;
 
+function trimmedClaim(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function normalizedEmail(value: unknown): string {
+  return trimmedClaim(value)?.toLowerCase() ?? '';
+}
+
 function encodeLocalPasswordHash(password: string, salt: Buffer): string {
   const digest = scryptSync(
     password,
@@ -428,11 +438,74 @@ export class AuthService implements OnModuleInit {
       throw new UnauthorizedException('User account is inactive');
     }
 
+    const identitySync = await this.identitySyncData(user, profile);
     user = await this.prisma.user.update({
       where: { id: user.id },
-      data: { lastLoginAt: new Date(), avatarUrl },
+      data: { lastLoginAt: new Date(), avatarUrl, ...identitySync },
     });
     return user;
+  }
+
+  /**
+   * Prepare the email/username refresh for the existing login write. Identity
+   * remains keyed by `keycloakId`; these claims never participate in resolving
+   * the user. Unique email/username rows are checked before adding each field so
+   * a stale row cannot be clobbered by a changed claim.
+   */
+  private async identitySyncData(
+    user: User,
+    profile: any,
+  ): Promise<{ email?: string; username?: string }> {
+    const data: { email?: string; username?: string } = {};
+    const conflictingUserIds = new Set<string>();
+    const conflictingFields = new Set<'email' | 'username'>();
+    const email = trimmedClaim(profile?.email);
+    const username = trimmedClaim(profile?.preferred_username || profile?.username);
+
+    if (email && normalizedEmail(email) !== normalizedEmail(user.email)) {
+      const conflict = await this.prisma.user.findFirst({
+        where: {
+          id: { not: user.id },
+          email: { equals: email, mode: 'insensitive' },
+        },
+        select: { id: true },
+      });
+      if (conflict) {
+        conflictingUserIds.add(conflict.id);
+        conflictingFields.add('email');
+      } else {
+        data.email = email;
+      }
+    }
+
+    if (username && username !== user.username.trim()) {
+      const conflict = await this.prisma.user.findFirst({
+        where: {
+          id: { not: user.id },
+          username,
+        },
+        select: { id: true },
+      });
+      if (conflict) {
+        conflictingUserIds.add(conflict.id);
+        conflictingFields.add('username');
+      } else {
+        data.username = username;
+      }
+    }
+
+    if (conflictingUserIds.size > 0) {
+      this.logger.warn(
+        JSON.stringify({
+          event: 'auth.identity_sync_collision',
+          userId: user.id,
+          conflictingUserIds: [...conflictingUserIds].sort(),
+          fields: [...conflictingFields].sort(),
+        }),
+      );
+    }
+
+    return data;
   }
 
   /** Create the local identity admitted by an Ops-Center entitlement. */

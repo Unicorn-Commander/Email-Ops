@@ -112,10 +112,24 @@ describe('AuthService.generateTokenForUser', () => {
 });
 
 describe('AuthService.validateKeycloakUser avatar upsert', () => {
-  function makeService(existing: any) {
+  function makeService(existing: any, collisions: any[] = []) {
     const prisma = {
       user: {
         findUnique: jest.fn().mockResolvedValue(existing),
+        findFirst: jest.fn().mockImplementation(async ({ where }: any) => {
+          if (where.email?.equals) {
+            const normalized = where.email.equals.trim().toLowerCase();
+            return (
+              collisions.find(
+                (row) => row.email.trim().toLowerCase() === normalized,
+              ) ?? null
+            );
+          }
+          if (where.username) {
+            return collisions.find((row) => row.username === where.username) ?? null;
+          }
+          return null;
+        }),
         update: jest.fn().mockImplementation(async ({ data }: any) => ({ ...existing, ...data })),
       },
     } as unknown as PrismaService;
@@ -186,6 +200,137 @@ describe('AuthService.validateKeycloakUser avatar upsert', () => {
     });
 
     expect(resolved.avatarUrl).toBe(avatarUrl);
+  });
+});
+
+describe('AuthService.validateKeycloakUser identity sync', () => {
+  const currentUser = {
+    id: 'human-user-1',
+    email: 'old.address@example.test',
+    username: 'old-handle',
+    firstName: 'Casey',
+    lastName: 'Example',
+    keycloakId: 'kc-human-1',
+    avatarUrl: null,
+    isActive: true,
+  };
+
+  function makeService(existing: any = currentUser, collisions: any[] = []) {
+    const prisma = {
+      user: {
+        findUnique: jest.fn().mockResolvedValue(existing),
+        findFirst: jest.fn().mockImplementation(async ({ where }: any) => {
+          if (where.email?.equals) {
+            const normalized = where.email.equals.trim().toLowerCase();
+            return (
+              collisions.find(
+                (row) => row.email.trim().toLowerCase() === normalized,
+              ) ?? null
+            );
+          }
+          if (where.username) {
+            return collisions.find((row) => row.username === where.username) ?? null;
+          }
+          return null;
+        }),
+        update: jest.fn().mockImplementation(async ({ data }: any) => ({ ...existing, ...data })),
+      },
+      invitation: { findFirst: jest.fn().mockResolvedValue(null) },
+    } as unknown as PrismaService;
+    return { service: new AuthService({} as any, prisma), prisma };
+  }
+
+  it('refreshes email and preferred username by sub and returns the refreshed profile', async () => {
+    const { service, prisma } = makeService();
+
+    const resolved = await service.validateKeycloakUser('kc-human-1', {
+      email: '  New.Address@Example.Test  ',
+      preferred_username: 'new-handle',
+    });
+
+    expect(resolved).toMatchObject({
+      id: 'human-user-1',
+      email: 'New.Address@Example.Test',
+      username: 'new-handle',
+    });
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { keycloakId: 'kc-human-1' },
+    });
+    expect(prisma.user.findUnique).not.toHaveBeenCalledWith({
+      where: { email: 'New.Address@Example.Test' },
+    });
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: 'human-user-1' },
+      data: expect.objectContaining({
+        email: 'New.Address@Example.Test',
+        username: 'new-handle',
+      }),
+    });
+  });
+
+  it('does not include identity fields in the login write when normalized claims are unchanged', async () => {
+    const { service, prisma } = makeService();
+
+    await service.validateKeycloakUser('kc-human-1', {
+      email: ' OLD.ADDRESS@example.test ',
+      preferred_username: 'old-handle',
+    });
+
+    const update = (prisma.user.update as jest.Mock).mock.calls[0][0];
+    expect(update.data).not.toHaveProperty('email');
+    expect(update.data).not.toHaveProperty('username');
+  });
+
+  it('keeps both old values and signs in when new identity values collide', async () => {
+    const conflictingUser = {
+      id: 'human-user-2',
+      email: 'new.address@example.test',
+      username: 'new-handle',
+    };
+    const { service, prisma } = makeService(currentUser, [conflictingUser]);
+    const warn = jest.spyOn((service as any).logger, 'warn');
+
+    const resolved = await service.validateKeycloakUser('kc-human-1', {
+      email: ' New.Address@Example.Test ',
+      preferred_username: 'new-handle',
+    });
+
+    expect(resolved).toMatchObject({
+      id: 'human-user-1',
+      email: 'old.address@example.test',
+      username: 'old-handle',
+    });
+    const update = (prisma.user.update as jest.Mock).mock.calls[0][0];
+    expect(update.data).not.toHaveProperty('email');
+    expect(update.data).not.toHaveProperty('username');
+    expect(warn).toHaveBeenCalledTimes(1);
+    const warning = JSON.parse(String(warn.mock.calls[0][0]));
+    expect(warning).toMatchObject({
+      event: 'auth.identity_sync_collision',
+      userId: 'human-user-1',
+      conflictingUserIds: ['human-user-2'],
+      fields: ['email', 'username'],
+    });
+    expect(String(warn.mock.calls[0][0])).not.toContain('new.address@example.test');
+    expect(String(warn.mock.calls[0][0])).not.toContain('new-handle');
+  });
+
+  it('returns the synchronized values through the verified bearer path', async () => {
+    const { service } = makeService();
+
+    const resolved = await service.validateJwtPayload({
+      iss: 'https://auth.example.test/realms/uchub',
+      sub: 'kc-human-1',
+      email: 'fresh.address@example.test',
+      email_verified: true,
+      preferred_username: 'fresh-handle',
+    });
+
+    expect(resolved).toMatchObject({
+      id: 'human-user-1',
+      email: 'fresh.address@example.test',
+      username: 'fresh-handle',
+    });
   });
 });
 
