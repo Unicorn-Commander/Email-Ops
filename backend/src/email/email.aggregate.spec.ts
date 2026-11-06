@@ -108,4 +108,22 @@ describe('EmailService.listAggregateInbox — bounded multi-mailbox fan-out', ()
     expect(seen.every((s) => s.q === 'invoice' && s.offset === 20)).toBe(true);
     expect(out).toHaveLength(3); // limit applied post-merge
   });
+
+  it('asks the unified-inbox mailbox query for active rows only', async () => {
+    const findMany = jest.fn().mockResolvedValue([]);
+    const tx = { mailboxAccount: { findMany } };
+    const prisma = {
+      withWorkspace: jest.fn(),
+    } as unknown as ConstructorParameters<typeof EmailService>[0];
+    const svc = new EmailService(prisma, {} as never, {} as never, {} as never);
+
+    await (svc as unknown as {
+      readableMailboxes: (db: unknown, workspaceId: string, ucUid: string) => Promise<unknown[]>;
+    }).readableMailboxes(tx, WS, UID);
+
+    expect(findMany).toHaveBeenLastCalledWith({
+      where: { workspaceId: WS, active: true },
+      orderBy: { createdAt: 'asc' },
+    });
+  });
 });

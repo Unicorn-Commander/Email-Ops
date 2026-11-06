@@ -51,6 +51,8 @@ export interface MailboxPick {
   display_name: string | null;
   owner_kind: 'HUMAN' | 'AGENT' | 'SHARED';
   kind: string;
+  /** Parked mailboxes remain in the registry but are not inbox choices. */
+  active?: boolean;
   /**
    * Which backend this mailbox reads/sends through: 'stalwart' is the sovereign
    * mailbox, 'gmail'/'microsoft' are connected external accounts. Optional on the

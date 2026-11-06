@@ -31,6 +31,8 @@ export interface CreateMailboxInput {
   ownerKind?: MailboxOwnerKind;
   ownerKey?: string | null;
   postmarkLane?: boolean;
+  /** true → this box becomes the workspace default (the previous default is unset). */
+  isDefault?: boolean;
 }
 
 export interface UpdateMailboxInput {
@@ -39,4 +41,6 @@ export interface UpdateMailboxInput {
   ownerKey?: string | null;
   postmarkLane?: boolean;
   active?: boolean;
+  /** true → this box becomes the workspace default (the previous default is unset). */
+  isDefault?: boolean;
 }

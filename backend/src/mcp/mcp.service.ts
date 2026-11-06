@@ -1270,7 +1270,8 @@ export class McpService {
         description:
           'Remove a domain from the mail engine (idempotent). OWNER-only. ' +
           'The domain must already be bound to the caller workspace. ' +
-          'Call only when you are certain no active accounts remain under this domain. ' +
+          'The engine is changed only when no mailbox accounts use the domain; a successful ' +
+          'removal also deletes the workspace claim row. ' +
           'Returns { status:"ok"|"failed"|"engine_not_configured", result }.',
         inputSchema: {
           workspace_id: z.string().optional(),

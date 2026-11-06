@@ -15,6 +15,7 @@ describe('MailDomainService', () => {
   });
 
   const rows: MailDomain[] = [];
+  const mailboxAddresses: string[] = [];
   const auditEvents: unknown[] = [];
   let sequence = 0;
   const resolver = { resolveTxt: jest.fn<Promise<string[][]>, [string]>() };
@@ -66,6 +67,14 @@ describe('MailDomainService', () => {
         Object.assign(row, data);
         return row;
       }),
+      delete: jest.fn(async ({ where }: { where: { id: string } }) => {
+        const index = rows.findIndex((candidate) => candidate.id === where.id);
+        if (index < 0) throw new Error('row not found');
+        return rows.splice(index, 1)[0];
+      }),
+    },
+    mailboxAccount: {
+      count: jest.fn(async () => mailboxAddresses.length),
     },
     agentActionEvent: {
       create: jest.fn(async ({ data }: { data: unknown }) => {
@@ -98,6 +107,7 @@ describe('MailDomainService', () => {
 
   beforeEach(() => {
     rows.splice(0, rows.length);
+    mailboxAddresses.splice(0, mailboxAddresses.length);
     auditEvents.splice(0, auditEvents.length);
     sequence = 0;
     jest.clearAllMocks();
@@ -132,6 +142,31 @@ describe('MailDomainService', () => {
     await expect(service.assertWorkspaceOwnsDomain('ws-b', 'uc-b', 'owned.test')).rejects.toThrow(
       ForbiddenException,
     );
+  });
+
+  it('blocks removal while a mailbox uses the claimed domain', async () => {
+    const row = await service.bindDomain('ws-a', 'uc-a', 'owned.test');
+    mailboxAddresses.push('person@owned.test');
+
+    await expect(service.assertDomainUnused('ws-a', 'uc-a', row.id)).rejects.toMatchObject({
+      response: {
+        blockers: { mailboxes: 1 },
+      },
+    });
+    await expect(service.deleteDomainClaim('ws-a', 'uc-a', row.id)).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(rows).toHaveLength(1);
+  });
+
+  it('deletes the claim once no mailbox uses the domain', async () => {
+    const row = await service.bindDomain('ws-a', 'uc-a', 'unused.test');
+
+    await expect(service.deleteDomainClaim('ws-a', 'uc-a', row.id)).resolves.toMatchObject({
+      id: row.id,
+      domain: 'unused.test',
+    });
+    expect(rows).toHaveLength(0);
   });
 
   it('lists only rows carrying the requested workspace id', async () => {

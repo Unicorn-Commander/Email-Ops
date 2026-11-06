@@ -10,7 +10,7 @@
  * ADMIN/OWNER-only because verified domains change the send-kit trust boundary.
  */
 
-import { Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Controller, Delete, ForbiddenException, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { User, WorkspaceRole } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -20,13 +20,17 @@ import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membersh
 import { WorkspaceRoleParam } from '../common/workspace/workspace-role.decorator';
 import { ucUidOf, WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { MailDomainService } from './mail-domain.service';
+import { MailEngineAdminPort } from './mail-engine-admin.port';
 
 @ApiTags('mail-domains')
 @ApiBearerAuth()
 @Controller('workspaces/:workspaceId/mail-domains')
 @UseGuards(JwtAuthGuard, WorkspaceMembershipGuard)
 export class MailDomainController {
-  constructor(private readonly domains: MailDomainService) {}
+  constructor(
+    private readonly domains: MailDomainService,
+    private readonly admin: MailEngineAdminPort,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'List the workspace mail domains and verification state.' })
@@ -81,5 +85,27 @@ export class MailDomainController {
       role,
       id,
     );
+  }
+
+  @Delete(':id')
+  @ApiOperation({ summary: 'Remove an unused mail domain and its workspace claim (OWNER-only).' })
+  @ApiResponse({ status: 403, description: 'Only a workspace owner may remove a mail domain.' })
+  @ApiResponse({ status: 409, description: 'Mailbox accounts still use this domain.' })
+  async remove(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @WorkspaceRoleParam() role: WorkspaceRole,
+    @Param('id') id: string,
+  ) {
+    if (role !== WorkspaceRole.OWNER) {
+      throw new ForbiddenException('Only a workspace owner may remove a mail domain.');
+    }
+    const ucUid = ucUidOf(user as WithWorkspaceClaim);
+    const binding = await this.domains.assertDomainUnused(workspaceId, ucUid, id);
+    if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
+    const result = await this.admin.removeDomain(binding.domain);
+    if (!result.provisioned) return { status: 'failed', result };
+    await this.domains.deleteDomainClaim(workspaceId, ucUid, id);
+    return { status: 'ok', result };
   }
 }

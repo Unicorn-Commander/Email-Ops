@@ -1,5 +1,5 @@
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
-import { User } from '@prisma/client';
+import { User, WorkspaceRole } from '@prisma/client';
 import { WithWorkspaceClaim } from '../common/workspace/workspace.util';
 import { ProvisioningPolicyService } from '../provisioning/provisioning-policy.service';
 import { MailProviderPort } from '../mail-provider/mail-provider.port';
@@ -82,5 +82,19 @@ describe('MailboxAccountsController (device connection)', () => {
     const out = await make({ resetOwnAppPassword }).resetAppPassword(WS, user(), 'mb-1');
     expect(resetOwnAppPassword).toHaveBeenCalledWith(WS, 'kc-aaron', 'mb-1');
     expect(out).toEqual({ password: 'abc-def' });
+  });
+
+  it('DELETE is owner-only and delegates the scoped reference check', async () => {
+    const deleteMailbox = jest.fn().mockResolvedValue({ id: 'mb-1', deleted: true });
+    await expect(make({ deleteMailbox }).remove(WS, user(), WorkspaceRole.OWNER, 'mb-1')).resolves.toEqual({
+      id: 'mb-1',
+      deleted: true,
+    });
+    expect(deleteMailbox).toHaveBeenCalledWith(WS, 'kc-aaron', 'mb-1');
+
+    await expect(make({ deleteMailbox }).remove(WS, user(), WorkspaceRole.ADMIN, 'mb-1')).rejects.toBeInstanceOf(
+      ForbiddenException,
+    );
+    expect(deleteMailbox).toHaveBeenCalledTimes(1);
   });
 });

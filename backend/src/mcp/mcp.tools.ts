@@ -1269,8 +1269,20 @@ export class EmailOpsTools {
       ucUidOf(user as WithWorkspaceClaim),
       args.domain,
     );
+    await this.mailDomains.assertDomainUnused(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      binding.id,
+    );
     if (!this.admin.isConfigured()) return { status: 'engine_not_configured' };
     const result = await this.admin.removeDomain(binding.domain);
+    if (result.provisioned) {
+      await this.mailDomains.deleteDomainClaim(
+        workspaceId,
+        ucUidOf(user as WithWorkspaceClaim),
+        binding.id,
+      );
+    }
     return { status: result.provisioned ? 'ok' : 'failed', result };
   }
 

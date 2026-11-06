@@ -50,6 +50,7 @@ export interface CreateMailboxBody {
   owner_kind?: MailboxOwnerKind;
   owner_key?: string;
   postmark_lane?: boolean;
+  is_default?: boolean;
 }
 
 export interface UpdateMailboxBody {
@@ -58,6 +59,7 @@ export interface UpdateMailboxBody {
   owner_key?: string | null;
   postmark_lane?: boolean;
   active?: boolean;
+  is_default?: boolean;
 }
 
 export interface MailboxListResponse {

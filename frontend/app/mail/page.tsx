@@ -436,9 +436,10 @@ export default function MailPage() {
 
   // Scope the mailbox picker to the active Space (purely client-side).
   const visibleMailboxes = useMemo(() => {
-    if (!activeSpace) return mail.mailboxes;
+    const activeMailboxes = mail.mailboxes.filter((mailbox) => mailbox.active !== false);
+    if (!activeSpace) return activeMailboxes;
     const allowed = new Set(activeSpace.mailbox_ids);
-    return mail.mailboxes.filter((m) => allowed.has(m.id));
+    return activeMailboxes.filter((m) => allowed.has(m.id));
   }, [mail.mailboxes, activeSpace]);
 
   const selectedVisible =
