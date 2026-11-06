@@ -1,16 +1,27 @@
 # Standing campaigns and phone approval
 
-A human can create a campaign request in Agent Inbox, review its template and
-limits, and approve it. PATs and federation identities receive 403 on every
-standing-approval operation. Definitions are immutable: renewal or a change to
-the sender, template, rules, cap or expiry requires a new request and human
-approval. Approving a new revision revokes the earlier active revision of that
+A human with review authority can create a campaign request in Agent Inbox,
+review its template and limits, and approve it. An agent principal — a personal
+access token, a federation actor, or a federation session — may also create the
+request through `POST /workspaces/:workspaceId/standing-approvals` or the MCP
+tool `request_standing_approval`. That row is `PENDING_HUMAN` and grants nothing
+until a human approves it. List, approve, and revoke stay human-only: those
+calls return 403 for every agent principal. Definitions are immutable: renewal
+or a change to the sender, template, rules, cap or expiry requires a new request
+and human approval. Approving a new revision revokes the earlier active revision of that
 campaign in the same transaction. The approver must have access to both
 mailboxes if a revision changes the sender.
 
 Each request binds one mailbox ID and its address, one subject and plain-text
 template, a positive daily cap, an expiry within 90 days, and optional exact
-recipient-domain allow/block lists. The UI's free-mail option stores its displayed
+recipient-domain allow/block lists. `{name}` tokens in the template need a
+`placeholder_rules` entry: the name mapped to a Unicode regular-expression
+source. The campaign form detects those tokens and offers a required non-empty
+name, a 16-character lowercase hex token, required non-empty text, or a custom
+expression. `{first_name}` and `{token}` start from the same built-in sources
+the send-kit guard uses when `placeholder_rules` is omitted. Saving requires a
+source for every `{name}` token, and each source must compile as a Unicode
+regular expression. The UI's free-mail option stores its displayed
 domain list in the request. It is not a dynamically changing provider taxonomy;
 additional domains can be entered explicitly. Empty allow lists allow any domain
 except those blocked. Domain matching is exact, not a suffix or wildcard match.
@@ -83,7 +94,7 @@ All paths are relative to `/api/v1`.
 | Method and path | Purpose |
 | --- | --- |
 | `GET /workspaces/:workspaceId/standing-approvals` | Human-only list and fresh pending links |
-| `POST /workspaces/:workspaceId/standing-approvals` | Human-only immutable request |
+| `POST /workspaces/:workspaceId/standing-approvals` | Immutable `PENDING_HUMAN` request. A human with review authority, or an agent principal who is a workspace member, may create it. The row grants nothing until a human approves it. |
 | `POST /workspaces/:workspaceId/standing-approvals/:id/approve` | Human approval with `definition_sha256` |
 | `POST /workspaces/:workspaceId/standing-approvals/:id/revoke` | Human revocation, including pending requests |
 | `POST /approvals/:workspaceId/:kind/:id/preview` | Human summary; JSON `{ token }` |
@@ -92,9 +103,13 @@ All paths are relative to `/api/v1`.
 
 Kinds are `send-kit` and `standing`. The corresponding MCP tools are
 `request_standing_approval`, `list_standing_approvals`,
-`approve_standing_approval`, and `revoke_standing_approval`. They all require a
-human identity, regardless of PAT scopes. There is no agent renewal or widening
-tool; a human creates and reviews a replacement request.
+`approve_standing_approval`, and `revoke_standing_approval`.
+`request_standing_approval` accepts an agent principal and stores a
+`PENDING_HUMAN` request that grants nothing until a human approves it.
+`list_standing_approvals`, `approve_standing_approval`, and
+`revoke_standing_approval` stay human-only, regardless of PAT scopes. There is
+no agent renewal or widening tool; renewal or a wider grant is a new request
+that a human approves.
 
 ## Migration and review
 
