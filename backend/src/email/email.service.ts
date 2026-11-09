@@ -116,10 +116,7 @@ import {
 } from './autonomy';
 import { mapWithConcurrency, withTimeout } from '../common/async/concurrency';
 import { mayActThroughMailbox } from '../common/mailbox/mailbox-fence';
-import {
-  MailboxOutOfScopeException,
-  resolveMailboxScope,
-} from '../common/mailbox/mailbox-scope';
+import { MailboxOutOfScopeException, resolveMailboxScope } from '../common/mailbox/mailbox-scope';
 import { ApprovalLinksService, kitTarget } from '../approvals/approval-links.service';
 import { StandingApprovalsService } from '../approvals/standing-approvals.service';
 import { ApprovalPendingNotice, StableNotifierService } from '../notify/stable-notifier.service';
@@ -963,7 +960,8 @@ export class EmailService {
         );
         const hasDraftMessage = t.messages.some(
           (message) =>
-            (message.direction === EmailDirection.DRAFT || message.status === EmailMessageStatus.DRAFT) &&
+            (message.direction === EmailDirection.DRAFT ||
+              message.status === EmailMessageStatus.DRAFT) &&
             message.fromAddress?.toLowerCase() === addr.toLowerCase(),
         );
         switch (folder) {
@@ -2115,8 +2113,7 @@ export class EmailService {
             // Governed members must not learn whether the id was foreign or
             // nonexistent. Legacy direct callers keep the old send-as error for
             // an existing private mailbox, but never fall back to the default.
-            if (mailboxScope.patScoped && requestedMailbox)
-              throw new MailboxOutOfScopeException();
+            if (mailboxScope.patScoped && requestedMailbox) throw new MailboxOutOfScopeException();
             if (mailboxScope.governed) throw new NotFoundException('Mailbox not found.');
             if (requestedMailbox)
               throw new ForbiddenException('You are not allowed to send as that mailbox.');
@@ -2817,7 +2814,10 @@ export class EmailService {
         const scope = await resolveMailboxScope(tx, workspaceId, proposedBy);
         if (scope.patScoped) {
           const mailbox = await tx.mailboxAccount.findFirst({
-            where: { workspaceId, emailAddress: { equals: definition.fromAddress, mode: 'insensitive' } },
+            where: {
+              workspaceId,
+              emailAddress: { equals: definition.fromAddress, mode: 'insensitive' },
+            },
             select: { id: true },
           });
           if (mailbox) throw new MailboxOutOfScopeException();
@@ -2873,10 +2873,15 @@ export class EmailService {
       });
       return { ...(await this.sendKitView(tx, created, true)), replaced: false };
     });
-    if (notifyProposal && result.state === AgentSendKitState.PROPOSED) this.fireApprovalNotice({
-      id: result.kit_id, workspaceId, kind: 'SEND KIT', summary: result.title,
-      draftedBy: proposedBy, approvalUrl: result.approval_url,
-    });
+    if (notifyProposal && result.state === AgentSendKitState.PROPOSED)
+      this.fireApprovalNotice({
+        id: result.kit_id,
+        workspaceId,
+        kind: 'SEND KIT',
+        summary: result.title,
+        draftedBy: proposedBy,
+        approvalUrl: result.approval_url,
+      });
     return result;
   }
 
@@ -3988,7 +3993,10 @@ export class EmailService {
               )
             );
           });
-          if (external.length && !(await this.standingApprovals?.reserve(tx, workspaceId, item.message))) {
+          if (
+            external.length &&
+            !(await this.standingApprovals?.reserve(tx, workspaceId, item.message))
+          ) {
             const now = new Date();
             const kit = item.message.kitId
               ? await tx.agentSendKit.findFirst({
@@ -4520,7 +4528,10 @@ export class EmailService {
           const scope = await resolveMailboxScope(tx, workspaceId, approvedBy);
           if (scope.patScoped) {
             const mailbox = await tx.mailboxAccount.findFirst({
-              where: { workspaceId, emailAddress: { equals: definition.fromAddress, mode: 'insensitive' } },
+              where: {
+                workspaceId,
+                emailAddress: { equals: definition.fromAddress, mode: 'insensitive' },
+              },
               select: { id: true },
             });
             if (mailbox) throw new MailboxOutOfScopeException();
@@ -5236,6 +5247,75 @@ export class EmailService {
     };
   }
 
+  /** Read attachment bytes only after the same item and mailbox scope check as detail. */
+  async getAgentInboxAttachment(
+    workspaceId: string,
+    ucUid: string | null,
+    itemId: string,
+    index: number,
+  ): Promise<{ data: Buffer; contentType: string | null; filename: string | null } | null> {
+    if (!Number.isSafeInteger(index) || index < 0) return null;
+    const found = await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+      const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
+      const item = await tx.agentInboxItem.findFirst({
+        where: { id: itemId, workspaceId, ...this.agentInboxScopeWhere(scope) },
+        include: { message: true },
+      });
+      const message = item?.message;
+      const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+      const raw = attachments[index];
+      if (!message || !raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+      const attachment = raw as Record<string, unknown>;
+      const filename = [attachment.name, attachment.filename].find((v) => typeof v === 'string') as
+        | string
+        | undefined;
+      const contentType = [attachment.type, attachment.content_type, attachment.contentType].find(
+        (v) => typeof v === 'string',
+      ) as string | undefined;
+      const base64 = attachment.content_base64 ?? attachment.contentBase64;
+      if (typeof base64 === 'string') {
+        if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64))
+          return null;
+        return {
+          data: Buffer.from(base64, 'base64'),
+          contentType: contentType ?? null,
+          filename: filename ?? null,
+        };
+      }
+      const documentId = attachment.documentId ?? attachment.document_id;
+      if (typeof documentId === 'string' && message.mailboxAccountId) {
+        const row = await tx.outboundAttachment.findFirst({
+          where: { id: documentId, workspaceId, mailboxId: message.mailboxAccountId },
+          select: { bytes: true, mimeType: true, filename: true },
+        });
+        return row
+          ? { data: Buffer.from(row.bytes), contentType: row.mimeType, filename: row.filename }
+          : null;
+      }
+      const blobId = attachment.blob_id ?? attachment.blobId;
+      if (typeof blobId === 'string' && message.mailboxAccountId) {
+        return {
+          blobId,
+          mailboxId: message.mailboxAccountId,
+          contentType: contentType ?? null,
+          filename: filename ?? null,
+        };
+      }
+      return null;
+    });
+    if (!found) return null;
+    if (found.data !== undefined)
+      return { data: found.data, contentType: found.contentType, filename: found.filename };
+    const blob = await this.downloadAttachment(workspaceId, ucUid, found.mailboxId, found.blobId);
+    return blob
+      ? {
+          data: blob.data,
+          contentType: found.contentType ?? blob.contentType,
+          filename: found.filename ?? blob.filename ?? null,
+        }
+      : null;
+  }
+
   /** An EmailMessage row → the Wave-7 full-fidelity wire shape (null-safe). */
   private messageFullView(
     m: {
@@ -5279,15 +5359,26 @@ export class EmailService {
   }
 
   /** Stored attachments JSON → display meta [{blobId,name,type,size?}] (tolerant of both key spellings). */
-  private attachmentsMeta(
-    value: unknown,
-  ): { blobId: string | null; name: string | null; type: string | null; size?: number | null }[] {
+  private attachmentsMeta(value: unknown): {
+    index: number;
+    downloadable: boolean;
+    blobId: string | null;
+    name: string | null;
+    type: string | null;
+    size?: number | null;
+  }[] {
     if (!Array.isArray(value)) return [];
     return value
+      .map((a, index) => ({ a, index }))
       .filter(
-        (a): a is Record<string, unknown> => !!a && typeof a === 'object' && !Array.isArray(a),
+        (entry): entry is { a: Record<string, unknown>; index: number } =>
+          !!entry.a && typeof entry.a === 'object' && !Array.isArray(entry.a),
       )
-      .map((a) => ({
+      .map(({ a, index }) => ({
+        index,
+        downloadable:
+          typeof (a.content_base64 ?? a.contentBase64) === 'string' ||
+          !!(a.blob_id ?? a.blobId ?? a.documentId ?? a.document_id),
         blobId:
           typeof a.blobId === 'string'
             ? a.blobId
@@ -6320,6 +6411,18 @@ export class EmailService {
     };
   }
 
+  private redactAttachmentBytes(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map((entry) => this.redactAttachmentBytes(entry));
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(
+        Object.entries(value)
+          .filter(([key]) => key !== 'content_base64' && key !== 'contentBase64')
+          .map(([key, entry]) => [key, this.redactAttachmentBytes(entry)]),
+      );
+    }
+    return value;
+  }
+
   private inboxView(
     it: {
       id: string;
@@ -6390,7 +6493,9 @@ export class EmailService {
       body_sha256: isCleanup || msg?.body == null ? null : plainTextBodySha256(msg.body),
       thread_id: isCleanup ? null : (msg?.inReplyToThreadId ?? null),
       kit_id: isCleanup ? null : (msg?.kitId ?? null),
-      ...(!isCleanup && msg?.standingApprovalId ? { standing_approval_id: msg.standingApprovalId } : {}),
+      ...(!isCleanup && msg?.standingApprovalId
+        ? { standing_approval_id: msg.standingApprovalId }
+        : {}),
       attachments: isCleanup
         ? []
         : this.attachmentsMeta(msg?.attachments).map((a) => ({
@@ -6407,7 +6512,9 @@ export class EmailService {
       // gate held the send). Additive: pre-wave EMAIL items had a null payload
       // in the DB, so they keep rendering null here.
       payload:
-        isCleanup || kitHold || (it.payload && typeof it.payload === 'object') ? payload : null,
+        isCleanup || kitHold || (it.payload && typeof it.payload === 'object')
+          ? (this.redactAttachmentBytes(payload) as Record<string, unknown>)
+          : null,
     };
   }
 
