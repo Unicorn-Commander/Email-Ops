@@ -908,6 +908,7 @@ export class McpService {
           // Wave 7 learning: default TRUE — the approval trusts the external
           // recipients; pass false to approve without learning.
           trust_recipients: z.boolean().optional(),
+          factual_correction: z.boolean().optional(),
         },
       },
       async (args: any) => wrap(await tools.approveAgentInboxItem(user, args)),
@@ -927,6 +928,7 @@ export class McpService {
           item_ids: z.array(z.string().min(1).max(200)).min(1).max(200),
           note: z.string().max(2000).optional(),
           trust_recipients: z.boolean().optional(),
+          factual_correction: z.boolean().optional(),
         },
       },
       async (args: any) => wrap(await tools.bulkApproveAgentInboxItems(user, args)),

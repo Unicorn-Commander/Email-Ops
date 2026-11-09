@@ -890,7 +890,13 @@ export class EmailOpsTools {
 
   async approveAgentInboxItem(
     user: User,
-    args: { workspace_id?: string; item_id: string; note?: string; trust_recipients?: boolean },
+    args: {
+      workspace_id?: string;
+      item_id: string;
+      note?: string;
+      factual_correction?: boolean;
+      trust_recipients?: boolean;
+    },
   ): Promise<unknown> {
     const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
     const { role } = await this.membership.resolveWithRole(user, args.workspace_id);
@@ -924,6 +930,7 @@ export class EmailOpsTools {
       args.trust_recipients,
       !!(user as any).__isFederationActor || !!(user as any).__patAuth,
       role,
+      ...(args.factual_correction === undefined ? [] : [args.factual_correction]),
     );
     if (!res) return { ok: false, reason: 'agent-inbox item not found in this workspace' };
     return { ok: true, ...res };
@@ -935,6 +942,7 @@ export class EmailOpsTools {
       workspace_id?: string;
       item_ids: string[];
       note?: string;
+      factual_correction?: boolean;
       trust_recipients?: boolean;
     },
   ): Promise<unknown> {
@@ -966,6 +974,7 @@ export class EmailOpsTools {
       args.trust_recipients,
       !!(user as any).__isFederationActor || !!(user as any).__patAuth,
       role,
+      ...(args.factual_correction === undefined ? [] : [args.factual_correction]),
     );
   }
 

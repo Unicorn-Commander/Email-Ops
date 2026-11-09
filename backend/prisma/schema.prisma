@@ -1278,6 +1278,12 @@ model AgentInboxItem {
   reviewedByUcUid String?
   reviewedAt      DateTime?
   reviewNote      String?
+  // Immutable draft baseline; legacy rows deliberately remain unknown.
+  bodySha256       String?
+  // Plain-text body approved for delivery (confirmed again on accepted send).
+  sentBodySha256    String?
+  editedBeforeSend Boolean?
+  factualCorrection Boolean?
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 
