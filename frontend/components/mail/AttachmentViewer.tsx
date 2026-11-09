@@ -37,7 +37,12 @@ export function AttachmentViewer({ attachment, onClose }: {
       if (!active) return;
       // Use the declared type only for the fixed preview allowlist.
       const type = attachment.type?.toLowerCase().trim() ?? '';
-      objectUrl = URL.createObjectURL(blob);
+      // A PDF is shown by Chrome's own viewer, which a sandboxed frame refuses to load. Re-type the
+      // bytes as application/pdf so the frame can only ever render them as a PDF, never as a page
+      // running in this origin, whatever Content-Type the server sent.
+      objectUrl = URL.createObjectURL(
+        type === 'application/pdf' ? new Blob([blob], { type: 'application/pdf' }) : blob,
+      );
       setUrl(objectUrl);
       if (TEXT_TYPES.has(type)) {
         setTruncated(blob.size > TEXT_LIMIT);
@@ -74,7 +79,7 @@ export function AttachmentViewer({ attachment, onClose }: {
       {loading && <p>Loading attachment…</p>}
       {error && <p role="alert" className="text-danger">{error}</p>}
       {url && IMAGE_TYPES.has(type) && <img src={url} alt={name} className="max-h-[65vh] max-w-full object-contain" />}
-      {url && type === 'application/pdf' && <iframe src={url} title={name} sandbox="" className="h-[65vh] w-full" />}
+      {url && type === 'application/pdf' && <iframe src={url} title={name} className="h-[65vh] w-full rounded-token bg-white" />}
       {url && TEXT_TYPES.has(type) && text !== null && <>
         <pre className="max-h-[65vh] overflow-auto whitespace-pre-wrap break-words rounded-token bg-surface-base p-3 text-xs">{text}</pre>
         {truncated && <p className="mt-2 text-xs text-tertiary">Preview truncated at 1 MB.</p>}
