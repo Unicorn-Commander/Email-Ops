@@ -63,6 +63,11 @@ import {
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { MAX_TARGET_ROWS } from '../connected-accounts/cleanup-targets';
 import { isAgentOrigin } from '../common/agent-origin';
+import {
+  approvalFeedback,
+  approvalAuditDetail,
+  type ApprovalFeedback,
+} from '../agent-inbox/approval-feedback';
 import { classifyApprovalTier } from '../agent-inbox/approval-routing';
 import { businessDayWindow } from '../common/business-time';
 import { PrismaService, WorkspaceTxClient } from '../prisma/prisma.service';
@@ -322,6 +327,8 @@ type ApprovePrep =
       kitId: string | null;
       req: SendReq;
       scheduledApproval?: boolean;
+      feedback: ApprovalFeedback;
+      bodySha256: string | null;
     };
 
 export interface AgentSendKitProposalInput extends AgentSendKitDefinitionInput {
@@ -2275,6 +2282,7 @@ export class EmailService {
             data: {
               workspaceId,
               messageId: msg.id,
+              bodySha256: plainTextBodySha256(input.body),
               state: AgentInboxState.PENDING,
               approvalTier: approval.tier,
               approvalReason: approval.matchedReason,
@@ -3482,6 +3490,7 @@ export class EmailService {
     trustRecipients?: boolean,
     agentPrincipal = false,
     reviewerRole?: WorkspaceRole,
+    factualCorrection?: boolean,
   ): Promise<BulkApproveAgentInboxResult> {
     const ids = [...new Set(itemIds.map((itemId) => itemId.trim()).filter(Boolean))];
     if (ids.length === 0 || ids.length > 200) {
@@ -3711,6 +3720,11 @@ export class EmailService {
       for (const scheduled of plan.scheduled) {
         const source = candidateRows.get(scheduled.itemId);
         if (!source) continue;
+        const feedback = approvalFeedback(
+          source.row.bodySha256,
+          source.message.body ?? '',
+          factualCorrection,
+        );
         const payload = payloadOf(source.row.payload);
         payload.sends_at = scheduled.sendAt.toISOString();
         payload.approval_seconds_between = scheduled.approvalSecondsBetween;
@@ -3726,6 +3740,7 @@ export class EmailService {
             reviewedByUcUid: ucUid,
             reviewedAt: now,
             reviewNote: note ?? null,
+            ...feedback,
             payload: payload as Prisma.InputJsonValue,
           },
           include: { message: true },
@@ -3735,7 +3750,13 @@ export class EmailService {
           agentKey: source.row.draftedBy,
           messageId: source.message.id,
           actorUcUid: ucUid,
-          detail: `${source.message.subject ?? '(no subject)'} (scheduled ${scheduled.sendAt.toISOString()})`,
+          detail: approvalAuditDetail(
+            source.message.subject,
+            source.row.bodySha256,
+            feedback,
+            note,
+            scheduled.sendAt,
+          ),
         });
         resultById.set(scheduled.itemId, {
           item_id: scheduled.itemId,
@@ -3755,6 +3776,7 @@ export class EmailService {
           trustRecipients,
           agentPrincipal,
           reviewerRole,
+          factualCorrection,
         );
         resultById.set(id, {
           item_id: id,
@@ -3836,6 +3858,7 @@ export class EmailService {
     trustRecipients?: boolean,
     agentPrincipal = false,
     reviewerRole?: WorkspaceRole,
+    factualCorrection?: boolean,
   ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
     // PHASE 1 — validate + authorize (a short tx). A CLEANUP item executes wholly
     // in-tx as before; an EMAIL item resolves its mailbox + returns the send plan,
@@ -4149,6 +4172,12 @@ export class EmailService {
           kitId: item.message.kitId ?? null,
           mailbox: mailbox ?? null,
           scheduledApproval,
+          bodySha256: item.bodySha256 ?? null,
+          feedback: approvalFeedback(
+            item.bodySha256,
+            item.message.body ?? '',
+            scheduledApproval ? item.factualCorrection : factualCorrection,
+          ),
           req: {
             fromAddress: sendFromAddress,
             fromName: mailbox?.displayName ?? null,
@@ -4329,12 +4358,13 @@ export class EmailService {
       const updated = await tx.agentInboxItem.update({
         where: { id: prep.itemId },
         data: prep.scheduledApproval
-          ? { state: AgentInboxState.APPROVED }
+          ? { state: AgentInboxState.APPROVED, ...prep.feedback }
           : {
               state: AgentInboxState.APPROVED,
               reviewedByUcUid: ucUid,
               reviewedAt: new Date(),
               reviewNote: note ?? null,
+              ...prep.feedback,
             },
         include: { message: true },
       });
@@ -4347,7 +4377,7 @@ export class EmailService {
           agentKey: prep.draftedBy,
           messageId: prep.messageId,
           actorUcUid: ucUid,
-          detail: prep.subject,
+          detail: approvalAuditDetail(prep.subject, prep.bodySha256, prep.feedback, note),
         });
       }
       return { inbox: this.inboxView(updated, sent), message: this.composeView(sent) };
@@ -6437,6 +6467,10 @@ export class EmailService {
       reviewedByUcUid: string | null;
       reviewedAt: Date | null;
       reviewNote: string | null;
+      bodySha256?: string | null;
+      sentBodySha256?: string | null;
+      editedBeforeSend?: boolean | null;
+      factualCorrection?: boolean | null;
       createdAt: Date;
     },
     msg: {
@@ -6490,7 +6524,14 @@ export class EmailService {
         : msg
           ? (msg.preview ?? this.snippet(msg.body))
           : null,
-      body_sha256: isCleanup || msg?.body == null ? null : plainTextBodySha256(msg.body),
+      // Legacy items retain the existing display hash, but never infer a baseline
+      // for edited_before_send from their mutable message body.
+      body_sha256:
+        it.bodySha256 ??
+        (isCleanup || msg?.body == null ? null : plainTextBodySha256(msg.body)),
+      sent_body_sha256: it.sentBodySha256 ?? null,
+      edited_before_send: it.editedBeforeSend ?? null,
+      factual_correction: it.factualCorrection ?? null,
       thread_id: isCleanup ? null : (msg?.inReplyToThreadId ?? null),
       kit_id: isCleanup ? null : (msg?.kitId ?? null),
       ...(!isCleanup && msg?.standingApprovalId
