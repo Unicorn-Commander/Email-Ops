@@ -1230,6 +1230,9 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
             "type": "string",
             "maxLength": 2000
           },
+          factual_correction: {
+            type: 'boolean',
+          },
           "trust_recipients": {
             "type": "boolean"
           }
@@ -1268,6 +1271,9 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
           "note": {
             "type": "string",
             "maxLength": 2000
+          },
+          factual_correction: {
+            type: 'boolean',
           },
           "trust_recipients": {
             "type": "boolean"

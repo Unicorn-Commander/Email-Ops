@@ -6527,8 +6527,7 @@ export class EmailService {
       // Legacy items retain the existing display hash, but never infer a baseline
       // for edited_before_send from their mutable message body.
       body_sha256:
-        it.bodySha256 ??
-        (isCleanup || msg?.body == null ? null : plainTextBodySha256(msg.body)),
+        it.bodySha256 ?? (isCleanup || msg?.body == null ? null : plainTextBodySha256(msg.body)),
       sent_body_sha256: it.sentBodySha256 ?? null,
       edited_before_send: it.editedBeforeSend ?? null,
       factual_correction: it.factualCorrection ?? null,

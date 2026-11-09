@@ -100,6 +100,13 @@ class ReviewBodyDto {
   trustRecipients?: boolean;
 }
 
+/** Optional human feedback on an email approval. Omission remains unknown. */
+class ApproveBodyDto extends ReviewBodyDto {
+  @IsOptional()
+  @IsBoolean()
+  factual_correction?: boolean;
+}
+
 /** The state filter for the queue list (defaults to pending in the service). */
 class InboxQueryDto {
   @IsOptional()
@@ -180,7 +187,7 @@ class RejectSendKitDto {
   @IsOptional() @IsString() @MaxLength(2000) note?: string;
 }
 
-class BulkApproveDto {
+class BulkApproveDto extends ApproveBodyDto {
   @IsArray()
   @ArrayMinSize(1)
   @ArrayMaxSize(200)
@@ -188,14 +195,6 @@ class BulkApproveDto {
   @MaxLength(200, { each: true })
   item_ids!: string[];
 
-  @IsOptional()
-  @IsString()
-  @MaxLength(2000)
-  note?: string;
-
-  @IsOptional()
-  @IsBoolean()
-  trustRecipients?: boolean;
 }
 
 @ApiTags('agent-inbox')
@@ -406,6 +405,7 @@ export class AgentInboxController {
       body.trustRecipients,
       false,
       role,
+      ...(body.factual_correction === undefined ? [] : [body.factual_correction]),
     );
   }
 
@@ -505,7 +505,7 @@ export class AgentInboxController {
     @ResolvedWorkspace() workspaceId: string,
     @CurrentUser() user: User,
     @Param('id') id: string,
-    @Body() body: ReviewBodyDto,
+    @Body() body: ApproveBodyDto,
     @WorkspaceRoleParam() role?: WorkspaceRole,
   ) {
     await this.membership.assertCanReviewInbox(user, workspaceId);
@@ -532,7 +532,7 @@ export class AgentInboxController {
       throw new ForbiddenException(gate.reason);
     }
     const res =
-      role === undefined
+      role === undefined && body.factual_correction === undefined
         ? await this.email.approveAgentInboxItem(
             workspaceId,
             ucUidOf(user as WithWorkspaceClaim),
@@ -548,6 +548,7 @@ export class AgentInboxController {
             body.trustRecipients,
             false,
             role,
+            ...(body.factual_correction === undefined ? [] : [body.factual_correction]),
           );
     if (!res) {
       throw new NotFoundException('Agent-inbox item not found in this workspace.');
