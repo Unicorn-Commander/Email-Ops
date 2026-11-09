@@ -754,6 +754,8 @@ export interface HoldPolicyView {
 
 /** One attachment on a staged (not yet sent) message. Meta only; `blob_id` when downloadable. */
 export interface StagedAttachmentView {
+  index: number;
+  downloadable: boolean;
   name: string | null;
   type: string | null;
   size: number | null;
@@ -825,13 +827,15 @@ function asAddressList(value: unknown): string[] {
   return out;
 }
 
-function coerceStagedAttachment(raw: unknown): StagedAttachmentView | null {
+function coerceStagedAttachment(raw: unknown, index: number): StagedAttachmentView | null {
   const rec = asRec(raw);
   if (!rec) return null;
   const name = asStr(rec.name) ?? asStr(rec.filename);
   const type = asStr(rec.type) ?? asStr(rec.content_type) ?? asStr(rec.contentType);
-  if (!name && !type) return null;
+  if (!name && !type && rec.downloadable !== true) return null;
   return {
+    index: typeof rec.index === 'number' ? rec.index : index,
+    downloadable: rec.downloadable === true,
     name,
     type,
     size: asNum(rec.size),
@@ -938,6 +942,22 @@ export async function getAgentInboxItemDetail(
     coerceStagedMessage(raw) ??
     null;
   return { item, message };
+}
+
+/** Fetch staged bytes with the same bearer/session transport as detail. */
+export async function fetchAgentInboxAttachment(
+  workspaceId: string,
+  itemId: string,
+  index: number,
+  token?: string,
+): Promise<Blob> {
+  const bearer = token ?? getToken();
+  const res = await fetch(
+    `${API_BASE}${inboxBase(workspaceId)}/${encodeURIComponent(itemId)}/attachments/${index}`,
+    { credentials: 'include', headers: bearer ? { Authorization: `Bearer ${bearer}` } : {} },
+  );
+  if (!res.ok) throw new ApiError(res.status, `Could not open the attachment (${res.status}).`);
+  return res.blob();
 }
 
 // ── Auto-sent audit lane (Wave 7) ─────────────────────────────────────────

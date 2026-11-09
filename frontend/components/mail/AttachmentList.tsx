@@ -3,9 +3,8 @@
 /**
  * Attachment UI shared by the viewer and the composers.
  *
- *  - `MessageAttachments`: chips on a received/sent message; click downloads
- *    through the authenticated blobs endpoint (object URL — an <a href> can't
- *    carry the bearer token).
+ *  - `MessageAttachments`: chips on a received/sent message; click opens the
+ *    shared viewer using the authenticated blobs endpoint.
  *  - `useAttachmentUploads` + `ComposerAttachments`: the composer side — file
  *    picker/drag-drop feeds `addFiles`, each file uploads to the attachments
  *    endpoint with a progress bar, and `refs()` yields the blob refs to include
@@ -16,6 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '@/components/ui';
 import { Tooltip } from '@/components/Tooltip';
+import { AttachmentViewer, type ViewerAttachment } from './AttachmentViewer';
 import {
   fetchMailBlob,
   isMissingEndpoint,
@@ -38,20 +38,6 @@ function PaperclipIcon({ className }: { className?: string }) {
     <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
       <path
         d="M21 12.5l-8.5 8.5a5.66 5.66 0 01-8-8l9-9a3.77 3.77 0 015.3 5.3l-9 9a1.89 1.89 0 01-2.7-2.7l8.3-8.3"
-        stroke="currentColor"
-        strokeWidth={1.6}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function DownloadIcon({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
-      <path
-        d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"
         stroke="currentColor"
         strokeWidth={1.6}
         strokeLinecap="round"
@@ -110,8 +96,8 @@ function attachmentKind(type?: string | null, name?: string | null): AttachmentK
 
 /**
  * The leading square: image thumbnail when we have one, else a type badge.
- * Exported for the agent-inbox review panel's read-only staged-attachment
- * chips — the prop is name/type meta only, so a not-yet-sent attachment
+ * Exported for the agent-inbox review panel's staged attachment
+ * chips. The prop is name/type meta only, so a not-yet-sent attachment
  * (no blob id) renders with the same visual language as a received one.
  */
 export function AttachmentGlyph({
@@ -161,13 +147,14 @@ export function MessageAttachments({
   workspaceId: string;
   mailboxId: string;
 }) {
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [viewing, setViewing] = useState<ViewerAttachment | null>(null);
 
-  // Inline (cid) images already render in the body; list the rest for download.
+  // Inline (cid) images already render in the body; list the rest for viewing.
   const files = useMemo(() => attachments.filter((a) => !a.cid), [attachments]);
   const imageFiles = useMemo(
-    () => files.filter((a) => isImageAttachment(a.type, a.name)),
+    () => files.filter((a) =>
+      ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(a.type?.toLowerCase() ?? ''),
+    ),
     [files],
   );
 
@@ -204,46 +191,20 @@ export function MessageAttachments({
 
   if (files.length === 0) return null;
 
-  async function download(att: MailAttachment) {
-    if (busy) return;
-    setBusy(att.blob_id);
-    setError(null);
-    try {
-      const blob = await fetchMailBlob(workspaceId, mailboxId, att.blob_id, att.name, att.type);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = att.name ?? 'attachment';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
-    } catch (err) {
-      setError(
-        isMissingEndpoint(err)
-          ? 'Downloads are not available yet on this server.'
-          : err instanceof Error
-            ? err.message
-            : 'Could not download the attachment.',
-      );
-    } finally {
-      setBusy(null);
-    }
-  }
-
   return (
     <div className="mt-3 border-t border-subtle pt-2.5">
       <div className="flex flex-wrap gap-1.5">
         {files.map((att) => {
-          const downloading = busy === att.blob_id;
           return (
             <button
               key={att.blob_id}
               type="button"
-              disabled={busy !== null}
-              onClick={() => void download(att)}
-              aria-label={`Download ${att.name ?? 'attachment'}`}
-              title={`Download ${att.name ?? 'attachment'}`}
+              onClick={() => setViewing({
+                name: att.name, type: att.type, size: att.size,
+                load: () => fetchMailBlob(workspaceId, mailboxId, att.blob_id, att.name, att.type),
+              })}
+              aria-label={`Open ${att.name ?? 'attachment'}`}
+              title={`Open ${att.name ?? 'attachment'}`}
               className={cn(
                 'group inline-flex max-w-[14rem] items-center gap-2 rounded-token border border-subtle bg-surface-overlay/60 p-1.5 pr-2.5',
                 'text-left transition-colors duration-fast ease-token',
@@ -256,26 +217,19 @@ export function MessageAttachments({
                   {att.name ?? 'attachment'}
                 </span>
                 <span className="flex items-center gap-1 text-[10px] leading-4 text-muted">
-                  {downloading ? (
-                    <span className="text-tertiary">downloading…</span>
-                  ) : (
-                    <>
-                      {att.size != null && (
-                        <span className="shrink-0 font-mono">{formatBytes(att.size)}</span>
-                      )}
-                      <span className="inline-flex items-center gap-0.5 text-tertiary opacity-0 transition-opacity duration-fast ease-token group-hover:opacity-100">
-                        <DownloadIcon className="h-3 w-3" />
-                        Download
-                      </span>
-                    </>
+                  {att.size != null && (
+                    <span className="shrink-0 font-mono">{formatBytes(att.size)}</span>
                   )}
+                  <span className="inline-flex items-center gap-0.5 text-tertiary opacity-0 transition-opacity duration-fast ease-token group-hover:opacity-100">
+                    Open
+                  </span>
                 </span>
               </span>
             </button>
           );
         })}
       </div>
-      {error && <p className="mt-1 text-[11px] text-danger">{error}</p>}
+      <AttachmentViewer attachment={viewing} onClose={() => setViewing(null)} />
     </div>
   );
 }

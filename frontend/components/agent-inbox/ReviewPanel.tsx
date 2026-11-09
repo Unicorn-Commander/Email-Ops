@@ -28,6 +28,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Badge, Button, cn, useConfirm } from '@/components/ui';
 import { HtmlEmailBody } from '@/components/mail/HtmlEmailBody';
+import { AttachmentViewer, type ViewerAttachment } from '@/components/mail/AttachmentViewer';
 import {
   AttachmentGlyph,
   MessageAttachments,
@@ -46,6 +47,7 @@ import { cleanupReason, deriveCleanupTargets, remainingCount } from '@/lib/clean
 import { fetchMailBlob, type MailAttachment } from '@/lib/mailApi';
 import {
   getAgentInboxItemDetail,
+  fetchAgentInboxAttachment,
   holdPolicyOf,
   coerceStagedMessage,
   ApiError,
@@ -127,7 +129,9 @@ function degradedMessage(item: AgentInboxItemView): StagedMessageView {
     cc_addresses: [],
     html_body: null,
     text_body: null,
-    attachments: (item.attachments ?? []).map((attachment) => ({
+    attachments: (item.attachments ?? []).map((attachment, index) => ({
+      index,
+      downloadable: false,
       name: attachment.name,
       type: attachment.type,
       size: attachment.size,
@@ -170,15 +174,15 @@ function AddressRow({ label, values }: { label: string; values: string[] }) {
   );
 }
 
-/** Read-only chips for staged attachments that aren't downloadable (yet). */
-function StagedAttachmentChips({ items }: { items: StagedAttachmentView[] }) {
+/** Staged chips use the item-scoped attachment route, including inline bytes. */
+function StagedAttachmentChips({ items, onOpen }: { items: StagedAttachmentView[]; onOpen: (item: StagedAttachmentView) => void }) {
   if (items.length === 0) return null;
   return (
     <div className="flex flex-wrap gap-1.5">
       {items.map((att, i) => (
-        <span
+        <button type="button" disabled={!att.downloadable} onClick={() => onOpen(att)}
           key={`${att.name ?? 'attachment'}-${i}`}
-          className="inline-flex max-w-[16rem] items-center gap-2 rounded-token border border-subtle bg-surface-overlay/60 p-1.5 pr-2.5"
+          className="inline-flex max-w-[16rem] items-center gap-2 rounded-token border border-subtle bg-surface-overlay/60 p-1.5 pr-2.5 disabled:cursor-default disabled:opacity-60 hover:enabled:bg-surface-overlay"
           title={att.name ?? 'attachment'}
         >
           <AttachmentGlyph att={att} />
@@ -189,7 +193,7 @@ function StagedAttachmentChips({ items }: { items: StagedAttachmentView[] }) {
               {att.type && <span className="truncate">{att.type}</span>}
             </span>
           </span>
-        </span>
+        </button>
       ))}
     </div>
   );
@@ -442,6 +446,7 @@ export function ReviewPanel({
   const confirm = useConfirm();
   const router = useRouter();
   const { enqueueLocal } = useUiCommands();
+  const [viewingAttachment, setViewingAttachment] = useState<ViewerAttachment | null>(null);
 
   // Mount-then-show so the entrance transition runs (MessagePopout pattern).
   const [mounted, setMounted] = useState(false);
@@ -459,11 +464,11 @@ export function ReviewPanel({
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape' && !viewingAttachment) onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open, onClose, viewingAttachment]);
 
   const queueItem = subject?.kind === 'item' ? subject.item : null;
   const auto = subject?.kind === 'auto-sent' ? subject.item : null;
@@ -555,8 +560,8 @@ export function ReviewPanel({
 
   const attachments = message?.attachments ?? [];
   const downloadable =
-    workspaceId && blobMailboxId ? attachments.filter((a) => a.blob_id) : [];
-  const metaOnly = attachments.filter((a) => !downloadable.includes(a));
+    auto && workspaceId && blobMailboxId ? attachments.filter((a) => a.blob_id) : [];
+  const metaOnly = auto ? attachments.filter((a) => !downloadable.includes(a)) : attachments;
   const downloadableMail: MailAttachment[] = downloadable.map((a) => ({
     blob_id: a.blob_id as string,
     name: a.name,
@@ -847,11 +852,18 @@ export function ReviewPanel({
                     )}
                     {metaOnly.length > 0 && (
                       <div className="mt-2">
-                        <StagedAttachmentChips items={metaOnly} />
+                        <StagedAttachmentChips items={metaOnly} onOpen={(att) => {
+                          if (!workspaceId || !queueItem || !att.downloadable) return;
+                          setViewingAttachment({
+                            name: att.name, type: att.type, size: att.size,
+                            load: () => fetchAgentInboxAttachment(workspaceId, queueItem.id, att.index),
+                          });
+                        }} />
                       </div>
                     )}
                   </section>
                 )}
+                <AttachmentViewer attachment={viewingAttachment} onClose={() => setViewingAttachment(null)} />
               </>
             )}
 
