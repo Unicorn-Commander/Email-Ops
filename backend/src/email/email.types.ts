@@ -306,6 +306,8 @@ export interface MessageFullView {
   bodyHtml: string | null;
   htmlBody: string | null;
   attachments: {
+    index: number;
+    downloadable: boolean;
     blobId: string | null;
     name: string | null;
     type: string | null;

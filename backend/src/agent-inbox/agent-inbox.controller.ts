@@ -27,6 +27,7 @@ import {
   NotFoundException,
   Param,
   Post,
+  Res,
   Query,
   ForbiddenException,
   UseGuards,
@@ -61,6 +62,27 @@ import { EmailService } from '../email/email.service';
 import { checkComposeEntitlement } from '../email/entitlement';
 import { checkCleanerEntitlement } from '../connected-accounts/entitlement';
 import { resolveEffectiveEntitlements } from '../connected-accounts/entitlement-resolver';
+import type { Response } from 'express';
+
+const SAFE_INLINE_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'application/pdf',
+  'text/plain',
+  'text/csv',
+]);
+
+function safeFilename(value: string | null): string {
+  return (
+    (value ?? 'attachment')
+      .split(/[\\/]/)
+      .pop()!
+      .replace(/[\x00-\x1f\x7f]/g, '')
+      .trim() || 'attachment'
+  );
+}
 
 /** Optional reviewer note carried on an approve/reject. */
 class ReviewBodyDto {
@@ -194,7 +216,11 @@ export class AgentInboxController {
     @CurrentUser() user: User,
     @Body() body: ApproveSendKitDto,
   ) {
-    if ((user as any).__patAuth || (user as any).__isFederationActor || (user as any).__isFederationAuth) {
+    if (
+      (user as any).__patAuth ||
+      (user as any).__isFederationActor ||
+      (user as any).__isFederationAuth
+    ) {
       throw new ForbiddenException('Only a signed-in human may approve a send kit.');
     }
     await this.membership.assertCanReviewInbox(user, workspaceId);
@@ -277,7 +303,11 @@ export class AgentInboxController {
     @Param('kitId') kitId: string,
     @Body() body: ApproveSendKitHashDto,
   ) {
-    if ((user as any).__patAuth || (user as any).__isFederationActor || (user as any).__isFederationAuth) {
+    if (
+      (user as any).__patAuth ||
+      (user as any).__isFederationActor ||
+      (user as any).__isFederationAuth
+    ) {
       throw new ForbiddenException('Only a signed-in human may approve a send kit.');
     }
     await this.membership.assertCanReviewInbox(user, workspaceId);
@@ -296,7 +326,11 @@ export class AgentInboxController {
     @Param('kitId') kitId: string,
     @Body() body: RejectSendKitDto,
   ) {
-    if ((user as any).__patAuth || (user as any).__isFederationActor || (user as any).__isFederationAuth) {
+    if (
+      (user as any).__patAuth ||
+      (user as any).__isFederationActor ||
+      (user as any).__isFederationAuth
+    ) {
       throw new ForbiddenException('Only a signed-in human may reject a send kit.');
     }
     await this.membership.assertCanReviewInbox(user, workspaceId);
@@ -418,6 +452,38 @@ export class AgentInboxController {
       throw new NotFoundException('Agent-inbox item not found in this workspace.');
     }
     return { item };
+  }
+
+  @Get(':id/attachments/:index')
+  @ApiOperation({ summary: 'Read a staged attachment through the item mailbox scope.' })
+  async attachment(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Param('index') index: string,
+    @Res() res: Response,
+  ) {
+    if (!/^(0|[1-9][0-9]*)$/.test(index)) throw new NotFoundException('Attachment not found.');
+    const attachment = await this.email.getAgentInboxAttachment(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      id,
+      Number(index),
+    );
+    if (!attachment) throw new NotFoundException('Attachment not found.');
+    const type = attachment.contentType?.trim().toLowerCase() ?? '';
+    const inline = SAFE_INLINE_TYPES.has(type);
+    const filename = safeFilename(attachment.filename);
+    const ascii = filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+    res.set({
+      'Content-Type': inline ? type : 'application/octet-stream',
+      'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)}`,
+      'Content-Length': String(attachment.data.length),
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "sandbox; default-src 'none'",
+      'Cache-Control': 'private, no-store',
+    });
+    res.send(attachment.data);
   }
 
   @Post(':id/approve')
