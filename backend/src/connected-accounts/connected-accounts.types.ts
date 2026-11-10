@@ -212,6 +212,13 @@ export interface EngineMailThread {
   flagged?: boolean;
 }
 
+export type EngineMailReadStatus =
+  | 'ok'
+  | 'engine_not_configured'
+  | 'engine_unreachable'
+  | 'provider_auth_failed'
+  | 'provider_error';
+
 export interface EngineMailThreadsResult {
   threads: EngineMailThread[];
   /** Opaque provider cursor for the next page (Gmail pageToken / Graph nextLink). */
@@ -221,6 +228,11 @@ export interface EngineMailThreadsResult {
   /** False when the provider refused the search rather than returning unfiltered mail. */
   search_supported?: boolean;
   reason?: string | null;
+  /**
+   * Additive empty-vs-unavailable discriminator. Absent/`ok` = the read
+   * completed. Never carries tokens or provider error bodies.
+   */
+  status?: EngineMailReadStatus;
 }
 
 /** Per-sender result of an RFC 2369 / RFC 8058 unsubscribe attempt. */
@@ -297,6 +309,8 @@ export interface EngineMailAttachmentBytes {
 
 export interface EngineMailThreadResult {
   messages: EngineMailMessage[];
+  /** Additive empty-vs-unavailable discriminator. See EngineMailThreadsResult. */
+  status?: EngineMailReadStatus;
 }
 
 export interface EngineMailSendResult {

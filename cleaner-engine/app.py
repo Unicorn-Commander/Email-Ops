@@ -601,6 +601,7 @@ def mail_threads(request: MailThreadsRequest) -> dict[str, Any]:
             "has_more": False,
             "search_supported": True,
             "reason": None,
+            "status": "provider_auth_failed",
         }
     try:
         listed = provider.list_threads(
@@ -621,6 +622,7 @@ def mail_threads(request: MailThreadsRequest) -> dict[str, Any]:
             "has_more": bool(next_token),
             "search_supported": True,
             "reason": None,
+            "status": "ok",
         }
     except ValueError as exc:
         # Explicit unsupported search (e.g. Microsoft free-text) — honest empty.
@@ -631,15 +633,17 @@ def mail_threads(request: MailThreadsRequest) -> dict[str, Any]:
             "has_more": False,
             "search_supported": False,
             "reason": str(exc),
+            "status": "ok",
         }
-    except Exception as exc:  # noqa: BLE001 - degrade clean
-        logger.warning("mail/threads failed for %s: %s", request.provider, exc)
+    except Exception:  # noqa: BLE001 - degrade clean; never echo provider bodies
+        logger.warning("mail/threads failed for %s", request.provider)
         return {
             "threads": [],
             "next_page_token": None,
             "has_more": False,
             "search_supported": True,
             "reason": None,
+            "status": "provider_error",
         }
 
 
@@ -647,13 +651,13 @@ def mail_threads(request: MailThreadsRequest) -> dict[str, Any]:
 def mail_thread(request: MailThreadRequest) -> dict[str, Any]:
     provider = _try_authenticated_provider(request.provider, request.credentials.model_dump())
     if provider is None:
-        return {"messages": []}
+        return {"messages": [], "status": "provider_auth_failed"}
     try:
         messages = provider.get_thread(request.thread_id)
-        return {"messages": [_mail_message_to_dict(m) for m in messages]}
-    except Exception as exc:  # noqa: BLE001 - degrade clean
-        logger.warning("mail/thread failed for %s: %s", request.provider, exc)
-        return {"messages": []}
+        return {"messages": [_mail_message_to_dict(m) for m in messages], "status": "ok"}
+    except Exception:  # noqa: BLE001 - degrade clean; never echo provider bodies
+        logger.warning("mail/thread failed for %s", request.provider)
+        return {"messages": [], "status": "provider_error"}
 
 
 @app.post("/mail/poll-inbound", dependencies=[Depends(_require_engine_token)])

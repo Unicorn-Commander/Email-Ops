@@ -188,6 +188,13 @@ class FakeProvider:
         )
 
 
+class AuthFailingProvider(FakeProvider):
+    """Authenticate raises; the JSON body must not echo the exception (it can carry a token)."""
+
+    def authenticate(self, credentials: dict[str, Any]) -> bool:
+        raise RuntimeError("invalid_grant token=secret-xyz")
+
+
 class FailingProvider(FakeProvider):
     """A provider that authenticates but whose mail methods raise (degrade-clean)."""
 
@@ -668,6 +675,7 @@ def test_mail_threads_happy_path(client, fake_provider_factory, provider):
     assert body["has_more"] is True
     assert body["next_page_token"] == "NEXT"
     assert body["search_supported"] is True
+    assert body["status"] == "ok"
 
 
 @pytest.mark.parametrize("provider", ["gmail", "microsoft"])
@@ -686,6 +694,7 @@ def test_mail_thread_happy_path(client, fake_provider_factory, provider):
     assert msg["from"] == {"address": "a@example.com", "name": "A"}
     assert msg["thread_id"] == "thread-1"
     assert msg["direction"] == "received"
+    assert body["status"] == "ok"
 
 
 @pytest.mark.parametrize("provider", ["gmail", "microsoft"])
@@ -775,6 +784,8 @@ def test_mail_threads_degrades_clean_on_provider_error(monkeypatch):
     assert body["threads"] == []
     assert body["has_more"] is False
     assert body["next_page_token"] is None
+    assert body["status"] == "provider_error"
+    assert "401 auth error" not in response.text
 
 
 def test_mail_thread_degrades_clean_on_provider_error(monkeypatch):
@@ -785,7 +796,39 @@ def test_mail_thread_degrades_clean_on_provider_error(monkeypatch):
         json={"provider": "microsoft", "credentials": {"access_token": "abc"}, "thread_id": "t"},
     )
     assert response.status_code == 200
-    assert response.json() == {"messages": []}
+    assert response.json() == {"messages": [], "status": "provider_error"}
+    assert "403" not in response.text
+    assert "forbidden" not in response.text.lower()
+
+
+def test_mail_threads_auth_failure_is_typed_and_does_not_echo_secrets(monkeypatch):
+    cli, _ = _client_with_factory(monkeypatch, AuthFailingProvider)
+    response = cli.post(
+        "/mail/threads",
+        headers=_auth_headers(),
+        json={"provider": "gmail", "credentials": {"token": "secret-xyz"}, "folder": "inbox"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["threads"] == []
+    assert body["status"] == "provider_auth_failed"
+    assert "secret-xyz" not in response.text
+    assert "invalid_grant" not in response.text
+
+
+def test_mail_thread_auth_failure_is_typed_and_does_not_echo_secrets(monkeypatch):
+    cli, _ = _client_with_factory(monkeypatch, AuthFailingProvider)
+    response = cli.post(
+        "/mail/thread",
+        headers=_auth_headers(),
+        json={"provider": "gmail", "credentials": {"token": "secret-xyz"}, "thread_id": "t"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["messages"] == []
+    assert body["status"] == "provider_auth_failed"
+    assert "secret-xyz" not in response.text
+    assert "invalid_grant" not in response.text
 
 
 def test_mail_send_degrades_clean_on_provider_error(monkeypatch):

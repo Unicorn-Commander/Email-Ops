@@ -25,6 +25,7 @@ function gmailbox(over: Partial<MailboxAccount> = {}): MailboxAccount {
 }
 
 function make(opts: {
+  configured?: boolean;
   token?: string | null;
   user?: { keycloakId: string } | null;
   threads?: unknown;
@@ -46,6 +47,7 @@ function make(opts: {
     getProviderAccessToken: jest.fn().mockResolvedValue(opts.token ?? null),
   } as unknown as KeycloakBrokerService;
   const engine = {
+    isConfigured: jest.fn().mockReturnValue(opts.configured ?? true),
     getAccountProfile: jest.fn().mockResolvedValue(opts.profile ?? null),
     listMailThreads: jest.fn().mockResolvedValue(opts.threads ?? null),
     getMailThread: jest.fn().mockResolvedValue(opts.thread ?? null),
@@ -124,6 +126,7 @@ describe('EngineMailProvider', () => {
     ]);
     expect(out.hasMore).toBe(false);
     expect(out.nextPageToken).toBeNull();
+    expect(out.status).toBe('ok');
   });
 
   it('microsoft uses the microsoft alias + access_token credentials', async () => {
@@ -207,30 +210,55 @@ describe('EngineMailProvider', () => {
     expect(out.hasMore).toBe(false);
     expect(out.nextPageToken).toBeNull();
     expect(out.reason).toMatch(/page_token/i);
+    expect(out.status).toBe('ok');
   });
 
-  it('listInbox degrades clean: no owner / no user / no token / null engine → empty page', async () => {
-    const empty = {
+  it('listInbox: a truly empty mailbox is status ok (not unavailable)', async () => {
+    const { provider } = make({
+      user: { keycloakId: 'kc-sub-1' },
+      token: 'gtok',
+      threads: { threads: [] },
+    });
+    const out = await provider.listInbox(gmailbox(), { folder: 'inbox', limit: 50 });
+    expect(out).toEqual({
       threads: [],
       nextPageToken: null,
       hasMore: false,
       searchSupported: true,
       reason: null,
-    };
-    expect(await make({}).provider.listInbox(gmailbox({ ownerKey: null }), { folder: 'inbox', limit: 50 })).toEqual(empty);
-    expect(await make({ user: null }).provider.listInbox(gmailbox(), { folder: 'inbox', limit: 50 })).toEqual(empty);
-    expect(
-      await make({ user: { keycloakId: 'kc-sub-1' }, token: null }).provider.listInbox(gmailbox(), {
-        folder: 'inbox',
-        limit: 50,
-      }),
-    ).toEqual(empty);
-    expect(
-      await make({ user: { keycloakId: 'kc-sub-1' }, token: 'gtok', threads: null }).provider.listInbox(
-        gmailbox(),
-        { folder: 'inbox', limit: 50 },
-      ),
-    ).toEqual(empty);
+      status: 'ok',
+    });
+  });
+
+  it.each([
+    ['engine_not_configured', { configured: false }, 'engine_not_configured'],
+    ['provider_auth_failed (no owner)', { ownerKey: null as string | null }, 'provider_auth_failed'],
+    ['provider_auth_failed (no user)', { user: null }, 'provider_auth_failed'],
+    ['provider_auth_failed (no token)', { user: { keycloakId: 'kc-sub-1' }, token: null }, 'provider_auth_failed'],
+    [
+      'engine_unreachable (null engine result)',
+      { user: { keycloakId: 'kc-sub-1' }, token: 'gtok', threads: null },
+      'engine_unreachable',
+    ],
+    [
+      'provider_error (engine status)',
+      {
+        user: { keycloakId: 'kc-sub-1' },
+        token: 'gtok',
+        threads: { threads: [], status: 'provider_error' },
+      },
+      'provider_error',
+    ],
+  ] as const)('listInbox surfaces %s instead of a silent empty mailbox', async (_label, opts, status) => {
+    const ownerKey = 'ownerKey' in opts ? (opts as { ownerKey: string | null }).ownerKey : 'kc-sub-1';
+    const { provider, engine } = make(opts as Parameters<typeof make>[0]);
+    const out = await provider.listInbox(gmailbox({ ownerKey }), { folder: 'inbox', limit: 50 });
+    expect(out.threads).toEqual([]);
+    expect(out.status).toBe(status);
+    expect(JSON.stringify(out)).not.toMatch(/gtok|token=/i);
+    if (status === 'engine_not_configured' || status === 'provider_auth_failed') {
+      expect(engine.listMailThreads).not.toHaveBeenCalled();
+    }
   });
 
   it('send: maps an accepted engine result; not-connected → accepted:false (engine never called)', async () => {
@@ -448,9 +476,33 @@ describe('EngineMailProvider', () => {
       },
     });
     const out = await provider.listThreadMessages(gmailbox(), 't1');
-    expect(out[0].attachments).toEqual([
+    expect(out.status).toBe('ok');
+    expect(out.messages[0].attachments).toEqual([
       { blob_id: 'm1::att9', name: 'doc.pdf', type: 'application/pdf', size: 1234, cid: null },
     ]);
+  });
+
+  it.each([
+    ['engine_not_configured', { configured: false }, 'engine_not_configured'],
+    ['provider_auth_failed', { user: { keycloakId: 'kc-sub-1' }, token: null }, 'provider_auth_failed'],
+    [
+      'engine_unreachable',
+      { user: { keycloakId: 'kc-sub-1' }, token: 'gtok', thread: null },
+      'engine_unreachable',
+    ],
+    [
+      'provider_error',
+      {
+        user: { keycloakId: 'kc-sub-1' },
+        token: 'gtok',
+        thread: { messages: [], status: 'provider_error' },
+      },
+      'provider_error',
+    ],
+  ] as const)('listThreadMessages surfaces %s instead of a silent empty thread', async (_label, opts, status) => {
+    const { provider } = make(opts);
+    const out = await provider.listThreadMessages(gmailbox(), 't1');
+    expect(out).toEqual({ messages: [], status });
   });
 
   it('downloadAttachment: decodes engine base64 bytes', async () => {

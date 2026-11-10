@@ -15,9 +15,9 @@
  * FEATURE-DETECTED: a 404/501 flips the matching `features.*` flag off and the
  * UI hides that affordance — no crashes, no error toasts.
  *
- * Degrade-clean: the mail engine is often DORMANT, so thread lists come back
- * EMPTY and a compose returns `status: 'failed'`. None of that is an error here;
- * empty is empty, and the truthful compose status is handed back to the caller.
+ * Degrade-clean: a compose still returns `status: 'failed'` when the engine is
+ * dormant. Thread lists carry an additive `status` so a connected mailbox that
+ * cannot be read is UNAVAILABLE, not an empty inbox.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -54,10 +54,12 @@ import {
   type MailboxPick,
   type MailFolder,
   type MailFolderView,
+  type MailReadStatus,
   type MessageComposeView,
   type MessageView,
   type ThreadDisposition,
   type ThreadView,
+  isMailReadUnavailable,
 } from '@/lib/mailApi';
 
 /** Sentinel mailbox id for the unified "All inboxes" list (Wave 2). */
@@ -157,6 +159,11 @@ export interface UseMailClient {
   threads: ThreadView[];
   threadsLoad: Load;
   threadsError: string | null;
+  /**
+   * Additive empty-vs-unavailable discriminator from the last successful list
+   * read. A non-ok value with an empty list is UNAVAILABLE, not empty.
+   */
+  threadsStatus: MailReadStatus | null;
   refreshThreads: () => void;
   /**
    * Silently refetch the current list + unread counts (the manual Refresh
@@ -191,6 +198,7 @@ export interface UseMailClient {
   messages: MessageView[];
   messagesLoad: Load;
   messagesError: string | null;
+  messagesStatus: MailReadStatus | null;
 
   /** Mark threads read/unread (optimistic; uses the Wave-2 read endpoint). */
   markRead: (threadIds: string[], read: boolean) => void;
@@ -325,6 +333,7 @@ export function useMailClient(): UseMailClient {
   const [threads, setThreads] = useState<ThreadView[]>([]);
   const [threadsLoad, setThreadsLoad] = useState<Load>('loading');
   const [threadsError, setThreadsError] = useState<string | null>(null);
+  const [threadsStatus, setThreadsStatus] = useState<MailReadStatus | null>(null);
   const [hasMore, setHasMore] = useState(false);
   // Opaque provider cursor for external mailboxes (Gmail/Graph ignore `offset`).
   const nextPageTokenRef = useRef<string | null>(null);
@@ -340,6 +349,7 @@ export function useMailClient(): UseMailClient {
   const [messages, setMessages] = useState<MessageView[]>([]);
   const [messagesLoad, setMessagesLoad] = useState<Load>('loading');
   const [messagesError, setMessagesError] = useState<string | null>(null);
+  const [messagesStatus, setMessagesStatus] = useState<MailReadStatus | null>(null);
 
   // Guards stale async writes when the selection changes mid-flight.
   const threadReqRef = useRef(0);
@@ -507,11 +517,18 @@ export function useMailClient(): UseMailClient {
                 })
               : await listMailThreads(ws.workspace_id, mailboxId, opts);
         if (req !== threadReqRef.current) return; // superseded
+        const status = res.status ?? 'ok';
+        // A background poll must not wipe a working list into "unavailable" on
+        // a transient engine blip — keep what we have; the next tick recovers.
+        if (silent && isMailReadUnavailable(status) && threadsRef.current.length > 0) {
+          return;
+        }
         setThreads((prev) => {
           if (!append) return res.threads;
           const seen = new Set(prev.map((t) => t.id));
           return [...prev, ...res.threads.filter((t) => !seen.has(t.id))];
         });
+        setThreadsStatus(status);
         const mbxMeta = mailboxesRef.current.find((m) => m.id === mailboxId);
         const externalList =
           mailboxId !== ALL_INBOXES && isExternalProvider(mbxMeta?.provider);
@@ -1065,6 +1082,7 @@ export function useMailClient(): UseMailClient {
         const res = await getMailThread(workspace.workspace_id, openThread.mailboxId!, openThread.id);
         if (req !== messageReqRef.current) return;
         setMessages(res.messages);
+        setMessagesStatus(res.status ?? 'ok');
         setMessagesError(null);
         setMessagesLoad('ready');
       } catch (err) {
@@ -1112,6 +1130,7 @@ export function useMailClient(): UseMailClient {
       const res = await getMailThread(ws.workspace_id, openThread.mailboxId, openThread.id);
       if (req !== messageReqRef.current) return;
       setMessages(res.messages);
+      setMessagesStatus(res.status ?? 'ok');
       setMessagesError(null);
       setMessagesLoad('ready');
     } catch (err) {
@@ -1280,6 +1299,7 @@ export function useMailClient(): UseMailClient {
     threads,
     threadsLoad,
     threadsError,
+    threadsStatus,
     refreshThreads,
     refresh,
     refreshing,
@@ -1293,6 +1313,7 @@ export function useMailClient(): UseMailClient {
     messages,
     messagesLoad,
     messagesError,
+    messagesStatus,
     markRead,
     toggleFlag,
     compose,

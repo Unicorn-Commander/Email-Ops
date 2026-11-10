@@ -59,7 +59,7 @@ Revoking consent does not delete your Google/Microsoft mailbox, remove the Email
 - **SSO session expired / cannot start linking:** sign out and sign back in through SSO, then retry Connect in that browser. A local-only login does not supply the Keycloak session needed for this flow.
 - **Provider denies consent or rejects a redirect:** report the visible error and the pilot environment to the administrator. Provider approval, tenant consent, and redirect allowlists are outside the mailbox screen.
 - **Linked, but no mailbox in Mail:** choose **Add to Mail** on Accounts, verify the selected workspace and returned address, and open Mail again.
-- **Mailbox exists, but looks empty:** try Reconnect on Accounts and Refresh in Mail. Missing/expired tokens, unavailable engine configuration, and provider read failures can return empty results; an empty inbox is not proof that connection succeeded. Ask the administrator to verify it if you know the provider inbox contains mail.
+- **Mailbox exists, but Mail says it is unavailable:** the inbox distinguishes an empty folder from a failed read. Reconnect the account when asked, or Try again. “Mail service is not available right now” means the Cleaner engine is unwired or unreachable — your mail is still at the provider. A true empty folder still shows the normal empty state.
 - **Analysis is unavailable:** the `email-ops` entitlement and Cleaner Engine must be available. Linking and adding an external mailbox do not require the hosted-mailbox add-on.
 <!-- backend/src/auth/auth.service.ts:330; backend/src/auth/auth.service.ts:392; backend/src/auth/keycloak-broker.service.ts:48; backend/src/connected-accounts/connected-accounts.service.ts:152; frontend/app/accounts/page.tsx:642; backend/src/mail-provider/engine-mail-provider.ts:49; cleaner-engine/app.py:589; backend/src/connected-accounts/connected-accounts.controller.ts:130; backend/src/connected-accounts/entitlement.ts:39 -->
 
@@ -86,7 +86,7 @@ The change is limited to the inbox banner, its mounting import, this guide and a
 cd frontend
 npm ci --no-audit --no-fund
 npm install --no-save --package-lock=false --no-audit --no-fund vitest@3.2.4
-./node_modules/.bin/vitest run components/mail/ListBannerView.test.mjs --maxWorkers=2
+./node_modules/.bin/vitest run components/mail/ListBannerView.test.mjs components/mail/MailUnavailableView.test.mjs --maxWorkers=2
 ```
 
 The tests mock the broker helper and reject network fetches. They cover both provider redirects, pending/error/retry states, and separation from loading, missing-workspace, request-error and empty-space states. Restore locked dependencies with `npm ci` before running the frontend CI build. CI also attempts `npm run lint` non-blockingly; this repository currently prompts for ESLint configuration.

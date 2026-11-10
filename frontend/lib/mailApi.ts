@@ -11,10 +11,11 @@
  * shared `apiGet`/`apiPost` from `@/lib/api` (auth, error extraction, JSON) and
  * never edits that file.
  *
- * Degrade-clean note: the mail engine may be DORMANT. In that state `threads`
- * comes back EMPTY and a compose returns `status: 'failed'` (recorded, not sent).
- * That is expected — the UI reports it honestly rather than treating it as an
- * error. These types therefore keep `status`/nullable fields faithful to the
+ * Degrade-clean note: the mail engine may be DORMANT. Compose still returns
+ * `status: 'failed'` (recorded, not sent). Thread/aggregate reads add a typed
+ * `status` (`ok` / `engine_not_configured` / `engine_unreachable` /
+ * `provider_auth_failed` / `provider_error`) so an unavailable mailbox is not
+ * rendered as empty. These types keep `status`/nullable fields faithful to the
  * wire so the page can render the truth.
  */
 
@@ -307,11 +308,40 @@ export interface MailThreadsResponse {
   /** False when the provider cannot honour `q` — the list is UNFILTERED, say so. */
   search_supported?: boolean;
   reason?: string | null;
+  /**
+   * Additive empty-vs-unavailable discriminator. Absent or `ok` means the read
+   * completed (including a truly empty mailbox). Any other value means the empty
+   * `threads` list is UNAVAILABLE — never treat it as "no mail".
+   */
+  status?: MailReadStatus;
+}
+
+/** Typed read-path status for a connected mailbox. Additive on the wire. */
+export type MailReadStatus =
+  | 'ok'
+  | 'engine_not_configured'
+  | 'engine_unreachable'
+  | 'provider_auth_failed'
+  | 'provider_error';
+
+export type MailReadUnavailable = Exclude<MailReadStatus, 'ok'>;
+
+export function isMailReadUnavailable(
+  status: string | null | undefined,
+): status is MailReadUnavailable {
+  return (
+    status === 'engine_not_configured' ||
+    status === 'engine_unreachable' ||
+    status === 'provider_auth_failed' ||
+    status === 'provider_error'
+  );
 }
 
 export interface MailThreadResponse {
   messages: MessageView[];
   count: number;
+  /** Additive. Same empty-vs-unavailable discriminator as MailThreadsResponse. */
+  status?: MailReadStatus;
 }
 
 const seg = encodeURIComponent;
@@ -477,12 +507,27 @@ export async function listAggregateThreads(
   opts: ListThreadsOpts = {},
   token?: string,
 ): Promise<MailThreadsResponse> {
-  const raw = await apiGet<{ threads?: ThreadView[]; items?: ThreadView[]; count?: number; folder?: string }>(
+  const raw = await apiGet<{
+    threads?: ThreadView[];
+    items?: ThreadView[];
+    count?: number;
+    folder?: string;
+    status?: MailReadStatus;
+    search_supported?: boolean;
+    has_more?: boolean;
+  }>(
     `/workspaces/${seg(workspaceId)}/mail/threads/aggregate${threadsQs(opts)}`,
     token,
   );
   const threads = raw.threads ?? raw.items ?? [];
-  return { threads, count: raw.count ?? threads.length, folder: raw.folder };
+  return {
+    threads,
+    count: raw.count ?? threads.length,
+    folder: raw.folder,
+    status: raw.status,
+    search_supported: raw.search_supported,
+    has_more: raw.has_more,
+  };
 }
 
 /** Per-mailbox inbox counts (Wave 2) — feeds the unread badges in the picker. */

@@ -36,6 +36,8 @@ import {
 import { Button, Skeleton, cn } from '@/components/ui';
 import { Tooltip } from '@/components/Tooltip';
 import { HelpHintBar } from '@/components/mail/HelpHintBar';
+import { MailUnavailableView } from '@/components/mail/MailUnavailableView';
+import { isMailReadUnavailable, type MailReadStatus } from '@/lib/mailApi';
 import { useActiveSpace } from '@/components/ActiveSpaceProvider';
 import { useUiCommands } from '@/components/UiCommandProvider';
 import { useMailboxCollapsed, useRailCollapsed } from '@/state/uiCollapse';
@@ -1469,6 +1471,7 @@ export default function MailPage() {
               onOpenFolders={() => setMobileFoldersOpen(true)}
               banner={banner}
               error={mail.threadsError ?? mail.error}
+              readStatus={mail.threadsStatus}
               title={listTitle}
               unreadCount={listUnread}
               filter={filter}
@@ -1528,6 +1531,7 @@ export default function MailPage() {
               threadId={mail.selectedThreadId}
               load={mail.messagesLoad}
               error={mail.messagesError}
+              readStatus={mail.messagesStatus}
               messages={mail.messages}
               folder={mail.folder}
               onBack={() => selectThread(null)}
@@ -2498,6 +2502,7 @@ function ConversationList({
   onOpenFolders,
   banner,
   error,
+  readStatus,
   title,
   unreadCount,
   filter,
@@ -2533,6 +2538,7 @@ function ConversationList({
   onOpenFolders?: () => void;
   banner: ListBanner | null;
   error: string | null;
+  readStatus: MailReadStatus | null;
   title: string;
   unreadCount: number | null;
   filter: SegFilter;
@@ -2672,6 +2678,8 @@ function ConversationList({
               Try again
             </Button>
           </div>
+        ) : threads.length === 0 && isMailReadUnavailable(readStatus) ? (
+          <MailUnavailableView status={readStatus} onRetry={onRetry} />
         ) : threads.length === 0 ? (
           <EmptyList filter={filter} searching={searching} />
         ) : (
@@ -3271,6 +3279,7 @@ function Reader({
   threadId,
   load,
   error,
+  readStatus,
   messages,
   folder,
   onBack,
@@ -3306,6 +3315,7 @@ function Reader({
   threadId: string | null;
   load: Load;
   error: string | null;
+  readStatus: MailReadStatus | null;
   messages: MessageView[];
   folder: MailFolder;
   onBack: () => void;
@@ -3558,6 +3568,8 @@ function Reader({
               Try again
             </Button>
           </div>
+        ) : messages.length === 0 && isMailReadUnavailable(readStatus) ? (
+          <MailUnavailableView status={readStatus} onRetry={onReload} />
         ) : messages.length === 0 ? (
           <div className="p-8 text-center">
             <p className="text-sm text-tertiary">
