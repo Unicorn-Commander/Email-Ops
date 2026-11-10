@@ -74,6 +74,7 @@ import { ShortcutsHelp } from '@/components/mail/ShortcutsHelp';
 import { useMailShortcuts } from '@/components/mail/useMailShortcuts';
 import { CommandPalette, type CommandAction } from '@/components/mail/CommandPalette';
 import { MailTopBar } from '@/components/mail/MailTopBar';
+import { ListBannerView, type ListBanner } from '@/components/mail/ListBannerView';
 import { MailIconNav } from '@/components/mail/MailIconNav';
 import { AgentRail } from '@/components/mail/AgentRail';
 import { AgentDraftCard } from '@/components/mail/AgentDraftCard';
@@ -2474,8 +2475,6 @@ function RailAvatar({
 
 // ── (3) Conversation list ──────────────────────────────────────────────────────
 
-type ListBanner = 'no-workspace' | 'error' | 'loading' | 'no-mailboxes' | 'no-space';
-
 /** Bucket a message time into a scannable date group label (Today / Yesterday
  *  / This week / This month / "June 2026"). Threads arrive sorted newest-first,
  *  so emitting a header whenever the bucket changes chunks the list in order. */
@@ -3111,52 +3110,6 @@ function EmptyList({ filter, searching }: { filter: SegFilter; searching: boolea
         <Link href="/help#agent-drafts" className="text-[12px] font-medium text-accent hover:underline">
           How agent drafts work →
         </Link>
-      )}
-    </div>
-  );
-}
-
-function ListBannerView({
-  banner,
-  error,
-  spaceName,
-  onRetry,
-}: {
-  banner: ListBanner;
-  error: string | null;
-  spaceName: string | null;
-  onRetry: () => void;
-}) {
-  const map: Record<ListBanner, { t: string; d: string }> = {
-    'no-workspace': {
-      t: 'No workspace yet',
-      d: 'Your account isn’t a member of an Email-Ops workspace, so there are no mailboxes to show.',
-    },
-    error: { t: 'Could not load your mail', d: error ?? 'Unknown error.' },
-    loading: { t: 'Loading…', d: 'Fetching your mailboxes.' },
-    'no-mailboxes': {
-      t: 'No mailboxes yet',
-      d: 'Once a mailbox is provisioned for this workspace it shows up here.',
-    },
-    'no-space': {
-      t: `No mailboxes in ${spaceName ?? 'this space'}`,
-      d: 'This space doesn’t include any mailboxes yet. Switch back to “All”, or add some.',
-    },
-  };
-  const copy = map[banner];
-  return (
-    <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center">
-      <div className="grid h-11 w-11 place-items-center rounded-full bg-surface-overlay text-tertiary">
-        <MailIcon className="h-5 w-5" />
-      </div>
-      <p className="text-sm font-medium text-primary">{copy.t}</p>
-      <p className={cn('max-w-xs text-xs leading-5', banner === 'error' ? 'text-danger' : 'text-tertiary')}>
-        {copy.d}
-      </p>
-      {banner === 'error' && (
-        <Button variant="secondary" size="sm" className="mt-2" onClick={onRetry}>
-          Try again
-        </Button>
       )}
     </div>
   );
