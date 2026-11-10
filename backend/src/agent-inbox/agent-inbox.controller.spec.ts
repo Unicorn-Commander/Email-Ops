@@ -142,6 +142,32 @@ describe('AgentInboxController (delegation)', () => {
     expect(approveAgentInboxItem).toHaveBeenCalledWith(WS, 'kc-sub-aaron', 'item-9', 'ok', false);
   });
 
+  it('POST approve and bulk-approve refuse body edits from PAT callers', async () => {
+    const peekAgentInboxKind = jest.fn().mockResolvedValue(AgentInboxKind.EMAIL);
+    const approveAgentInboxItem = jest.fn();
+    const bulkApproveAgentInboxItems = jest.fn();
+    const ctrl = make({ peekAgentInboxKind, approveAgentInboxItem, bulkApproveAgentInboxItems });
+    const patUser = {
+      ...userWith(bothSkus),
+      __patAuth: { scopes: ['agent-inbox:approve'] },
+    } as User;
+
+    await expect(
+      ctrl.approve(WS, patUser, 'item-9', { body: 'agent-edited body' }),
+    ).rejects.toThrow('only a human approver can edit the body');
+    await expect(
+      ctrl.bulkApprove(
+        WS,
+        patUser,
+        { item_ids: ['item-9'], body: 'agent-edited body' },
+        WorkspaceRole.MEMBER,
+      ),
+    ).rejects.toThrow('only a human approver can edit the body');
+    expect(peekAgentInboxKind).not.toHaveBeenCalled();
+    expect(approveAgentInboxItem).not.toHaveBeenCalled();
+    expect(bulkApproveAgentInboxItems).not.toHaveBeenCalled();
+  });
+
   it('GET auto-sent delegates to listAutoSentFeed and returns { items } (Wave 7 pinned shape)', async () => {
     const listAutoSentFeed = jest
       .fn()

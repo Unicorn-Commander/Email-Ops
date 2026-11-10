@@ -103,6 +103,11 @@ class ReviewBodyDto {
 /** Optional human feedback on an email approval. Omission remains unknown. */
 class ApproveBodyDto extends ReviewBodyDto {
   @IsOptional()
+  @IsString()
+  @MaxLength(100000)
+  body?: string;
+
+  @IsOptional()
   @IsBoolean()
   factual_correction?: boolean;
 }
@@ -377,6 +382,12 @@ export class AgentInboxController {
     @Body() body: BulkApproveDto,
     @WorkspaceRoleParam() role?: WorkspaceRole,
   ) {
+    if (
+      body.body !== undefined &&
+      (!!(user as any).__isFederationActor || !!(user as any).__patAuth)
+    ) {
+      throw new ForbiddenException('only a human approver can edit the body');
+    }
     await this.membership.assertCanReviewInbox(user, workspaceId);
     // Match the single-approve gate before the bulk service does any writes.
     // Missing/foreign ids remain per-item not_found results from the service;
@@ -508,6 +519,12 @@ export class AgentInboxController {
     @Body() body: ApproveBodyDto,
     @WorkspaceRoleParam() role?: WorkspaceRole,
   ) {
+    if (
+      body.body !== undefined &&
+      (!!(user as any).__isFederationActor || !!(user as any).__patAuth)
+    ) {
+      throw new ForbiddenException('only a human approver can edit the body');
+    }
     await this.membership.assertCanReviewInbox(user, workspaceId);
     // Gate BY KIND (defense-in-depth, re-derived off the verified token; mirrors
     // the MCP approve tool). Peek first: a missing/foreign id 404s before any
@@ -532,15 +549,8 @@ export class AgentInboxController {
       throw new ForbiddenException(gate.reason);
     }
     const res =
-      role === undefined && body.factual_correction === undefined
+      body.body !== undefined
         ? await this.email.approveAgentInboxItem(
-            workspaceId,
-            ucUidOf(user as WithWorkspaceClaim),
-            id,
-            body.note ?? null,
-            body.trustRecipients,
-          )
-        : await this.email.approveAgentInboxItem(
             workspaceId,
             ucUidOf(user as WithWorkspaceClaim),
             id,
@@ -548,8 +558,27 @@ export class AgentInboxController {
             body.trustRecipients,
             false,
             role,
-            ...(body.factual_correction === undefined ? [] : [body.factual_correction]),
-          );
+            body.factual_correction,
+            body.body,
+          )
+        : role === undefined && body.factual_correction === undefined
+          ? await this.email.approveAgentInboxItem(
+              workspaceId,
+              ucUidOf(user as WithWorkspaceClaim),
+              id,
+              body.note ?? null,
+              body.trustRecipients,
+            )
+          : await this.email.approveAgentInboxItem(
+              workspaceId,
+              ucUidOf(user as WithWorkspaceClaim),
+              id,
+              body.note ?? null,
+              body.trustRecipients,
+              false,
+              role,
+              body.factual_correction,
+            );
     if (!res) {
       throw new NotFoundException('Agent-inbox item not found in this workspace.');
     }

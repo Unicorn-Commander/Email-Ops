@@ -98,7 +98,7 @@ function harness(rows = [pendingItem()]) {
     accepted: true,
     providerMessageId: 'fictional-provider-message',
   });
-  return { rows, tx, service, send };
+  return { rows, tx, service, send, prisma };
 }
 
 describe('agent-inbox approval evidence', () => {
@@ -124,11 +124,11 @@ describe('agent-inbox approval evidence', () => {
   it.each([
     ['unchanged', DRAFT, false],
     ['edited', DRAFT.replace('Tuesday', 'Wednesday'), true],
-    ['line endings changed', DRAFT.replace(/\r\n/g, '\n'), true],
+    ['line endings changed', DRAFT.replace(/\r\n/g, '\n'), false],
+    ['formatting whitespace changed', `  ${DRAFT.replace(/\r?\n/g, '   ')}  `, false],
     ['empty body', '', true],
   ])('approves %s text and audits both hashes', async (_label, body, edited) => {
     const { rows, service, tx, send } = harness();
-    rows[0].message.body = body as string;
     const out = await service.approveAgentInboxItem(
       WS,
       UID,
@@ -138,6 +138,7 @@ describe('agent-inbox approval evidence', () => {
       false,
       WorkspaceRole.MEMBER,
       true,
+      body as string,
     );
     const evidence = {
       body_sha256: hash(DRAFT),
@@ -181,6 +182,46 @@ describe('agent-inbox approval evidence', () => {
       factual_correction: null,
     });
     expect(rows[0].bodySha256).toBeNull();
+  });
+
+  it('sends an edited body supplied by an approval front door', async () => {
+    const { rows, service, send } = harness();
+    const edited = 'Hello Zoë, your appointment moved to Wednesday.';
+    const out = await service.approveAgentInboxItem(
+      WS,
+      UID,
+      rows[0].id,
+      null,
+      false,
+      false,
+      WorkspaceRole.MEMBER,
+      false,
+      edited,
+    );
+    expect(send).toHaveBeenCalledWith(null, expect.objectContaining({ body: edited }));
+    expect(out?.inbox).toMatchObject({
+      sent_body_sha256: hash(edited),
+      edited_before_send: true,
+    });
+  });
+
+  it('refuses an edited body from an agent principal before phase 1', async () => {
+    const { service, send, prisma } = harness();
+    await expect(
+      service.approveAgentInboxItem(
+        WS,
+        UID,
+        'item-1',
+        null,
+        false,
+        true,
+        WorkspaceRole.MEMBER,
+        undefined,
+        'agent-edited body',
+      ),
+    ).rejects.toThrow('only a human approver can edit the body');
+    expect(prisma.withWorkspace).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('does not record successful approval evidence when sending fails', async () => {
@@ -369,6 +410,53 @@ describe('approval feedback REST and MCP contracts', () => {
     },
   );
 
+  it('keeps an edited body in the body slot when factual correction is omitted', async () => {
+    const { service, controller, tools } = fronts();
+    const single = jest
+      .spyOn(service, 'approveAgentInboxItem')
+      .mockResolvedValue({ inbox: {} as any, message: null });
+    const edited = 'Hello Zoë, the appointment moved to Wednesday.';
+
+    await controller.approve(WS, user, 'item-1', { body: edited }, WorkspaceRole.MEMBER);
+    await tools.approveAgentInboxItem(user, { item_id: 'item-1', body: edited });
+
+    expect(single).toHaveBeenNthCalledWith(
+      1,
+      WS,
+      UID,
+      'item-1',
+      null,
+      undefined,
+      false,
+      WorkspaceRole.MEMBER,
+      undefined,
+      edited,
+    );
+    expect(single).toHaveBeenNthCalledWith(
+      2,
+      WS,
+      UID,
+      'item-1',
+      null,
+      undefined,
+      false,
+      WorkspaceRole.MEMBER,
+      undefined,
+      edited,
+    );
+  });
+
+  it('refuses an edited body from an MCP agent principal without calling approval service', async () => {
+    const { service, tools } = fronts();
+    const approve = jest.spyOn(service, 'approveAgentInboxItem');
+    const agent = { ...user, __patAuth: { scopes: ['agent-inbox:approve'] } } as any;
+
+    await expect(
+      tools.approveAgentInboxItem(agent, { item_id: 'item-1', body: 'agent-edited body' }),
+    ).resolves.toEqual({ ok: false, reason: 'only a human approver can edit the body' });
+    expect(approve).not.toHaveBeenCalled();
+  });
+
   it('REST detail/list and MCP list expose the same persisted evidence', async () => {
     const { service, controller, tools } = fronts();
     await service.approveAgentInboxItem(
@@ -404,5 +492,9 @@ describe('approval feedback REST and MCP contracts', () => {
       });
       expect(tool.input_schema.required).not.toContain('factual_correction');
     }
+    const single = MCP_MANIFEST_CATALOG.tools.find(
+      (entry) => entry.name === 'approve_agent_inbox_item',
+    )!;
+    expect(single.input_schema.properties.body.description).toContain('human approvers only');
   });
 });

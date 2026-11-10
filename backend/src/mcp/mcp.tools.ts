@@ -894,10 +894,17 @@ export class EmailOpsTools {
       workspace_id?: string;
       item_id: string;
       note?: string;
+      body?: string;
       factual_correction?: boolean;
       trust_recipients?: boolean;
     },
   ): Promise<unknown> {
+    if (
+      args.body !== undefined &&
+      (!!(user as any).__isFederationActor || !!(user as any).__patAuth)
+    ) {
+      return { ok: false, reason: 'only a human approver can edit the body' };
+    }
     const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
     const { role } = await this.membership.resolveWithRole(user, args.workspace_id);
     // Gate BY KIND (mirrors the REST approve): peek first so a missing/foreign
@@ -920,18 +927,39 @@ export class EmailOpsTools {
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
-    const res = await this.email.approveAgentInboxItem(
-      workspaceId,
-      ucUidOf(user as WithWorkspaceClaim),
-      args.item_id,
-      args.note ?? null,
-      // Wave 7 learning: default TRUE; trust_recipients:false approves without
-      // trusting the external recipients.
-      args.trust_recipients,
-      !!(user as any).__isFederationActor || !!(user as any).__patAuth,
-      role,
-      ...(args.factual_correction === undefined ? [] : [args.factual_correction]),
-    );
+    const res =
+      args.body === undefined && args.factual_correction === undefined
+        ? await this.email.approveAgentInboxItem(
+            workspaceId,
+            ucUidOf(user as WithWorkspaceClaim),
+            args.item_id,
+            args.note ?? null,
+            args.trust_recipients,
+            !!(user as any).__isFederationActor || !!(user as any).__patAuth,
+            role,
+          )
+        : args.body === undefined
+          ? await this.email.approveAgentInboxItem(
+              workspaceId,
+              ucUidOf(user as WithWorkspaceClaim),
+              args.item_id,
+              args.note ?? null,
+              args.trust_recipients,
+              !!(user as any).__isFederationActor || !!(user as any).__patAuth,
+              role,
+              args.factual_correction,
+            )
+          : await this.email.approveAgentInboxItem(
+              workspaceId,
+              ucUidOf(user as WithWorkspaceClaim),
+              args.item_id,
+              args.note ?? null,
+              args.trust_recipients,
+              !!(user as any).__isFederationActor || !!(user as any).__patAuth,
+              role,
+              args.factual_correction,
+              args.body,
+            );
     if (!res) return { ok: false, reason: 'agent-inbox item not found in this workspace' };
     return { ok: true, ...res };
   }

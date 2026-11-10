@@ -9,11 +9,14 @@ normal `prisma migrate deploy` workflow. `rollback.sql` is the Prisma-generated
 reverse diff, supplied because Prisma does not have a `migrate down` command.
 Rolling back discards the four new evidence columns; it preserves existing rows.
 
-New EMAIL inbox items capture `bodySha256` at staging. Approval compares the
-plain-text body with that immutable baseline using the existing exact UTF-8
-SHA-256 function (no whitespace or line-ending normalization). Missing baselines
-keep `editedBeforeSend` null, even when a sent hash is available. HTML-only changes
-are outside this existing plain-text hash contract.
+New EMAIL inbox items capture `bodySha256` at staging. When an approval front
+door submits replacement text, approval compares it with the staged plain-text
+body after trimming and collapsing Unicode whitespace runs, so line-ending and
+formatting-only changes are not edits. The `sentBodySha256` value still uses the
+exact UTF-8 SHA-256 of the text delivered. Approvals without replacement text
+use the immutable hash comparison; missing baselines keep `editedBeforeSend`
+null, even when a sent hash is available. HTML-only changes are outside this
+plain-text hash contract.
 
 Single approval records evidence only after the provider accepts the send. Bulk
 approval records the body approved for scheduled delivery, and the existing

@@ -68,6 +68,12 @@ export type ReviewSubject =
   | { kind: 'item'; item: AgentInboxItemView }
   | { kind: 'auto-sent'; item: AutoSentItemView };
 
+export interface ReviewApprovalOptions {
+  trustRecipients?: boolean;
+  factualCorrection?: boolean;
+  body?: string;
+}
+
 const AUTONOMY_SHORT: Record<AutonomyLevel, string> = {
   L0_DRAFT_ONLY: 'L0 · draft only',
   L1_APPROVE_TO_SEND: 'L1 · approve to send',
@@ -439,8 +445,8 @@ export function ReviewPanel({
   agent: AgentView | null;
   /** Shared trusted-correspondents store (revoke actions; null = not wired). */
   trusted: UseTrustedCorrespondents | null;
-  /** Pending queue items only — approve (note, trustRecipients) / reject (note). */
-  onApprove?: (note: string | undefined, trustRecipients: boolean | undefined) => Promise<ReviewOutcome>;
+  /** Pending queue items only — approve (note, optional evidence) / reject (note). */
+  onApprove?: (note: string | undefined, options?: ReviewApprovalOptions) => Promise<ReviewOutcome>;
   onReject?: (note: string | undefined) => Promise<ReviewOutcome>;
 }) {
   const confirm = useConfirm();
@@ -517,6 +523,8 @@ export function ReviewPanel({
   // ── Per-subject review state ──────────────────────────────────────────────
   const [note, setNote] = useState('');
   const [trustChoice, setTrustChoice] = useState(false);
+  const [factualCorrection, setFactualCorrection] = useState(false);
+  const [editedBody, setEditedBody] = useState('');
   const [acting, setActing] = useState<null | 'approve' | 'reject'>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [revokeBusy, setRevokeBusy] = useState<string | null>(null);
@@ -524,6 +532,8 @@ export function ReviewPanel({
   useEffect(() => {
     setNote('');
     setTrustChoice(false);
+    setFactualCorrection(false);
+    setEditedBody('');
     setActing(null);
     setActionError(null);
     setRevokeBusy(null);
@@ -549,6 +559,11 @@ export function ReviewPanel({
   );
   const pending = !!queueItem && queueItem.state === 'pending';
   const hasFullBody = !!(message?.html_body || message?.text_body);
+  const canEditBody =
+    pending && !isCleanup && !auto && message?.text_body !== null && message?.text_body !== undefined;
+  useEffect(() => {
+    if (canEditBody) setEditedBody(message?.text_body ?? '');
+  }, [canEditBody, message?.text_body, subjectKey]);
   const threadId = message?.thread_id ?? null;
   const blobMailboxId =
     message?.mailbox_id ?? (agent?.mailbox_account_id || null);
@@ -627,7 +642,11 @@ export function ReviewPanel({
     setActionError(null);
     const res = await onApprove(
       note.trim() || undefined,
-      trustAddresses.length > 0 ? trustChoice : undefined,
+      {
+        ...(trustAddresses.length > 0 ? { trustRecipients: trustChoice } : {}),
+        ...(factualCorrection ? { factualCorrection: true } : {}),
+        ...(canEditBody ? { body: editedBody } : {}),
+      },
     );
     if (!res.ok) {
       setActionError(res.error ?? 'Could not approve.');
@@ -808,12 +827,28 @@ export function ReviewPanel({
                     attachments={downloadableMail}
                     resolveCidUrl={resolveCid}
                   />
-                ) : message?.text_body ? (
-                  <div className="w-full max-w-[680px]">
-                    <p className="whitespace-pre-wrap text-sm leading-6 text-secondary">
-                      {message.text_body}
-                    </p>
-                  </div>
+                ) : message?.text_body !== null && message?.text_body !== undefined ? (
+                  canEditBody ? (
+                    <div className="w-full max-w-[680px]">
+                      <label htmlFor="agent-inbox-edited-body" className="text-[11px] font-semibold uppercase tracking-wide text-tertiary">
+                        Edit before sending (optional)
+                      </label>
+                      <textarea
+                        id="agent-inbox-edited-body"
+                        value={editedBody}
+                        onChange={(event) => setEditedBody(event.target.value)}
+                        rows={8}
+                        maxLength={100000}
+                        className="mt-1.5 block w-full resize-y rounded-token border border-subtle bg-surface-raised px-3 py-2 text-sm leading-6 text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                      />
+                    </div>
+                  ) : (
+                    <div className="w-full max-w-[680px]">
+                      <p className="whitespace-pre-wrap text-sm leading-6 text-secondary">
+                        {message.text_body}
+                      </p>
+                    </div>
+                  )
                 ) : queueItem?.body_preview ? (
                   <div className="w-full max-w-[680px]">
                     <p className="whitespace-pre-wrap text-sm leading-6 text-secondary">
@@ -945,6 +980,17 @@ export function ReviewPanel({
                     how trust works
                   </a>
                 </span>
+              </label>
+            )}
+            {!isCleanup && onApprove && (
+              <label className="flex cursor-pointer items-start gap-2 text-[12px] leading-5 text-secondary">
+                <input
+                  type="checkbox"
+                  checked={factualCorrection}
+                  onChange={(e) => setFactualCorrection(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 shrink-0 rounded border-border accent-[rgb(var(--accent))]"
+                />
+                <span>Factual correction (optional)</span>
               </label>
             )}
             <input
