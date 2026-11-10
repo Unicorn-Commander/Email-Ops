@@ -23,7 +23,7 @@ can open a browser.
 
 An agent token is for the cases that cannot: a CLI, a server-side automation, or
 a client with no sign-in window. You paste the token into the client instead of
-signing in. A token is deliberately narrower than your sign-in — it only has the
+signing in. A token is deliberately narrower than your sign-in: it only has the
 scopes and mailboxes you chose, and it expires on its own.
 
 ## Scopes
@@ -37,12 +37,12 @@ Pick the fewest scopes the job needs. These are the choices in the form:
 | `agent-inbox:read` | Read the approval queue | See drafts waiting for you. | The agent should show you what is pending. |
 | `agent-inbox:approve` | Approve the queue | Approve or reject drafts. Approving a send lets it leave. | Only if the agent may approve on your behalf. |
 | `cleaner:run` | Run cleanup | Stage cleanup plans for your approval. | The agent tidies mailboxes (plans still wait for you). |
-| `admin:provision` | Provision | Provision mailboxes and domains. | Setup automation only — this is admin-level reach. |
+| `admin:provision` | Provision | Provision mailboxes and domains. | Setup automation only: this is admin-level reach. |
 | `ui:control` | Drive the app | Open screens and prefill the composer. You still press Send. | The agent drives the app on your screen. |
 
 Notes:
 
-- The form starts with `mail:read` + `agent-inbox:read` checked — a reader, not
+- The form starts with `mail:read` + `agent-inbox:read` checked: a reader, not
   a sender. That is a good default for a first token.
 - `mail:write` alone does **not** put mail on the wire: sending through the
   agent compose path also requires `agent-inbox:approve`.
@@ -50,7 +50,7 @@ Notes:
 ## Mailbox access
 
 The default is **All current mailboxes**, which means the token can touch every
-mailbox you own — including any you add later. For most agents, pick **specific
+mailbox you own: including any you add later. For most agents, pick **specific
 mailboxes** instead: the token can only ever see the ones you ticked, and the
 selected list is re-checked against the mailboxes you still own on every request,
 so removing access takes effect immediately.
@@ -59,7 +59,7 @@ so removing access takes effect immediately.
 
 Every token expires. The default lifetime is **90 days**; the maximum is
 **365 days**. A never-expiring token cannot be created at all. Choose the
-shortest lifetime the job allows — an agent you re-visit monthly does not need
+shortest lifetime the job allows: an agent you re-visit monthly does not need
 a yearly token.
 
 ## Rotating a token
