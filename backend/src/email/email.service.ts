@@ -3859,6 +3859,7 @@ export class EmailService {
     agentPrincipal = false,
     reviewerRole?: WorkspaceRole,
     factualCorrection?: boolean,
+    approvedBody?: string,
   ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
     // PHASE 1 — validate + authorize (a short tx). A CLEANUP item executes wholly
     // in-tx as before; an EMAIL item resolves its mailbox + returns the send plan,
@@ -4162,6 +4163,12 @@ export class EmailService {
           item.message.externalSource === AGENT_REPLY_RUNTIME_SOURCE
             ? [{ name: AGENT_AUTOREPLY_HEADER, value: '1' }]
             : [];
+        // A body supplied by a human approval front door is used only for this
+        // send. The staged message remains the immutable draft baseline; the
+        // approval row stores the exact sent hash and edit decision.
+        const sentBody = scheduledApproval
+          ? item.message.body ?? ''
+          : approvedBody ?? item.message.body ?? '';
 
         return {
           kind: 'send',
@@ -4175,8 +4182,9 @@ export class EmailService {
           bodySha256: item.bodySha256 ?? null,
           feedback: approvalFeedback(
             item.bodySha256,
-            item.message.body ?? '',
+            sentBody,
             scheduledApproval ? item.factualCorrection : factualCorrection,
+            approvedBody === undefined ? null : item.message.body,
           ),
           req: {
             fromAddress: sendFromAddress,
@@ -4189,7 +4197,7 @@ export class EmailService {
             cc: item.message.ccAddresses?.length ? item.message.ccAddresses : undefined,
             bcc: item.message.bccAddresses?.length ? item.message.bccAddresses : undefined,
             subject: item.message.subject ?? '',
-            body: item.message.body ?? '',
+            body: sentBody,
             bodyHtml: item.message.bodyHtml ?? null,
             attachments: this.parseStoredAttachments(item.message.attachments),
             inReplyToThreadId: item.message.inReplyToThreadId ?? null,
@@ -6524,10 +6532,9 @@ export class EmailService {
         : msg
           ? (msg.preview ?? this.snippet(msg.body))
           : null,
-      // Legacy items retain the existing display hash, but never infer a baseline
-      // for edited_before_send from their mutable message body.
-      body_sha256:
-        it.bodySha256 ?? (isCleanup || msg?.body == null ? null : plainTextBodySha256(msg.body)),
+      // Legacy rows have no immutable baseline; never infer one from the
+      // mutable staged message body. Their edit evidence remains unknown.
+      body_sha256: it.bodySha256 ?? null,
       sent_body_sha256: it.sentBodySha256 ?? null,
       edited_before_send: it.editedBeforeSend ?? null,
       factual_correction: it.factualCorrection ?? null,

@@ -905,6 +905,7 @@ export class McpService {
           workspace_id: z.string().optional(),
           item_id: z.string(),
           note: z.string().max(2000).optional(),
+          body: z.string().max(100000).optional(),
           // Wave 7 learning: default TRUE — the approval trusts the external
           // recipients; pass false to approve without learning.
           trust_recipients: z.boolean().optional(),

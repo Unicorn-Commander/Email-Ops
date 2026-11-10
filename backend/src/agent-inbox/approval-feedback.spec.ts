@@ -124,11 +124,11 @@ describe('agent-inbox approval evidence', () => {
   it.each([
     ['unchanged', DRAFT, false],
     ['edited', DRAFT.replace('Tuesday', 'Wednesday'), true],
-    ['line endings changed', DRAFT.replace(/\r\n/g, '\n'), true],
+    ['line endings changed', DRAFT.replace(/\r\n/g, '\n'), false],
+    ['formatting whitespace changed', `  ${DRAFT.replace(/\r?\n/g, '   ')}  `, false],
     ['empty body', '', true],
   ])('approves %s text and audits both hashes', async (_label, body, edited) => {
     const { rows, service, tx, send } = harness();
-    rows[0].message.body = body as string;
     const out = await service.approveAgentInboxItem(
       WS,
       UID,
@@ -138,6 +138,7 @@ describe('agent-inbox approval evidence', () => {
       false,
       WorkspaceRole.MEMBER,
       true,
+      body as string,
     );
     const evidence = {
       body_sha256: hash(DRAFT),
@@ -181,6 +182,27 @@ describe('agent-inbox approval evidence', () => {
       factual_correction: null,
     });
     expect(rows[0].bodySha256).toBeNull();
+  });
+
+  it('sends an edited body supplied by an approval front door', async () => {
+    const { rows, service, send } = harness();
+    const edited = 'Hello Zoë, your appointment moved to Wednesday.';
+    const out = await service.approveAgentInboxItem(
+      WS,
+      UID,
+      rows[0].id,
+      null,
+      false,
+      false,
+      WorkspaceRole.MEMBER,
+      false,
+      edited,
+    );
+    expect(send).toHaveBeenCalledWith(null, expect.objectContaining({ body: edited }));
+    expect(out?.inbox).toMatchObject({
+      sent_body_sha256: hash(edited),
+      edited_before_send: true,
+    });
   });
 
   it('does not record successful approval evidence when sending fails', async () => {

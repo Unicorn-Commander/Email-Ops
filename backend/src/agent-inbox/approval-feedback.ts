@@ -6,16 +6,31 @@ export interface ApprovalFeedback {
   factualCorrection: boolean | null;
 }
 
-/** Use the same exact UTF-8 hash as the draft; never reconstruct a missing baseline. */
+/**
+ * Compare text after trimming and collapsing all Unicode whitespace runs. This
+ * makes line-ending and formatting-only changes honest non-edits while keeping
+ * sent_body_sha256 as the exact UTF-8 hash of the text delivered.
+ */
+export function normalizeApprovalText(body: string): string {
+  return body.replace(/\s+/gu, ' ').trim();
+}
+
+/** Hash the exact sent text; never reconstruct a missing draft baseline. */
 export function approvalFeedback(
   bodySha256: string | null | undefined,
   sentBody: string,
   factualCorrection?: boolean | null,
+  draftBody?: string | null,
 ): ApprovalFeedback {
   const sentBodySha256 = plainTextBodySha256(sentBody);
   return {
     sentBodySha256,
-    editedBeforeSend: bodySha256 == null ? null : bodySha256 !== sentBodySha256,
+    editedBeforeSend:
+      bodySha256 == null
+        ? null
+        : draftBody == null
+          ? bodySha256 !== sentBodySha256
+          : normalizeApprovalText(draftBody) !== normalizeApprovalText(sentBody),
     factualCorrection: factualCorrection ?? null,
   };
 }

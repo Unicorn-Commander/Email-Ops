@@ -424,6 +424,7 @@ describe('approve_send_kit and agent-inbox projections', () => {
 
   it('includes body_sha256, reply thread_id, and kit_id in list and single-item views', async () => {
     const body = 'Ana,\n\nYour secure link: 0123456789abcdef';
+    const bodySha256 = createHash('sha256').update(body, 'utf8').digest('hex');
     const item = {
       id: 'item-1',
       messageId: 'message-1',
@@ -435,6 +436,10 @@ describe('approve_send_kit and agent-inbox projections', () => {
       reviewedByUcUid: null,
       reviewedAt: null,
       reviewNote: null,
+      bodySha256,
+      sentBodySha256: null,
+      editedBeforeSend: null,
+      factualCorrection: null,
       createdAt: NOW,
       message: {
         id: 'message-1',

@@ -1230,6 +1230,11 @@ export const MCP_MANIFEST_CATALOG: Record<string, any> = {
             "type": "string",
             "maxLength": 2000
           },
+          "body": {
+            "type": "string",
+            "maxLength": 100000,
+            "description": "Optional edited plain-text body to send; whitespace-only differences are not counted as edits."
+          },
           factual_correction: {
             type: 'boolean',
           },

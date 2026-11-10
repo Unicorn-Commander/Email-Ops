@@ -103,6 +103,11 @@ class ReviewBodyDto {
 /** Optional human feedback on an email approval. Omission remains unknown. */
 class ApproveBodyDto extends ReviewBodyDto {
   @IsOptional()
+  @IsString()
+  @MaxLength(100000)
+  body?: string;
+
+  @IsOptional()
   @IsBoolean()
   factual_correction?: boolean;
 }
@@ -532,7 +537,7 @@ export class AgentInboxController {
       throw new ForbiddenException(gate.reason);
     }
     const res =
-      role === undefined && body.factual_correction === undefined
+      role === undefined && body.factual_correction === undefined && body.body === undefined
         ? await this.email.approveAgentInboxItem(
             workspaceId,
             ucUidOf(user as WithWorkspaceClaim),
@@ -549,6 +554,7 @@ export class AgentInboxController {
             false,
             role,
             ...(body.factual_correction === undefined ? [] : [body.factual_correction]),
+            ...(body.body === undefined ? [] : [body.body]),
           );
     if (!res) {
       throw new NotFoundException('Agent-inbox item not found in this workspace.');

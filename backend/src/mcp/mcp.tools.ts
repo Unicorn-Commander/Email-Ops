@@ -894,6 +894,7 @@ export class EmailOpsTools {
       workspace_id?: string;
       item_id: string;
       note?: string;
+      body?: string;
       factual_correction?: boolean;
       trust_recipients?: boolean;
     },
@@ -931,6 +932,7 @@ export class EmailOpsTools {
       !!(user as any).__isFederationActor || !!(user as any).__patAuth,
       role,
       ...(args.factual_correction === undefined ? [] : [args.factual_correction]),
+      ...(args.body === undefined ? [] : [args.body]),
     );
     if (!res) return { ok: false, reason: 'agent-inbox item not found in this workspace' };
     return { ok: true, ...res };
