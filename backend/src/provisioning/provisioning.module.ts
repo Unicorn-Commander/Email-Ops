@@ -3,6 +3,9 @@ import { AuthModule } from '../auth/auth.module';
 import { WorkspaceModule } from '../common/workspace/workspace.module';
 import { ProvisioningPolicyController } from './provisioning-policy.controller';
 import { ProvisioningPolicyService } from './provisioning-policy.service';
+import { WorkspaceProvisioningController } from './workspace-provisioning.controller';
+import { OpsCenterServiceJwtGuard, ProvisioningEnabledGuard } from './workspace-provisioning.auth';
+import { WorkspaceProvisioningService } from './workspace-provisioning.service';
 
 /**
  * The provisioning RBAC surface: the per-workspace policy + the gate other write
@@ -12,8 +15,13 @@ import { ProvisioningPolicyService } from './provisioning-policy.service';
  */
 @Module({
   imports: [AuthModule, WorkspaceModule],
-  controllers: [ProvisioningPolicyController],
-  providers: [ProvisioningPolicyService],
+  controllers: [ProvisioningPolicyController, WorkspaceProvisioningController],
+  providers: [
+    ProvisioningPolicyService,
+    WorkspaceProvisioningService,
+    ProvisioningEnabledGuard,
+    OpsCenterServiceJwtGuard,
+  ],
   exports: [ProvisioningPolicyService],
 })
 export class ProvisioningModule {}

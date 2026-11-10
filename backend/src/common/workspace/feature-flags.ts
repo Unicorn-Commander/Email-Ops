@@ -62,6 +62,15 @@ export function webhooksEnabled(getEnv: EnvGetter = defaultGetter): boolean {
 }
 
 /**
+ * Ops-Center workspace provisioning is deliberately dormant until the app ring
+ * is configured with the service-JWT secret. Keeping the route mounted but
+ * returning 404 while disabled makes the rollout invisible to callers.
+ */
+export function provisioningEnabled(getEnv: EnvGetter = defaultGetter): boolean {
+  return truthy(getEnv('PROVISIONING_ENABLED'), false);
+}
+
+/**
  * Inbound watcher master switch (Wave 2 — the agent-email fabric's inbound half).
  *
  * Default OFF == today's behavior: no polling of the sovereign James mailboxes,
