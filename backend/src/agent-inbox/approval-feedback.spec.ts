@@ -391,6 +391,42 @@ describe('approval feedback REST and MCP contracts', () => {
     },
   );
 
+  it('keeps an edited body in the body slot when factual correction is omitted', async () => {
+    const { service, controller, tools } = fronts();
+    const single = jest
+      .spyOn(service, 'approveAgentInboxItem')
+      .mockResolvedValue({ inbox: {} as any, message: null });
+    const edited = 'Hello Zoë, the appointment moved to Wednesday.';
+
+    await controller.approve(WS, user, 'item-1', { body: edited }, WorkspaceRole.MEMBER);
+    await tools.approveAgentInboxItem(user, { item_id: 'item-1', body: edited });
+
+    expect(single).toHaveBeenNthCalledWith(
+      1,
+      WS,
+      UID,
+      'item-1',
+      null,
+      undefined,
+      false,
+      WorkspaceRole.MEMBER,
+      undefined,
+      edited,
+    );
+    expect(single).toHaveBeenNthCalledWith(
+      2,
+      WS,
+      UID,
+      'item-1',
+      null,
+      undefined,
+      false,
+      WorkspaceRole.MEMBER,
+      undefined,
+      edited,
+    );
+  });
+
   it('REST detail/list and MCP list expose the same persisted evidence', async () => {
     const { service, controller, tools } = fronts();
     await service.approveAgentInboxItem(

@@ -537,15 +537,8 @@ export class AgentInboxController {
       throw new ForbiddenException(gate.reason);
     }
     const res =
-      role === undefined && body.factual_correction === undefined && body.body === undefined
+      body.body !== undefined
         ? await this.email.approveAgentInboxItem(
-            workspaceId,
-            ucUidOf(user as WithWorkspaceClaim),
-            id,
-            body.note ?? null,
-            body.trustRecipients,
-          )
-        : await this.email.approveAgentInboxItem(
             workspaceId,
             ucUidOf(user as WithWorkspaceClaim),
             id,
@@ -553,9 +546,27 @@ export class AgentInboxController {
             body.trustRecipients,
             false,
             role,
-            ...(body.factual_correction === undefined ? [] : [body.factual_correction]),
-            ...(body.body === undefined ? [] : [body.body]),
-          );
+            body.factual_correction,
+            body.body,
+          )
+        : role === undefined && body.factual_correction === undefined
+          ? await this.email.approveAgentInboxItem(
+              workspaceId,
+              ucUidOf(user as WithWorkspaceClaim),
+              id,
+              body.note ?? null,
+              body.trustRecipients,
+            )
+          : await this.email.approveAgentInboxItem(
+              workspaceId,
+              ucUidOf(user as WithWorkspaceClaim),
+              id,
+              body.note ?? null,
+              body.trustRecipients,
+              false,
+              role,
+              body.factual_correction,
+            );
     if (!res) {
       throw new NotFoundException('Agent-inbox item not found in this workspace.');
     }
