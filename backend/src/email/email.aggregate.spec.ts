@@ -126,4 +126,52 @@ describe('EmailService.listAggregateInbox — bounded multi-mailbox fan-out', ()
       orderBy: { createdAt: 'asc' },
     });
   });
+
+  it('listAggregateInboxPage: empty merge with an unavailable mailbox is not an empty inbox', async () => {
+    const svc = makeService(makeMailboxes(2));
+    jest.spyOn(svc, 'listMailboxInboxPage').mockImplementation(async (_w, _u, mailboxId) => ({
+      threads: [],
+      nextPageToken: null,
+      hasMore: false,
+      pagingMode: 'page_token',
+      searchSupported: true,
+      reason: null,
+      status: mailboxId === 'mb-0' ? 'provider_auth_failed' : 'ok',
+    }));
+    const out = await svc.listAggregateInboxPage(WS, UID, 'inbox', 50, null, 0);
+    expect(out.threads).toEqual([]);
+    expect(out.status).toBe('provider_auth_failed');
+  });
+
+  it('listAggregateInboxPage: a truly empty set of mailboxes stays status ok', async () => {
+    const svc = makeService(makeMailboxes(2));
+    jest.spyOn(svc, 'listMailboxInboxPage').mockResolvedValue({
+      threads: [],
+      nextPageToken: null,
+      hasMore: false,
+      pagingMode: 'page_token',
+      searchSupported: true,
+      reason: null,
+      status: 'ok',
+    });
+    const out = await svc.listAggregateInboxPage(WS, UID, 'inbox', 50, null, 0);
+    expect(out.threads).toEqual([]);
+    expect(out.status).toBe('ok');
+  });
+
+  it('listAggregateInboxPage: threads from one mailbox keep status ok even if another failed', async () => {
+    const svc = makeService(makeMailboxes(2));
+    jest.spyOn(svc, 'listMailboxInboxPage').mockImplementation(async (_w, _u, mailboxId) => ({
+      threads: mailboxId === 'mb-0' ? [thread('t-0', '2026-07-06T00:00:00.000Z')] : [],
+      nextPageToken: null,
+      hasMore: false,
+      pagingMode: 'page_token',
+      searchSupported: true,
+      reason: null,
+      status: mailboxId === 'mb-1' ? 'engine_unreachable' : 'ok',
+    }));
+    const out = await svc.listAggregateInboxPage(WS, UID, 'inbox', 50, null, 0);
+    expect(out.threads).toHaveLength(1);
+    expect(out.status).toBe('ok');
+  });
 });

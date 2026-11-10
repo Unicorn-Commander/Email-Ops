@@ -9,8 +9,10 @@
  * mailbox is external.
  *
  * Degrade-clean, exactly like StalwartPort: an unconnected account / dormant
- * engine yields [] (reads) or accepted:false (send) — NEVER throws. This keeps
- * `/mail` honest while OAuth credentials are still being wired per deployment.
+ * engine NEVER throws. Reads return an empty list PLUS a typed `status`
+ * (`engine_not_configured` / `engine_unreachable` / `provider_auth_failed` /
+ * `provider_error`) so a connected mailbox cannot look empty when the mail
+ * service is actually unavailable. Sends still return accepted:false.
  *
  * The shapes returned are the federation wire shapes (ThreadView/MessageView)
  * WITHOUT the disposition overlay — EmailService merges the overlay so external
@@ -20,6 +22,9 @@
 import { MailboxAccount } from '@prisma/client';
 import { MailFolder, MessageView, ThreadView } from '../email/email.types';
 import { InboundPollResult } from '../stalwart/stalwart.types';
+import { MailReadStatus } from './mail-read-status';
+
+export type { MailReadStatus } from './mail-read-status';
 
 export interface MailProviderSendRequest {
   from: string;
@@ -67,6 +72,18 @@ export interface MailProviderListResult {
   hasMore: boolean;
   searchSupported: boolean;
   reason: string | null;
+  /**
+   * Additive. Absent or `ok` = the read completed (including a truly empty
+   * mailbox). Any other value means the empty `threads` list is UNAVAILABLE,
+   * not empty — never echo tokens or provider error bodies here.
+   */
+  status?: MailReadStatus;
+}
+
+/** Thread-detail read with the same empty-vs-unavailable discriminator. */
+export interface MailProviderThreadResult {
+  messages: MessageView[];
+  status?: MailReadStatus;
 }
 
 export interface MailProviderListOpts {
@@ -117,8 +134,15 @@ export abstract class MailProviderPort {
     opts: MailProviderListOpts,
   ): Promise<MailProviderListResult>;
 
-  /** The messages in one thread. [] when not connected. */
-  abstract listThreadMessages(mailbox: MailboxAccount, threadId: string): Promise<MessageView[]>;
+  /**
+   * The messages in one thread. Empty `messages` with a non-ok `status` means
+   * unavailable (not an empty conversation). Implementations MAY still return a
+   * bare `MessageView[]` — callers treat that as `{ messages, status: 'ok' }`.
+   */
+  abstract listThreadMessages(
+    mailbox: MailboxAccount,
+    threadId: string,
+  ): Promise<MessageView[] | MailProviderThreadResult>;
 
   /** Send / reply through the external account. accepted:false when not connected. */
   abstract send(

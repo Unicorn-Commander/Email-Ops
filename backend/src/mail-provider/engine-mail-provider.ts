@@ -6,8 +6,10 @@
  * is MailboxAccount.ownerKey) and calling the cleaner-engine's /mail/* routes —
  * reusing the exact token→credentials→engine chain the Cleaner already uses.
  *
- * Degrade-clean everywhere: no owner / no User row / no broker token / dormant
- * engine → [] or accepted:false, never throws.
+ * Degrade-clean everywhere: never throws. Reads return an empty list PLUS a
+ * typed `status` so a connected mailbox cannot look empty when the engine is
+ * unwired, unreachable, or the provider refused. Sends still return
+ * accepted:false. Status values never include tokens or provider error bodies.
  */
 
 import { Injectable, Logger } from '@nestjs/common';
@@ -15,7 +17,6 @@ import { MailboxAccount } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { KeycloakBrokerService } from '../auth/keycloak-broker.service';
 import { ConnectedAccountsEnginePort } from '../connected-accounts/connected-accounts.port';
-import { MessageView } from '../email/email.types';
 import {
   MailProviderListOpts,
   MailProviderListResult,
@@ -24,7 +25,13 @@ import {
   MailProviderPort,
   MailProviderSendRequest,
   MailProviderSendResult,
+  MailProviderThreadResult,
 } from './mail-provider.port';
+import {
+  isMailReadUnavailable,
+  MailReadStatus,
+  parseMailReadStatus,
+} from './mail-read-status';
 import { parseSearchQuery, buildGmailQuery } from '../stalwart/search-query';
 import { InboundPollResult } from '../stalwart/stalwart.types';
 
@@ -50,14 +57,6 @@ export class EngineMailProvider extends MailProviderPort {
     mailbox: MailboxAccount,
     opts: MailProviderListOpts,
   ): Promise<MailProviderListResult> {
-    const empty: MailProviderListResult = {
-      threads: [],
-      nextPageToken: null,
-      hasMore: false,
-      searchSupported: true,
-      reason: null,
-    };
-
     // Gmail/Graph paginate by opaque pageToken, NOT numeric offset. A page-2+
     // request that only carries offset would previously re-serve page 1 of the
     // unfiltered folder — the exact dishonest bug this method exists to fix.
@@ -65,15 +64,16 @@ export class EngineMailProvider extends MailProviderPort {
     const offset = opts.offset ?? 0;
     const pageToken = opts.pageToken?.trim() || null;
     if (offset > 0 && !pageToken) {
-      return {
-        ...empty,
+      return this.emptyPage('ok', {
         reason:
           'external mailboxes page by opaque page_token, not numeric offset — no more pages',
-      };
+      });
     }
 
+    if (!this.engine.isConfigured()) return this.emptyPage('engine_not_configured');
+
     const auth = await this.authFor(mailbox);
-    if (!auth) return empty;
+    if (!auth) return this.emptyPage('provider_auth_failed');
 
     // Query mapping is PER PROVIDER. Gmail wants app operators rewritten into
     // Gmail `q` syntax. Microsoft must receive the RAW query and parse it itself
@@ -96,7 +96,12 @@ export class EngineMailProvider extends MailProviderPort {
       providerQuery,
       pageToken,
     );
-    if (!res) return empty;
+    if (!res) return this.emptyPage('engine_unreachable');
+
+    const status = parseMailReadStatus(res.status);
+    if (isMailReadUnavailable(status) && (res.threads ?? []).length === 0) {
+      return this.emptyPage(status, { reason: res.reason ?? null });
+    }
 
     const next = res.next_page_token ?? null;
     return {
@@ -116,38 +121,52 @@ export class EngineMailProvider extends MailProviderPort {
       hasMore: Boolean(next ?? res.has_more),
       searchSupported: res.search_supported !== false,
       reason: res.reason ?? null,
+      status: 'ok',
     };
   }
 
-  async listThreadMessages(mailbox: MailboxAccount, threadId: string): Promise<MessageView[]> {
+  async listThreadMessages(
+    mailbox: MailboxAccount,
+    threadId: string,
+  ): Promise<MailProviderThreadResult> {
+    if (!this.engine.isConfigured()) {
+      return { messages: [], status: 'engine_not_configured' };
+    }
     const auth = await this.authFor(mailbox);
-    if (!auth) return [];
+    if (!auth) return { messages: [], status: 'provider_auth_failed' };
     const res = await this.engine.getMailThread(auth.provider, auth.credentials, threadId);
-    if (!res) return [];
-    return res.messages.map((m) => ({
-      id: m.id,
-      thread_id: m.thread_id,
-      from: m.from ? { address: m.from.address, name: m.from.name } : null,
-      to: m.to.map((p) => ({ address: p.address, name: p.name })),
-      subject: m.subject,
-      sent_at: m.sent_at,
-      preview: m.preview,
-      direction: m.direction,
-      // Pass the full bodies the reader path now supplies through to the
-      // MessageView; the frontend prefers html_body/text_body over preview.
-      html_body: m.body_html ?? null,
-      text_body: m.body_text ?? null,
-      // Attachment metadata (bytes fetched on demand). The blob_id is a composite
-      // `${messageId}::${attachmentId}` so the download route can address the
-      // per-message provider attachment id (Gmail/Graph have no global blob store).
-      attachments: (m.attachments ?? []).map((a) => ({
-        blob_id: `${m.id}::${a.id}`,
-        name: a.filename ?? null,
-        type: a.mime_type ?? null,
-        size: a.size ?? null,
-        cid: a.cid ?? null,
+    if (!res) return { messages: [], status: 'engine_unreachable' };
+    const status = parseMailReadStatus(res.status);
+    if (isMailReadUnavailable(status) && (res.messages ?? []).length === 0) {
+      return { messages: [], status };
+    }
+    return {
+      status: 'ok',
+      messages: res.messages.map((m) => ({
+        id: m.id,
+        thread_id: m.thread_id,
+        from: m.from ? { address: m.from.address, name: m.from.name } : null,
+        to: m.to.map((p) => ({ address: p.address, name: p.name })),
+        subject: m.subject,
+        sent_at: m.sent_at,
+        preview: m.preview,
+        direction: m.direction,
+        // Pass the full bodies the reader path now supplies through to the
+        // MessageView; the frontend prefers html_body/text_body over preview.
+        html_body: m.body_html ?? null,
+        text_body: m.body_text ?? null,
+        // Attachment metadata (bytes fetched on demand). The blob_id is a composite
+        // `${messageId}::${attachmentId}` so the download route can address the
+        // per-message provider attachment id (Gmail/Graph have no global blob store).
+        attachments: (m.attachments ?? []).map((a) => ({
+          blob_id: `${m.id}::${a.id}`,
+          name: a.filename ?? null,
+          type: a.mime_type ?? null,
+          size: a.size ?? null,
+          cid: a.cid ?? null,
+        })),
       })),
-    }));
+    };
   }
 
   async send(
@@ -368,6 +387,20 @@ export class EngineMailProvider extends MailProviderPort {
   }
 
   // ── helpers ──
+
+  private emptyPage(
+    status: MailReadStatus,
+    extra: { reason?: string | null } = {},
+  ): MailProviderListResult {
+    return {
+      threads: [],
+      nextPageToken: null,
+      hasMore: false,
+      searchSupported: true,
+      reason: extra.reason ?? null,
+      status,
+    };
+  }
 
   private providerOf(mailbox: Pick<MailboxAccount, 'provider'>): ExternalProvider | null {
     return mailbox.provider === 'gmail' || mailbox.provider === 'microsoft'

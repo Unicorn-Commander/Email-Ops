@@ -15,6 +15,7 @@ import {
   EngineMailAttachmentBytes,
   EngineMailSendResult,
   EngineMailThreadActionResult,
+  EngineMailReadStatus,
   EngineMailThreadResult,
   EngineMailThreadsResult,
   EngineMessageSummary,
@@ -134,6 +135,50 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
     } catch (err) {
       this.logger.warn(`Cleaner Engine text parse error on ${path}: ${(err as Error).message}`);
       return null;
+    }
+  }
+
+  /**
+   * Mail-thread reads must distinguish empty from unavailable. `postJson` maps
+   * every failure to null, which the inbox then renders as an empty mailbox.
+   * This helper never reads or forwards the engine's error body (it can echo
+   * credentials); it only classifies by config, transport, and HTTP status.
+   */
+  private async postMailRead<T extends { status?: EngineMailReadStatus }>(
+    path: string,
+    body: unknown,
+    unavailable: (status: EngineMailReadStatus) => T,
+  ): Promise<T> {
+    if (!this.isConfigured()) return unavailable('engine_not_configured');
+
+    const url = this.endpoint(path);
+    if (!url || !this.token) return unavailable('engine_not_configured');
+
+    let res: Response;
+    try {
+      res = await this.fetchWithTimeout(url, {
+        method: 'POST',
+        headers: this.headers(),
+        body: JSON.stringify(body),
+      });
+    } catch {
+      this.logger.warn(`Cleaner Engine transport error on ${path}`);
+      return unavailable('engine_unreachable');
+    }
+
+    if (!res.ok) {
+      this.logger.warn(`Cleaner Engine HTTP ${res.status} on ${path}`);
+      if (res.status >= 500 || res.status === 401 || res.status === 403) {
+        return unavailable('engine_unreachable');
+      }
+      return unavailable('provider_error');
+    }
+
+    try {
+      return (await res.json()) as T;
+    } catch {
+      this.logger.warn(`Cleaner Engine non-JSON response on ${path}`);
+      return unavailable('engine_unreachable');
     }
   }
 
@@ -369,14 +414,25 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
     query: string | null = null,
     pageToken: string | null = null,
   ): Promise<EngineMailThreadsResult | null> {
-    return this.postJson<EngineMailThreadsResult>('/mail/threads', {
-      provider,
-      credentials,
-      folder,
-      limit,
-      query: query ?? '',
-      page_token: pageToken,
-    });
+    return this.postMailRead<EngineMailThreadsResult>(
+      '/mail/threads',
+      {
+        provider,
+        credentials,
+        folder,
+        limit,
+        query: query ?? '',
+        page_token: pageToken,
+      },
+      (status) => ({
+        threads: [],
+        next_page_token: null,
+        has_more: false,
+        search_supported: true,
+        reason: null,
+        status,
+      }),
+    );
   }
 
   async unsubscribeSenders(
@@ -396,11 +452,15 @@ export class CleanerEngineClient extends ConnectedAccountsEnginePort {
     credentials: Record<string, unknown>,
     threadId: string,
   ): Promise<EngineMailThreadResult | null> {
-    return this.postJson<EngineMailThreadResult>('/mail/thread', {
-      provider,
-      credentials,
-      thread_id: threadId,
-    });
+    return this.postMailRead<EngineMailThreadResult>(
+      '/mail/thread',
+      {
+        provider,
+        credentials,
+        thread_id: threadId,
+      },
+      (status) => ({ messages: [], status }),
+    );
   }
 
   // Thread-level triage verbs. The thread id rides in the PATH (the engine's

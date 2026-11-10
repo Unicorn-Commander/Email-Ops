@@ -224,7 +224,7 @@ export class MailController {
   ) {
     const limit = parseLimit(limitRaw);
     const folder = normalizeFolder(folderRaw);
-    const threads = await this.email.listAggregateInbox(
+    const page = await this.email.listAggregateInboxPage(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
       folder,
@@ -232,7 +232,14 @@ export class MailController {
       q ?? null,
       parseOffset(offsetRaw),
     );
-    return { threads, count: threads.length, folder };
+    return {
+      threads: page.threads,
+      count: page.threads.length,
+      folder,
+      search_supported: page.searchSupported,
+      has_more: page.hasMore,
+      status: page.status,
+    };
   }
 
   @Get('counts')
@@ -328,6 +335,7 @@ export class MailController {
       paging_mode: page.pagingMode,
       search_supported: page.searchSupported,
       reason: page.reason,
+      status: page.status,
     };
   }
 
@@ -340,13 +348,13 @@ export class MailController {
     @Param('mailboxId') mailboxId: string,
     @Param('threadId') threadId: string,
   ) {
-    const messages = await this.email.listThreadMessages(
+    const page = await this.email.listThreadMessagesPage(
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
       threadId,
       mailboxId,
     );
-    return { messages, count: messages.length };
+    return { messages: page.messages, count: page.messages.length, status: page.status };
   }
 
   @Put(':mailboxId/threads/:threadId/read')

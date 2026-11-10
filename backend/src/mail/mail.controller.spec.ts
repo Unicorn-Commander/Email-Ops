@@ -49,8 +49,9 @@ describe('MailController (webmail wave)', () => {
       pagingMode: 'offset',
       searchSupported: true,
       reason: null,
+      status: 'ok',
     });
-    await make({ listMailboxInboxPage }).threads(
+    const out = await make({ listMailboxInboxPage }).threads(
       WS,
       user(),
       'mb-1',
@@ -69,16 +70,68 @@ describe('MailController (webmail wave)', () => {
       25,
       null,
     );
+    expect(out.status).toBe('ok');
   });
 
-  it('GET threads/aggregate delegates with folder/limit/q/offset and echoes count', async () => {
-    const listAggregateInbox = jest
-      .fn()
-      .mockResolvedValue([{ id: 't1', mailbox_id: 'mb-1', mailbox_address: 'hq@x.test' }]);
-    const out = await make({ listAggregateInbox }).aggregate(WS, user(), '10', 'inbox', 'hello', '0');
-    expect(listAggregateInbox).toHaveBeenCalledWith(WS, 'kc-aaron', 'inbox', 10, 'hello', 0);
+  it.each([
+    'engine_not_configured',
+    'engine_unreachable',
+    'provider_auth_failed',
+    'provider_error',
+  ] as const)('GET :mailboxId/threads echoes status=%s on an empty list', async (status) => {
+    const listMailboxInboxPage = jest.fn().mockResolvedValue({
+      threads: [],
+      nextPageToken: null,
+      hasMore: false,
+      pagingMode: 'page_token',
+      searchSupported: true,
+      reason: null,
+      status,
+    });
+    const out = await make({ listMailboxInboxPage }).threads(WS, user(), 'mb-1');
+    expect(out).toMatchObject({ threads: [], count: 0, status });
+    expect(JSON.stringify(out)).not.toMatch(/token=|Bearer /i);
+  });
+
+  it('GET threads/aggregate delegates with folder/limit/q/offset and echoes count + status', async () => {
+    const listAggregateInboxPage = jest.fn().mockResolvedValue({
+      threads: [{ id: 't1', mailbox_id: 'mb-1', mailbox_address: 'hq@x.test' }],
+      searchSupported: true,
+      hasMore: false,
+      status: 'ok',
+    });
+    const out = await make({ listAggregateInboxPage }).aggregate(WS, user(), '10', 'inbox', 'hello', '0');
+    expect(listAggregateInboxPage).toHaveBeenCalledWith(WS, 'kc-aaron', 'inbox', 10, 'hello', 0);
     expect(out.count).toBe(1);
+    expect(out.status).toBe('ok');
     expect(out.threads[0]).toMatchObject({ mailbox_id: 'mb-1', mailbox_address: 'hq@x.test' });
+  });
+
+  it.each([
+    'engine_not_configured',
+    'engine_unreachable',
+    'provider_auth_failed',
+    'provider_error',
+  ] as const)('GET threads/aggregate echoes status=%s when every mailbox is unavailable', async (status) => {
+    const listAggregateInboxPage = jest.fn().mockResolvedValue({
+      threads: [],
+      searchSupported: true,
+      hasMore: false,
+      status,
+    });
+    const out = await make({ listAggregateInboxPage }).aggregate(WS, user());
+    expect(out).toMatchObject({ threads: [], count: 0, status });
+  });
+
+  it.each([
+    'engine_not_configured',
+    'engine_unreachable',
+    'provider_auth_failed',
+    'provider_error',
+  ] as const)('GET :mailboxId/threads/:threadId echoes status=%s', async (status) => {
+    const listThreadMessagesPage = jest.fn().mockResolvedValue({ messages: [], status });
+    const out = await make({ listThreadMessagesPage }).thread(WS, user(), 'mb-1', 't1');
+    expect(out).toEqual({ messages: [], count: 0, status });
   });
 
   it('GET counts returns { mailboxes } from the service', async () => {

@@ -79,6 +79,12 @@ import {
   StalwartThread,
 } from '../stalwart/stalwart.types';
 import { MailProviderDraftRequest, MailProviderPort } from '../mail-provider/mail-provider.port';
+import {
+  MailReadStatus,
+  mergeMailReadStatus,
+  parseMailReadStatus,
+  unwrapThreadMessages,
+} from '../mail-provider/mail-read-status';
 import { routeFromAddress, routingTable } from '../mail-provider/mail-routing';
 import {
   AGENT_REPLY_RUNTIME_SOURCE,
@@ -658,6 +664,19 @@ export class EmailService {
     threadId: string,
     mailboxId?: string,
   ): Promise<MessageView[]> {
+    return (await this.listThreadMessagesPage(workspaceId, ucUid, threadId, mailboxId)).messages;
+  }
+
+  /**
+   * Thread-detail read with the additive empty-vs-unavailable `status`.
+   * `listThreadMessages` stays a bare array for older MCP/federation callers.
+   */
+  async listThreadMessagesPage(
+    workspaceId: string,
+    ucUid: string | null,
+    threadId: string,
+    mailboxId?: string,
+  ): Promise<{ messages: MessageView[]; status: MailReadStatus }> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const scope = await resolveMailboxScope(tx, workspaceId, ucUid);
       // When a mailbox is named (the client BFF passes it) use it — so external
@@ -670,18 +689,24 @@ export class EmailService {
       // An ungoverned direct caller still gets the old empty response when it
       // names another HUMAN mailbox. A governed caller was rejected above with
       // a 404, before any SoR or provider read.
-      if (mailboxId && !mailbox) return [];
+      if (mailboxId && !mailbox) return { messages: [], status: 'ok' as const };
 
       // ⚠️ PER-USER FENCE — before ANY branch, for EVERY mailbox kind. This
       // method returns FULL MESSAGE BODIES, so an unfenced sovereign path is
       // the most sensitive read in the service. The check previously sat inside
       // the external-provider branch only, leaving James-hosted mail readable
       // by any co-member of the workspace.
-      if (mailbox && !(await this.mayActThroughMailbox(mailbox, ucUid))) return [];
+      if (mailbox && !(await this.mayActThroughMailbox(mailbox, ucUid))) {
+        return { messages: [], status: 'ok' as const };
+      }
 
       let live: MessageView[] = [];
+      let status: MailReadStatus = 'ok';
       if (mailbox && this.mailProvider.handles(mailbox)) {
-        live = await this.mailProvider.listThreadMessages(mailbox, threadId);
+        const raw = await this.mailProvider.listThreadMessages(mailbox, threadId);
+        const parsed = unwrapThreadMessages<MessageView>(raw);
+        live = parsed.messages;
+        status = parsed.status;
       } else if (mailbox) {
         // webmail wave: the FULL detail (bodies/cc/threading headers/read
         // state/attachments) — a superset of the previous previews-only read.
@@ -727,7 +752,9 @@ export class EmailService {
           messages,
         );
       }
-      return messages;
+      // SoR rows can still populate the thread when the provider is down; if we
+      // have messages to show, the read is `ok`.
+      return { messages, status: messages.length > 0 ? 'ok' : status };
     });
   }
 
@@ -771,6 +798,7 @@ export class EmailService {
     pagingMode: 'offset' | 'page_token';
     searchSupported: boolean;
     reason: string | null;
+    status: MailReadStatus;
   }> {
     return this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
       const mailbox = await this.mailboxForCallerInTx(tx, workspaceId, ucUid, mailboxId);
@@ -782,6 +810,7 @@ export class EmailService {
           pagingMode: 'offset',
           searchSupported: true,
           reason: null,
+          status: 'ok' as const,
         };
       }
       if (this.mailProvider.handles(mailbox)) {
@@ -799,6 +828,7 @@ export class EmailService {
           pagingMode: 'page_token' as const,
           searchSupported: page.searchSupported,
           reason: page.reason,
+          status: parseMailReadStatus(page.status),
         };
       }
 
@@ -820,6 +850,7 @@ export class EmailService {
         pagingMode: 'offset' as const,
         searchSupported: true,
         reason: null,
+        status: 'ok' as const,
       };
     });
   }
@@ -1171,7 +1202,12 @@ export class EmailService {
     limit = 50,
     query?: string | null,
     offset = 0,
-  ): Promise<{ threads: ThreadView[]; searchSupported: boolean; hasMore: boolean }> {
+  ): Promise<{
+    threads: ThreadView[];
+    searchSupported: boolean;
+    hasMore: boolean;
+    status: MailReadStatus;
+  }> {
     const mailboxes = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
       this.readableMailboxes(tx, workspaceId, ucUid),
     );
@@ -1186,6 +1222,7 @@ export class EmailService {
               mailbox_address: mb.emailAddress,
             })),
             searchSupported: page.searchSupported,
+            status: page.status,
           }),
         ),
         MAILBOX_FANOUT_TIMEOUT_MS,
@@ -1193,17 +1230,20 @@ export class EmailService {
       ),
     );
     const merged: ThreadView[] = [];
+    const readStatuses: MailReadStatus[] = [];
     // Start true; any unsearched/failed mailbox (when a query is present) makes
     // the merged answer potentially incomplete → report false, honestly.
     let searchSupported = true;
     settled.forEach((r, i) => {
       if (r.status === 'fulfilled') {
         merged.push(...r.value.threads);
+        readStatuses.push(r.value.status);
         if (hasQuery && !r.value.searchSupported) searchSupported = false;
       } else {
         this.logger.warn(
           `aggregate inbox search: mailbox ${mailboxes[i]?.emailAddress ?? '?'} failed (${(r.reason as Error)?.message ?? r.reason}) — omitted; search coverage marked incomplete`,
         );
+        readStatuses.push('engine_unreachable');
         if (hasQuery) searchSupported = false;
       }
     });
@@ -1221,7 +1261,13 @@ export class EmailService {
       if (ma !== 0) return ma;
       return a.id.localeCompare(b.id);
     });
-    return { threads: deduped.slice(0, limit), searchSupported, hasMore: deduped.length > limit };
+    const threads = deduped.slice(0, limit);
+    return {
+      threads,
+      searchSupported,
+      hasMore: deduped.length > limit,
+      status: mergeMailReadStatus(readStatuses, threads.length),
+    };
   }
 
   /**
