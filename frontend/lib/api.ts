@@ -428,6 +428,9 @@ export interface AgentInboxItemView {
   subject: string | null;
   body_preview: string | null;
   body_sha256: string | null;
+  sent_body_sha256?: string | null;
+  edited_before_send?: boolean | null;
+  factual_correction?: boolean | null;
   thread_id: string | null;
   kit_id: string | null;
   standing_approval_id?: string;
@@ -538,6 +541,10 @@ export interface ApproveOptions {
    * agent replies to them can auto-send under policy. Omitted means false.
    */
   trustRecipients?: boolean;
+  /** Optional edited plain-text body to use for this approval send. */
+  body?: string;
+  /** Whether the approver checked that the draft needed a factual correction. */
+  factualCorrection?: boolean;
 }
 
 /** Approve a pending draft (this SENDS it). */
@@ -553,6 +560,10 @@ export async function approveAgentInboxItem(
     {
       ...(note ? { note } : {}),
       ...(opts?.trustRecipients !== undefined ? { trustRecipients: opts.trustRecipients } : {}),
+      ...(opts?.body !== undefined ? { body: opts.body } : {}),
+      ...(opts?.factualCorrection !== undefined
+        ? { factual_correction: opts.factualCorrection }
+        : {}),
     },
     token,
   );
@@ -572,6 +583,9 @@ export async function bulkApproveAgentInboxItems(
       item_ids: itemIds,
       ...(note ? { note } : {}),
       ...(opts?.trustRecipients !== undefined ? { trustRecipients: opts.trustRecipients } : {}),
+      ...(opts?.factualCorrection !== undefined
+        ? { factual_correction: opts.factualCorrection }
+        : {}),
     },
     token,
   );

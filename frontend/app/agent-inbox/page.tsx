@@ -99,6 +99,7 @@ export default function AgentInboxPage() {
   const [stateFilter, setStateFilter] = useState<QueueStateFilter>('all');
   const [kitFilter, setKitFilter] = useState<QueueKitFilter>('all');
   const [bulkNote, setBulkNote] = useState('');
+  const [bulkFactualCorrection, setBulkFactualCorrection] = useState(false);
   const [bulkActing, setBulkActing] = useState<null | 'approve' | 'reject'>(null);
   const [bulkMessage, setBulkMessage] = useState<string | null>(null);
   const [bulkError, setBulkError] = useState<string | null>(null);
@@ -178,7 +179,11 @@ export default function AgentInboxPage() {
     setBulkActing('approve');
     setBulkMessage(null);
     setBulkError(null);
-    const outcome = await inbox.bulkApprove(selectedPendingIds, bulkNote.trim() || undefined);
+    const outcome = await inbox.bulkApprove(
+      selectedPendingIds,
+      bulkNote.trim() || undefined,
+      bulkFactualCorrection ? { factualCorrection: true } : undefined,
+    );
     if (outcome.ok && outcome.result) {
       setBulkMessage(formatBulkSchedule(outcome.result));
       setSelected(new Set());
@@ -186,7 +191,7 @@ export default function AgentInboxPage() {
       setBulkError(outcome.error ?? 'Could not approve the selected items.');
     }
     setBulkActing(null);
-  }, [bulkActing, bulkNote, canReview, confirm, inbox, selectedPendingIds]);
+  }, [bulkActing, bulkFactualCorrection, bulkNote, canReview, confirm, inbox, selectedPendingIds]);
 
   const rejectSelected = useCallback(async () => {
     if (!canReview || selectedPendingIds.length === 0 || bulkActing !== null) return;
@@ -273,6 +278,8 @@ export default function AgentInboxPage() {
               onToggleAll={toggleAllVisible}
               bulkNote={bulkNote}
               onBulkNoteChange={setBulkNote}
+              bulkFactualCorrection={bulkFactualCorrection}
+              onBulkFactualCorrectionChange={setBulkFactualCorrection}
               bulkActing={bulkActing}
               bulkMessage={bulkMessage}
               bulkError={bulkError}
@@ -324,11 +331,21 @@ export default function AgentInboxPage() {
         trusted={trusted}
         onApprove={
           reviewPending && canReview
-            ? (note, trustRecipients) =>
+            ? (note, options) =>
                 inbox.approve(
                   (reviewSubject as Extract<ReviewSubject, { kind: 'item' }>).item.id,
                   note,
-                  trustRecipients !== undefined ? { trustRecipients } : undefined,
+                  options
+                    ? {
+                        ...(options.trustRecipients !== undefined
+                          ? { trustRecipients: options.trustRecipients }
+                          : {}),
+                        ...(options.factualCorrection !== undefined
+                          ? { factualCorrection: options.factualCorrection }
+                          : {}),
+                        ...(options.body !== undefined ? { body: options.body } : {}),
+                      }
+                    : undefined,
                 )
             : undefined
         }
@@ -1020,6 +1037,8 @@ function QueueControls({
   onToggleAll,
   bulkNote,
   onBulkNoteChange,
+  bulkFactualCorrection,
+  onBulkFactualCorrectionChange,
   bulkActing,
   bulkMessage,
   bulkError,
@@ -1040,6 +1059,8 @@ function QueueControls({
   onToggleAll: () => void;
   bulkNote: string;
   onBulkNoteChange: (value: string) => void;
+  bulkFactualCorrection: boolean;
+  onBulkFactualCorrectionChange: (value: boolean) => void;
   bulkActing: null | 'approve' | 'reject';
   bulkMessage: string | null;
   bulkError: string | null;
@@ -1114,6 +1135,15 @@ function QueueControls({
             placeholder="Kept on each audit record"
             className="mt-1 w-full resize-y rounded-token border border-subtle bg-surface-base px-2.5 py-2 text-sm text-primary placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           />
+          <label className="mt-1.5 inline-flex cursor-pointer items-center gap-1.5 text-[11px] text-tertiary">
+            <input
+              type="checkbox"
+              checked={bulkFactualCorrection}
+              onChange={(event) => onBulkFactualCorrectionChange(event.target.checked)}
+              className="h-3.5 w-3.5 rounded border-subtle accent-accent"
+            />
+            Factual correction for selected items
+          </label>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button
