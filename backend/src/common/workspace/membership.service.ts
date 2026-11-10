@@ -146,17 +146,54 @@ export class MembershipService {
     return { workspaceId, role: m?.role ?? WorkspaceRole.VIEWER };
   }
 
+  /**
+   * Reads remain available for inactive workspaces so an operator can explain
+   * the state to a customer; all mutating workspace routes must call this
+   * before doing their write. The provisioning control-plane PATCH is separate
+   * and uses its service JWT, so it can reactivate a mirror.
+   */
+  async assertWorkspaceWritable(workspaceId: string): Promise<void> {
+    if (!this.enabled) return;
+    const workspace = await this.prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { id: true, status: true },
+    });
+    if (workspace && workspace.status !== 'active') {
+      throw new ForbiddenException({
+        type: 'https://docs.unicorncommander.ai/problems/workspace-inactive',
+        title: 'Workspace is not active',
+        status: 403,
+        detail: 'Workspace writes are disabled while this workspace is inactive.',
+        workspace_id: workspace.id,
+        workspace_status: workspace.status,
+      });
+    }
+  }
+
   /** Fresh member-or-higher authority for a human inbox decision. */
   async assertCanReviewInbox(user: User, requestedWorkspaceId?: string): Promise<string> {
     const workspaceId = await this.resolveAndAuthorize(user, requestedWorkspaceId);
     if (!this.enabled) return workspaceId;
     const member = await this.prisma.membership.findUnique({
-      where: { userKey_workspaceId: { userKey: MembershipService.membershipKey(user), workspaceId } },
+      where: {
+        userKey_workspaceId: { userKey: MembershipService.membershipKey(user), workspaceId },
+      },
       include: { workspace: { select: { status: true } } },
     });
-    if (!member || member.status !== MembershipStatus.ACTIVE || member.workspace.status !== 'active' ||
-        ![WorkspaceRole.MEMBER, WorkspaceRole.MANAGER, WorkspaceRole.ADMIN, WorkspaceRole.OWNER].includes(member.role as any)) {
-      throw new ForbiddenException('An active MEMBER or higher workspace role is required to approve or reject drafts.');
+    if (
+      !member ||
+      member.status !== MembershipStatus.ACTIVE ||
+      member.workspace.status !== 'active' ||
+      ![
+        WorkspaceRole.MEMBER,
+        WorkspaceRole.MANAGER,
+        WorkspaceRole.ADMIN,
+        WorkspaceRole.OWNER,
+      ].includes(member.role as any)
+    ) {
+      throw new ForbiddenException(
+        'An active MEMBER or higher workspace role is required to approve or reject drafts.',
+      );
     }
     return workspaceId;
   }

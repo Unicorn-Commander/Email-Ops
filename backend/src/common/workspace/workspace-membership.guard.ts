@@ -53,6 +53,9 @@ export class WorkspaceMembershipGuard implements CanActivate {
       throw error;
     }
     const { workspaceId, role } = resolved;
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(String(req?.method ?? '').toUpperCase())) {
+      await this.membership.assertWorkspaceWritable(workspaceId);
+    }
     // Stash for downstream handlers + the withWorkspace GUC chokepoint, and the
     // caller's role for the provisioning RBAC gates (@WorkspaceRole()).
     req.workspaceId = workspaceId;
