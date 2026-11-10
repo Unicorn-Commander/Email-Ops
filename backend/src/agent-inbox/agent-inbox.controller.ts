@@ -382,6 +382,12 @@ export class AgentInboxController {
     @Body() body: BulkApproveDto,
     @WorkspaceRoleParam() role?: WorkspaceRole,
   ) {
+    if (
+      body.body !== undefined &&
+      (!!(user as any).__isFederationActor || !!(user as any).__patAuth)
+    ) {
+      throw new ForbiddenException('only a human approver can edit the body');
+    }
     await this.membership.assertCanReviewInbox(user, workspaceId);
     // Match the single-approve gate before the bulk service does any writes.
     // Missing/foreign ids remain per-item not_found results from the service;
@@ -513,6 +519,12 @@ export class AgentInboxController {
     @Body() body: ApproveBodyDto,
     @WorkspaceRoleParam() role?: WorkspaceRole,
   ) {
+    if (
+      body.body !== undefined &&
+      (!!(user as any).__isFederationActor || !!(user as any).__patAuth)
+    ) {
+      throw new ForbiddenException('only a human approver can edit the body');
+    }
     await this.membership.assertCanReviewInbox(user, workspaceId);
     // Gate BY KIND (defense-in-depth, re-derived off the verified token; mirrors
     // the MCP approve tool). Peek first: a missing/foreign id 404s before any

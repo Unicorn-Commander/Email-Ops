@@ -900,7 +900,8 @@ export class McpService {
           'a message. EMAIL drafts are the human-in-the-loop SEND, so they require the ' +
           'email-ops entitlement. trust_recipients defaults to false for external recipients; ' +
           'only explicit true learns them for future autonomous replies. Agents cannot approve ' +
-          'their own external drafts without a human-approved send kit. Returns the updated inbox item + message.',
+          'their own external drafts without a human-approved send kit. body: human approvers only. ' +
+          'Returns the updated inbox item + message.',
         inputSchema: {
           workspace_id: z.string().optional(),
           item_id: z.string(),

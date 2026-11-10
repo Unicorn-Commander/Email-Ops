@@ -3861,6 +3861,9 @@ export class EmailService {
     factualCorrection?: boolean,
     approvedBody?: string,
   ): Promise<{ inbox: AgentInboxView; message: MessageComposeView | null } | null> {
+    if (agentPrincipal === true && approvedBody !== undefined) {
+      throw new ForbiddenException('only a human approver can edit the body');
+    }
     // PHASE 1 — validate + authorize (a short tx). A CLEANUP item executes wholly
     // in-tx as before; an EMAIL item resolves its mailbox + returns the send plan,
     // deferring the external send to phase 2 so a slow provider can't time out the

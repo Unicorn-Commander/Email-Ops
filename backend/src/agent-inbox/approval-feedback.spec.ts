@@ -98,7 +98,7 @@ function harness(rows = [pendingItem()]) {
     accepted: true,
     providerMessageId: 'fictional-provider-message',
   });
-  return { rows, tx, service, send };
+  return { rows, tx, service, send, prisma };
 }
 
 describe('agent-inbox approval evidence', () => {
@@ -203,6 +203,25 @@ describe('agent-inbox approval evidence', () => {
       sent_body_sha256: hash(edited),
       edited_before_send: true,
     });
+  });
+
+  it('refuses an edited body from an agent principal before phase 1', async () => {
+    const { service, send, prisma } = harness();
+    await expect(
+      service.approveAgentInboxItem(
+        WS,
+        UID,
+        'item-1',
+        null,
+        false,
+        true,
+        WorkspaceRole.MEMBER,
+        undefined,
+        'agent-edited body',
+      ),
+    ).rejects.toThrow('only a human approver can edit the body');
+    expect(prisma.withWorkspace).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('does not record successful approval evidence when sending fails', async () => {
@@ -427,6 +446,17 @@ describe('approval feedback REST and MCP contracts', () => {
     );
   });
 
+  it('refuses an edited body from an MCP agent principal without calling approval service', async () => {
+    const { service, tools } = fronts();
+    const approve = jest.spyOn(service, 'approveAgentInboxItem');
+    const agent = { ...user, __patAuth: { scopes: ['agent-inbox:approve'] } } as any;
+
+    await expect(
+      tools.approveAgentInboxItem(agent, { item_id: 'item-1', body: 'agent-edited body' }),
+    ).resolves.toEqual({ ok: false, reason: 'only a human approver can edit the body' });
+    expect(approve).not.toHaveBeenCalled();
+  });
+
   it('REST detail/list and MCP list expose the same persisted evidence', async () => {
     const { service, controller, tools } = fronts();
     await service.approveAgentInboxItem(
@@ -462,5 +492,9 @@ describe('approval feedback REST and MCP contracts', () => {
       });
       expect(tool.input_schema.required).not.toContain('factual_correction');
     }
+    const single = MCP_MANIFEST_CATALOG.tools.find(
+      (entry) => entry.name === 'approve_agent_inbox_item',
+    )!;
+    expect(single.input_schema.properties.body.description).toContain('human approvers only');
   });
 });

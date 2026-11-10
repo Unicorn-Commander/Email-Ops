@@ -899,6 +899,12 @@ export class EmailOpsTools {
       trust_recipients?: boolean;
     },
   ): Promise<unknown> {
+    if (
+      args.body !== undefined &&
+      (!!(user as any).__isFederationActor || !!(user as any).__patAuth)
+    ) {
+      return { ok: false, reason: 'only a human approver can edit the body' };
+    }
     const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
     const { role } = await this.membership.resolveWithRole(user, args.workspace_id);
     // Gate BY KIND (mirrors the REST approve): peek first so a missing/foreign

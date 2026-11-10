@@ -1240,7 +1240,7 @@
     },
     {
       "name": "approve_agent_inbox_item",
-      "description": "Approve a PENDING agent-inbox draft: hand it to the send lane and advance the message to queued/sent. NOTICE items are acknowledged without sending or changing a message. EMAIL drafts are the human-in-the-loop SEND, so they require the email-ops entitlement. By default the approval also TRUSTS the external recipients (Wave 7 learning) so future in-thread agent replies to them can send autonomously; pass trust_recipients:false to approve without learning. Returns the updated inbox item + message.",
+      "description": "Approve a PENDING agent-inbox draft: hand it to the send lane and advance the message to queued/sent. NOTICE items are acknowledged without sending or changing a message. EMAIL drafts are the human-in-the-loop SEND, so they require the email-ops entitlement. By default the approval also TRUSTS the external recipients (Wave 7 learning) so future in-thread agent replies to them can send autonomously; pass trust_recipients:false to approve without learning. body: human approvers only. Returns the updated inbox item + message.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -1257,7 +1257,7 @@
           "body": {
             "type": "string",
             "maxLength": 100000,
-            "description": "Optional edited plain-text body to send; whitespace-only differences are not counted as edits."
+            "description": "Optional edited plain-text body to send; human approvers only; whitespace-only differences are not counted as edits."
           },
           "factual_correction": {
             "type": "boolean"
