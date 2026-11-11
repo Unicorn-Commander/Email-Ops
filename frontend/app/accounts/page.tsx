@@ -29,6 +29,7 @@ import {
   type MailboxPick,
 } from '@/lib/mailApi';
 import { useActiveWorkspace } from '@/components/ActiveWorkspaceProvider';
+import { DisconnectControl } from './DisconnectControl';
 
 export default function AccountsPage() {
   const { accounts, loading, error, refreshAccounts } = useConnectedAccounts();
@@ -139,6 +140,7 @@ export default function AccountsPage() {
               account={account}
               workspaceId={workspaceId}
               selfEmail={selfEmail}
+              onDisconnected={() => void refreshAccounts()}
             />
           ))}
         </div>
@@ -614,10 +616,12 @@ function AccountCard({
   account,
   workspaceId,
   selfEmail,
+  onDisconnected,
 }: {
   account: LinkedAccountView;
   workspaceId: string | null;
   selfEmail: string | null;
+  onDisconnected: () => void;
 }) {
   const meta = providerMeta(account.provider);
   const { load, stats, unavailableReason, error } = useInboxStats(account.provider, account.linked);
@@ -722,7 +726,7 @@ function AccountCard({
           <Tooltip
             content={
               account.linked
-                ? `Re-run the ${meta.shortLabel} sign-in to refresh the broker token — the fix when reading or analysis stops working. Deletes nothing.`
+                ? `Re-run the ${meta.shortLabel} sign-in to refresh the broker token. This is the fix when reading or analysis stops working. Deletes nothing.`
                 : `Sign in with ${meta.shortLabel} via the identity broker and grant mail consent`
             }
             bubbleClassName="max-w-[300px]"
@@ -739,13 +743,11 @@ function AccountCard({
                   : `Connect ${meta.shortLabel}`}
             </Button>
           </Tooltip>
-          <Tooltip content="Disconnect isn't available yet — unlink from your identity provider's security settings meanwhile">
-            <span className="inline-flex">
-              <Button variant="ghost" disabled>
-                Disconnect
-              </Button>
-            </span>
-          </Tooltip>
+          <DisconnectControl
+            provider={account.provider}
+            linked={account.linked}
+            onDisconnected={onDisconnected}
+          />
         </div>
 
         {/* Unified inbox: register this connected account as a /mail mailbox. */}
@@ -785,7 +787,7 @@ function AccountCard({
                   title={
                     canAdd
                       ? undefined
-                      : 'Resolving your workspace and identity — one moment.'
+                      : 'Resolving your workspace and identity. One moment.'
                   }
                 >
                   {add.kind === 'adding' ? 'Adding…' : 'Add to Mail'}
@@ -802,7 +804,7 @@ function AccountCard({
 
         <p className="text-xs leading-5 text-tertiary">
           Connecting links {meta.label} to your account via Magic Unicorn SSO. Disconnecting only
-          removes access — it deletes no mail. The cleanup engine is read-only from this screen.
+          removes access. It deletes no mail. The cleanup engine is read-only from this screen.
         </p>
       </div>
     </Card>
@@ -814,10 +816,10 @@ function ScopeChip({ label, state }: { label: string; state: 'on' | 'off' | 'loc
     <Tooltip
       content={
         state === 'on'
-          ? 'Active — the linked broker token grants this access'
+          ? 'Active. The linked broker token grants this access'
           : state === 'locked'
             ? 'Hard privacy rail: analysis reads headers and metadata only, never message bodies'
-            : 'Not granted yet — link the account to enable this'
+            : 'Not granted yet. Link the account to enable this'
       }
     >
       <div className="rounded-token border border-subtle bg-surface-base p-3" tabIndex={0}>

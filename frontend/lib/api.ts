@@ -1571,6 +1571,26 @@ export async function getProviderLinkUrl(
   );
 }
 
+export interface DisconnectProviderResponse {
+  provider: ConnectedProvider;
+  status: 'disconnected';
+  broker: 'unlinked' | 'already_absent';
+  mailboxes_deactivated: number;
+  refresh_token_cleared: boolean;
+}
+
+/** Unlink this provider for the signed-in user and mark their mailbox inactive. */
+export async function disconnectProvider(
+  provider: ConnectedProvider,
+  token?: string,
+): Promise<DisconnectProviderResponse> {
+  return apiPost<DisconnectProviderResponse>(
+    `/connected-accounts/${encodeURIComponent(provider)}/disconnect`,
+    {},
+    token,
+  );
+}
+
 export async function getInboxStats(
   provider: ConnectedProvider,
   token?: string,
