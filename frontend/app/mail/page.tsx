@@ -809,7 +809,8 @@ export default function MailPage() {
     !mail.unified &&
     mail.selectedMailbox &&
     mail.selectedMailbox.provider !== 'gmail' &&
-    mail.selectedMailbox.provider !== 'microsoft'
+    mail.selectedMailbox.provider !== 'microsoft' &&
+    mail.selectedMailbox.provider !== 'external_imap'
       ? mail.selectedMailbox
       : null;
   const canSchedule = !!sovereignMailbox;
@@ -822,7 +823,7 @@ export default function MailPage() {
   const externalMailbox =
     !mail.unified &&
     !!mail.selectedMailbox &&
-    (mail.selectedMailbox.provider === 'gmail' || mail.selectedMailbox.provider === 'microsoft');
+    ['gmail', 'microsoft', 'external_imap'].includes(mail.selectedMailbox.provider ?? '');
   // Sovereign mailboxes always search (JMAP full-text). An external mailbox
   // searches only when the BACKEND confirms the provider honoured `q` — the
   // provider lane can now really search Gmail, but we trust the server's
@@ -1256,6 +1257,7 @@ export default function MailPage() {
   const canCompose =
     mail.load === 'ready' &&
     !!mail.workspace &&
+    mail.composeMailbox?.provider !== 'external_imap' &&
     (mail.unified ? visibleMailboxes.length > 0 : selectedVisible);
 
   const activeAgentCount =
@@ -1388,6 +1390,9 @@ export default function MailPage() {
 
       {/* One-time orientation strip — localStorage-dismissed, quiet. */}
       <HelpHintBar />
+      {mail.composeMailbox?.provider === 'external_imap' && (
+        <p role="status" className="px-4 py-2 text-xs text-tertiary">Sending from this mailbox is not available yet.</p>
+      )}
 
       <div className="flex min-h-0 flex-1">
         <MailIconNav pendingCount={inbox.pendingCount} />
@@ -1450,7 +1455,8 @@ export default function MailPage() {
                   !!mail.selectedMailbox &&
                   mail.foldersSupported &&
                   mail.selectedMailbox.provider !== 'gmail' &&
-                  mail.selectedMailbox.provider !== 'microsoft'
+                  mail.selectedMailbox.provider !== 'microsoft' &&
+                  mail.selectedMailbox.provider !== 'external_imap'
                 }
                 customFolders={mail.customFolders}
                 activeCustomFolderId={mail.activeCustomFolderId}
@@ -1546,7 +1552,8 @@ export default function MailPage() {
                 !mail.unified &&
                 !!mail.selectedMailbox &&
                 mail.selectedMailbox.provider !== 'gmail' &&
-                mail.selectedMailbox.provider !== 'microsoft'
+                mail.selectedMailbox.provider !== 'microsoft' &&
+                mail.selectedMailbox.provider !== 'external_imap'
               }
               replyHasUndoWindow={canSchedule}
               replyLimitedExternalSend={threadMailboxIsExternal}
@@ -1612,7 +1619,7 @@ export default function MailPage() {
       )}
 
       <ComposeDialog
-        open={composeOpen}
+        open={composeOpen && mail.composeMailbox?.provider !== 'external_imap'}
         onClose={() => setComposeOpen(false)}
         fromAddress={mail.composeMailbox?.email_address ?? null}
         workspaceId={mail.workspace?.workspace_id ?? null}
@@ -3600,7 +3607,7 @@ function Reader({
         {/* On-demand reply zone: docked tight under the last message. Collapsed it
             is a compact action bar (no empty void); Reply / Reply all expand the
             full composer inline, Forward opens the full dialog. */}
-        {load !== 'error' && load !== 'loading' && (
+        {load !== 'error' && load !== 'loading' && mailbox?.provider !== 'external_imap' && (
           <div className="px-4 pb-5 pt-1 sm:px-6">
             {composerOpen ? (
               <ReplyComposer

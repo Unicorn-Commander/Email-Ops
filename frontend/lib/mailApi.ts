@@ -43,7 +43,7 @@ export interface MailParticipant {
 }
 
 /** The mail backend each mailbox reads/sends through. */
-export type MailboxProvider = 'stalwart' | 'gmail' | 'microsoft';
+export type MailboxProvider = 'stalwart' | 'gmail' | 'microsoft' | 'external_imap';
 
 /** One mailbox the signed-in caller can open in the mail client (the picker). */
 export interface MailboxPick {

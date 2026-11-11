@@ -7,7 +7,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { ListBannerView } from './ListBannerView';
 import { getProviderLinkUrl } from '../../lib/api';
 
-vi.mock('../../lib/api', () => ({ getProviderLinkUrl: vi.fn() }));
+vi.mock('../../lib/api', () => ({ getProviderLinkUrl: vi.fn(), apiGet: vi.fn(), apiPost: vi.fn() }));
+vi.mock('../ActiveWorkspaceProvider', () => ({ useActiveWorkspace: () => ({ activeWorkspaceId: null }) }));
 
 // The app's tsconfig preserves JSX for Next. Supply React for Vitest's classic
 // JSX transform without changing the app's compiler or adding test dependencies.

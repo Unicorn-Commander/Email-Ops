@@ -70,7 +70,7 @@ export const PAGE_SIZE = 50;
 
 /** Connected external providers whose list/search/paging ports are still degraded. */
 function isExternalProvider(provider: string | null | undefined): boolean {
-  return provider === 'gmail' || provider === 'microsoft';
+  return provider === 'gmail' || provider === 'microsoft' || provider === 'external_imap';
 }
 
 /**
@@ -399,6 +399,16 @@ export function useMailClient(): UseMailClient {
   // re-scopes when it switches; keyed on the workspace id to avoid refetch churn.
   const { activeWorkspace, load: workspaceLoad } = useActiveWorkspace();
   const activeWorkspaceId = activeWorkspace?.workspace_id ?? null;
+  const [imapConnectionVersion, setImapConnectionVersion] = useState(0);
+  useEffect(() => {
+    const onConnected = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === activeWorkspaceId) {
+        setImapConnectionVersion((value) => value + 1);
+      }
+    };
+    window.addEventListener('external-imap:connected', onConnected);
+    return () => window.removeEventListener('external-imap:connected', onConnected);
+  }, [activeWorkspaceId]);
 
   useEffect(() => {
     if (!activeWorkspace) {
@@ -434,7 +444,7 @@ export function useMailClient(): UseMailClient {
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeWorkspaceId, workspaceLoad, guard401]);
+  }, [activeWorkspaceId, workspaceLoad, guard401, imapConnectionVersion]);
 
   // ── Counts (Wave 2, feature-detected) ─────────────────────────────────────
   const refreshCounts = useCallback(() => {

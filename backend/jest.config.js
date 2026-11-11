@@ -17,6 +17,7 @@
 
 // Paths relative to <rootDir> (= src, set below).
 const INTEGRATION_SPECS = [
+  'external-imap/external-imap.rls.integration.spec.ts',
   'agent-inbox/agent-inbox.authorization.integration.spec.ts',
   'sms/sms.service.spec.ts',
   'auth/auth.service.identity.spec.ts',
@@ -53,9 +54,7 @@ const base = {
 const integrationMatch = INTEGRATION_SPECS.map((p) => `<rootDir>/${p}`);
 // Unit project: everything EXCEPT those specs. testPathIgnorePatterns are
 // regexes matched against the absolute path, so escape the dots and anchor end.
-const integrationIgnore = INTEGRATION_SPECS.map(
-  (p) => p.replace(/\./g, '\\.') + '$',
-);
+const integrationIgnore = INTEGRATION_SPECS.map((p) => p.replace(/\./g, '\\.') + '$');
 
 module.exports = {
   collectCoverageFrom: ['**/*.(t|j)s'],
