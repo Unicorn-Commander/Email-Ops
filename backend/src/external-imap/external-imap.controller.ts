@@ -27,21 +27,25 @@ export class ExternalImapController {
   ) {}
 
   @Get('capabilities')
-  capabilities() {
-    return { enabled: externalImapEnabled() };
+  capabilities(@ResolvedWorkspace() workspaceId: string) {
+    return { enabled: externalImapEnabled(workspaceId) };
   }
 
-  private assertHuman(user: User & { __patAuth?: unknown }) {
-    requireExternalImap();
+  private assertHuman(workspaceId: string, user: User & { __patAuth?: unknown }) {
+    requireExternalImap(workspaceId);
     if (user.__patAuth)
       throw new ForbiddenException('Connect mailboxes through your signed-in session.');
   }
 
   @Post('test')
   @Throttle({ short: { ttl: 60000, limit: 5 }, long: { ttl: 3600000, limit: 30 } })
-  test(@CurrentUser() user: User, @Body() body: ImapConnectDto) {
-    this.assertHuman(user);
-    return this.connection.test(body);
+  test(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Body() body: ImapConnectDto,
+  ) {
+    this.assertHuman(workspaceId, user);
+    return this.connection.test(workspaceId, body);
   }
 
   @Post('connect')
@@ -51,7 +55,7 @@ export class ExternalImapController {
     @CurrentUser() user: User,
     @Body() body: ImapConnectDto,
   ) {
-    this.assertHuman(user);
+    this.assertHuman(workspaceId, user);
     return this.accounts.connect(workspaceId, user, body);
   }
 }

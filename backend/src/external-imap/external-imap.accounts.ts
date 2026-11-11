@@ -16,10 +16,10 @@ export class ExternalImapAccounts {
     user: User,
     input: ImapCredentials & { email_address: string },
   ) {
-    requireExternalImap();
+    requireExternalImap(workspaceId);
     if (!isEncryptionConfigured())
       throw new ServiceUnavailableException('Mailbox encryption is not configured.');
-    const result = await this.connection.test(input);
+    const result = await this.connection.test(workspaceId, input);
     if (result.status !== 'ok') return result;
     const ownerKey = user.keycloakId ?? user.id;
     const emailAddress = input.email_address.toLowerCase();
@@ -78,7 +78,7 @@ export class ExternalImapAccounts {
   }
 
   async credentials(mailbox: MailboxAccount): Promise<ImapCredentials> {
-    requireExternalImap();
+    requireExternalImap(mailbox.workspaceId);
     if (
       mailbox.provider !== 'external_imap' ||
       mailbox.ownerKind !== 'HUMAN' ||
