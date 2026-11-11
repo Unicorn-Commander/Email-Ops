@@ -9,6 +9,16 @@ import {
   publicTlsOptions,
 } from './imap-connection';
 
+/** Verified identity tags, never request-body provenance. */
+export function isHumanMailSession(user: object) {
+  const identity = user as {
+    __patAuth?: unknown;
+    __isFederationActor?: unknown;
+    __isFederationAuth?: unknown;
+  };
+  return !identity.__patAuth && !identity.__isFederationActor && !identity.__isFederationAuth;
+}
+
 export const externalImapSendEnabled = (workspaceId: string) =>
   externalImapEnabled(workspaceId) && process.env.EXTERNAL_IMAP_SEND_ENABLED === 'true';
 export function requireExternalImapSend(workspaceId: string) {

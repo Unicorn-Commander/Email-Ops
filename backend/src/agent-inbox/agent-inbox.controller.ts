@@ -1,3 +1,4 @@
+import { externalImapSendEnabled, isHumanMailSession } from '../external-imap/smtp-connection';
 /**
  * The agent-inbox REST surface (Phase 2, Part B).
  *
@@ -414,7 +415,7 @@ export class AgentInboxController {
       body.item_ids,
       body.note ?? null,
       body.trustRecipients,
-      false,
+      externalImapSendEnabled() && !isHumanMailSession(user),
       role,
       ...(body.factual_correction === undefined ? [] : [body.factual_correction]),
     );
@@ -548,6 +549,7 @@ export class AgentInboxController {
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
+    const agentPrincipal = externalImapSendEnabled() && !isHumanMailSession(user);
     const res =
       body.body !== undefined
         ? await this.email.approveAgentInboxItem(
@@ -556,12 +558,12 @@ export class AgentInboxController {
             id,
             body.note ?? null,
             body.trustRecipients,
-            false,
+            agentPrincipal,
             role,
             body.factual_correction,
             body.body,
           )
-        : role === undefined && body.factual_correction === undefined
+        : role === undefined && body.factual_correction === undefined && !agentPrincipal
           ? await this.email.approveAgentInboxItem(
               workspaceId,
               ucUidOf(user as WithWorkspaceClaim),
@@ -575,7 +577,7 @@ export class AgentInboxController {
               id,
               body.note ?? null,
               body.trustRecipients,
-              false,
+              agentPrincipal,
               role,
               body.factual_correction,
             );

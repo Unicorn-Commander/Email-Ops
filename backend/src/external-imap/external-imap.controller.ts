@@ -1,3 +1,4 @@
+import { isHumanMailSession } from './smtp-connection';
 import { Body, Controller, ForbiddenException, Get, Post, UseGuards } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { Throttle } from '@nestjs/throttler';
@@ -51,7 +52,7 @@ export class ExternalImapController {
 
   private assertHuman(workspaceId: string, user: User & { __patAuth?: unknown }) {
     requireExternalImap(workspaceId);
-    if (user.__patAuth)
+    if (!isHumanMailSession(user))
       throw new ForbiddenException('Connect mailboxes through your signed-in session.');
   }
 

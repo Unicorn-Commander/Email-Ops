@@ -1,3 +1,4 @@
+import { isHumanMailSession } from '../external-imap/smtp-connection';
 /**
  * The human email-client BFF (read your inboxes + compose), distinct from the
  * agent-inbox approval surface.
@@ -725,7 +726,7 @@ export class MailController {
       workspaceId,
       ucUidOf(user as WithWorkspaceClaim),
       input,
-      !(user as User & { __patAuth?: unknown }).__patAuth,
+      isHumanMailSession(user),
     );
   }
 }

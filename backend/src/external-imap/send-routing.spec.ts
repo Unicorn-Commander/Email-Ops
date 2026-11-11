@@ -1,3 +1,4 @@
+import { AgentInboxController } from '../agent-inbox/agent-inbox.controller';
 import { User } from '@prisma/client';
 import { Logger } from '@nestjs/common';
 import { EmailService } from '../email/email.service';
@@ -41,14 +42,19 @@ describe('external IMAP existing send routing authorization', () => {
     else process.env.EXTERNAL_IMAP_SEND_ENABLED = previousSend;
   });
 
-  it.each([false, true])(
-    'the human compose front door marks session authorization, PAT=%s',
-    async (pat) => {
+  it.each([
+    ['session', {}, true],
+    ['PAT', { __patAuth: {} }, false],
+    ['federation', { __isFederationActor: true }, false],
+    ['federated auth', { __isFederationAuth: true }, false],
+  ] as const)(
+    'the human compose front door checks %s identity before marking authorization',
+    async (_kind, identity, authorized) => {
       const composeEmail = jest.fn();
       const controller = new MailController({ composeEmail } as unknown as EmailService);
       await controller.compose(
         'workspace-one',
-        { id: 'owner-one', ...(pat ? { __patAuth: {} } : {}) } as User,
+        { id: 'owner-one', ...identity } as User,
         mailbox.id,
         {
           to_address: 'recipient@example.com',
@@ -58,8 +64,38 @@ describe('external IMAP existing send routing authorization', () => {
           sendAuthorization: 'human',
         } as any,
       );
-      expect(composeEmail.mock.calls[0][3]).toBe(!pat);
+      expect(composeEmail.mock.calls[0][3]).toBe(authorized);
       expect(composeEmail.mock.calls[0][2].sendAuthorization).toBeUndefined();
+    },
+  );
+
+  it.each([{ __patAuth: {} }, { __isFederationActor: true }, { __isFederationAuth: true }])(
+    'REST single and bulk approvals propagate non-human identity to the send guard',
+    async (identity) => {
+      const approveAgentInboxItem = jest.fn().mockResolvedValue({});
+      const bulkApproveAgentInboxItems = jest.fn().mockResolvedValue({});
+      const email = {
+        approveAgentInboxItem,
+        bulkApproveAgentInboxItems,
+        peekAgentInboxKind: jest.fn().mockResolvedValue('EMAIL'),
+      };
+      const controller = new AgentInboxController(
+        email as any,
+        { assertCanReviewInbox: jest.fn() } as any,
+      );
+      const user = {
+        id: 'owner-one',
+        __ucUid: 'owner-one',
+        __entitlements: ['email-ops', 'customer-ops'],
+        ...identity,
+      } as unknown as User;
+      await controller.approve('workspace-one', user, 'item-one', {});
+      expect(approveAgentInboxItem.mock.calls[0][5]).toBe(true);
+      await controller.bulkApprove('workspace-one', user, { item_ids: ['item-one'] });
+      expect(bulkApproveAgentInboxItems.mock.calls[0][5]).toBe(true);
+      delete process.env.EXTERNAL_IMAP_SEND_ENABLED;
+      await controller.approve('workspace-one', user, 'item-one', {});
+      expect(approveAgentInboxItem.mock.calls[1]).toHaveLength(5);
     },
   );
 
@@ -94,14 +130,12 @@ describe('external IMAP existing send routing authorization', () => {
     const prisma = {
       withWorkspace: jest.fn(async (_workspace, _user, operation) => operation(tx)),
     };
-    const send = jest
-      .fn()
-      .mockResolvedValue({
-        accepted: true,
-        providerMessageId: '<sent@example.com>',
-        threadId: null,
-        reason: null,
-      });
+    const send = jest.fn().mockResolvedValue({
+      accepted: true,
+      providerMessageId: '<sent@example.com>',
+      threadId: null,
+      reason: null,
+    });
     const provider = {
       handles: () => true,
       send,
