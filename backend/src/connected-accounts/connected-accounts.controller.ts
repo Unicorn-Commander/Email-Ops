@@ -9,14 +9,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import {
-  IsArray,
-  IsBoolean,
-  IsIn,
-  IsObject,
-  IsOptional,
-  IsString,
-} from 'class-validator';
+import { IsArray, IsBoolean, IsIn, IsObject, IsOptional, IsString } from 'class-validator';
 import { User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -119,6 +112,19 @@ export class ConnectedAccountsController {
     const provider = this.provider(providerParam);
     await this.resolveWorkspace(user);
     return this.connectedAccounts.getProviderLinkUrl(user, provider);
+  }
+
+  @Post(':provider/disconnect')
+  @ApiOperation({
+    summary:
+      "Unlink this provider for the signed-in user and mark that user's mailbox record inactive.",
+  })
+  @ApiResponse({ status: 200, description: 'Broker link removed. No token values.' })
+  @ApiResponse({ status: 503, description: 'Broker unavailable. Nothing was changed.' })
+  async disconnect(@CurrentUser() user: User, @Param('provider') providerParam: string) {
+    const provider = this.provider(providerParam);
+    await this.resolveWorkspace(user);
+    return this.connectedAccounts.disconnectProvider(user, provider);
   }
 
   @Get(':provider/stats')

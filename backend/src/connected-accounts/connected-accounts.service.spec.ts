@@ -2,6 +2,7 @@ import {
   BadGatewayException,
   ConflictException,
   ForbiddenException,
+  Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { CleanupActionKind, CleanupBatchState, User } from '@prisma/client';
@@ -23,10 +24,12 @@ describe('ConnectedAccountsService', () => {
 
   const broker = {
     getProviderAccessToken: jest.fn().mockResolvedValue('broker-token'),
+    unlinkBrokerIdentity: jest.fn(),
   } as unknown as KeycloakBrokerService;
 
   const membership = {
     resolveAndAuthorize: jest.fn().mockResolvedValue('ws-1'),
+    listActiveMemberships: jest.fn().mockResolvedValue([]),
   } as unknown as MembershipService;
 
   const tx = {
@@ -49,9 +52,20 @@ describe('ConnectedAccountsService', () => {
     agent: {
       findFirst: jest.fn().mockResolvedValue({ paused: false }),
     },
+    mailboxAccount: {
+      findMany: jest.fn().mockResolvedValue([]),
+      findFirst: jest.fn().mockResolvedValue(null),
+      update: jest.fn().mockImplementation(async ({ where, data }) => ({ id: where.id, ...data })),
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      delete: jest.fn(),
+      deleteMany: jest.fn(),
+    },
   } as any;
 
   const prisma = {
+    user: {
+      update: jest.fn().mockResolvedValue({ id: 'u1' }),
+    },
     withWorkspace: jest.fn(async (_ws: string, _uc: string | null, fn: any) => fn(tx)),
     cleanupBatch: {
       findFirst: jest.fn(async () => {
@@ -762,5 +776,195 @@ describe('ConnectedAccountsService', () => {
     );
     expect(plan.safe.map((r) => r.id)).toEqual(['m-1', 'm-2']);
     expect(plan.freesBytes).toBe(86984 + 2048); // real sizes, never null-coerced 0
+  });
+
+  describe('disconnectProvider', () => {
+    const caller = {
+      ...user,
+      kcRefreshTokenEnc: 'REMOVED-refresh-token',
+    } as typeof user;
+    const otherUser = {
+      ...user,
+      id: 'u2',
+      keycloakId: 'kc-other',
+      kcRefreshTokenEnc: 'other-user-secret-token',
+    } as typeof user;
+    const rows = [
+      {
+        id: 'mine',
+        workspaceId: 'ws-1',
+        provider: 'gmail',
+        ownerKind: 'HUMAN',
+        ownerKey: 'kc-sub-user',
+        active: true,
+        isDefault: true,
+      },
+      {
+        id: 'hosted',
+        workspaceId: 'ws-1',
+        provider: 'stalwart',
+        ownerKind: 'SHARED',
+        ownerKey: null,
+        active: true,
+        isDefault: false,
+      },
+      {
+        id: 'other-user',
+        workspaceId: 'ws-1',
+        provider: 'gmail',
+        ownerKind: 'HUMAN',
+        ownerKey: 'kc-other',
+        active: true,
+        isDefault: false,
+      },
+      {
+        id: 'mine-ms',
+        workspaceId: 'ws-1',
+        provider: 'microsoft',
+        ownerKind: 'HUMAN',
+        ownerKey: 'kc-sub-user',
+        active: true,
+        isDefault: false,
+      },
+      {
+        id: 'mine-ws2',
+        workspaceId: 'ws-2',
+        provider: 'gmail',
+        ownerKind: 'HUMAN',
+        ownerKey: 'u1',
+        active: true,
+        isDefault: false,
+      },
+    ];
+
+    function matches(row: (typeof rows)[number], where: any): boolean {
+      if (where.workspaceId && row.workspaceId !== where.workspaceId) return false;
+      if (where.provider && row.provider !== where.provider) return false;
+      if (where.ownerKind && row.ownerKind !== where.ownerKind) return false;
+      if (where.ownerKey?.in && !where.ownerKey.in.includes(row.ownerKey)) return false;
+      if (where.active === true && row.active !== true) return false;
+      if (where.id?.notIn?.includes(row.id)) return false;
+      return true;
+    }
+
+    beforeEach(() => {
+      (broker.unlinkBrokerIdentity as jest.Mock).mockResolvedValue({
+        ok: true,
+        alreadyAbsent: false,
+        remainingAliases: ['microsoft'],
+      });
+      (membership.listActiveMemberships as jest.Mock).mockResolvedValue([
+        { workspaceId: 'ws-1' },
+        { workspaceId: 'ws-2' },
+      ]);
+      (tx.mailboxAccount.findMany as jest.Mock).mockImplementation(async ({ where }) =>
+        rows.filter((row) => matches(row, where)),
+      );
+      (tx.mailboxAccount.findFirst as jest.Mock).mockImplementation(
+        async ({ where }) => rows.find((row) => matches(row, where)) ?? null,
+      );
+    });
+
+    it('unlinks only this user and provider, and deactivates without deleting', async () => {
+      const logs = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      const result = await service().disconnectProvider(caller, 'gmail');
+
+      expect(broker.unlinkBrokerIdentity).toHaveBeenCalledTimes(1);
+      expect(broker.unlinkBrokerIdentity).toHaveBeenCalledWith(caller, 'google');
+      expect(broker.unlinkBrokerIdentity).not.toHaveBeenCalledWith(otherUser, expect.anything());
+      expect(broker.unlinkBrokerIdentity).not.toHaveBeenCalledWith(caller, 'microsoft');
+
+      const wheres = (tx.mailboxAccount.findMany as jest.Mock).mock.calls.map(
+        (call) => call[0].where,
+      );
+      expect(wheres.map((where) => where.provider)).toEqual(['gmail', 'gmail']);
+      for (const where of wheres) {
+        expect(where.ownerKey.in).toEqual(expect.arrayContaining(['kc-sub-user', 'u1']));
+        expect(where.ownerKey.in).not.toContain('kc-other');
+        expect(where.ownerKind).toBe('HUMAN');
+      }
+
+      const updates = (tx.mailboxAccount.update as jest.Mock).mock.calls.map((call) => call[0]);
+      expect(updates).toEqual(
+        expect.arrayContaining([
+          { where: { id: 'hosted' }, data: { isDefault: true } },
+          { where: { id: 'mine' }, data: { active: false, isDefault: false } },
+          { where: { id: 'mine-ws2' }, data: { active: false } },
+        ]),
+      );
+      expect(updates.some((call) => call.where.id === 'other-user')).toBe(false);
+      expect(updates.some((call) => call.where.id === 'mine-ms')).toBe(false);
+      expect(tx.mailboxAccount.delete).not.toHaveBeenCalled();
+      expect(tx.mailboxAccount.deleteMany).not.toHaveBeenCalled();
+      expect(rows.find((row) => row.id === 'other-user')?.active).toBe(true);
+      expect(rows.find((row) => row.id === 'mine-ms')?.active).toBe(true);
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        provider: 'gmail',
+        status: 'disconnected',
+        broker: 'unlinked',
+        mailboxes_deactivated: 2,
+        refresh_token_cleared: false,
+      });
+      const leaked = JSON.stringify({
+        result,
+        logs: [...logs.mock.calls, ...warn.mock.calls],
+      });
+      expect(leaked).not.toContain('REMOVED-refresh-token');
+      expect(leaked).not.toContain('other-user-secret-token');
+      logs.mockRestore();
+      warn.mockRestore();
+    });
+
+    it('clears the stored refresh token only when no other provider link remains', async () => {
+      (broker.unlinkBrokerIdentity as jest.Mock).mockResolvedValue({
+        ok: true,
+        alreadyAbsent: false,
+        remainingAliases: [],
+      });
+
+      const result = await service().disconnectProvider(caller, 'gmail');
+
+      expect(result.refresh_token_cleared).toBe(true);
+      expect(prisma.user.update).toHaveBeenCalledTimes(1);
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'u1' },
+        data: { kcRefreshTokenEnc: null, kcRefreshUpdatedAt: expect.any(Date) },
+      });
+      expect(JSON.stringify((prisma.user.update as jest.Mock).mock.calls)).not.toContain(
+        'REMOVED-refresh-token',
+      );
+    });
+
+    it('changes nothing when the broker is down', async () => {
+      (broker.unlinkBrokerIdentity as jest.Mock).mockResolvedValue({
+        ok: false,
+        reason: 'broker_down',
+      });
+
+      await expect(service().disconnectProvider(caller, 'gmail')).rejects.toMatchObject({
+        response: expect.objectContaining({ code: 'broker_unavailable' }),
+      });
+      await expect(service().disconnectProvider(caller, 'gmail')).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      expect(prisma.withWorkspace).not.toHaveBeenCalled();
+      expect(tx.mailboxAccount.update).not.toHaveBeenCalled();
+      expect(tx.mailboxAccount.delete).not.toHaveBeenCalled();
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('does not clear the token when the mailbox update fails after unlink', async () => {
+      (tx.mailboxAccount.findMany as jest.Mock).mockRejectedValue(new Error('db down'));
+
+      await expect(service().disconnectProvider(caller, 'microsoft')).rejects.toBeInstanceOf(
+        BadGatewayException,
+      );
+      expect(broker.unlinkBrokerIdentity).toHaveBeenCalledWith(caller, 'microsoft');
+      expect(broker.unlinkBrokerIdentity).not.toHaveBeenCalledWith(caller, 'google');
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
   });
 });
