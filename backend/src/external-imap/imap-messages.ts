@@ -16,6 +16,12 @@ export function groupMessages(messages: FetchMessageObject[], validity: string) 
     let current = id;
     while (parents.has(current) && parents.get(current) !== current)
       current = parents.get(current)!;
+    let cursor = id;
+    while (parents.has(cursor) && parents.get(cursor) !== current) {
+      const next = parents.get(cursor)!;
+      parents.set(cursor, current);
+      cursor = next;
+    }
     return current;
   };
   for (const message of messages) {
@@ -34,14 +40,19 @@ export function groupMessages(messages: FetchMessageObject[], validity: string) 
   const components = new Map<string, string[]>();
   for (const id of parents.keys()) {
     const key = root(id);
-    components.set(key, [...(components.get(key) ?? []), id]);
+    const component = components.get(key) ?? [];
+    component.push(id);
+    components.set(key, component);
+  }
+  const threadIds = new Map<string, string>();
+  for (const [key, component] of components) {
+    const ancestors = component.filter((id) => !hasParent.has(id));
+    const canonical = (ancestors.length ? ancestors : component).slice().sort()[0];
+    threadIds.set(key, `imap-${validity}-${createHash('sha256').update(canonical).digest('hex')}`);
   }
   const groups = new Map<string, FetchMessageObject[]>();
   for (const message of messages) {
-    const component = components.get(root(ownId(message)))!;
-    const ancestors = component.filter((id) => !hasParent.has(id));
-    const canonical = (ancestors.length ? ancestors : component).slice().sort()[0];
-    const id = `imap-${validity}-${createHash('sha256').update(canonical).digest('hex')}`;
+    const id = threadIds.get(root(ownId(message)))!;
     const group = groups.get(id) ?? [];
     group.push(message);
     groups.set(id, group);
