@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { User } from '@prisma/client';
 import { encrypt } from '../connected-accounts/crypto';
@@ -87,7 +88,9 @@ describe('KeycloakBrokerService', () => {
 
   it('refreshes the KC token, re-stores rotated refresh tokens, and fetches the broker token', async () => {
     (global.fetch as jest.Mock)
-      .mockResolvedValueOnce(refreshResponse({ access_token: 'kc-access', refresh_token: 'rotated' }))
+      .mockResolvedValueOnce(
+        refreshResponse({ access_token: 'kc-access', refresh_token: 'rotated' }),
+      )
       .mockResolvedValueOnce(okTextResponse('provider-access-token'));
 
     const svc = makeService();
@@ -159,5 +162,143 @@ describe('KeycloakBrokerService', () => {
 
     const svc = makeService();
     await expect(svc.getProviderAccessToken(makeUser(), 'google')).resolves.toBeNull();
+  });
+
+  function statusResponse(status: number, body?: unknown) {
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+      text: async () => (body === undefined ? '' : JSON.stringify(body)),
+    };
+  }
+
+  function collectLogs() {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    return {
+      text: () => JSON.stringify([...warn.mock.calls, ...log.mock.calls]),
+      restore: () => {
+        warn.mockRestore();
+        log.mockRestore();
+      },
+    };
+  }
+
+  it('unlinks only the requested provider for the user whose token was refreshed', async () => {
+    const logs = collectLogs();
+    const userA = makeUser();
+    const userB = {
+      id: 'u2',
+      kcRefreshTokenEnc: encrypt({ refresh_token: 'other-user-refresh' }),
+    } as User;
+    (global.fetch as jest.Mock)
+      .mockResolvedValueOnce(
+        refreshResponse({ access_token: 'access-a', refresh_token: 'rotated-a' }),
+      )
+      .mockResolvedValueOnce(statusResponse(204))
+      .mockResolvedValueOnce(statusResponse(200, [{ providerAlias: 'microsoft', connected: true }]))
+      .mockResolvedValueOnce(
+        refreshResponse({ access_token: 'access-b', refresh_token: 'rotated-b' }),
+      )
+      .mockResolvedValueOnce(statusResponse(204))
+      .mockResolvedValueOnce(statusResponse(200, []));
+
+    const svc = makeService();
+    const first = await svc.unlinkBrokerIdentity(userA, 'google');
+    const second = await svc.unlinkBrokerIdentity(userB, 'microsoft');
+
+    expect(first).toEqual({
+      ok: true,
+      alreadyAbsent: false,
+      remainingAliases: ['microsoft'],
+    });
+    expect(second).toEqual({ ok: true, alreadyAbsent: false, remainingAliases: [] });
+    expect(JSON.stringify(first)).not.toMatch(/access-a|rotated-a|kc-refresh-token/);
+    expect(JSON.stringify(second)).not.toMatch(/access-b|rotated-b|other-user-refresh/);
+
+    const calls = (global.fetch as jest.Mock).mock.calls;
+    expect(String(calls[0][1].body)).toContain('refresh_token=kc-refresh-token');
+    expect(String(calls[0][1].body)).not.toContain('other-user-refresh');
+    expect(calls[1][0]).toBe(
+      'https://auth.example.test/realms/uchub/account/linked-accounts/google',
+    );
+    expect(calls[1][1]).toEqual(
+      expect.objectContaining({
+        method: 'DELETE',
+        headers: expect.objectContaining({ Authorization: 'Bearer access-a' }),
+      }),
+    );
+    expect(String(calls[3][1].body)).toContain('refresh_token=other-user-refresh');
+    expect(String(calls[3][1].body)).not.toContain('kc-refresh-token');
+    expect(calls[4][0]).toBe(
+      'https://auth.example.test/realms/uchub/account/linked-accounts/microsoft',
+    );
+    expect(calls[4][1].headers.Authorization).toBe('Bearer access-b');
+    expect(
+      calls
+        .slice(3)
+        .map((call) => String(call[0]))
+        .join('\n'),
+    ).not.toContain('google');
+    expect(authService.storeKcRefreshToken).toHaveBeenNthCalledWith(1, userA, 'rotated-a');
+    expect(authService.storeKcRefreshToken).toHaveBeenNthCalledWith(2, userB, 'rotated-b');
+    expect(logs.text()).not.toMatch(
+      /kc-refresh-token|other-user-refresh|access-a|access-b|rotated-a|rotated-b/,
+    );
+    logs.restore();
+  });
+
+  it('treats a broker outage as a typed failure and does not read another account', async () => {
+    const logs = collectLogs();
+    (global.fetch as jest.Mock)
+      .mockResolvedValueOnce(refreshResponse({ access_token: 'access-a' }))
+      .mockResolvedValueOnce(statusResponse(503));
+
+    const svc = makeService();
+    await expect(svc.unlinkBrokerIdentity(makeUser(), 'google')).resolves.toEqual({
+      ok: false,
+      reason: 'broker_down',
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(logs.text()).not.toMatch(/kc-refresh-token|access-a/);
+    logs.restore();
+  });
+
+  it('reports the link already gone only after the list confirms it is absent', async () => {
+    (global.fetch as jest.Mock)
+      .mockResolvedValueOnce(refreshResponse({ access_token: 'access-a' }))
+      .mockResolvedValueOnce(statusResponse(400))
+      .mockResolvedValueOnce(
+        statusResponse(200, [{ providerAlias: 'microsoft', connected: true }]),
+      );
+
+    const svc = makeService();
+    await expect(svc.unlinkBrokerIdentity(makeUser(), 'google')).resolves.toEqual({
+      ok: true,
+      alreadyAbsent: true,
+      remainingAliases: ['microsoft'],
+    });
+  });
+
+  it('keeps a refused unlink as rejected when the provider is still linked', async () => {
+    (global.fetch as jest.Mock)
+      .mockResolvedValueOnce(refreshResponse({ access_token: 'access-a' }))
+      .mockResolvedValueOnce(statusResponse(400))
+      .mockResolvedValueOnce(statusResponse(200, [{ providerAlias: 'google', connected: true }]));
+
+    const svc = makeService();
+    await expect(svc.unlinkBrokerIdentity(makeUser(), 'google')).resolves.toEqual({
+      ok: false,
+      reason: 'rejected',
+    });
+  });
+
+  it('does not call Keycloak when this user has no stored refresh token', async () => {
+    const svc = makeService();
+    await expect(
+      svc.unlinkBrokerIdentity({ id: 'u1', kcRefreshTokenEnc: null } as User, 'microsoft'),
+    ).resolves.toEqual({ ok: false, reason: 'no_session' });
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });
