@@ -1,4 +1,5 @@
 import { FetchMessageObject } from 'imapflow';
+import { laneForMailbox, routingTable } from '../mail-provider/mail-routing';
 import { bodyParts, groupMessages, references } from './imap-messages';
 
 function message(uid: number, id?: string, refs?: string, reply?: string): FetchMessageObject {
@@ -10,6 +11,11 @@ function message(uid: number, id?: string, refs?: string, reply?: string): Fetch
   };
 }
 describe('IMAP thread and MIME mapping', () => {
+  it('labels IMAP routing as read-only, including when the connector is disabled', () => {
+    const mailbox = { provider: 'external_imap', emailAddress: 'reader@example.com', active: true };
+    expect(laneForMailbox(mailbox)).toBe('read_only');
+    expect(routingTable([mailbox])[0].lane).toBe('read_only');
+  });
   it('merges references through missing parents and In-Reply-To, independent of fetch order', () => {
     const a = message(1, '<a@example.com>');
     const b = message(2, '<b@example.com>', '<a@example.com>\r\n <missing@example.com>');

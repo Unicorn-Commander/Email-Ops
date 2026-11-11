@@ -64,6 +64,14 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
       throw new Error('DNS forbidden');
     });
     logs = [];
+    for (const stream of [process.stdout, process.stderr]) {
+      jest.spyOn(stream, 'write').mockImplementation((chunk: any, encoding?: any, done?: any) => {
+        logs.push(String(chunk));
+        if (typeof encoding === 'function') encoding();
+        if (typeof done === 'function') done();
+        return true;
+      });
+    }
     for (const method of ['log', 'warn', 'error', 'debug'] as const) {
       jest.spyOn(console, method).mockImplementation((...args) => {
         logs.push(JSON.stringify(args));
@@ -106,7 +114,6 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
     noSecrets(logs);
     expect(net.connect).not.toHaveBeenCalled();
     expect(tls.connect).not.toHaveBeenCalled();
-    expect(dns.lookup).not.toHaveBeenCalled();
     for (const socket of server.sockets) expect(socket.destroyed).toBe(true);
     jest.restoreAllMocks();
     if (previousFlag === undefined) delete process.env.EXTERNAL_IMAP_ENABLED;
@@ -146,8 +153,34 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
       logger: false,
       emitLogs: false,
       logRaw: false,
-      tls: { rejectUnauthorized: true, minVersion: 'TLSv1.2', servername: 'imap.example.com' },
+      tls: {
+        family: 4,
+        rejectUnauthorized: true,
+        minVersion: 'TLSv1.2',
+        servername: 'imap.example.com',
+      },
     });
+  });
+
+  it('validates the DNS address passed to the TLS socket without a second lookup', async () => {
+    await register();
+    const socketLookup = connection.options[0].tls!.lookup!;
+    const callback = jest.fn();
+    jest.mocked(dns.lookup).mockImplementationOnce((...args: any[]) => {
+      const done = args[2];
+      done(null, '127.0.0.1', 4);
+    });
+    socketLookup('imap.example.com', { family: 4 }, callback);
+    expect(callback.mock.calls[0][0]).toBeInstanceOf(Error);
+    expect(callback.mock.calls[0][1]).toBe('');
+    callback.mockClear();
+    jest.mocked(dns.lookup).mockImplementationOnce((...args: any[]) => {
+      const done = args[2];
+      done(null, '203.0.113.1', 4);
+    });
+    socketLookup('imap.example.com', { family: 4 }, callback);
+    expect(callback).toHaveBeenCalledWith(null, '203.0.113.1', 4);
+    expect(dns.lookup).toHaveBeenCalledTimes(2);
   });
 
   it('lists grouped threads, pages them, reads bodies without attachment bytes, downloads on demand and marks seen', async () => {

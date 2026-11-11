@@ -34,7 +34,7 @@
  */
 
 /** The transport lane a message actually travels. */
-export type MailLane = 'graph' | 'gmail' | 'james';
+export type MailLane = 'graph' | 'gmail' | 'james' | 'read_only';
 
 /** The minimum shape routing needs from a MailboxAccount row. */
 export interface RoutableMailbox {
@@ -73,6 +73,8 @@ export function laneForMailbox(mailbox: Pick<RoutableMailbox, 'provider'>): Mail
       return 'graph';
     case 'gmail':
       return 'gmail';
+    case 'external_imap':
+      return 'read_only';
     default:
       return 'james';
   }
@@ -80,7 +82,7 @@ export function laneForMailbox(mailbox: Pick<RoutableMailbox, 'provider'>): Mail
 
 /** True when this lane is served by an external provider API (not James). */
 export function isExternalLane(lane: MailLane): boolean {
-  return lane === 'graph' || lane === 'gmail';
+  return lane === 'graph' || lane === 'gmail' || lane === 'read_only';
 }
 
 /**

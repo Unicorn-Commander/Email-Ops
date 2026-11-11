@@ -823,7 +823,7 @@ export default function MailPage() {
   const externalMailbox =
     !mail.unified &&
     !!mail.selectedMailbox &&
-    ['gmail', 'microsoft', 'external_imap'].includes(mail.selectedMailbox.provider);
+    ['gmail', 'microsoft', 'external_imap'].includes(mail.selectedMailbox.provider ?? '');
   // Sovereign mailboxes always search (JMAP full-text). An external mailbox
   // searches only when the BACKEND confirms the provider honoured `q` — the
   // provider lane can now really search Gmail, but we trust the server's

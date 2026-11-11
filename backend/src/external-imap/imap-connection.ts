@@ -34,7 +34,6 @@ for (const [address, prefix] of [
   blocked.addSubnet(address, prefix, 'ipv4');
 for (const [address, prefix] of [
   ['::', 96],
-  ['::ffff:0:0', 96],
   ['fc00::', 7],
   ['fe80::', 10],
   ['ff00::', 8],
@@ -74,24 +73,27 @@ export class ImapConnection {
     if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(host)) {
       throw new Error('Invalid IMAP host');
     }
+    const tlsOptions: NonNullable<ImapFlowOptions['tls']> & { family: 4 } = {
+      // Keep Node's socket lookup in single-address IPv4 mode.
+      family: 4,
+      rejectUnauthorized: true,
+      minVersion: 'TLSv1.2',
+      servername: host,
+      // Resolve and validate the exact address the TLS socket will connect to.
+      lookup: (hostname, _options, callback) => {
+        lookup(hostname, { family: 4 }, (error, address, family) => {
+          if (error || !publicAddress(address)) {
+            callback(error ?? new Error('Destination unavailable'), '', 4);
+          } else callback(null, address, family);
+        });
+      },
+    };
     const client = this.createClient({
       host,
       port: 993,
       secure: true,
       auth: { user: credentials.username, pass: credentials.password, loginMethod: 'LOGIN' },
-      tls: {
-        rejectUnauthorized: true,
-        minVersion: 'TLSv1.2',
-        servername: host,
-        // Resolve and validate the exact address the TLS socket will connect to.
-        lookup: (hostname, _options, callback) => {
-          lookup(hostname, { family: 4 }, (error, address, family) => {
-            if (error || !publicAddress(address)) {
-              callback(error ?? new Error('Destination unavailable'), '', 4);
-            } else callback(null, address, family);
-          });
-        },
-      },
+      tls: tlsOptions,
       logger: false,
       logRaw: false,
       emitLogs: false,
