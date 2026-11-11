@@ -7,10 +7,14 @@ The UI says: “Sending from this mailbox is not available yet.”
 
 ## Availability
 
-`EXTERNAL_IMAP_ENABLED` defaults to false. Only the exact value `true` enables it
-on the backend; no separate frontend build flag is required. When disabled, the
-empty-state Connect screen is unchanged, connection endpoints return 404, and
-IMAP reads and writes never connect. Previously registered IMAP rows remain in
+`EXTERNAL_IMAP_ENABLED` defaults to false. Availability requires the exact value
+`true` AND the workspace ID in `EXTERNAL_IMAP_WORKSPACE_IDS`, a comma-separated
+allowlist that defaults to empty. For a single pilot, set the allowlist to that
+workspace ID. Whitespace around IDs and empty entries are ignored; IDs match
+exactly. An empty allowlist enables nobody and logs one warning at startup when
+the global flag is true. No separate frontend build flag is required.
+For disabled or unlisted workspaces, the empty-state Connect screen is unchanged,
+connection endpoints return 404, and IMAP reads and writes never connect. Previously registered IMAP rows remain in
 the registry but cannot be read or sent through another provider as a fallback.
 
 The deployment owner must apply migration `20261110193000_external_imap` and

@@ -1,11 +1,21 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { lookup } from 'node:dns';
 import { BlockList, isIP } from 'node:net';
 import { ImapFlow, ImapFlowOptions } from 'imapflow';
 
-export const externalImapEnabled = () => process.env.EXTERNAL_IMAP_ENABLED === 'true';
-export function requireExternalImap() {
-  if (!externalImapEnabled()) throw new NotFoundException();
+const externalImapWorkspaceIds = () =>
+  new Set(
+    (process.env.EXTERNAL_IMAP_WORKSPACE_IDS ?? '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean),
+  );
+
+export const externalImapEnabled = (workspaceId: string) =>
+  process.env.EXTERNAL_IMAP_ENABLED === 'true' && externalImapWorkspaceIds().has(workspaceId);
+
+export function requireExternalImap(workspaceId: string) {
+  if (!externalImapEnabled(workspaceId)) throw new NotFoundException();
 }
 
 export type ConnectionStatus = 'ok' | 'auth_failed' | 'tls_failed' | 'unreachable';
@@ -55,17 +65,26 @@ export function connectionStatus(error: unknown): Exclude<ConnectionStatus, 'ok'
 }
 
 @Injectable()
-export class ImapConnection {
+export class ImapConnection implements OnModuleInit {
+  onModuleInit() {
+    if (process.env.EXTERNAL_IMAP_ENABLED === 'true' && externalImapWorkspaceIds().size === 0) {
+      new Logger(ImapConnection.name).warn(
+        'EXTERNAL_IMAP_ENABLED is true but EXTERNAL_IMAP_WORKSPACE_IDS is empty; external IMAP is disabled for every workspace.',
+      );
+    }
+  }
+
   // Overridden only by the in-memory protocol fixture, never by API input.
   protected createClient(options: ImapFlowOptions): ImapFlow {
     return new ImapFlow(options);
   }
 
   async run<T>(
+    workspaceId: string,
     credentials: ImapCredentials,
     operation: (client: ImapFlow) => Promise<T>,
   ): Promise<T> {
-    requireExternalImap();
+    requireExternalImap(workspaceId);
     if (credentials.port !== 993 || credentials.security !== 'tls') {
       throw Object.assign(new Error('TLS required'), { tlsFailed: true });
     }
@@ -129,10 +148,13 @@ export class ImapConnection {
     }
   }
 
-  async test(credentials: ImapCredentials): Promise<{ status: ConnectionStatus }> {
-    requireExternalImap();
+  async test(
+    workspaceId: string,
+    credentials: ImapCredentials,
+  ): Promise<{ status: ConnectionStatus }> {
+    requireExternalImap(workspaceId);
     try {
-      await this.run(credentials, async () => undefined);
+      await this.run(workspaceId, credentials, async () => undefined);
       return { status: 'ok' };
     } catch (error) {
       return { status: connectionStatus(error) };

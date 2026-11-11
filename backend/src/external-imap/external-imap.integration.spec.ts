@@ -32,6 +32,7 @@ class TestConnection extends ImapConnection {
 }
 
 describe('external IMAP protocol integration (no sockets or database)', () => {
+  const previousWorkspaceIds = process.env.EXTERNAL_IMAP_WORKSPACE_IDS;
   const previousFlag = process.env.EXTERNAL_IMAP_ENABLED;
   const previousKey = process.env.CONNECTED_ACCOUNT_ENC_KEY;
   let server: FakeImapServer;
@@ -52,6 +53,7 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
 
   beforeEach(() => {
     process.env.EXTERNAL_IMAP_ENABLED = 'true';
+    process.env.EXTERNAL_IMAP_WORKSPACE_IDS = 'workspace-one';
     process.env.CONNECTED_ACCOUNT_ENC_KEY = Buffer.alloc(32, 7).toString('base64');
     // Any accidental real transport is a test failure, not a network call.
     jest.spyOn(net, 'connect').mockImplementation(() => {
@@ -116,6 +118,8 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
     expect(tls.connect).not.toHaveBeenCalled();
     for (const socket of server.sockets) expect(socket.destroyed).toBe(true);
     jest.restoreAllMocks();
+    if (previousWorkspaceIds === undefined) delete process.env.EXTERNAL_IMAP_WORKSPACE_IDS;
+    else process.env.EXTERNAL_IMAP_WORKSPACE_IDS = previousWorkspaceIds;
     if (previousFlag === undefined) delete process.env.EXTERNAL_IMAP_ENABLED;
     else process.env.EXTERNAL_IMAP_ENABLED = previousFlag;
     if (previousKey === undefined) delete process.env.CONNECTED_ACCOUNT_ENC_KEY;
@@ -243,7 +247,7 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
     'maps %s to tls_failed',
     async (code) => {
       server.failureCode = code;
-      const result = await connection.test(credentials);
+      const result = await connection.test('workspace-one', credentials);
       expect(result).toEqual({ status: 'tls_failed' });
       noSecrets(result);
     },
@@ -251,22 +255,48 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
 
   it('maps unreachable and SELECT refusal to a sanitized result', async () => {
     server.failureCode = 'ECONNREFUSED';
-    expect(await connection.test(credentials)).toEqual({ status: 'unreachable' });
+    expect(await connection.test('workspace-one', credentials)).toEqual({ status: 'unreachable' });
     server.failureCode = null;
     server.refuseInbox = true;
-    expect(await connection.test(credentials)).toEqual({ status: 'unreachable' });
+    expect(await connection.test('workspace-one', credentials)).toEqual({ status: 'unreachable' });
   });
 
   it('bounds a silent server and closes the request session', async () => {
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
     try {
       server.silent = true;
-      const pending = connection.test(credentials);
+      const pending = connection.test('workspace-one', credentials);
       await jest.advanceTimersByTimeAsync(20001);
       expect(await pending).toEqual({ status: 'unreachable' });
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('enables only the listed workspace for capabilities and connection routes', async () => {
+    process.env.EXTERNAL_IMAP_WORKSPACE_IDS = ' workspace-two, , workspace-one, workspace-one ';
+    const controller = new ExternalImapController(accounts, connection);
+    expect(controller.capabilities('workspace-one')).toEqual({ enabled: true });
+    expect(controller.capabilities('workspace-three')).toEqual({ enabled: false });
+    const input = { ...credentials, email_address: 'reader@example.com' };
+    expect(await controller.test('workspace-one', user, input)).toEqual({ status: 'ok' });
+    expect(await controller.connect('workspace-one', user, input)).toEqual({
+      status: 'ok',
+      mailbox_id: mailbox.id,
+    });
+    const count = server.connections.length;
+    prisma.withWorkspace.mockClear();
+    expect(
+      await provider.listInbox(
+        { ...mailbox, workspaceId: 'workspace-three' },
+        {
+          folder: 'inbox',
+          limit: 10,
+        },
+      ),
+    ).toMatchObject({ status: 'engine_not_configured', threads: [] });
+    expect(prisma.withWorkspace).not.toHaveBeenCalled();
+    expect(server.connections).toHaveLength(count);
   });
 
   it('requires a human session for connection management', () => {
@@ -283,18 +313,34 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
   it.each([{ port: 143 }, { port: 587 }, { security: 'plaintext' }, { security: 'starttls' }])(
     'refuses insecure options before connecting',
     async (override) => {
-      const result = await connection.test({ ...credentials, ...override } as typeof credentials);
+      const result = await connection.test('workspace-one', {
+        ...credentials,
+        ...override,
+      } as typeof credentials);
       expect(result).toEqual({ status: 'tls_failed' });
       expect(server.connections).toHaveLength(0);
     },
   );
 
-  it('disabled flag hides the capability, blocks registration and does not connect or fall back to another send lane', async () => {
+  it.each([
+    [undefined, 'workspace-one'],
+    ['false', 'workspace-one'],
+    ['true', 'workspace-two'],
+    ['true', ''],
+    ['true', undefined],
+    ['true', ' , , '],
+  ])('refuses every IMAP entry point with flag %s and allowlist %s', async (flag, ids) => {
     const controller = new ExternalImapController(accounts, connection);
-    delete process.env.EXTERNAL_IMAP_ENABLED;
-    expect(controller.capabilities()).toEqual({ enabled: false });
+    if (flag === undefined) delete process.env.EXTERNAL_IMAP_ENABLED;
+    else process.env.EXTERNAL_IMAP_ENABLED = flag;
+    if (ids === undefined) delete process.env.EXTERNAL_IMAP_WORKSPACE_IDS;
+    else process.env.EXTERNAL_IMAP_WORKSPACE_IDS = ids;
+    expect(controller.capabilities('workspace-one')).toEqual({ enabled: false });
     expect(() =>
-      controller.test(user, { ...credentials, email_address: 'reader@example.com' }),
+      controller.test('workspace-one', user, {
+        ...credentials,
+        email_address: 'reader@example.com',
+      }),
     ).toThrow(NotFoundException);
     await expect(
       accounts.connect('workspace-one', user, {
@@ -302,6 +348,26 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
         email_address: 'reader@example.com',
       }),
     ).rejects.toThrow(NotFoundException);
+    expect(() =>
+      controller.connect('workspace-one', user, {
+        ...credentials,
+        email_address: 'reader@example.com',
+      }),
+    ).toThrow(NotFoundException);
+    await expect(accounts.credentials(mailbox)).rejects.toThrow(NotFoundException);
+    await expect(connection.test('workspace-one', credentials)).rejects.toThrow(NotFoundException);
+    const operation = jest.fn();
+    await expect(connection.run('workspace-one', credentials, operation)).rejects.toThrow(
+      NotFoundException,
+    );
+    expect(operation).not.toHaveBeenCalled();
+    expect(await provider.listThreadMessages(mailbox, 'imap-42-1')).toEqual({
+      messages: [],
+      status: 'engine_not_configured',
+    });
+    expect(await provider.getInboxCounts(mailbox)).toBeNull();
+    expect(await provider.downloadAttachment(mailbox, 'imap-42-1', '2')).toBeNull();
+    expect(await provider.setThreadRead(mailbox, 'imap-42-1', true)).toBe(false);
     const engine = {
       handles: jest.fn(() => true),
       send: jest.fn(),

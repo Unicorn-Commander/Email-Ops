@@ -44,11 +44,15 @@ export class ExternalImapProvider extends MailProviderPort {
   }
 
   private async run<T>(mailbox: MailboxAccount, operation: (client: ImapFlow) => Promise<T>) {
-    return this.connection.run(await this.accounts.credentials(mailbox), operation);
+    return this.connection.run(
+      mailbox.workspaceId,
+      await this.accounts.credentials(mailbox),
+      operation,
+    );
   }
 
-  private status(error: unknown): MailReadStatus {
-    if (!externalImapEnabled()) return 'engine_not_configured';
+  private status(workspaceId: string, error: unknown): MailReadStatus {
+    if (!externalImapEnabled(workspaceId)) return 'engine_not_configured';
     const status = connectionStatus(error);
     return status === 'auth_failed'
       ? 'provider_auth_failed'
@@ -87,7 +91,8 @@ export class ExternalImapProvider extends MailProviderPort {
       reason: null,
       status: 'ok',
     };
-    if (!externalImapEnabled()) return { ...empty, status: 'engine_not_configured' };
+    if (!externalImapEnabled(mailbox.workspaceId))
+      return { ...empty, status: 'engine_not_configured' };
     if (opts.folder !== 'inbox' || opts.query?.trim())
       return { ...empty, reason: 'Only INBOX browsing is available for IMAP in phase 1.' };
     try {
@@ -141,7 +146,11 @@ export class ExternalImapProvider extends MailProviderPort {
         };
       });
     } catch (error) {
-      return { ...empty, status: this.status(error), reason: 'IMAP inbox is unavailable.' };
+      return {
+        ...empty,
+        status: this.status(mailbox.workspaceId, error),
+        reason: 'IMAP inbox is unavailable.',
+      };
     }
   }
 
@@ -217,7 +226,7 @@ export class ExternalImapProvider extends MailProviderPort {
         return { messages, status: 'ok' };
       });
     } catch (error) {
-      return { messages: [], status: this.status(error) };
+      return { messages: [], status: this.status(mailbox.workspaceId, error) };
     }
   }
 
