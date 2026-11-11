@@ -52,6 +52,13 @@ describe('ConnectedAccountsController', () => {
       provider: 'microsoft',
       analysis: { categories: [] },
     }),
+    disconnectProvider: jest.fn().mockResolvedValue({
+      provider: 'gmail',
+      status: 'disconnected',
+      broker: 'unlinked',
+      mailboxes_deactivated: 1,
+      refresh_token_cleared: false,
+    }),
   } as unknown as jest.Mocked<ConnectedAccountsService>;
 
   const savedEnv = process.env.UC_ENTITLEMENT_MODE;
@@ -111,6 +118,41 @@ describe('ConnectedAccountsController', () => {
     });
 
     expect(connectedAccounts.analyzeInbox).toHaveBeenCalledWith(user, 'microsoft');
+  });
+
+  it("disconnects the requested provider after resolving this user's workspace", async () => {
+    const user = userWith([]);
+    await expect(controller().disconnect(user, 'gmail')).resolves.toEqual({
+      provider: 'gmail',
+      status: 'disconnected',
+      broker: 'unlinked',
+      mailboxes_deactivated: 1,
+      refresh_token_cleared: false,
+    });
+
+    expect(membership.resolveAndAuthorize).toHaveBeenCalledWith(user, null);
+    expect(connectedAccounts.disconnectProvider).toHaveBeenCalledWith(user, 'gmail');
+    const body = JSON.stringify(await controller().disconnect(user, 'gmail'));
+    expect(body).not.toContain('kc-refresh');
+    expect(body).not.toContain('secret');
+  });
+
+  it('refuses a PAT-authenticated caller before unlinking a mailbox', async () => {
+    const user = { ...userWith([]), __patAuth: {} } as User;
+    const refusal = controller().disconnect(user, 'gmail');
+
+    await expect(refusal).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(refusal).rejects.toThrow('Disconnect your mailbox from your signed-in session.');
+    expect(membership.resolveAndAuthorize).not.toHaveBeenCalled();
+    expect(connectedAccounts.disconnectProvider).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown provider before disconnect changes anything', async () => {
+    const user = userWith(['email-ops']);
+    await expect(controller().disconnect(user, 'imap')).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(membership.resolveAndAuthorize).not.toHaveBeenCalled();
+    expect(connectedAccounts.disconnectProvider).not.toHaveBeenCalled();
   });
 
   it('rejects unknown providers before resolving workspace membership', async () => {

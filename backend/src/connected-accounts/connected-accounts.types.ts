@@ -169,6 +169,15 @@ export interface ConnectedAccountsListResult {
   accounts: LinkedAccountView[];
 }
 
+/** In-app disconnect. Never includes a token, secret, or mailbox credential. */
+export interface DisconnectProviderResult {
+  provider: ConnectedProvider;
+  status: 'disconnected';
+  broker: 'unlinked' | 'already_absent';
+  mailboxes_deactivated: number;
+  refresh_token_cleared: boolean;
+}
+
 export interface ProviderUnavailableResult {
   available: false;
   provider: ConnectedProvider;
@@ -236,11 +245,7 @@ export interface EngineMailThreadsResult {
 }
 
 /** Per-sender result of an RFC 2369 / RFC 8058 unsubscribe attempt. */
-export type UnsubscribeSenderStatus =
-  | 'unsubscribed'
-  | 'link_returned'
-  | 'unavailable'
-  | 'failed';
+export type UnsubscribeSenderStatus = 'unsubscribed' | 'link_returned' | 'unavailable' | 'failed';
 
 export interface EngineUnsubscribeSenderResult {
   sender: string;

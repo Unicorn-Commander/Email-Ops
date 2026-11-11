@@ -13,6 +13,7 @@ import {
   AgentInboxState,
   CleanupActionKind,
   CleanupBatchState,
+  MailboxOwnerKind,
   User,
 } from '@prisma/client';
 import { randomUUID } from 'crypto';
@@ -31,6 +32,7 @@ import {
   CleanupExecutionBackupRef,
   CleanupExecutionResult,
   CleanupMode,
+  DisconnectProviderResult,
   CleanupPlanMessageView,
   CleanupPlanResult,
   CleanupWriteMode,
@@ -159,6 +161,76 @@ export class ConnectedAccountsService {
       );
     }
     return { url };
+  }
+
+  /**
+   * Unlink one provider for this user, then mark that user's mailbox records
+   * inactive. History stays. A broker failure returns before any local write.
+   * The stored Keycloak refresh token is shared with the other provider, so
+   * it is cleared only when the broker reports that other link is gone.
+   */
+  async disconnectProvider(
+    user: User,
+    provider: ConnectedProvider,
+  ): Promise<DisconnectProviderResult> {
+    if (this.ownerKeysOf(user).length === 0) {
+      throw new BadRequestException({
+        code: 'owner_unknown',
+        message: 'This account has no identity to match a mailbox. Nothing was changed.',
+      });
+    }
+
+    const unlinked = await this.broker.unlinkBrokerIdentity(user, this.aliasFor(provider));
+    if (!unlinked.ok) {
+      throw this.disconnectFailure(unlinked.reason, provider);
+    }
+
+    let mailboxesDeactivated = 0;
+    try {
+      mailboxesDeactivated = await this.deactivateOwnedMailboxes(user, provider);
+    } catch (err) {
+      this.logger.warn(
+        `Mailbox deactivate failed after ${provider} unlink for user ${user.id}: ${(err as Error).name}`,
+      );
+      throw new BadGatewayException({
+        code: 'mailbox_update_failed',
+        message:
+          'The provider link was removed, but the mailbox record could not be marked inactive. Try again.',
+      });
+    }
+
+    const other: ConnectedProvider = provider === 'gmail' ? 'microsoft' : 'gmail';
+    const remaining = unlinked.remainingAliases;
+    const refreshTokenCleared =
+      Array.isArray(remaining) && !remaining.includes(this.aliasFor(other));
+    if (refreshTokenCleared) {
+      try {
+        await this.prisma.user.update({
+          where: { id: user.id },
+          data: { kcRefreshTokenEnc: null, kcRefreshUpdatedAt: new Date() },
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Refresh token clear failed after ${provider} unlink for user ${user.id}: ${(err as Error).name}`,
+        );
+        throw new BadGatewayException({
+          code: 'refresh_token_clear_failed',
+          message:
+            'The provider link was removed and the mailbox was marked inactive, but the saved refresh token could not be cleared. Try again.',
+        });
+      }
+    }
+
+    this.logger.log(
+      `Disconnected ${provider} for user ${user.id}: mailboxes=${mailboxesDeactivated} refreshTokenCleared=${refreshTokenCleared}`,
+    );
+    return {
+      provider,
+      status: 'disconnected',
+      broker: unlinked.alreadyAbsent ? 'already_absent' : 'unlinked',
+      mailboxes_deactivated: mailboxesDeactivated,
+      refresh_token_cleared: refreshTokenCleared,
+    };
   }
 
   async getInboxStats(
@@ -1726,6 +1798,102 @@ export class ConnectedAccountsService {
 
   private aliasFor(provider: ConnectedProvider): IdpAlias {
     return provider === 'gmail' ? 'google' : 'microsoft';
+  }
+
+  private ownerKeysOf(user: User): string[] {
+    const keys = [user.keycloakId, user.id].filter(
+      (key): key is string => typeof key === 'string' && key.trim().length > 0,
+    );
+    return [...new Set(keys.map((key) => key.trim()))];
+  }
+
+  private async workspaceIdsFor(user: User): Promise<string[]> {
+    const resolved = await this.membership.resolveAndAuthorize(user, null);
+    const ids = [resolved];
+    const listed = await this.membership.listActiveMemberships(user);
+    for (const membership of listed) {
+      if (membership.workspaceId && !ids.includes(membership.workspaceId)) {
+        ids.push(membership.workspaceId);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Mark this user's external mailbox rows inactive. Rows are matched by
+   * owner key, so another user's link in the same workspace is not updated
+   * and nothing is deleted.
+   */
+  private async deactivateOwnedMailboxes(user: User, provider: ConnectedProvider): Promise<number> {
+    const ownerKeys = this.ownerKeysOf(user);
+    const workspaceIds = await this.workspaceIdsFor(user);
+    const ucUid = ucUidOf(user);
+    let deactivated = 0;
+    for (const workspaceId of workspaceIds) {
+      deactivated += await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
+        const owned = await tx.mailboxAccount.findMany({
+          where: {
+            workspaceId,
+            provider,
+            ownerKind: MailboxOwnerKind.HUMAN,
+            ownerKey: { in: ownerKeys },
+          },
+          select: { id: true, active: true, isDefault: true },
+        });
+        const ownedIds = owned.map((row) => row.id);
+        let count = 0;
+        for (const row of owned) {
+          if (!row.active) continue;
+          if (row.isDefault) {
+            const replacement = await tx.mailboxAccount.findFirst({
+              where: { workspaceId, active: true, id: { notIn: ownedIds } },
+              orderBy: { createdAt: 'asc' },
+              select: { id: true },
+            });
+            if (replacement) {
+              await tx.mailboxAccount.updateMany({
+                where: { workspaceId, isDefault: true },
+                data: { isDefault: false },
+              });
+              await tx.mailboxAccount.update({
+                where: { id: replacement.id },
+                data: { isDefault: true },
+              });
+            }
+          }
+          await tx.mailboxAccount.update({
+            where: { id: row.id },
+            data: row.isDefault ? { active: false, isDefault: false } : { active: false },
+          });
+          count += 1;
+        }
+        return count;
+      });
+    }
+    return deactivated;
+  }
+
+  private disconnectFailure(
+    reason: 'no_session' | 'broker_down' | 'rejected',
+    provider: ConnectedProvider,
+  ): BadRequestException | ForbiddenException | BadGatewayException | ServiceUnavailableException {
+    if (reason === 'no_session') {
+      return new ForbiddenException({
+        code: 'sso_session_expired',
+        message:
+          'Your sign-in session expired. Sign out and back in, then try Disconnect again. Nothing was changed.',
+      });
+    }
+    if (reason === 'broker_down') {
+      return new ServiceUnavailableException({
+        code: 'broker_unavailable',
+        message: 'The identity broker is unavailable. Nothing was changed. Try again.',
+      });
+    }
+    return new BadGatewayException({
+      code: 'broker_rejected',
+      message: `The identity broker refused to unlink ${provider}. Nothing was changed.`,
+    });
   }
 
   private async safeBrokerToken(user: User, provider: ConnectedProvider): Promise<string | null> {

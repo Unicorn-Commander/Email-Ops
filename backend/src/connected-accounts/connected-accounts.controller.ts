@@ -9,14 +9,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import {
-  IsArray,
-  IsBoolean,
-  IsIn,
-  IsObject,
-  IsOptional,
-  IsString,
-} from 'class-validator';
+import { IsArray, IsBoolean, IsIn, IsObject, IsOptional, IsString } from 'class-validator';
 import { User } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -119,6 +112,24 @@ export class ConnectedAccountsController {
     const provider = this.provider(providerParam);
     await this.resolveWorkspace(user);
     return this.connectedAccounts.getProviderLinkUrl(user, provider);
+  }
+
+  @Post(':provider/disconnect')
+  @ApiOperation({
+    summary:
+      "Unlink this provider for the signed-in user and mark that user's mailbox record inactive.",
+  })
+  @ApiResponse({ status: 200, description: 'Broker link removed. No token values.' })
+  @ApiResponse({
+    status: 403,
+    description: 'A personal access token cannot disconnect a mailbox.',
+  })
+  @ApiResponse({ status: 503, description: 'Broker unavailable. Nothing was changed.' })
+  async disconnect(@CurrentUser() user: User, @Param('provider') providerParam: string) {
+    this.assertHuman(user);
+    const provider = this.provider(providerParam);
+    await this.resolveWorkspace(user);
+    return this.connectedAccounts.disconnectProvider(user, provider);
   }
 
   @Get(':provider/stats')
@@ -294,5 +305,12 @@ export class ConnectedAccountsController {
   private provider(value: string): ConnectedProvider {
     if (value === 'gmail' || value === 'microsoft') return value;
     throw new BadRequestException('provider must be one of: gmail, microsoft');
+  }
+
+  /** Agent seats authenticate with a human's PAT. Unlink stays on the signed-in session. */
+  private assertHuman(user: User & { __patAuth?: unknown }) {
+    if (user.__patAuth) {
+      throw new ForbiddenException('Disconnect your mailbox from your signed-in session.');
+    }
   }
 }
