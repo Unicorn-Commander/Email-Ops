@@ -1,3 +1,4 @@
+import { SmtpConnection } from './smtp-connection';
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { WorkspaceModule } from '../common/workspace/workspace.module';
@@ -9,7 +10,7 @@ import { ImapConnection } from './imap-connection';
 @Module({
   imports: [AuthModule, WorkspaceModule],
   controllers: [ExternalImapController],
-  providers: [ExternalImapAccounts, ExternalImapProvider, ImapConnection],
+  providers: [ExternalImapAccounts, ExternalImapProvider, ImapConnection, SmtpConnection],
   exports: [ExternalImapProvider],
 })
 export class ExternalImapModule {}

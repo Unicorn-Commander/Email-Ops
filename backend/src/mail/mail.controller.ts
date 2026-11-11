@@ -1,3 +1,4 @@
+import { isHumanMailSession } from '../external-imap/smtp-connection';
 /**
  * The human email-client BFF (read your inboxes + compose), distinct from the
  * agent-inbox approval surface.
@@ -721,6 +722,11 @@ export class MailController {
       inReplyToMessageId: body.in_reply_to ?? null,
       references: body.references?.length ? body.references : undefined,
     };
-    return this.email.composeEmail(workspaceId, ucUidOf(user as WithWorkspaceClaim), input);
+    return this.email.composeEmail(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      input,
+      isHumanMailSession(user),
+    );
   }
 }

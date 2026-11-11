@@ -64,6 +64,29 @@ export function connectionStatus(error: unknown): Exclude<ConnectionStatus, 'ok'
   return 'unreachable';
 }
 
+export function publicTlsOptions(hostname: string) {
+  const host = hostname.toLowerCase();
+  if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(host)) {
+    throw new Error('Invalid IMAP host');
+  }
+  const tlsOptions: NonNullable<ImapFlowOptions['tls']> & { family: 4 } = {
+    // Keep Node's socket lookup in single-address IPv4 mode.
+    family: 4,
+    rejectUnauthorized: true,
+    minVersion: 'TLSv1.2',
+    servername: host,
+    // Resolve and validate the exact address the TLS socket will connect to.
+    lookup: (hostname, _options, callback) => {
+      lookup(hostname, { family: 4 }, (error, address, family) => {
+        if (error || !publicAddress(address)) {
+          callback(error ?? new Error('Destination unavailable'), '', 4);
+        } else callback(null, address, family);
+      });
+    },
+  };
+  return tlsOptions;
+}
+
 @Injectable()
 export class ImapConnection implements OnModuleInit {
   onModuleInit() {
@@ -89,24 +112,7 @@ export class ImapConnection implements OnModuleInit {
       throw Object.assign(new Error('TLS required'), { tlsFailed: true });
     }
     const host = credentials.host.toLowerCase();
-    if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(host)) {
-      throw new Error('Invalid IMAP host');
-    }
-    const tlsOptions: NonNullable<ImapFlowOptions['tls']> & { family: 4 } = {
-      // Keep Node's socket lookup in single-address IPv4 mode.
-      family: 4,
-      rejectUnauthorized: true,
-      minVersion: 'TLSv1.2',
-      servername: host,
-      // Resolve and validate the exact address the TLS socket will connect to.
-      lookup: (hostname, _options, callback) => {
-        lookup(hostname, { family: 4 }, (error, address, family) => {
-          if (error || !publicAddress(address)) {
-            callback(error ?? new Error('Destination unavailable'), '', 4);
-          } else callback(null, address, family);
-        });
-      },
-    };
+    const tlsOptions = publicTlsOptions(host);
     const client = this.createClient({
       host,
       port: 993,

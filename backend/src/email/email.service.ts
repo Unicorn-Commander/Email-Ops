@@ -63,6 +63,7 @@ import {
 import { ConnectedAccountsService } from '../connected-accounts/connected-accounts.service';
 import { MAX_TARGET_ROWS } from '../connected-accounts/cleanup-targets';
 import { isAgentOrigin } from '../common/agent-origin';
+import { externalImapSendEnabled } from '../external-imap/smtp-connection';
 import {
   approvalFeedback,
   approvalAuditDetail,
@@ -196,6 +197,8 @@ const AGENT_SEND_KIT_REASON_MESSAGES: Record<string, string> = {
  * (engine-agnostic; callEngine dispatches Stalwart vs the external provider).
  */
 interface SendReq {
+  /** Internal route authorization, never copied from compose input. */
+  sendAuthorization?: 'human' | 'approval';
   fromAddress: string;
   fromName: string | null;
   toAddress: string;
@@ -2035,6 +2038,7 @@ export class EmailService {
     workspaceId: string,
     ucUid: string | null,
     input: ComposeInput,
+    humanSend = false,
   ): Promise<MessageComposeView> {
     input = {
       ...input,
@@ -2263,7 +2267,13 @@ export class EmailService {
           ...(agentInitiated ? (input.policyReasons ?? []) : []),
           ...decision.reasons,
         ];
-        const mode = decision.mode === 'draft' ? EmailMode.DRAFT : EmailMode.SEND;
+        // External IMAP never acquires an autonomous lane from the general autonomy dial.
+        const imapNeedsApproval =
+          mailbox?.provider === 'external_imap' &&
+          externalImapSendEnabled(workspaceId) &&
+          !humanSend;
+        const mode =
+          decision.mode === 'draft' || imapNeedsApproval ? EmailMode.DRAFT : EmailMode.SEND;
         if (decision.coerced) {
           this.logger.log(
             `compose_email autonomy gate: agent '${agentKey}' send→draft (${decision.reason}) — staged for approval (workspace ${workspaceId})`,
@@ -2557,6 +2567,8 @@ export class EmailService {
     // PHASE 2 — the external send, OUTSIDE any transaction. callEngine is
     // degrade-clean (a rejected/failed send returns accepted:false, never throws),
     // so a slow or dead provider can't roll back the committed QUEUED row.
+    if (prep.send.mailbox?.provider === 'external_imap' && humanSend)
+      prep.send.req.sendAuthorization = 'human';
     const result = await this.callEngine(prep.send.mailbox, prep.send.req);
 
     if (result.accepted && input.draftId && prep.send.mailbox) {
@@ -4366,6 +4378,8 @@ export class EmailService {
 
     // PHASE 2 — hand the approved draft to the mail engine / provider, OUTSIDE the
     // tx (degrade-clean: a failed send returns accepted:false, never throws).
+    if (prep.mailbox?.provider === 'external_imap' && !agentPrincipal && ucUid)
+      prep.req.sendAuthorization = 'approval';
     const result = await this.callEngine(prep.mailbox, prep.req);
 
     // Wave 7 learning (default ON): the approval vouches for the external
@@ -6122,7 +6136,7 @@ export class EmailService {
     workspaceId: string,
     ucUid: string | null,
   ): Promise<{ messageIdHeader: string | null; references: string[] | null } | null> {
-    if (!mailbox) return null;
+    if (!mailbox || mailbox.provider === 'external_imap') return null;
     const direct = await this.stalwart.getMessageHeaders(mailbox.emailAddress, internalId);
     if (direct) return direct;
     const row = await this.prisma.withWorkspace(workspaceId, ucUid, (tx) =>
@@ -6176,6 +6190,9 @@ export class EmailService {
       });
       const toList = req.toAddresses?.length ? req.toAddresses : [req.toAddress];
       const r = await this.mailProvider.send(mailbox, {
+        ...(mailbox.provider === 'external_imap' && req.sendAuthorization
+          ? { sendAuthorization: req.sendAuthorization }
+          : {}),
         from: req.fromAddress,
         to: toList[0],
         toAddresses: toList,

@@ -1,3 +1,4 @@
+import { externalImapSendEnabled, isHumanMailSession } from '../external-imap/smtp-connection';
 /**
  * Tool implementations for the Email-Ops MCP server.
  *
@@ -899,13 +900,14 @@ export class EmailOpsTools {
       trust_recipients?: boolean;
     },
   ): Promise<unknown> {
-    if (
-      args.body !== undefined &&
-      (!!(user as any).__isFederationActor || !!(user as any).__patAuth)
-    ) {
+    const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    const agentPrincipal =
+      !!(user as any).__isFederationActor ||
+      !!(user as any).__patAuth ||
+      (externalImapSendEnabled(workspaceId) && !isHumanMailSession(user));
+    if (args.body !== undefined && agentPrincipal) {
       return { ok: false, reason: 'only a human approver can edit the body' };
     }
-    const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
     const { role } = await this.membership.resolveWithRole(user, args.workspace_id);
     // Gate BY KIND (mirrors the REST approve): peek first so a missing/foreign
     // id reads as not-found before any entitlement verdict. Approving an EMAIL
@@ -935,7 +937,7 @@ export class EmailOpsTools {
             args.item_id,
             args.note ?? null,
             args.trust_recipients,
-            !!(user as any).__isFederationActor || !!(user as any).__patAuth,
+            agentPrincipal,
             role,
           )
         : args.body === undefined
@@ -945,7 +947,7 @@ export class EmailOpsTools {
               args.item_id,
               args.note ?? null,
               args.trust_recipients,
-              !!(user as any).__isFederationActor || !!(user as any).__patAuth,
+              agentPrincipal,
               role,
               args.factual_correction,
             )
@@ -955,7 +957,7 @@ export class EmailOpsTools {
               args.item_id,
               args.note ?? null,
               args.trust_recipients,
-              !!(user as any).__isFederationActor || !!(user as any).__patAuth,
+              agentPrincipal,
               role,
               args.factual_correction,
               args.body,
@@ -978,6 +980,10 @@ export class EmailOpsTools {
       throw new BadRequestException('item_ids must contain between 1 and 200 items.');
     }
     const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    const agentPrincipal =
+      !!(user as any).__isFederationActor ||
+      !!(user as any).__patAuth ||
+      (externalImapSendEnabled(workspaceId) && !isHumanMailSession(user));
     const { role } = await this.membership.resolveWithRole(user, args.workspace_id);
     const uid = ucUidOf(user as WithWorkspaceClaim);
     const kinds = await Promise.all(
@@ -1000,7 +1006,7 @@ export class EmailOpsTools {
       args.item_ids,
       args.note ?? null,
       args.trust_recipients,
-      !!(user as any).__isFederationActor || !!(user as any).__patAuth,
+      agentPrincipal,
       role,
       ...(args.factual_correction === undefined ? [] : [args.factual_correction]),
     );

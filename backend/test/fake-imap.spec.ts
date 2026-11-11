@@ -23,6 +23,9 @@ export class FakeImapServer implements ImapTransport {
   failureCode: string | null = null;
   refuseInbox = false;
   silent = false;
+  sentFolder: string | null = 'Sent Items';
+  refuseAppend = false;
+  appended: { folder: string; raw: Buffer }[] = [];
   // RFC 3501 BODYSTRUCTURE: text plus an attachment, no attachment bytes inline.
   readonly structure =
     '(("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 12 1 NIL NIL NIL NIL)("APPLICATION" "OCTET-STREAM" ("NAME" "note.txt") NIL NIL "BASE64" 8 NIL ("ATTACHMENT" ("FILENAME" "note.txt")) NIL NIL) "MIXED" ("BOUNDARY" "fixture") NIL NIL NIL)';
@@ -30,15 +33,43 @@ export class FakeImapServer implements ImapTransport {
   connect(options: ImapTransportConnectOptions, connected: () => void): ImapTransportSocket {
     this.connections.push(options);
     let input = '';
+    let literal: { tag: string; folder: string; size: number } | undefined;
     const socket = new Duplex({
       read() {},
       write: (chunk, _encoding, done) => {
         input += chunk.toString();
         let index: number;
-        while ((index = input.indexOf('\r\n')) >= 0) {
+        while (input.length) {
+          if (literal) {
+            if (Buffer.byteLength(input) < literal.size + 2) break;
+            const raw = Buffer.from(input).subarray(0, literal.size);
+            input = Buffer.from(input)
+              .subarray(literal.size + 2)
+              .toString();
+            const tag = literal.tag;
+            this.appended.push({ folder: literal.folder, raw });
+            literal = undefined;
+            queueMicrotask(() => socket.push(`${tag} OK [APPENDUID 42 4] appended\r\n`));
+            continue;
+          }
+          index = input.indexOf('\r\n');
+          if (index < 0) break;
           const line = input.slice(0, index);
           input = input.slice(index + 2);
-          queueMicrotask(() => this.respond(socket, line));
+          const append = /^(\S+) APPEND ("[^"]+"|\S+) .*\{(\d+)\}$/.exec(line);
+          if (append) {
+            this.commands.push('APPEND [message omitted]');
+            if (this.refuseAppend) {
+              queueMicrotask(() => socket.push(`${append[1]} NO unavailable\r\n`));
+            } else {
+              literal = {
+                tag: append[1],
+                folder: append[2].replace(/^"|"$/g, ''),
+                size: Number(append[3]),
+              };
+              queueMicrotask(() => socket.push('+ continue\r\n'));
+            }
+          } else queueMicrotask(() => this.respond(socket, line));
         }
         done();
       },
@@ -80,7 +111,10 @@ export class FakeImapServer implements ImapTransport {
         ok('* NAMESPACE (("" "/")) NIL NIL\r\n');
         return;
       case 'LIST':
-        ok('* LIST (\\HasNoChildren) "/" "INBOX"\r\n');
+        ok(
+          '* LIST (\\HasNoChildren) "/" "INBOX"\r\n' +
+            (this.sentFolder ? `* LIST (\\Sent) "/" "${this.sentFolder}"\r\n` : ''),
+        );
         return;
       case 'LSUB':
         ok('* LSUB () "/" "INBOX"\r\n');

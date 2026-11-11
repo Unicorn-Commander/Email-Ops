@@ -12,10 +12,14 @@ import {
   MailProviderListResult,
   MailProviderThreadResult,
   MailReadStatus,
+  MailProviderSendRequest,
+  MailProviderSendResult,
 } from '../mail-provider/mail-provider.port';
 import { MessageView, ParticipantView, ThreadView } from '../email/email.types';
 import { ExternalImapAccounts } from './external-imap.accounts';
 import { connectionStatus, externalImapEnabled, ImapConnection } from './imap-connection';
+import { SmtpConnection, externalImapSendEnabled } from './smtp-connection';
+import { smtpMessage } from './smtp-message';
 import { bodyParts, groupMessages, references } from './imap-messages';
 
 export const IMAP_SEND_UNAVAILABLE = 'Sending from this mailbox is not available yet.';
@@ -34,6 +38,7 @@ export class ExternalImapProvider extends MailProviderPort {
   constructor(
     private readonly accounts: ExternalImapAccounts,
     private readonly connection: ImapConnection,
+    private readonly smtp: SmtpConnection = new SmtpConnection(),
   ) {
     super();
   }
@@ -285,13 +290,66 @@ export class ExternalImapProvider extends MailProviderPort {
     }
   }
 
-  async send() {
-    return {
+  async send(
+    mailbox: MailboxAccount,
+    req: MailProviderSendRequest,
+  ): Promise<MailProviderSendResult> {
+    const refused: MailProviderSendResult = {
       accepted: false,
       providerMessageId: null,
       threadId: null,
       reason: IMAP_SEND_UNAVAILABLE,
     };
+    if (!externalImapSendEnabled(mailbox.workspaceId)) return refused;
+    if (req.sendAuthorization !== 'human' && req.sendAuthorization !== 'approval')
+      return { ...refused, reason: 'A human send or approval is required.' };
+    let accepted: MailProviderSendResult | undefined;
+    try {
+      const credentials = await this.accounts.credentials(mailbox);
+      if (!credentials.smtp) return refused;
+      // Resolve threading and Sent before SMTP; a read failure must not send a
+      // reply into a new conversation. SMTP and APPEND have separate deadlines.
+      const prepared = await this.connection.run(
+        mailbox.workspaceId,
+        credentials,
+        async (client) => {
+          let reply: { parent: string; references: string[] } | undefined;
+          if (req.inReplyToThreadId) {
+            const { groups } = await this.index(client);
+            const messages = groups.get(req.inReplyToThreadId);
+            const last = messages
+              ?.slice()
+              .sort((a, b) => (date(a) ?? '').localeCompare(date(b) ?? '') || a.uid - b.uid)
+              .pop();
+            if (!last?.envelope?.messageId) throw new Error('Reply unavailable');
+            reply = { parent: last.envelope.messageId, references: references(last) };
+          }
+          const folders = await client.list();
+          const sent =
+            folders.find((folder) => folder.specialUse === '\\Sent' || folder.flags.has('\\Sent'))
+              ?.path ?? 'Sent';
+          return { sent, message: smtpMessage(mailbox.emailAddress, req, reply) };
+        },
+      );
+      await this.smtp.run(mailbox.workspaceId, credentials.smtp, prepared.message);
+      accepted = {
+        accepted: true,
+        providerMessageId: prepared.message.id,
+        threadId: req.inReplyToThreadId ?? null,
+        reason: null,
+      };
+      await this.connection.run(mailbox.workspaceId, credentials, async (client) => {
+        if (!(await client.append(prepared.sent, prepared.message.raw, ['\\Seen'], new Date())))
+          throw new Error('Sent copy unavailable');
+      });
+      return accepted;
+    } catch {
+      // SMTP delivery cannot be rolled back. Do not mark an accepted message
+      // failed (and invite a duplicate send) when the Sent copy could not save.
+      return accepted
+        ? { ...accepted, reason: 'Message sent, but the Sent copy could not be saved.' }
+        : { ...refused, reason: 'The SMTP message could not be sent.' };
+    }
   }
   async createDraft() {
     return {

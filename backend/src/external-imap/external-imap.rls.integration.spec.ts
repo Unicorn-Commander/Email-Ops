@@ -39,6 +39,10 @@ describe('external IMAP credential row-level security (Postgres)', () => {
         username: 'owner@example.com',
         // Opaque fixture only: this suite never decrypts or returns credentials.
         encryptedPassword: 'synthetic-ciphertext',
+        smtpHost: 'smtp.example.com',
+        smtpPort: 587,
+        smtpUsername: 'owner@example.com',
+        smtpEncryptedPassword: 'synthetic-smtp-ciphertext',
       },
     });
   });
@@ -110,6 +114,26 @@ describe('external IMAP credential row-level security (Postgres)', () => {
     expect(await asRuntime(workspaceId, readCredentialIds)).toEqual([{ mailboxId }]);
   });
 
+  it('applies the existing forced policy to SMTP column reads and owner updates', async () => {
+    const readSmtp = (tx: Prisma.TransactionClient) =>
+      tx.externalImapAccount.findMany({
+        where: { mailboxId },
+        select: { smtpHost: true, smtpPort: true },
+      });
+    expect(await asRuntime(otherWorkspaceId, readSmtp)).toEqual([]);
+    expect(await asRuntime(null, readSmtp)).toEqual([]);
+    expect(await asRuntime(workspaceId, readSmtp)).toEqual([
+      { smtpHost: 'smtp.example.com', smtpPort: 587 },
+    ]);
+    await asRuntime(workspaceId, async (tx) => {
+      expect(
+        await tx.externalImapAccount.updateMany({ where: { mailboxId }, data: { smtpPort: 465 } }),
+      ).toEqual({ count: 1 });
+      expect(await readSmtp(tx)).toEqual([{ smtpHost: 'smtp.example.com', smtpPort: 465 }]);
+      await tx.externalImapAccount.update({ where: { mailboxId }, data: { smtpPort: 587 } });
+    });
+  });
+
   it('returns zero rows without workspace context, including after an authorized read', async () => {
     await asRuntime(workspaceId, readCredentialIds);
     await asRuntime(null, async (tx) => {
@@ -125,7 +149,10 @@ describe('external IMAP credential row-level security (Postgres)', () => {
       expect(
         await tx.externalImapAccount.updateMany({
           where: { mailboxId },
-          data: { host: 'changed.example.com' },
+          data: {
+            smtpHost: 'changed.example.com',
+            smtpEncryptedPassword: 'replacement-ciphertext',
+          },
         }),
       ).toEqual({ count: 0 });
       expect(await tx.externalImapAccount.deleteMany({ where: { mailboxId } })).toEqual({
@@ -141,8 +168,8 @@ describe('external IMAP credential row-level security (Postgres)', () => {
         workspaceId,
         (tx) =>
           tx.$executeRaw`
-          INSERT INTO external_imap_accounts ("mailboxId", host, username, "encryptedPassword")
-          VALUES (${otherMailboxId}, 'imap.example.com', 'other@example.com', 'synthetic-ciphertext')
+          INSERT INTO external_imap_accounts ("mailboxId", host, username, "encryptedPassword", "smtpHost", "smtpPort", "smtpEncryptedPassword")
+          VALUES (${otherMailboxId}, 'imap.example.com', 'other@example.com', 'synthetic-ciphertext', 'smtp.example.com', 587, 'synthetic-smtp-ciphertext')
         `,
       ),
     ).rejects.toMatchObject({ code: 'P2010', meta: { code: '42501' } });

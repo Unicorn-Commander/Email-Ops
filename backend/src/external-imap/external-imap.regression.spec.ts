@@ -32,6 +32,8 @@ class TestConnection extends ImapConnection {
 const MUTATING = /\b(APPEND|STORE|EXPUNGE|MOVE|DELETE)\b/i;
 
 describe('external IMAP regression (#81)', () => {
+  const previousWorkspaceIds = process.env.EXTERNAL_IMAP_WORKSPACE_IDS;
+  const previousSendFlag = process.env.EXTERNAL_IMAP_SEND_ENABLED;
   const previousFlag = process.env.EXTERNAL_IMAP_ENABLED;
   const previousKey = process.env.CONNECTED_ACCOUNT_ENC_KEY;
   const user = { id: 'user-one', keycloakId: 'subject-one', __ucUid: 'subject-one' } as User & {
@@ -61,6 +63,8 @@ describe('external IMAP regression (#81)', () => {
 
   beforeEach(() => {
     process.env.EXTERNAL_IMAP_ENABLED = 'true';
+    process.env.EXTERNAL_IMAP_WORKSPACE_IDS = 'workspace-one';
+    delete process.env.EXTERNAL_IMAP_SEND_ENABLED;
     process.env.CONNECTED_ACCOUNT_ENC_KEY = Buffer.alloc(32, 7).toString('base64');
     jest.spyOn(net, 'connect').mockImplementation(() => {
       throw new Error('Network forbidden');
@@ -127,6 +131,10 @@ describe('external IMAP regression (#81)', () => {
     expect(net.connect).not.toHaveBeenCalled();
     expect(tls.connect).not.toHaveBeenCalled();
     jest.restoreAllMocks();
+    if (previousWorkspaceIds === undefined) delete process.env.EXTERNAL_IMAP_WORKSPACE_IDS;
+    else process.env.EXTERNAL_IMAP_WORKSPACE_IDS = previousWorkspaceIds;
+    if (previousSendFlag === undefined) delete process.env.EXTERNAL_IMAP_SEND_ENABLED;
+    else process.env.EXTERNAL_IMAP_SEND_ENABLED = previousSendFlag;
     if (previousFlag === undefined) delete process.env.EXTERNAL_IMAP_ENABLED;
     else process.env.EXTERNAL_IMAP_ENABLED = previousFlag;
     if (previousKey === undefined) delete process.env.CONNECTED_ACCOUNT_ENC_KEY;
@@ -144,9 +152,12 @@ describe('external IMAP regression (#81)', () => {
 
   it('flag off: the connect route is 404 and nothing is stored', async () => {
     delete process.env.EXTERNAL_IMAP_ENABLED;
-    expect(controller.capabilities()).toEqual({ enabled: false });
+    expect(controller.capabilities('workspace-one')).toEqual({ enabled: false });
     expect(() =>
-      controller.test(user, { ...credentials, email_address: 'reader@example.com' }),
+      controller.test('workspace-one', user, {
+        ...credentials,
+        email_address: 'reader@example.com',
+      }),
     ).toThrow(NotFoundException);
     expect(() =>
       controller.connect('workspace-one', user, {
@@ -167,7 +178,7 @@ describe('external IMAP regression (#81)', () => {
     expect(ciphertext.includes(fixturePassword)).toBe(false);
     expect(ciphertext.length).toBeGreaterThan(fixturePassword.length);
 
-    const probed = await controller.test(user, {
+    const probed = await controller.test('workspace-one', user, {
       ...credentials,
       email_address: 'reader@example.com',
     });
@@ -240,6 +251,8 @@ describe('external IMAP regression (#81)', () => {
   });
 
   it('another workspace cannot read or use the connector', async () => {
+    // Exercise credential isolation even when both workspaces are enabled.
+    process.env.EXTERNAL_IMAP_WORKSPACE_IDS = 'workspace-one,workspace-two';
     await register();
     const sessions = server.connections.length;
     const ciphertext = String(row?.encryptedPassword);
