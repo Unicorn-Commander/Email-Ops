@@ -21,7 +21,10 @@ the registry but cannot be read or sent through another provider as a fallback.
 
 `EXTERNAL_IMAP_SEND_ENABLED` also defaults to false. Both flags must be exactly
 `true`, and the workspace must be listed in `EXTERNAL_IMAP_WORKSPACE_IDS`, for
-SMTP configuration, AUTH testing, or sending. The gate is checked again when a
+SMTP configuration, AUTH testing, or sending. For the operator runbook on
+enabling sending for one workspace and rolling it back, see
+[Send operator guide: external IMAP mailboxes](operations/external-mailbox-send.md).
+The gate is checked again when a
 human approves a draft and before the SMTP connection opens. Removing a workspace
 from the allowlist prevents previously staged drafts from sending; they remain
 pending for a later human approval. With the send flag off,
