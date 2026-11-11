@@ -102,23 +102,20 @@ describe('external IMAP per-workspace allowlist (#84)', () => {
 
   it('refuses a workspace off the allowlist with the global flag on: no connection is created or used', async () => {
     expect(controller.capabilities('workspace-two')).toEqual({ enabled: false });
-    expect(() =>
-      controller.test('workspace-two', user, input),
-    ).toThrow(NotFoundException);
+    expect(() => controller.test('workspace-two', user, input)).toThrow(NotFoundException);
     await expect(accounts.test('workspace-two', input)).rejects.toThrow(NotFoundException);
-    expect(() =>
-      controller.connect('workspace-two', user, input),
-    ).toThrow(NotFoundException);
-    await expect(accounts.connect('workspace-two', user, input)).rejects.toThrow(
-      NotFoundException,
-    );
-    expect(await provider.listInbox({ ...mailbox, workspaceId: 'workspace-two' }, {
-      folder: 'inbox',
-      limit: 10,
-    })).toMatchObject({ status: 'engine_not_configured', threads: [] });
+    expect(() => controller.connect('workspace-two', user, input)).toThrow(NotFoundException);
+    await expect(accounts.connect('workspace-two', user, input)).rejects.toThrow(NotFoundException);
     expect(
-      await provider.getInboxCounts({ ...mailbox, workspaceId: 'workspace-two' }),
-    ).toBeNull();
+      await provider.listInbox(
+        { ...mailbox, workspaceId: 'workspace-two' },
+        {
+          folder: 'inbox',
+          limit: 10,
+        },
+      ),
+    ).toMatchObject({ status: 'engine_not_configured', threads: [] });
+    expect(await provider.getInboxCounts({ ...mailbox, workspaceId: 'workspace-two' })).toBeNull();
     expect(
       await provider.setThreadRead({ ...mailbox, workspaceId: 'workspace-two' }, 'imap-42-1', true),
     ).toBe(false);
@@ -176,19 +173,11 @@ describe('external IMAP per-workspace allowlist (#84)', () => {
   it('still refuses an allowlisted workspace when the global flag is off', async () => {
     process.env.EXTERNAL_IMAP_ENABLED = 'false';
     expect(controller.capabilities('workspace-one')).toEqual({ enabled: false });
-    expect(() =>
-      controller.test('workspace-one', user, input),
-    ).toThrow(NotFoundException);
-    expect(() =>
-      controller.connect('workspace-one', user, input),
-    ).toThrow(NotFoundException);
-    await expect(accounts.connect('workspace-one', user, input)).rejects.toThrow(
-      NotFoundException,
-    );
+    expect(() => controller.test('workspace-one', user, input)).toThrow(NotFoundException);
+    expect(() => controller.connect('workspace-one', user, input)).toThrow(NotFoundException);
+    await expect(accounts.connect('workspace-one', user, input)).rejects.toThrow(NotFoundException);
     await expect(accounts.credentials(mailbox)).rejects.toThrow(NotFoundException);
-    await expect(connection.test('workspace-one', credentials)).rejects.toThrow(
-      NotFoundException,
-    );
+    await expect(connection.test('workspace-one', credentials)).rejects.toThrow(NotFoundException);
     expect(await provider.listInbox(mailbox, { folder: 'inbox', limit: 10 })).toMatchObject({
       status: 'engine_not_configured',
       threads: [],
