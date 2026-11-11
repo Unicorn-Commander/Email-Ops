@@ -681,14 +681,62 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
     expect(smtp.sockets).toHaveLength(smtpCount);
   });
 
+  it.each(['human', 'approval'] as const)(
+    'refuses an unlisted workspace despite %s authorization',
+    async (sendAuthorization) => {
+      await registerSmtp();
+      process.env.EXTERNAL_IMAP_WORKSPACE_IDS = 'workspace-two';
+      const imapConnections = server.connections.length;
+      const smtpConnections = smtp.sockets.length;
+      prisma.withWorkspace.mockClear();
+      expect(await provider.send(mailbox, { ...message, sendAuthorization })).toMatchObject({
+        accepted: false,
+        reason: 'Sending from this mailbox is not available yet.',
+      });
+      expect(prisma.withWorkspace).not.toHaveBeenCalled();
+      expect(server.connections).toHaveLength(imapConnections);
+      expect(smtp.sockets).toHaveLength(smtpConnections);
+      expect(smtp.messages).toHaveLength(0);
+      expect(server.appended).toHaveLength(0);
+    },
+  );
+
+  it('rechecks workspace eligibility at SMTP transport after preparing an approved reply', async () => {
+    await registerSmtp();
+    const run = connection.run.bind(connection);
+    jest.spyOn(connection, 'run').mockImplementationOnce(async (workspaceId, creds, operation) => {
+      const prepared = await run(workspaceId, creds, operation);
+      process.env.EXTERNAL_IMAP_WORKSPACE_IDS = 'workspace-two';
+      return prepared;
+    });
+    const smtpConnections = smtp.sockets.length;
+    expect(await provider.send(mailbox, message)).toMatchObject({ accepted: false });
+    expect(smtp.sockets).toHaveLength(smtpConnections);
+    expect(smtp.messages).toHaveLength(0);
+    expect(server.appended).toHaveLength(0);
+  });
+
+  it('blocks SMTP setup and AUTH tests for an unlisted workspace', async () => {
+    process.env.EXTERNAL_IMAP_SEND_ENABLED = 'true';
+    const body = { ...credentials, email_address: mailbox.emailAddress, smtp: smtpSettings };
+    await expect(accounts.connect('workspace-two', user, body)).rejects.toThrow(NotFoundException);
+    await expect(accounts.test('workspace-two', body)).rejects.toThrow(NotFoundException);
+    await expect(smtp.test('workspace-two', { ...credentials, ...smtpSettings })).rejects.toThrow(
+      NotFoundException,
+    );
+    expect(prisma.withWorkspace).not.toHaveBeenCalled();
+    expect(server.connections).toHaveLength(0);
+    expect(smtp.sockets).toHaveLength(0);
+  });
+
   it('keeps SMTP configuration inaccessible with flag off or PAT auth', async () => {
     const controller = new ExternalImapController(accounts, connection);
     const body = { ...credentials, email_address: mailbox.emailAddress, smtp: smtpSettings };
-    expect(controller.capabilities()).toEqual({ enabled: true });
-    await expect(controller.test(user, body)).rejects.toThrow(NotFoundException);
+    expect(controller.capabilities('workspace-one')).toEqual({ enabled: true });
+    await expect(controller.test('workspace-one', user, body)).rejects.toThrow(NotFoundException);
     process.env.EXTERNAL_IMAP_SEND_ENABLED = 'true';
     for (const action of [
-      () => controller.test({ ...user, __patAuth: {} } as User, body),
+      () => controller.test('workspace-one', { ...user, __patAuth: {} } as User, body),
       () => controller.connect('workspace-one', { ...user, __patAuth: {} } as User, body),
     ])
       expect(action).toThrow('signed-in session');
@@ -716,7 +764,7 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
     smtp.silent = true;
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
     try {
-      const result = smtp.test({
+      const result = smtp.test('workspace-one', {
         ...smtpSettings,
         username: fixtureUsername,
         password: fixturePassword,
