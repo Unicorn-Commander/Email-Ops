@@ -1,4 +1,4 @@
-import { ForbiddenException, Logger } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { MailboxOwnerKind, User, WorkspaceRole } from '@prisma/client';
 import { KeycloakBrokerService } from '../auth/keycloak-broker.service';
 import { MembershipService } from '../common/workspace/membership.service';
@@ -13,11 +13,18 @@ import { MailboxAccountsService } from '../mailbox-accounts/mailbox-accounts.ser
  */
 describe('mailbox disconnect regression (#82)', () => {
   const refreshToken = 'fictional-refresh-token';
+  const otherRefreshToken = 'fictional-other-refresh-token';
   const caller = {
     id: 'user-ada',
     email: 'ada@example.com',
     keycloakId: 'kc-ada',
     kcRefreshTokenEnc: refreshToken,
+  } as User;
+  const otherUser = {
+    id: 'user-bea',
+    email: 'bea@example.com',
+    keycloakId: 'kc-other',
+    kcRefreshTokenEnc: otherRefreshToken,
   } as User;
 
   function freshRows() {
@@ -33,6 +40,10 @@ describe('mailbox disconnect regression (#82)', () => {
   }
 
   function harness(rows = freshRows()) {
+    const users = [
+      { id: caller.id, kcRefreshTokenEnc: refreshToken as string | null },
+      { id: otherUser.id, kcRefreshTokenEnc: otherRefreshToken as string | null },
+    ];
     const tx = {
       mailboxAccount: {
         findMany: jest.fn(async ({ where }) => rows.filter((row) => matches(row, where))),
@@ -61,7 +72,14 @@ describe('mailbox disconnect regression (#82)', () => {
       },
     };
     const prisma = {
-      user: { update: jest.fn().mockResolvedValue({ id: caller.id }) },
+      user: {
+        update: jest.fn(async ({ where, data }) => {
+          const row = users.find((user) => user.id === where.id);
+          if (!row) throw new Error('missing user');
+          Object.assign(row, data);
+          return { ...row };
+        }),
+      },
       withWorkspace: jest.fn(
         async (_workspace: string, _uc: string | null, fn: (db: typeof tx) => unknown) => fn(tx),
       ),
@@ -92,7 +110,7 @@ describe('mailbox disconnect regression (#82)', () => {
       {} as never,
       {} as never,
     );
-    return { rows, tx, prisma, broker, membership, service, mailboxes };
+    return { rows, users, tx, prisma, broker, membership, service, mailboxes };
   }
 
   async function activeList(mailboxes: MailboxAccountsService, workspaceId: string) {
@@ -154,21 +172,112 @@ describe('mailbox disconnect regression (#82)', () => {
     warn.mockRestore();
   });
 
-  // xfail: disconnect deactivates this user's provider mailbox in every workspace, so another workspace is not left untouched.
-  it.failing(
-    'xfail: other workspaces stay untouched — disconnect also deactivates this user there',
-    async () => {
-      const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
-      try {
-        const { rows, service } = harness();
-        const before = rows.filter((row) => row.workspaceId === 'ws-2').map((row) => ({ ...row }));
-        await service.disconnectProvider(caller, 'gmail');
-        expect(rows.filter((row) => row.workspaceId === 'ws-2')).toEqual(before);
-      } finally {
-        log.mockRestore();
-      }
-    },
-  );
+  it("deactivates only this user's mailboxes and leaves the other user's tokens", async () => {
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const { rows, users, prisma, broker, service, mailboxes } = harness();
+
+      await service.disconnectProvider(caller, 'gmail');
+
+      // The broker link is user-global, so this user's gmail row drops in every workspace.
+      expect(rows.find((row) => row.id === 'mine')).toMatchObject({ active: false });
+      expect(rows.find((row) => row.id === 'mine-ws2')).toMatchObject({ active: false });
+      expect(rows.find((row) => row.id === 'mine-ms')?.active).toBe(true);
+
+      expect(rows.find((row) => row.id === 'other-user')).toMatchObject({
+        active: true,
+        ownerKey: 'kc-other',
+        workspaceId: 'ws-1',
+        provider: 'gmail',
+      });
+      expect(rows.find((row) => row.id === 'foreign')).toMatchObject({
+        active: true,
+        ownerKey: 'kc-other',
+        workspaceId: 'ws-2',
+        provider: 'gmail',
+      });
+      expect(rows.find((row) => row.id === 'team')?.active).toBe(true);
+      expect(rows.find((row) => row.id === 'desk')?.active).toBe(true);
+
+      const ws1 = (await activeList(mailboxes, 'ws-1')).map((mailbox) => mailbox.email_address);
+      expect(ws1).toContain('other@example.com');
+      expect(ws1).not.toContain('ada@example.com');
+      const ws2 = (await activeList(mailboxes, 'ws-2')).map((mailbox) => mailbox.email_address);
+      expect(ws2).toContain('foreign@example.com');
+      expect(ws2).not.toContain('ada.other@example.com');
+
+      expect(users.find((user) => user.id === otherUser.id)?.kcRefreshTokenEnc).toBe(
+        otherRefreshToken,
+      );
+      expect(users.find((user) => user.id === caller.id)?.kcRefreshTokenEnc).toBeNull();
+      expect(prisma.user.update).not.toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: otherUser.id } }),
+      );
+      expect(broker.unlinkBrokerIdentity).toHaveBeenCalledTimes(1);
+      expect(broker.unlinkBrokerIdentity).toHaveBeenCalledWith(caller, 'google');
+      expect(broker.unlinkBrokerIdentity).not.toHaveBeenCalledWith(otherUser, expect.anything());
+      const leaked = JSON.stringify({
+        logs: [...log.mock.calls, ...warn.mock.calls],
+        update: prisma.user.update.mock.calls,
+      });
+      expect(leaked.includes(refreshToken)).toBe(false);
+      expect(leaked.includes(otherRefreshToken)).toBe(false);
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("does not let one user disconnect another user's account", async () => {
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    try {
+      const { rows, users, prisma, broker, membership, service } = harness();
+      const controller = new ConnectedAccountsController(
+        membership as unknown as MembershipService,
+        service,
+      );
+
+      await controller.disconnect(caller, 'gmail');
+
+      expect(broker.unlinkBrokerIdentity).toHaveBeenCalledTimes(1);
+      expect(broker.unlinkBrokerIdentity).toHaveBeenCalledWith(caller, 'google');
+      expect(broker.unlinkBrokerIdentity).not.toHaveBeenCalledWith(otherUser, expect.anything());
+      expect(rows.find((row) => row.id === 'other-user')?.active).toBe(true);
+      expect(rows.find((row) => row.id === 'foreign')?.active).toBe(true);
+      expect(users.find((user) => user.id === otherUser.id)?.kcRefreshTokenEnc).toBe(
+        otherRefreshToken,
+      );
+      expect(prisma.user.update).not.toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: otherUser.id } }),
+      );
+
+      // The route has no target user. Only Bea, signed in as herself, can unlink Bea.
+      broker.unlinkBrokerIdentity.mockClear();
+      prisma.user.update.mockClear();
+      await controller.disconnect(otherUser, 'gmail');
+
+      expect(broker.unlinkBrokerIdentity).toHaveBeenCalledTimes(1);
+      expect(broker.unlinkBrokerIdentity).toHaveBeenCalledWith(otherUser, 'google');
+      expect(broker.unlinkBrokerIdentity).not.toHaveBeenCalledWith(caller, expect.anything());
+      expect(rows.find((row) => row.id === 'other-user')?.active).toBe(false);
+      expect(rows.find((row) => row.id === 'foreign')?.active).toBe(false);
+      expect(rows.find((row) => row.id === 'mine')?.active).toBe(false);
+      expect(rows.find((row) => row.id === 'mine-ms')?.active).toBe(true);
+      expect(rows.find((row) => row.id === 'team')?.active).toBe(true);
+      expect(rows.find((row) => row.id === 'desk')?.active).toBe(true);
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: otherUser.id } }),
+      );
+      expect(prisma.user.update).not.toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: caller.id } }),
+      );
+      expect(users.find((user) => user.id === caller.id)?.kcRefreshTokenEnc).toBeNull();
+      expect(users.find((user) => user.id === otherUser.id)?.kcRefreshTokenEnc).toBeNull();
+    } finally {
+      log.mockRestore();
+    }
+  });
 
   describe('who may disconnect', () => {
     function controllerFor(role: WorkspaceRole) {
@@ -205,13 +314,32 @@ describe('mailbox disconnect regression (#82)', () => {
       },
     );
 
-    // xfail: disconnect does not check workspace role, so a member is not rejected with 403.
-    it.failing('xfail: a workspace member gets 403 and no token is revoked', async () => {
-      const { controller, connectedAccounts } = controllerFor(WorkspaceRole.MEMBER);
-      await expect(controller.disconnect(caller, 'gmail')).rejects.toBeInstanceOf(
-        ForbiddenException,
-      );
-      expect(connectedAccounts.disconnectProvider).not.toHaveBeenCalled();
+    it('lets a workspace member disconnect their own account', async () => {
+      const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      try {
+        const { rows, broker, membership, service } = harness();
+        membership.resolveWithRole.mockResolvedValue({
+          workspaceId: 'ws-1',
+          role: WorkspaceRole.MEMBER,
+        });
+        const controller = new ConnectedAccountsController(
+          membership as unknown as MembershipService,
+          service,
+        );
+
+        await expect(controller.disconnect(caller, 'gmail')).resolves.toMatchObject({
+          provider: 'gmail',
+          status: 'disconnected',
+        });
+        expect(membership.resolveAndAuthorize).toHaveBeenCalledWith(caller, null);
+        expect(broker.unlinkBrokerIdentity).toHaveBeenCalledTimes(1);
+        expect(broker.unlinkBrokerIdentity).toHaveBeenCalledWith(caller, 'google');
+        expect(broker.unlinkBrokerIdentity).not.toHaveBeenCalledWith(otherUser, expect.anything());
+        expect(rows.find((row) => row.id === 'mine')?.active).toBe(false);
+        expect(rows.find((row) => row.id === 'other-user')?.active).toBe(true);
+      } finally {
+        log.mockRestore();
+      }
     });
   });
 });
