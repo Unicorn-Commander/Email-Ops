@@ -1,0 +1,57 @@
+import { Body, Controller, ForbiddenException, Get, Post, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import { User } from '@prisma/client';
+import { IsEmail, IsIn, IsInt, IsNotEmpty, IsString, MaxLength } from 'class-validator';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { WorkspaceMembershipGuard } from '../common/workspace/workspace-membership.guard';
+import { ResolvedWorkspace } from '../common/workspace/resolved-workspace.decorator';
+import { ExternalImapAccounts } from './external-imap.accounts';
+import { externalImapEnabled, ImapConnection, requireExternalImap } from './imap-connection';
+
+export class ImapConnectDto {
+  @IsString() @IsNotEmpty() @MaxLength(253) host!: string;
+  @IsInt() port!: number;
+  @IsString() @IsNotEmpty() @MaxLength(320) username!: string;
+  @IsString() @IsNotEmpty() @MaxLength(1024) password!: string;
+  @IsIn(['tls', 'starttls', 'plaintext']) security!: 'tls';
+  @IsEmail() @MaxLength(320) email_address!: string;
+}
+
+@Controller('workspaces/:workspaceId/external-imap')
+@UseGuards(JwtAuthGuard, WorkspaceMembershipGuard)
+export class ExternalImapController {
+  constructor(
+    private readonly accounts: ExternalImapAccounts,
+    private readonly connection: ImapConnection,
+  ) {}
+
+  @Get('capabilities')
+  capabilities() {
+    return { enabled: externalImapEnabled() };
+  }
+
+  private assertHuman(user: User & { __patAuth?: unknown }) {
+    requireExternalImap();
+    if (user.__patAuth)
+      throw new ForbiddenException('Connect mailboxes through your signed-in session.');
+  }
+
+  @Post('test')
+  @Throttle({ short: { ttl: 60000, limit: 5 }, long: { ttl: 3600000, limit: 30 } })
+  test(@CurrentUser() user: User, @Body() body: ImapConnectDto) {
+    this.assertHuman(user);
+    return this.connection.test(body);
+  }
+
+  @Post('connect')
+  @Throttle({ short: { ttl: 60000, limit: 5 }, long: { ttl: 3600000, limit: 30 } })
+  connect(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Body() body: ImapConnectDto,
+  ) {
+    this.assertHuman(user);
+    return this.accounts.connect(workspaceId, user, body);
+  }
+}

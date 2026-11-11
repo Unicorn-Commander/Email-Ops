@@ -676,6 +676,7 @@ model MailboxAccount {
   outboundAttachments OutboundAttachment[]
   mailRules      MailRule[]
   calendarDeviceKeys CalendarDeviceKey[]
+  externalImap ExternalImapAccount?
 
   // One mailbox identity per address per workspace.
   @@unique([workspaceId, emailAddress])
@@ -685,6 +686,18 @@ model MailboxAccount {
   @@index([workspaceId, ownerKind, ownerKey])
   standingApprovals StandingApproval[]
   @@map("mailbox_accounts")
+}
+
+// Kept separate from mailbox API rows. Only the IMAP module reads credentials.
+model ExternalImapAccount {
+  mailboxId String @id
+  host String
+  port Int @default(993)
+  username String
+  encryptedPassword String
+  mailbox MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@map("external_imap_accounts")
 }
 
 // ============================================================
