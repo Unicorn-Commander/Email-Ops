@@ -695,6 +695,10 @@ model ExternalImapAccount {
   port Int @default(993)
   username String
   encryptedPassword String
+  smtpHost String?
+  smtpPort Int?
+  smtpUsername String?
+  smtpEncryptedPassword String?
   mailbox MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
 
   @@map("external_imap_accounts")
