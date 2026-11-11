@@ -63,8 +63,17 @@ module.exports = {
     {
       ...base,
       displayName: 'unit',
+      // The static-analysis guard lives in <backend>/test (its rootDir stays
+      // src, so `roots` reaches the extra directory). The fake-* files there
+      // are fixture modules imported by src specs, not runnable suites.
+      roots: ['<rootDir>', '<rootDir>/../test'],
       testRegex: '.*\\.spec\\.ts$',
-      testPathIgnorePatterns: ['/node_modules/', ...integrationIgnore],
+      testPathIgnorePatterns: [
+        '/node_modules/',
+        '/test/fake-imap\\.spec\\.ts$',
+        '/test/fake-smtp\\.spec\\.ts$',
+        ...integrationIgnore,
+      ],
     },
     {
       ...base,
