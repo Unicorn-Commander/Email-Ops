@@ -27,6 +27,8 @@ import { MailReadStatus } from './mail-read-status';
 export type { MailReadStatus } from './mail-read-status';
 
 export interface MailProviderSendRequest {
+  /** Internal authorization from the existing human/approval routing seam, never a DTO field. */
+  sendAuthorization?: 'human' | 'approval';
   from: string;
   to: string;
   /**

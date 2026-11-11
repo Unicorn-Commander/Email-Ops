@@ -721,6 +721,11 @@ export class MailController {
       inReplyToMessageId: body.in_reply_to ?? null,
       references: body.references?.length ? body.references : undefined,
     };
-    return this.email.composeEmail(workspaceId, ucUidOf(user as WithWorkspaceClaim), input);
+    return this.email.composeEmail(
+      workspaceId,
+      ucUidOf(user as WithWorkspaceClaim),
+      input,
+      !(user as User & { __patAuth?: unknown }).__patAuth,
+    );
   }
 }
