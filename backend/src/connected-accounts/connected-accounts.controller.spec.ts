@@ -137,6 +137,16 @@ describe('ConnectedAccountsController', () => {
     expect(body).not.toContain('secret');
   });
 
+  it('refuses a PAT-authenticated caller before unlinking a mailbox', async () => {
+    const user = { ...userWith([]), __patAuth: {} } as User;
+    const refusal = controller().disconnect(user, 'gmail');
+
+    await expect(refusal).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(refusal).rejects.toThrow('Disconnect your mailbox from your signed-in session.');
+    expect(membership.resolveAndAuthorize).not.toHaveBeenCalled();
+    expect(connectedAccounts.disconnectProvider).not.toHaveBeenCalled();
+  });
+
   it('rejects an unknown provider before disconnect changes anything', async () => {
     const user = userWith(['email-ops']);
     await expect(controller().disconnect(user, 'imap')).rejects.toBeInstanceOf(BadRequestException);
