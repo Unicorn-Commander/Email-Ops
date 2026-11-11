@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { Button, cn } from '../ui';
 import { MailIcon } from './icons';
 import { getProviderLinkUrl, type ConnectedProvider } from '../../lib/api';
+import { ExternalImapConnect } from './ExternalImapConnect';
 
 export type ListBanner = 'no-workspace' | 'error' | 'loading' | 'no-mailboxes' | 'no-space';
 
@@ -69,6 +70,7 @@ export function ListBannerView({
             {linking === 'microsoft' ? 'Opening Microsoft 365…' : 'Connect Microsoft 365'}
           </Button>
           {linkError && <p role="alert" className="text-xs leading-5 text-danger">{linkError}</p>}
+          <ExternalImapConnect onConnected={onRetry} />
           <Link href="/accounts" className="mt-1 text-xs font-medium text-accent hover:underline">
             Already connected? Add to Mail on Accounts
           </Link>
