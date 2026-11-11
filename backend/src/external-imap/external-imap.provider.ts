@@ -300,7 +300,7 @@ export class ExternalImapProvider extends MailProviderPort {
       threadId: null,
       reason: IMAP_SEND_UNAVAILABLE,
     };
-    if (!externalImapSendEnabled()) return refused;
+    if (!externalImapSendEnabled(mailbox.workspaceId)) return refused;
     if (req.sendAuthorization !== 'human' && req.sendAuthorization !== 'approval')
       return { ...refused, reason: 'A human send or approval is required.' };
     let accepted: MailProviderSendResult | undefined;
@@ -309,32 +309,36 @@ export class ExternalImapProvider extends MailProviderPort {
       if (!credentials.smtp) return refused;
       // Resolve threading and Sent before SMTP; a read failure must not send a
       // reply into a new conversation. SMTP and APPEND have separate deadlines.
-      const prepared = await this.connection.run(credentials, async (client) => {
-        let reply: { parent: string; references: string[] } | undefined;
-        if (req.inReplyToThreadId) {
-          const { groups } = await this.index(client);
-          const messages = groups.get(req.inReplyToThreadId);
-          const last = messages
-            ?.slice()
-            .sort((a, b) => (date(a) ?? '').localeCompare(date(b) ?? '') || a.uid - b.uid)
-            .pop();
-          if (!last?.envelope?.messageId) throw new Error('Reply unavailable');
-          reply = { parent: last.envelope.messageId, references: references(last) };
-        }
-        const folders = await client.list();
-        const sent =
-          folders.find((folder) => folder.specialUse === '\\Sent' || folder.flags.has('\\Sent'))
-            ?.path ?? 'Sent';
-        return { sent, message: smtpMessage(mailbox.emailAddress, req, reply) };
-      });
-      await this.smtp.run(credentials.smtp, prepared.message);
+      const prepared = await this.connection.run(
+        mailbox.workspaceId,
+        credentials,
+        async (client) => {
+          let reply: { parent: string; references: string[] } | undefined;
+          if (req.inReplyToThreadId) {
+            const { groups } = await this.index(client);
+            const messages = groups.get(req.inReplyToThreadId);
+            const last = messages
+              ?.slice()
+              .sort((a, b) => (date(a) ?? '').localeCompare(date(b) ?? '') || a.uid - b.uid)
+              .pop();
+            if (!last?.envelope?.messageId) throw new Error('Reply unavailable');
+            reply = { parent: last.envelope.messageId, references: references(last) };
+          }
+          const folders = await client.list();
+          const sent =
+            folders.find((folder) => folder.specialUse === '\\Sent' || folder.flags.has('\\Sent'))
+              ?.path ?? 'Sent';
+          return { sent, message: smtpMessage(mailbox.emailAddress, req, reply) };
+        },
+      );
+      await this.smtp.run(mailbox.workspaceId, credentials.smtp, prepared.message);
       accepted = {
         accepted: true,
         providerMessageId: prepared.message.id,
         threadId: req.inReplyToThreadId ?? null,
         reason: null,
       };
-      await this.connection.run(credentials, async (client) => {
+      await this.connection.run(mailbox.workspaceId, credentials, async (client) => {
         if (!(await client.append(prepared.sent, prepared.message.raw, ['\\Seen'], new Date())))
           throw new Error('Sent copy unavailable');
       });

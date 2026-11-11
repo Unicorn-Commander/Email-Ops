@@ -20,7 +20,11 @@ connection endpoints return 404, and IMAP reads and writes never connect. Previo
 the registry but cannot be read or sent through another provider as a fallback.
 
 `EXTERNAL_IMAP_SEND_ENABLED` also defaults to false. Both flags must be exactly
-`true` for SMTP configuration, AUTH testing, or sending. With the send flag off,
+`true`, and the workspace must be listed in `EXTERNAL_IMAP_WORKSPACE_IDS`, for
+SMTP configuration, AUTH testing, or sending. The gate is checked again when a
+human approves a draft and before the SMTP connection opens. Removing a workspace
+from the allowlist prevents previously staged drafts from sending; they remain
+pending for a later human approval. With the send flag off,
 capabilities and existing IMAP-only requests retain their phase-1 shapes, SMTP
 settings cannot be changed, and sends return the existing unavailable result.
 There is no fallback to another provider.
@@ -81,7 +85,7 @@ for that account. Confirm the account's own regional settings before saving.
 Zoho documents the account types, ports, authentication, and the authoritative
 settings screen in its [SMTP configuration guide](https://www.zoho.com/mail/help/zoho-smtp.html).
 
-After both flags are enabled, a signed-in owner can use the existing `POST test`
+After both flags are enabled and the workspace is allowlisted, a signed-in owner can use the existing `POST test`
 and `POST connect` endpoints with the usual IMAP fields plus an optional nested
 `smtp` object:
 
@@ -161,6 +165,7 @@ Phase 1 currently uses IPv4 DNS resolution.
   or replace an existing hosted/Gmail/Microsoft send identity.
 - `RoutingMailProvider` preserves the Engine provider for Gmail/Microsoft and
   always claims `external_imap`, even when disabled. Sends require both flags,
+  a currently allowlisted workspace,
   configured SMTP, and the internal human/approval authorization marker. There
   is no sovereign fallback. Provider-side draft mirroring, automated inbound
   rules, folder mutation, archive/trash/spam, and flagging remain unavailable.

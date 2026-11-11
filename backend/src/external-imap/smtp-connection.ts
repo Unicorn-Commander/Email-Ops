@@ -192,7 +192,10 @@ export class SmtpConnection {
       socket.destroy();
     }
   }
-  async test(workspaceId: string, credentials: SmtpCredentials): Promise<{ status: ConnectionStatus }> {
+  async test(
+    workspaceId: string,
+    credentials: SmtpCredentials,
+  ): Promise<{ status: ConnectionStatus }> {
     requireExternalImapSend(workspaceId);
     try {
       await this.run(workspaceId, credentials);

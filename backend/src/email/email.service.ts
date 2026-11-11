@@ -2269,7 +2269,9 @@ export class EmailService {
         ];
         // External IMAP never acquires an autonomous lane from the general autonomy dial.
         const imapNeedsApproval =
-          mailbox?.provider === 'external_imap' && externalImapSendEnabled() && !humanSend;
+          mailbox?.provider === 'external_imap' &&
+          externalImapSendEnabled(workspaceId) &&
+          !humanSend;
         const mode =
           decision.mode === 'draft' || imapNeedsApproval ? EmailMode.DRAFT : EmailMode.SEND;
         if (decision.coerced) {

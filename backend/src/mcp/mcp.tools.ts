@@ -900,14 +900,14 @@ export class EmailOpsTools {
       trust_recipients?: boolean;
     },
   ): Promise<unknown> {
+    const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
     const agentPrincipal =
       !!(user as any).__isFederationActor ||
       !!(user as any).__patAuth ||
-      (externalImapSendEnabled() && !isHumanMailSession(user));
+      (externalImapSendEnabled(workspaceId) && !isHumanMailSession(user));
     if (args.body !== undefined && agentPrincipal) {
       return { ok: false, reason: 'only a human approver can edit the body' };
     }
-    const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
     const { role } = await this.membership.resolveWithRole(user, args.workspace_id);
     // Gate BY KIND (mirrors the REST approve): peek first so a missing/foreign
     // id reads as not-found before any entitlement verdict. Approving an EMAIL
@@ -976,14 +976,14 @@ export class EmailOpsTools {
       trust_recipients?: boolean;
     },
   ): Promise<unknown> {
-    const agentPrincipal =
-      !!(user as any).__isFederationActor ||
-      !!(user as any).__patAuth ||
-      (externalImapSendEnabled() && !isHumanMailSession(user));
     if (!Array.isArray(args.item_ids) || args.item_ids.length < 1 || args.item_ids.length > 200) {
       throw new BadRequestException('item_ids must contain between 1 and 200 items.');
     }
     const workspaceId = await this.membership.assertCanReviewInbox(user, args.workspace_id);
+    const agentPrincipal =
+      !!(user as any).__isFederationActor ||
+      !!(user as any).__patAuth ||
+      (externalImapSendEnabled(workspaceId) && !isHumanMailSession(user));
     const { role } = await this.membership.resolveWithRole(user, args.workspace_id);
     const uid = ucUidOf(user as WithWorkspaceClaim);
     const kinds = await Promise.all(

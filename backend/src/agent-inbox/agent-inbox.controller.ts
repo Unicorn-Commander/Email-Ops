@@ -415,7 +415,7 @@ export class AgentInboxController {
       body.item_ids,
       body.note ?? null,
       body.trustRecipients,
-      externalImapSendEnabled() && !isHumanMailSession(user),
+      externalImapSendEnabled(workspaceId) && !isHumanMailSession(user),
       role,
       ...(body.factual_correction === undefined ? [] : [body.factual_correction]),
     );
@@ -549,7 +549,7 @@ export class AgentInboxController {
     if (!gate.allowed) {
       throw new ForbiddenException(gate.reason);
     }
-    const agentPrincipal = externalImapSendEnabled() && !isHumanMailSession(user);
+    const agentPrincipal = externalImapSendEnabled(workspaceId) && !isHumanMailSession(user);
     const res =
       body.body !== undefined
         ? await this.email.approveAgentInboxItem(
