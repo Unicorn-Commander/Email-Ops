@@ -1,3 +1,4 @@
+import { FakeSmtpServer } from '../../test/fake-smtp.spec';
 import { ImapFlow, ImapFlowOptions } from 'imapflow';
 import { Logger, NotFoundException } from '@nestjs/common';
 import { MailboxAccount, User } from '@prisma/client';
@@ -33,6 +34,8 @@ class TestConnection extends ImapConnection {
 
 describe('external IMAP protocol integration (no sockets or database)', () => {
   const previousWorkspaceIds = process.env.EXTERNAL_IMAP_WORKSPACE_IDS;
+  const previousSendFlag = process.env.EXTERNAL_IMAP_SEND_ENABLED;
+  let smtp: FakeSmtpServer;
   const previousFlag = process.env.EXTERNAL_IMAP_ENABLED;
   const previousKey = process.env.CONNECTED_ACCOUNT_ENC_KEY;
   let server: FakeImapServer;
@@ -52,6 +55,7 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
   };
 
   beforeEach(() => {
+    delete process.env.EXTERNAL_IMAP_SEND_ENABLED;
     process.env.EXTERNAL_IMAP_ENABLED = 'true';
     process.env.EXTERNAL_IMAP_WORKSPACE_IDS = 'workspace-one';
     process.env.CONNECTED_ACCOUNT_ENC_KEY = Buffer.alloc(32, 7).toString('base64');
@@ -108,12 +112,16 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
       },
     };
     prisma = { withWorkspace: jest.fn((_workspace, _user, fn) => fn(tx)) };
-    accounts = new ExternalImapAccounts(prisma as PrismaService, connection);
-    provider = new ExternalImapProvider(accounts, connection);
+    smtp = new FakeSmtpServer();
+    accounts = new ExternalImapAccounts(prisma as PrismaService, connection, smtp);
+    provider = new ExternalImapProvider(accounts, connection, smtp);
   });
 
   afterEach(() => {
     noSecrets(logs);
+    for (const socket of smtp.sockets) expect(socket.destroyed).toBe(true);
+    if (previousSendFlag === undefined) delete process.env.EXTERNAL_IMAP_SEND_ENABLED;
+    else process.env.EXTERNAL_IMAP_SEND_ENABLED = previousSendFlag;
     expect(net.connect).not.toHaveBeenCalled();
     expect(tls.connect).not.toHaveBeenCalled();
     for (const socket of server.sockets) expect(socket.destroyed).toBe(true);
@@ -479,5 +487,244 @@ describe('external IMAP protocol integration (no sockets or database)', () => {
     'fe80::1',
   ])('rejects internal destination %s', (address) => {
     expect(publicAddress(address)).toBe(false);
+  });
+  const smtpSettings = { host: 'smtp.example.com', port: 587 as const };
+  const message = {
+    from: 'spoof@example.com',
+    to: 'recipient@example.com',
+    subject: 'Re: Plans',
+    body: 'A reply',
+    sendAuthorization: 'approval' as const,
+  };
+  async function registerSmtp(port: 465 | 587 = 587) {
+    process.env.EXTERNAL_IMAP_SEND_ENABLED = 'true';
+    const result = await accounts.connect('workspace-one', user, {
+      ...credentials,
+      email_address: mailbox.emailAddress,
+      smtp: { ...smtpSettings, port },
+    });
+    expect(result).toEqual({ status: 'ok', mailbox_id: mailbox.id });
+    noSecrets(result);
+  }
+
+  it.each([465, 587] as const)(
+    'tests SMTP AUTH on %s without submitting mail and reuses encrypted IMAP credentials',
+    async (port) => {
+      await registerSmtp(port);
+      expect(smtp.commands.some((s) => s.startsWith('AUTH'))).toBe(true);
+      expect(smtp.commands.some((s) => /^(MAIL|RCPT|DATA)/.test(s))).toBe(false);
+      expect(smtp.commands.includes('STARTTLS')).toBe(port === 587);
+      expect(
+        smtp.options.every(
+          (options) =>
+            options.rejectUnauthorized === true &&
+            options.minVersion === 'TLSv1.2' &&
+            options.servername === 'smtp.example.com',
+        ),
+      ).toBe(true);
+      expect(row.smtpEncryptedPassword).toBeNull();
+      expect(row.smtpUsername).toBeNull();
+      const stored = await accounts.credentials(mailbox);
+      expect(stored.smtp?.password === fixturePassword).toBe(true);
+      expect(stored.smtp?.username === fixtureUsername).toBe(true);
+    },
+  );
+
+  it('encrypts a separate SMTP password and preserves settings on IMAP-only reconnect', async () => {
+    await registerSmtp();
+    await accounts.connect('workspace-one', user, {
+      ...credentials,
+      email_address: mailbox.emailAddress,
+      smtp: { ...smtpSettings, username: 'smtp-user@example.com', password: fixturePassword },
+    });
+    expect(row.smtpEncryptedPassword.includes(fixturePassword)).toBe(false);
+    expect(
+      decrypt<{ password: string }>(row.smtpEncryptedPassword).password === fixturePassword,
+    ).toBe(true);
+    await register();
+    expect((await accounts.credentials(mailbox)).smtp?.username).toBe('smtp-user@example.com');
+  });
+
+  it.each(['missing', 'refused', 'certificate'] as const)(
+    'refuses STARTTLS %s before AUTH or saving',
+    async (kind) => {
+      process.env.EXTERNAL_IMAP_SEND_ENABLED = 'true';
+      smtp.starttls = kind !== 'missing';
+      smtp.refuseUpgrade = kind === 'refused';
+      smtp.failCertificate = kind === 'certificate';
+      const result = await accounts.connect('workspace-one', user, {
+        ...credentials,
+        email_address: mailbox.emailAddress,
+        smtp: smtpSettings,
+      });
+      expect(result).toEqual({ status: 'tls_failed' });
+      expect(smtp.commands.some((s) => s.startsWith('AUTH'))).toBe(false);
+      expect(tx.externalImapAccount.upsert).not.toHaveBeenCalled();
+      noSecrets(result);
+    },
+  );
+
+  it('returns a typed wrong SMTP password without server text, logs or persistence', async () => {
+    process.env.EXTERNAL_IMAP_SEND_ENABLED = 'true';
+    smtp.wrongPassword = true;
+    const result = await accounts.connect('workspace-one', user, {
+      ...credentials,
+      email_address: mailbox.emailAddress,
+      smtp: smtpSettings,
+    });
+    expect(result).toEqual({ status: 'auth_failed' });
+    noSecrets(result);
+    expect(tx.externalImapAccount.upsert).not.toHaveBeenCalled();
+  });
+
+  it('replies using phase-one thread grouping, sends all recipients and APPENDs identical MIME to SPECIAL-USE Sent', async () => {
+    await registerSmtp();
+    const inbox = await provider.listInbox(mailbox, { folder: 'inbox', limit: 10 });
+    const threadId = inbox.threads.find((t) => t.message_count === 2)!.id;
+    const result = await provider.send(mailbox, {
+      ...message,
+      inReplyToThreadId: threadId,
+      toAddresses: ['recipient@example.com', 'second@example.com'],
+      cc: ['copy@example.com'],
+      bcc: ['hidden@example.com'],
+      bodyHtml: '<p>A reply</p>',
+      attachments: [
+        {
+          filename: 'note.txt',
+          mimeType: 'text/plain',
+          contentBase64: Buffer.from('attachment').toString('base64'),
+        },
+      ],
+    });
+    expect(result).toMatchObject({ accepted: true, threadId, reason: null });
+    const raw = smtp.messages[0].toString();
+    expect(raw).toContain('From: reader@example.com\r\n');
+    expect(raw).not.toContain('spoof@example.com');
+    expect(raw).not.toContain('hidden@example.com');
+    expect(raw).toContain('In-Reply-To: <two@example.com>\r\n');
+    expect(raw).toContain('References: <one@example.com>\r\n <two@example.com>');
+    expect(raw).toContain(`Message-ID: ${result.providerMessageId}`);
+    expect(raw).toMatch(/^Date: .+GMT\r$/m);
+    expect(raw).toContain('multipart/alternative');
+    expect(raw).toContain('multipart/mixed');
+    expect(raw).toContain('YXR0YWNobWVudA==');
+    expect(smtp.commands).toEqual(
+      expect.arrayContaining([
+        'MAIL FROM:<reader@example.com>',
+        ...['recipient', 'second', 'copy', 'hidden'].map((name) => `RCPT TO:<${name}@example.com>`),
+      ]),
+    );
+    expect(server.appended).toHaveLength(1);
+    expect(server.appended[0].folder).toBe('Sent Items');
+    expect(server.appended[0].raw.equals(smtp.messages[0])).toBe(true);
+    noSecrets(result);
+  });
+
+  it('falls back to Sent and supports AUTH LOGIN', async () => {
+    smtp.authMethod = 'LOGIN';
+    server.sentFolder = null;
+    await registerSmtp(465);
+    expect(await provider.send(mailbox, { ...message, sendAuthorization: 'human' })).toMatchObject({
+      accepted: true,
+    });
+    expect(server.appended[0].folder).toBe('Sent');
+  });
+
+  it('does not invite a duplicate SMTP delivery when Sent APPEND fails', async () => {
+    await registerSmtp();
+    server.refuseAppend = true;
+    expect(await provider.send(mailbox, message)).toMatchObject({
+      accepted: true,
+      reason: 'Message sent, but the Sent copy could not be saved.',
+    });
+    expect(smtp.messages).toHaveLength(1);
+  });
+
+  it('refuses stale replies, header injection and a rejected recipient before DATA', async () => {
+    await registerSmtp();
+    for (const override of [
+      { inReplyToThreadId: 'imap-41-missing' },
+      { to: 'recipient@example.com\r\nBcc: hidden@example.com' },
+    ]) {
+      expect(await provider.send(mailbox, { ...message, ...override })).toMatchObject({
+        accepted: false,
+      });
+    }
+    smtp.refuseRecipient = true;
+    expect(await provider.send(mailbox, message)).toMatchObject({ accepted: false });
+    expect(smtp.messages).toHaveLength(0);
+    expect(server.appended).toHaveLength(0);
+  });
+
+  it('blocks unattended sends and either disabled flag before credential or network access', async () => {
+    await registerSmtp();
+    const count = server.connections.length;
+    const smtpCount = smtp.sockets.length;
+    prisma.withWorkspace.mockClear();
+    expect(
+      await provider.send(mailbox, { ...message, sendAuthorization: undefined }),
+    ).toMatchObject({ accepted: false, reason: 'A human send or approval is required.' });
+    for (const [imapFlag, sendFlag] of [
+      ['true', 'false'],
+      ['false', 'true'],
+      ['true', 'TRUE'],
+    ]) {
+      process.env.EXTERNAL_IMAP_ENABLED = imapFlag;
+      process.env.EXTERNAL_IMAP_SEND_ENABLED = sendFlag;
+      expect(await provider.send(mailbox, message)).toMatchObject({
+        accepted: false,
+        reason: 'Sending from this mailbox is not available yet.',
+      });
+    }
+    expect(prisma.withWorkspace).not.toHaveBeenCalled();
+    expect(server.connections).toHaveLength(count);
+    expect(smtp.sockets).toHaveLength(smtpCount);
+  });
+
+  it('keeps SMTP configuration inaccessible with flag off or PAT auth', async () => {
+    const controller = new ExternalImapController(accounts, connection);
+    const body = { ...credentials, email_address: mailbox.emailAddress, smtp: smtpSettings };
+    expect(controller.capabilities()).toEqual({ enabled: true });
+    await expect(controller.test(user, body)).rejects.toThrow(NotFoundException);
+    process.env.EXTERNAL_IMAP_SEND_ENABLED = 'true';
+    for (const action of [
+      () => controller.test({ ...user, __patAuth: {} } as User, body),
+      () => controller.connect('workspace-one', { ...user, __patAuth: {} } as User, body),
+    ])
+      expect(action).toThrow('signed-in session');
+    expect(server.connections).toHaveLength(0);
+    expect(smtp.sockets).toHaveLength(0);
+  });
+
+  it('applies the same DNS guard to the actual SMTP socket lookup', async () => {
+    await registerSmtp();
+    const callback = jest.fn();
+    jest
+      .mocked(dns.lookup)
+      .mockImplementationOnce((...args: any[]) => args[2](null, '127.0.0.1', 4));
+    smtp.options[0].lookup!('smtp.example.com', {}, callback);
+    expect(callback.mock.calls[0][0]).toBeInstanceOf(Error);
+    jest
+      .mocked(dns.lookup)
+      .mockImplementationOnce((...args: any[]) => args[2](null, '203.0.113.1', 4));
+    smtp.options[0].lookup!('smtp.example.com', {}, callback);
+    expect(callback).toHaveBeenLastCalledWith(null, '203.0.113.1', 4);
+  });
+
+  it('closes a silent SMTP server at the total deadline', async () => {
+    process.env.EXTERNAL_IMAP_SEND_ENABLED = 'true';
+    smtp.silent = true;
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    try {
+      const result = smtp.test({
+        ...smtpSettings,
+        username: fixtureUsername,
+        password: fixturePassword,
+      });
+      await jest.advanceTimersByTimeAsync(20001);
+      expect(await result).toEqual({ status: 'unreachable' });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

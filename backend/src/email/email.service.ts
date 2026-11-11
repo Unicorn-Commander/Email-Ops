@@ -197,6 +197,8 @@ const AGENT_SEND_KIT_REASON_MESSAGES: Record<string, string> = {
  * (engine-agnostic; callEngine dispatches Stalwart vs the external provider).
  */
 interface SendReq {
+  /** Internal route authorization, never copied from compose input. */
+  sendAuthorization?: 'human' | 'approval';
   fromAddress: string;
   fromName: string | null;
   toAddress: string;
@@ -2563,11 +2565,9 @@ export class EmailService {
     // PHASE 2 — the external send, OUTSIDE any transaction. callEngine is
     // degrade-clean (a rejected/failed send returns accepted:false, never throws),
     // so a slow or dead provider can't roll back the committed QUEUED row.
-    const result = await this.callEngine(
-      prep.send.mailbox,
-      prep.send.req,
-      humanSend ? 'human' : undefined,
-    );
+    if (prep.send.mailbox?.provider === 'external_imap' && humanSend)
+      prep.send.req.sendAuthorization = 'human';
+    const result = await this.callEngine(prep.send.mailbox, prep.send.req);
 
     if (result.accepted && input.draftId && prep.send.mailbox) {
       try {
@@ -4376,11 +4376,9 @@ export class EmailService {
 
     // PHASE 2 — hand the approved draft to the mail engine / provider, OUTSIDE the
     // tx (degrade-clean: a failed send returns accepted:false, never throws).
-    const result = await this.callEngine(
-      prep.mailbox,
-      prep.req,
-      !agentPrincipal && ucUid ? 'approval' : undefined,
-    );
+    if (prep.mailbox?.provider === 'external_imap' && !agentPrincipal && ucUid)
+      prep.req.sendAuthorization = 'approval';
+    const result = await this.callEngine(prep.mailbox, prep.req);
 
     // Wave 7 learning (default ON): the approval vouches for the external
     // recipients. Runs in its OWN fenced call, degrade-clean, so a learning
@@ -6154,7 +6152,6 @@ export class EmailService {
   private async callEngine(
     mailbox: MailboxAccount | null,
     req: SendReq,
-    sendAuthorization?: 'human' | 'approval',
   ): Promise<EngineSendResult> {
     if (mailbox && this.mailProvider.handles(mailbox)) {
       // Resolve staged external attachment bytes (consume-on-send) and pass them
@@ -6191,8 +6188,8 @@ export class EmailService {
       });
       const toList = req.toAddresses?.length ? req.toAddresses : [req.toAddress];
       const r = await this.mailProvider.send(mailbox, {
-        ...(mailbox.provider === 'external_imap' && sendAuthorization
-          ? { sendAuthorization }
+        ...(mailbox.provider === 'external_imap' && req.sendAuthorization
+          ? { sendAuthorization: req.sendAuthorization }
           : {}),
         from: req.fromAddress,
         to: toList[0],
