@@ -63,3 +63,8 @@ After a successful test, choose **Connect mailbox**. Email-Ops runs the same che
 ## Disconnect
 
 There is no separate disconnect button for this kind of mailbox yet. To stop Email-Ops from reaching the mailbox right away, delete or revoke the app password at your provider. That blocks the connection on the provider side, and nothing is deleted from your mailbox. To reconnect later with a new app password, an owner of the same address can run Connect again.
+
+## Related
+
+- [Connect your own Gmail or Microsoft 365 mailbox](../connect-your-mailbox.md)
+- [Disconnect a Gmail or Microsoft mailbox](disconnect-mailbox.md)

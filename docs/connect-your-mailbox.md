@@ -104,3 +104,8 @@ npm install --no-save --package-lock=false --no-audit --no-fund vitest@3.2.4
 
 The tests mock the broker helper and reject network fetches. They cover both provider redirects, pending/error/retry states, and separation from loading, missing-workspace, request-error and empty-space states. Restore locked dependencies with `npm ci` before running the frontend CI build. CI also attempts `npm run lint` non-blockingly; this repository currently prompts for ESLint configuration.
 <!-- frontend/components/mail/ListBannerView.test.mjs:1; frontend/package.json:5; .forgejo/workflows/ci.yml:128 -->
+
+## Related
+
+- [Disconnect a Gmail or Microsoft mailbox](user/disconnect-mailbox.md)
+- [Connect a mailbox from another provider (IMAP, read only)](user/connect-other-mailbox.md)

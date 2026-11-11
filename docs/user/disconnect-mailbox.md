@@ -69,3 +69,8 @@ You must be signed in as a person to disconnect. An automation token cannot disc
 - The route gate checks workspace membership only. It does not check the member's role, so any active member (including a viewer) can disconnect their own link today.
 - Disconnect does not write an audit entry, and it does not clear a mailbox sync cursor. Deactivation flips the active flag only.
 <!-- backend/src/connected-accounts/connected-accounts.controller.ts:117; backend/src/connected-accounts/connected-accounts.service.ts:172; backend/src/connected-accounts/connected-accounts.service.ts:1827 -->
+
+## Related
+
+- [Connect your own Gmail or Microsoft 365 mailbox](../connect-your-mailbox.md)
+- [Connect a mailbox from another provider (IMAP, read only)](connect-other-mailbox.md)
