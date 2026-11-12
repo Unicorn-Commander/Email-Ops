@@ -187,5 +187,7 @@ Check these in order:
 
 The single-item approve uses a conditional claim so a double click or a
 retried request sends once
-(`backend/src/email/email.service.ts:4260-4290`). A fix for concurrent
-approvals is in progress; see the agent-inbox approve spec.
+(`backend/src/email/email.service.ts:4260-4290`). Two concurrent approvals
+of the same item also send once: only the caller whose conditional update
+claims the row reaches the send lane, and the other gets the current state
+(PR #102; covered by `backend/src/agent-inbox/agent-inbox.approve-sends-once.spec.ts`).
