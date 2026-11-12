@@ -61,6 +61,7 @@ import {
 } from '@/lib/api';
 import type { ReviewOutcome } from '@/components/useAgentInbox';
 import { bareAddress, type UseTrustedCorrespondents } from './TrustedCorrespondents';
+import { resolveAgentInboxOpenTarget } from './queue';
 
 // ── Subject: what the panel is reviewing ─────────────────────────────────────
 
@@ -128,6 +129,7 @@ function payloadStr(
 
 /** A list-shaped queue item as a (degraded) staged message — instant render. */
 function degradedMessage(item: AgentInboxItemView): StagedMessageView {
+  const openTarget = resolveAgentInboxOpenTarget(item);
   return {
     subject: item.subject,
     from_address: null,
@@ -144,8 +146,8 @@ function degradedMessage(item: AgentInboxItemView): StagedMessageView {
       blob_id: null,
       cid: null,
     })),
-    thread_id: payloadStr(item.payload, ['thread_id', 'in_reply_to_thread_id', 'conversation_id']),
-    mailbox_id: payloadStr(item.payload, ['mailbox_id', 'mailbox_account_id', 'from_mailbox_id']),
+    thread_id: openTarget.threadId ?? payloadStr(item.payload, ['in_reply_to_thread_id', 'conversation_id']),
+    mailbox_id: openTarget.mailboxId ?? payloadStr(item.payload, ['from_mailbox_id']),
   };
 }
 
@@ -564,9 +566,10 @@ export function ReviewPanel({
   useEffect(() => {
     if (canEditBody) setEditedBody(message?.text_body ?? '');
   }, [canEditBody, message?.text_body, subjectKey]);
-  const threadId = message?.thread_id ?? null;
+  const openTarget = queueItem ? resolveAgentInboxOpenTarget(effectiveItem ?? queueItem) : null;
+  const threadId = openTarget?.threadId ?? message?.thread_id ?? null;
   const blobMailboxId =
-    message?.mailbox_id ?? (agent?.mailbox_account_id || null);
+    openTarget?.mailboxId ?? message?.mailbox_id ?? (agent?.mailbox_account_id || null);
 
   const trustAddresses = useMemo(
     () => (pending && !isCleanup ? trustTargets(policy, message, queueItem?.to_address ?? null) : []),
