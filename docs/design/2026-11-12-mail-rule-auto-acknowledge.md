@@ -105,16 +105,17 @@ the feature. Evaluate the following predicates in one workspace transaction:
 | Rule match | The rule itself matched the message | Keep `PENDING`; never infer from a neighboring rule |
 | Trusted correspondent | Sender matches no trusted address or trusted domain | Keep `PENDING` |
 | Reply relationship | Message is not a reply to an existing thread with an outbound message from the mailbox | Keep `PENDING` |
-| Customer-Ops guard | For mail addressed to the configured `support@` identity, Customer-Ops says the sender is not an existing customer | Keep `PENDING`; unknown or unavailable is unsafe |
+| Customer-Ops guard | Customer-Ops says the sender is not an existing customer; for mail to the configured `support@` identity, the support-specific customer check also passes | Keep `PENDING`; any customer, unknown, or unavailable result is unsafe |
 | Content safety | No attachment, no spam verdict, and no forwarded marker | Keep `PENDING` |
 | Daily cap | The rule has not reached its UTC-day cap | Keep `PENDING` and record `cap_reached` |
 | Idempotency | This inbound message has not already received a decision from this rule | Do not create a second decision |
 
-The customer guard is intentionally narrow. It applies to a configured support
-mailbox, initially `support@majiks.studio`, and not to every mailbox in the
-workspace. If any recipient is a configured customer-support address and the
-sender is a known Customer-Ops customer, the feature never auto-acknowledges.
-Unknown customer status is treated as customer or unknown, never as safe.
+The no-customer guard applies to every eligible message. In addition, the first
+dogfood lane applies a stricter check to the configured support mailbox,
+initially `support@majiks.studio`. If any recipient is a configured
+customer-support address and the sender is a known Customer-Ops customer, the
+feature never auto-acknowledges. Unknown customer status is treated as customer
+or unknown, never as safe.
 
 The reply guard should use provider thread evidence, not subject text. A thread
 with a prior outbound message from the same mailbox is a reply-sensitive
