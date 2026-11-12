@@ -9,9 +9,9 @@ What changed
 Review round note
 - The branch arrived with no prior commits (tip was the base; the earlier
   disconnect spec 923fdff was merged to main via PR #88 and used it.failing
-  pins). No REVIEW text was present in the task description, so this round
-  re-did the task strictly to the four numbered requirements, asserting only
-  actual shipped behavior (that removes the it.failing pattern PR #88 drew).
+  pins). No REVIEW text was in the task description, so this round re-did
+  the task strictly to the four numbered requirements, asserting only actual
+  shipped behavior (that removes the it.failing pattern PR #88 drew).
 
 The four proofs (real service + controller; fakes only for DB and broker)
 1. Credential wipe: Disconnect calls the broker revoke (unlinkBrokerIdentity
