@@ -4,6 +4,7 @@ import {
   filterAndSortQueue,
   formatBulkSchedule,
   pendingQueueIds,
+  resolveAgentInboxOpenTarget,
   toggleVisibleSelection,
 } from './queue';
 import type { AgentInboxItemView } from '../../lib/api';
@@ -68,5 +69,32 @@ describe('agent inbox queue helpers', () => {
       },
     });
     assert.match(text, /20 approved; sends from .* to .*, 10 per sender\./);
+  });
+
+  it('resolves camelCase notice ids and keeps snake_case items working', () => {
+    const notice = item({
+      id: 'notice-1',
+      kind: 'NOTICE',
+      from_address: 'vendor@example.com',
+      thread_id: null,
+      payload: {
+        type: 'mail_rule_notice',
+        threadId: 'thread-camel',
+        mailboxId: 'mailbox-camel',
+      },
+    });
+    assert.deepEqual(resolveAgentInboxOpenTarget(notice), {
+      threadId: 'thread-camel',
+      mailboxId: 'mailbox-camel',
+    });
+
+    const snake = item({
+      thread_id: 'thread-snake',
+      payload: { mailbox_id: 'mailbox-snake' },
+    });
+    assert.deepEqual(resolveAgentInboxOpenTarget(snake), {
+      threadId: 'thread-snake',
+      mailboxId: 'mailbox-snake',
+    });
   });
 });
