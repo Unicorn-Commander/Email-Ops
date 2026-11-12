@@ -30,6 +30,10 @@
 - [ops/agent-inbox-states.md](ops/agent-inbox-states.md) - Agent-inbox item lifecycle (operator)
 - [ops/external-imap-allowlist.md](ops/external-imap-allowlist.md) - External IMAP allowlist (operator)
 
+## releases
+
+- [releases/2026-11-12-pending.md](releases/2026-11-12-pending.md) - Pending release notes for PR #95-#104
+
 ## screenshots
 
 - [screenshots/approvals.webp](screenshots/approvals.webp)
