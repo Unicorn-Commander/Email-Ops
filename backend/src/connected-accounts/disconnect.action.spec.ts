@@ -302,6 +302,32 @@ describe('mailbox disconnect action (#82)', () => {
       }
     });
 
+    it('writes one audit entry per workspace with rows, and none for an empty workspace', async () => {
+      const restore = silenceLogger();
+      try {
+        const rows = [
+          ...freshRows(),
+          box('mine-ws-2', 'ws-2', 'gmail', 'kc-ada', 'ada.ws2@example.com'),
+        ];
+        const { tx, membership, service } = harness(rows);
+        membership.listActiveMemberships.mockResolvedValue([
+          { workspaceId: 'ws-1' },
+          { workspaceId: 'ws-2' },
+          { workspaceId: 'ws-empty' },
+        ]);
+
+        await service.disconnectProvider(caller, 'gmail');
+
+        expect(tx.agentActionEvent.create).toHaveBeenCalledTimes(2);
+        expect(
+          tx.agentActionEvent.create.mock.calls.map(([call]) => call.data.workspaceId),
+        ).toEqual(['ws-1', 'ws-2']);
+        expect(JSON.stringify(tx.agentActionEvent.create.mock.calls)).not.toContain(refreshToken);
+      } finally {
+        restore();
+      }
+    });
+
     it('clears the mailbox sync cursor on disconnect', async () => {
       const restore = silenceLogger();
       try {

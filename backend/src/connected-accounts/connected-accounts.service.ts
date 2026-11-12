@@ -1837,7 +1837,7 @@ export class ConnectedAccountsService {
     const workspaceIds = await this.workspaceIdsFor(user);
     const ucUid = ucUidOf(user);
     let deactivated = 0;
-    for (const [index, workspaceId] of workspaceIds.entries()) {
+    for (const workspaceId of workspaceIds) {
       deactivated += await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
         const owned = await tx.mailboxAccount.findMany({
           where: {
@@ -1877,7 +1877,7 @@ export class ConnectedAccountsService {
           });
           count += 1;
         }
-        if (index === 0) {
+        if (count > 0 || (outcome === 'already_absent' && owned.length > 0)) {
           await tx.agentActionEvent.create({
             data: {
               workspaceId,
