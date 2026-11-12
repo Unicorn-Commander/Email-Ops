@@ -68,6 +68,14 @@ function harness(rows = [pendingItem()]) {
     },
     agentSendKit: { findMany: jest.fn().mockResolvedValue([]) },
     emailMessage: {
+      updateMany: jest.fn().mockImplementation(({ where, data }) => {
+        const row = rows.find(
+          (entry) => entry.message.id === where.id && entry.workspaceId === where.workspaceId,
+        );
+        if (!row || row.message.status !== where.status) return { count: 0 };
+        Object.assign(row.message, data);
+        return { count: 1 };
+      }),
       findUnique: jest.fn().mockResolvedValue(null),
       create: jest.fn().mockImplementation(({ data }) => ({ ...rows[0].message, ...data })),
       update: jest.fn().mockImplementation(({ where, data }) => {
@@ -76,6 +84,14 @@ function harness(rows = [pendingItem()]) {
       }),
     },
     agentInboxItem: {
+      updateMany: jest.fn().mockImplementation(({ where, data }) => {
+        const row = rows.find(
+          (entry) => entry.id === where.id && entry.workspaceId === where.workspaceId,
+        );
+        if (!row || row.state !== where.state) return { count: 0 };
+        Object.assign(row, data);
+        return { count: 1 };
+      }),
       create: jest.fn().mockImplementation(({ data }) => Object.assign(rows[0], data)),
       findFirst: jest
         .fn()
@@ -290,6 +306,38 @@ describe('agent-inbox approval evidence', () => {
       reviewNote: 'Reviewed batch',
     });
     expect(tx.agentActionEvent.create).toHaveBeenCalledTimes(3);
+  });
+
+  it('concurrent bulk approvals schedule and audit a pending item once', async () => {
+    const { rows, service, tx } = harness();
+    const read = tx.agentInboxItem.findMany.getMockImplementation()!;
+    let reads = 0;
+    let releaseReads!: () => void;
+    const bothRead = new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    });
+    tx.agentInboxItem.findMany.mockImplementation(async (args) => {
+      const snapshot = (await read(args)).map((row) => ({
+        ...row,
+        message: { ...row.message },
+      }));
+      if (++reads <= 2) {
+        if (reads === 2) releaseReads();
+        await bothRead;
+      }
+      return snapshot;
+    });
+    const results = await Promise.all([
+      service.bulkApproveAgentInboxItems(WS, UID, [rows[0].id]),
+      service.bulkApproveAgentInboxItems(WS, UID, [rows[0].id]),
+    ]);
+    expect(results.map((result) => result.items[0].status).sort()).toEqual([
+      'already_approved',
+      'scheduled',
+    ]);
+    expect(tx.agentInboxItem.updateMany).toHaveBeenCalledTimes(2);
+    expect(tx.agentActionEvent.create).toHaveBeenCalledTimes(1);
+    expect(rows[0].state).toBe(AgentInboxState.APPROVED);
   });
 
   it('exposes null evidence for old rows without backfilling it during reads', async () => {

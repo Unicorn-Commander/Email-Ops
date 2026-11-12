@@ -13,23 +13,22 @@ import { AgentInboxController } from './agent-inbox.controller';
 /**
  * Agent-inbox approve: the send-once contract of the human-in-the-loop SEND.
  *
- * The approve flow lives in EmailService.approveAgentInboxItem (phase 1 reads
+ * The approve flow lives in EmailService.approveAgentInboxItem (phase 1 claims
  * the staged draft inside a withWorkspace tx, phase 2 hands the draft to the
- * mail engine via callEngine, phase 3 stamps the message SENT and flips the
- * item to APPROVED). Both the REST front door (AgentInboxController.approve)
- * and the MCP tool delegate to it, so this spec pins the service itself:
+ * mail engine via callEngine, phase 3 stamps the message SENT). Both the REST
+ * front door (AgentInboxController.approve) and the MCP tool delegate to it,
+ * so this spec pins the service itself:
  *
  *   (1) approving a pending draft queues delivery exactly once and marks the
  *       item approved + the message sent;
  *   (2) approving the same item again (double click / retry) is a no-op that
  *       returns the current approved/sent state and never re-sends;
- *   (3) two concurrent approves of the same item send once: the code has no
- *       guard, so both calls phase 1 off the PENDING row and both phase 2.
- *       This test documents that behavior (finding in REPORT.md) by holding
- *       the engine behind a barrier so both approves enter the send lane;
- *   (4) rejecting an approved item is refused (non-pending no-op) and the
+ *   (3) two concurrent approves of the same item send once: one claims the
+ *       PENDING row and the other returns its current state;
+ *   (4) a failed send restores PENDING so a later approval can retry;
+ *   (5) rejecting an approved item is refused (non-pending no-op) and the
  *       message stays SENT: a reject can never unsend;
- *   (5) a caller from another workspace cannot approve the item: the
+ *   (6) a caller from another workspace cannot approve the item: the
  *       workspaceId fence makes it resolve to null (-> 404 at the controller)
  *       and no send leaves.
  *
@@ -63,7 +62,7 @@ function makeRow(
     state: opts.state ?? AgentInboxState.PENDING,
     draftedBy: 'fictional-agent',
     summary: 'Appointment confirmation',
-    payload: null,
+    payload: null as Prisma.JsonValue,
     bodySha256: hash(DRAFT),
     sentBodySha256: null,
     editedBeforeSend: null,
@@ -77,7 +76,7 @@ function makeRow(
       workspaceId,
       mailboxAccountId: null,
       kitId: null,
-      sendAt: null,
+      sendAt: null as Date | null,
       threadId: null,
       status: opts.messageStatus ?? EmailMessageStatus.PENDING_APPROVAL,
       mode: EmailMode.DRAFT,
@@ -119,6 +118,14 @@ function harness(rows: ReturnType<typeof makeRow>[]) {
     },
     agentSendKit: { findMany: jest.fn().mockResolvedValue([]) },
     emailMessage: {
+      updateMany: jest.fn().mockImplementation(({ where, data }) => {
+        const row = rows.find(
+          (r) => r.message.id === where.id && r.workspaceId === where.workspaceId,
+        );
+        if (!row || row.message.status !== where.status) return Promise.resolve({ count: 0 });
+        Object.assign(row.message, data);
+        return Promise.resolve({ count: 1 });
+      }),
       update: jest
         .fn()
         .mockImplementation(
@@ -131,15 +138,24 @@ function harness(rows: ReturnType<typeof makeRow>[]) {
         ),
     },
     agentInboxItem: {
+      updateMany: jest.fn().mockImplementation(({ where, data }) => {
+        const row = rows.find((r) => r.id === where.id && r.workspaceId === where.workspaceId);
+        if (!row || row.state !== where.state) return Promise.resolve({ count: 0 });
+        Object.assign(row, data);
+        return Promise.resolve({ count: 1 });
+      }),
       findFirst: jest
         .fn()
         .mockImplementation(({ where }: { where: { id?: string; workspaceId?: string } }) =>
           Promise.resolve(
-            rows.find(
-              (r) =>
-                (!where.id || r.id === where.id) &&
-                (!where.workspaceId || r.workspaceId === where.workspaceId),
-            ) ?? null,
+            (() => {
+              const row = rows.find(
+                (r) =>
+                  (!where.id || r.id === where.id) &&
+                  (!where.workspaceId || r.workspaceId === where.workspaceId),
+              );
+              return row ? { ...row, message: { ...row.message } } : null;
+            })(),
           ),
         ),
       update: jest
@@ -161,7 +177,16 @@ function harness(rows: ReturnType<typeof makeRow>[]) {
     ),
   } as unknown as ConstructorParameters<typeof EmailService>[0];
   const service = new EmailService(prisma, {} as never, {} as never, {} as never);
-  const engine = jest.fn(async (_mailbox: unknown, _req: unknown) => ({
+  const engine = jest.fn<
+    Promise<{
+      accepted: boolean;
+      providerMessageId: string | null;
+      threadId: string | null;
+      lane: string | null;
+      reason: string | null;
+    }>,
+    [unknown, unknown]
+  >(async (_mailbox, _req) => ({
     accepted: true,
     providerMessageId: 'fictional-provider-message',
     threadId: 'fictional-thread',
@@ -201,6 +226,7 @@ describe('agent-inbox approve: sends exactly once (service-level)', () => {
       inbox: expect.objectContaining({ state: 'approved', review_note: 'lgtm' }),
       message: expect.objectContaining({ status: 'sent' }),
     });
+    expect(tx.agentInboxItem.updateMany).toHaveBeenCalledTimes(1);
     expect(tx.agentInboxItem.update).toHaveBeenCalledTimes(1);
     expect(tx.agentActionEvent.create).toHaveBeenCalledTimes(1);
   });
@@ -226,25 +252,33 @@ describe('agent-inbox approve: sends exactly once (service-level)', () => {
     });
   });
 
-  it('two concurrent approves both enter the send lane (no guard: documented finding)', async () => {
-    const { rows, service, engine } = harness([makeRow('item-1', WS_A)]);
-    const entered = jest.fn();
-    const settled = jest.fn();
-    // Barrier: both approves must be parked inside the engine (phase 2) before
-    // either one may finish and run phase 3.
+  it('two concurrent approves claim once and enter the send lane once', async () => {
+    const { rows, tx, service, engine } = harness([makeRow('item-1', WS_A)]);
+    const read = tx.agentInboxItem.findFirst.getMockImplementation()!;
+    let reads = 0;
+    let releaseReads!: () => void;
+    const bothRead = new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    });
+    tx.agentInboxItem.findFirst.mockImplementation(async (args: unknown) => {
+      const snapshot = await read(args);
+      if (++reads <= 2) {
+        if (reads === 2) releaseReads();
+        await bothRead;
+      }
+      return snapshot;
+    });
+    let releaseSend!: () => void;
+    let enteredSend!: () => void;
     const parked = new Promise<void>((resolve) => {
-      let done = 0;
-      entered.mockImplementation(() => {
-        if (++done === 2) resolve();
-      });
-      settled.mockImplementation(() => {
-        if (++done === 4) resolve();
-      });
+      releaseSend = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      enteredSend = resolve;
     });
     engine.mockImplementation(async () => {
-      entered();
+      enteredSend();
       await parked;
-      settled();
       return {
         accepted: true,
         providerMessageId: 'fictional-provider-message',
@@ -254,20 +288,88 @@ describe('agent-inbox approve: sends exactly once (service-level)', () => {
       };
     });
 
-    const results = await Promise.all([
+    const calls = [
       service.approveAgentInboxItem(WS_A, UID_A, 'item-1'),
       service.approveAgentInboxItem(WS_A, UID_A, 'item-1'),
-    ]);
-
-    // Both approves phase 1 off the PENDING row before either phase 3 flips the
-    // state, so both phase 2. The code has no atomic claim; the outcome is
-    // engine-dependent (both accepted here => two deliveries). Finding logged in
-    // REPORT.md with the file:line of the phase 1 read.
-    expect(entered).toHaveBeenCalledTimes(2);
-    expect(engine).toHaveBeenCalledTimes(2);
+    ];
+    await entered;
+    const loser = await Promise.race(calls);
+    expect(loser).toMatchObject({
+      inbox: expect.objectContaining({ state: 'approved' }),
+      message: expect.objectContaining({ status: 'queued' }),
+    });
+    expect(engine).toHaveBeenCalledTimes(1);
+    releaseSend();
+    const results = await Promise.all(calls);
+    expect(tx.agentInboxItem.updateMany).toHaveBeenCalledTimes(2);
     expect(results).toHaveLength(2);
+    expect(engine).toHaveBeenCalledTimes(1);
     expect(rows[0]).toMatchObject({ state: AgentInboxState.APPROVED });
   }, 15000);
+
+  it('a failed send restores the claim so approval can be retried', async () => {
+    const { rows, service, engine } = harness([makeRow('item-1', WS_A)]);
+    engine.mockResolvedValueOnce({
+      accepted: false,
+      providerMessageId: null,
+      threadId: null,
+      lane: 'fictional',
+      reason: 'Fictional send failure',
+    });
+    await expect(service.approveAgentInboxItem(WS_A, UID_A, 'item-1')).rejects.toThrow(
+      'Fictional send failure',
+    );
+    expect(rows[0].state).toBe(AgentInboxState.PENDING);
+    expect(rows[0].message.status).toBe(EmailMessageStatus.FAILED);
+    const retry = await service.approveAgentInboxItem(WS_A, UID_A, 'item-1');
+    expect(engine).toHaveBeenCalledTimes(2);
+    expect(retry).toMatchObject({ message: expect.objectContaining({ status: 'sent' }) });
+  });
+
+  it('a thrown engine error also restores the pending item', async () => {
+    const { rows, service, engine } = harness([makeRow('item-1', WS_A)]);
+    engine.mockRejectedValueOnce(new Error('Fictional engine error'));
+    await expect(service.approveAgentInboxItem(WS_A, UID_A, 'item-1')).rejects.toThrow(
+      'Fictional engine error',
+    );
+    expect(rows[0].state).toBe(AgentInboxState.PENDING);
+    expect(rows[0].message.status).toBe(EmailMessageStatus.FAILED);
+  });
+
+  it('two workers send a due scheduled approval only once', async () => {
+    const row = makeRow('item-1', WS_A, { state: AgentInboxState.APPROVED });
+    row.message.sendAt = new Date('2026-11-01T12:00:00.000Z');
+    row.payload = { sends_at: row.message.sendAt.toISOString() };
+    const { service, engine } = harness([row]);
+    let releaseSend!: () => void;
+    let enteredSend!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      enteredSend = resolve;
+    });
+    engine.mockImplementation(async () => {
+      enteredSend();
+      await parked;
+      return {
+        accepted: true,
+        providerMessageId: 'fictional-provider-message',
+        threadId: 'fictional-thread',
+        lane: 'fictional',
+        reason: null,
+      };
+    });
+
+    const first = service.approveAgentInboxItem(WS_A, UID_A, row.id);
+    await entered;
+    const second = await service.approveAgentInboxItem(WS_A, UID_A, row.id);
+    expect(second?.message?.status).toBe('queued');
+    releaseSend();
+    await first;
+    expect(engine).toHaveBeenCalledTimes(1);
+    expect(row.message.status).toBe(EmailMessageStatus.SENT);
+  });
 
   it('rejecting an approved item does not unsend: refused as a no-op, message stays sent', async () => {
     const { rows, service, engine } = harness([makeRow('item-1', WS_A)]);
