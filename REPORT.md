@@ -2,6 +2,7 @@
 
 What changed
 - `1197c72 docs: design vendor pitch notice auto-acknowledge`
+- `5cecdac docs: make customer guard global`
 - Added `docs/design/2026-11-12-mail-rule-auto-acknowledge.md` only.
 - The proposal is opt-in and off by default, with explicit `vendor_pitch`
   classification, trusted-sender, reply-thread, Customer-Ops, content, cap, and
