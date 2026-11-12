@@ -1,5 +1,5 @@
 import { isHumanMailSession } from './smtp-connection';
-import { Body, Controller, ForbiddenException, Get, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Param, Post, UseGuards } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { Throttle } from '@nestjs/throttler';
 import { User } from '@prisma/client';
@@ -76,5 +76,16 @@ export class ExternalImapController {
   ) {
     this.assertHuman(workspaceId, user);
     return this.accounts.connect(workspaceId, user, body);
+  }
+
+  @Post(':mailboxId/disconnect')
+  @Throttle({ short: { ttl: 60000, limit: 5 }, long: { ttl: 3600000, limit: 30 } })
+  disconnect(
+    @ResolvedWorkspace() workspaceId: string,
+    @CurrentUser() user: User,
+    @Param('mailboxId') mailboxId: string,
+  ) {
+    this.assertHuman(workspaceId, user);
+    return this.accounts.disconnect(workspaceId, user, mailboxId);
   }
 }
