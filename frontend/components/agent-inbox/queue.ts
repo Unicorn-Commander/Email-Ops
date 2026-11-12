@@ -4,6 +4,45 @@ export type QueueSort = 'created' | 'kit' | 'sender' | 'recipient' | 'tier';
 export type QueueStateFilter = 'all' | 'pending' | 'approved' | 'rejected';
 export type QueueKitFilter = 'all' | 'with-kit' | 'without-kit' | string;
 
+export interface AgentInboxOpenTarget {
+  threadId: string | null;
+  mailboxId: string | null;
+}
+
+function payloadRecord(payload: AgentInboxItemView['payload']): Record<string, unknown> | null {
+  return payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : null;
+}
+
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+/** Resolve the identifiers needed to open any inbox item, including notices. */
+export function resolveAgentInboxOpenTarget(item: AgentInboxItemView): AgentInboxOpenTarget {
+  const payload = payloadRecord(item.payload);
+  const itemWithMailbox = item as AgentInboxItemView & {
+    mailbox_id?: unknown;
+    mailboxId?: unknown;
+    mailbox_account_id?: unknown;
+  };
+  return {
+    threadId: firstString(item.thread_id, payload?.thread_id, payload?.threadId),
+    mailboxId: firstString(
+      itemWithMailbox.mailbox_id,
+      itemWithMailbox.mailboxId,
+      itemWithMailbox.mailbox_account_id,
+      payload?.mailbox_id,
+      payload?.mailboxId,
+      payload?.mailbox_account_id,
+    ),
+  };
+}
+
 function createdAt(item: AgentInboxItemView): number {
   const timestamp = Date.parse(item.created_at ?? '');
   return Number.isNaN(timestamp) ? 0 : timestamp;

@@ -22,7 +22,7 @@
 
 import Link from 'next/link';
 import { StandingApprovals } from '@/components/agent-inbox/StandingApprovals';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type MouseEvent } from 'react';
 import { Badge, Button, Card, Skeleton, SkeletonText, cn, useConfirm } from '@/components/ui';
 import { Tooltip } from '@/components/Tooltip';
 import { useUiCommands } from '@/components/UiCommandProvider';
@@ -35,6 +35,7 @@ import {
   useTrustedCorrespondents,
 } from '@/components/agent-inbox/TrustedCorrespondents';
 import { ReviewPanel, type ReviewSubject } from '@/components/agent-inbox/ReviewPanel';
+import { NoticeMessagePreview } from '@/components/agent-inbox/NoticeMessagePreview';
 import { CleanupTargetsList, cleanupTargetsSentence } from '@/components/mail/CleanupTargetsList';
 import { RobotIcon } from '@/components/mail/icons';
 import { agentLabel } from '@/lib/agents';
@@ -43,6 +44,7 @@ import {
   filterAndSortQueue,
   formatBulkSchedule,
   pendingQueueIds,
+  resolveAgentInboxOpenTarget,
   toggleVisibleSelection,
   type QueueKitFilter,
   type QueueSort,
@@ -59,6 +61,7 @@ import {
   type AgentView,
   type AutoSentItemView,
 } from '@/lib/api';
+import { getMailThread, type MessageView } from '@/lib/mailApi';
 
 type QueueTab = 'pending' | 'auto-sent' | 'history';
 
@@ -308,6 +311,7 @@ export default function AgentInboxPage() {
                   selected={selected.has(item.id)}
                   onSelectedChange={(checked) => toggleSelected(item.id, checked)}
                   canReview={canReview}
+                  workspaceId={workspaceId}
                   onOpen={() => openReview({ kind: 'item', item })}
                   onApprove={(note) => inbox.approve(item.id, note)}
                   onReject={(note) => inbox.reject(item.id, note)}
@@ -1194,6 +1198,7 @@ function ReviewCard({
   selected,
   onSelectedChange,
   canReview,
+  workspaceId,
   onOpen,
   onApprove,
   onReject,
@@ -1202,6 +1207,7 @@ function ReviewCard({
   selected: boolean;
   onSelectedChange: (checked: boolean) => void;
   canReview: boolean;
+  workspaceId: string | null;
   /** Open the full-fidelity review panel for this item. */
   onOpen: () => void;
   onApprove: (note?: string) => Promise<{ ok: boolean; error?: string }>;
@@ -1231,6 +1237,8 @@ function ReviewCard({
         selected={selected}
         onSelectedChange={onSelectedChange}
         canReview={canReview}
+        workspaceId={workspaceId}
+        onOpen={onOpen}
         onApprove={onApprove}
         onReject={onReject}
       />
@@ -1427,6 +1435,8 @@ function NoticeCard({
   selected,
   onSelectedChange,
   canReview,
+  workspaceId,
+  onOpen,
   onApprove,
   onReject,
 }: {
@@ -1435,6 +1445,8 @@ function NoticeCard({
   selected: boolean;
   onSelectedChange: (checked: boolean) => void;
   canReview: boolean;
+  workspaceId: string | null;
+  onOpen: () => void;
   onApprove: (note?: string) => Promise<{ ok: boolean; error?: string }>;
   onReject: (note?: string) => Promise<{ ok: boolean; error?: string }>;
 }) {
@@ -1446,18 +1458,55 @@ function NoticeCard({
   const ruleName = notice?.ruleName ?? 'Mail rule notice';
   const from = notice?.from ?? '(unknown sender)';
   const subject = notice?.subject || '(no subject)';
+  const openTarget = useMemo(() => resolveAgentInboxOpenTarget(item), [item]);
+  const [linkedMessage, setLinkedMessage] = useState<MessageView | null>(null);
+  const [messageLoading, setMessageLoading] = useState(false);
+
+  useEffect(() => {
+    if (!notice || !workspaceId || !openTarget.threadId || !openTarget.mailboxId) {
+      setLinkedMessage(null);
+      setMessageLoading(false);
+      return;
+    }
+    let alive = true;
+    setMessageLoading(true);
+    void getMailThread(workspaceId, openTarget.mailboxId, openTarget.threadId)
+      .then((result) => {
+        if (!alive) return;
+        setLinkedMessage(
+          result.messages.find((message) => message.id === notice.messageId) ??
+            result.messages[0] ??
+            null,
+        );
+      })
+      .catch(() => {
+        if (alive) setLinkedMessage(null);
+      })
+      .finally(() => {
+        if (alive) setMessageLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [notice, openTarget.mailboxId, openTarget.threadId, workspaceId]);
 
   function openThread() {
-    if (!notice) return;
+    if (!openTarget.threadId) return;
     enqueueLocal({
       id: `agent-inbox-notice-${Date.now()}`,
       created_at: new Date().toISOString(),
       kind: 'open_thread',
       payload: {
-        thread_id: notice.threadId,
-        mailbox_id: notice.mailboxId,
+        thread_id: openTarget.threadId,
+        ...(openTarget.mailboxId ? { mailbox_id: openTarget.mailboxId } : {}),
       },
     });
+  }
+
+  function openRow(event: MouseEvent<HTMLDivElement>) {
+    const target = event.target as HTMLElement;
+    if (target.closest('button, a, input, textarea, select')) return;
+    onOpen();
   }
 
   async function decide(kind: 'approve' | 'reject') {
@@ -1472,7 +1521,18 @@ function NoticeCard({
   }
 
   return (
-    <Card className="overflow-hidden">
+    <Card
+      className="overflow-hidden"
+      onClick={openRow}
+      onKeyDown={(event) => {
+        if ((event.key === 'Enter' || event.key === ' ') && event.target === event.currentTarget) {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+      role="button"
+      tabIndex={0}
+    >
       <div className="space-y-3 p-4">
         <div className="flex flex-wrap items-center gap-2">
           {item.state === 'pending' && (
@@ -1510,8 +1570,10 @@ function NoticeCard({
           )}
         </div>
 
+        <NoticeMessagePreview notice={notice} message={linkedMessage} loading={messageLoading} />
+
         <div className="flex flex-wrap items-center gap-3">
-          {notice ? (
+          {openTarget.threadId ? (
             <Link
               href="/mail"
               onClick={openThread}
@@ -1520,7 +1582,7 @@ function NoticeCard({
               Open thread
             </Link>
           ) : (
-            <span className="text-xs text-muted">Thread details unavailable.</span>
+            <span className="text-xs text-muted">This notice has no linked message</span>
           )}
           {item.state !== 'pending' && (
             <span className="text-[11px] text-muted">
