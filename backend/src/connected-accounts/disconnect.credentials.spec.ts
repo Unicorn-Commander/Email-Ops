@@ -16,8 +16,7 @@ import { ConnectedAccountsService } from './connected-accounts.service';
  * The disconnect code under test (ConnectedAccountsService /
  * ConnectedAccountsController) is REAL. Fictional identities only.
  *
- * Audit finding: disconnectProvider writes NO audit row (see REPORT.md); the
- * suite pins that actual behavior instead of asserting an unimplemented one.
+ * Disconnect writes one workspace-scoped audit row without credentials.
  */
 describe('mailbox Disconnect credential wipe (#82)', () => {
   const adaRefreshEnc = 'enc:ada-fictional-refresh-secret';
@@ -96,9 +95,7 @@ describe('mailbox Disconnect credential wipe (#82)', () => {
         deleteMany: jest.fn(),
       },
       agentActionEvent: {
-        create: jest.fn(async () => {
-          throw new Error('unexpected audit write in this scenario');
-        }),
+        create: jest.fn().mockResolvedValue({ id: 'event-1' }),
       },
     };
 
@@ -342,8 +339,8 @@ describe('mailbox Disconnect credential wipe (#82)', () => {
     });
   });
 
-  describe('audit behavior (actual)', () => {
-    it('Disconnect writes no audit event row (finding, see REPORT.md)', async () => {
+  describe('audit behavior', () => {
+    it('Disconnect writes one audit event row without the broker token', async () => {
       const restore = silenceLogger();
       try {
         const h = harness({
@@ -354,9 +351,21 @@ describe('mailbox Disconnect credential wipe (#82)', () => {
 
         await h.service.disconnectProvider(ada, 'gmail');
 
-        // disconnectProvider (connected-accounts.service.ts:172-231) writes no
-        // audit row; the only trace is a logger line. Pin that actual behavior.
-        expect(h.tx.agentActionEvent.create).not.toHaveBeenCalled();
+        expect(h.tx.agentActionEvent.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            workspaceId: 'ws-a',
+            actorUcUid: 'kc-ada',
+            kind: 'MAILBOX_UPDATED',
+            detail: JSON.stringify({
+              action: 'disconnect',
+              provider: 'gmail',
+              outcome: 'disconnected',
+            }),
+          }),
+        });
+        expect(JSON.stringify(h.tx.agentActionEvent.create.mock.calls)).not.toContain(
+          adaRefreshEnc,
+        );
       } finally {
         restore();
       }

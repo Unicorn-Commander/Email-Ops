@@ -9,6 +9,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
+  AgentActionKind,
   AgentInboxKind,
   AgentInboxState,
   CleanupActionKind,
@@ -40,7 +41,6 @@ import {
   ConnectedAccountsListResult,
   ConnectedAccountsStatsResult,
   ConnectedProvider,
-  EngineInboxStats,
   EngineMessageSummary,
   LinkedAccountView,
 } from './connected-accounts.types';
@@ -187,7 +187,11 @@ export class ConnectedAccountsService {
 
     let mailboxesDeactivated = 0;
     try {
-      mailboxesDeactivated = await this.deactivateOwnedMailboxes(user, provider);
+      mailboxesDeactivated = await this.deactivateOwnedMailboxes(
+        user,
+        provider,
+        unlinked.alreadyAbsent ? 'already_absent' : 'disconnected',
+      );
     } catch (err) {
       this.logger.warn(
         `Mailbox deactivate failed after ${provider} unlink for user ${user.id}: ${(err as Error).name}`,
@@ -1824,7 +1828,11 @@ export class ConnectedAccountsService {
    * owner key, so another user's link in the same workspace is not updated
    * and nothing is deleted.
    */
-  private async deactivateOwnedMailboxes(user: User, provider: ConnectedProvider): Promise<number> {
+  private async deactivateOwnedMailboxes(
+    user: User,
+    provider: ConnectedProvider,
+    outcome: 'disconnected' | 'already_absent',
+  ): Promise<number> {
     const ownerKeys = this.ownerKeysOf(user);
     const workspaceIds = await this.workspaceIdsFor(user);
     const ucUid = ucUidOf(user);
@@ -1863,9 +1871,21 @@ export class ConnectedAccountsService {
           }
           await tx.mailboxAccount.update({
             where: { id: row.id },
-            data: row.isDefault ? { active: false, isDefault: false } : { active: false },
+            data: row.isDefault
+              ? { active: false, isDefault: false, inboundCursor: null }
+              : { active: false, inboundCursor: null },
           });
           count += 1;
+        }
+        if (count > 0 || (outcome === 'already_absent' && owned.length > 0)) {
+          await tx.agentActionEvent.create({
+            data: {
+              workspaceId,
+              kind: AgentActionKind.MAILBOX_UPDATED,
+              actorUcUid: ucUid,
+              detail: JSON.stringify({ action: 'disconnect', provider, outcome }),
+            },
+          });
         }
         return count;
       });

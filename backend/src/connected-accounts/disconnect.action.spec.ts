@@ -1,4 +1,4 @@
-import { ForbiddenException, Logger } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { MailboxOwnerKind, User, WorkspaceRole } from '@prisma/client';
 import { KeycloakBrokerService } from '../auth/keycloak-broker.service';
 import { MembershipService } from '../common/workspace/membership.service';
@@ -10,11 +10,9 @@ import { ConnectedAccountsService } from './connected-accounts.service';
  * #82 mailbox Disconnect action, unit level. Everything (broker links, mailbox
  * rows, user rows) is in-memory fakes: no broker, database, or network.
  *
- * The suite documents what the shipped code does. Three requested behaviors
- * are NOT implemented in the #82 code and are pinned with it.failing:
- *   - refusing a viewer-role member (the route gate is membership-only),
- *   - writing an audit entry (disconnectProvider writes none),
- *   - clearing the mailbox sync cursor (deactivation flips flags only).
+ * The suite documents the #82 disconnect contract: members may disconnect
+ * their own links, mailbox rows are retained but deactivated, cursors reset,
+ * and each disconnect is audited without credentials.
  */
 describe('mailbox disconnect action (#82)', () => {
   const refreshToken = 'fictional-refresh-token';
@@ -196,7 +194,7 @@ describe('mailbox disconnect action (#82)', () => {
     it('second disconnect succeeds as already_absent with no error', async () => {
       const restore = silenceLogger();
       try {
-        const { rows, broker, service } = harness();
+        const { rows, broker, tx, service } = harness();
 
         const first = await service.disconnectProvider(caller, 'gmail');
         broker.unlinkBrokerIdentity.mockResolvedValue({
@@ -215,6 +213,17 @@ describe('mailbox disconnect action (#82)', () => {
         });
         expect(broker.unlinkBrokerIdentity).toHaveBeenCalledTimes(2);
         expect(rows.filter((row) => row.active === false)).toHaveLength(2);
+        expect(tx.agentActionEvent.create).toHaveBeenLastCalledWith({
+          data: expect.objectContaining({
+            workspaceId: 'ws-1',
+            actorUcUid: 'kc-ada',
+            detail: JSON.stringify({
+              action: 'disconnect',
+              provider: 'gmail',
+              outcome: 'already_absent',
+            }),
+          }),
+        });
       } finally {
         restore();
       }
@@ -243,28 +252,31 @@ describe('mailbox disconnect action (#82)', () => {
     });
   });
 
-  describe('requested policy not in the #82 code (it.failing)', () => {
-    it.failing('refuses a viewer-role member', async () => {
+  describe('disconnect policy and audit', () => {
+    it('allows a viewer to disconnect their own link, but not other mailboxes', async () => {
       const restore = silenceLogger();
       try {
-        const { broker, membership, controller } = harness();
-        // A viewer still holds an active membership, and the route gate
-        // (resolveAndAuthorize) only checks membership, never the role.
+        const { broker, membership, rows, controller } = harness();
         membership.resolveWithRole.mockResolvedValue({
           workspaceId: 'ws-1',
           role: WorkspaceRole.VIEWER,
         });
 
-        await expect(controller.disconnect(caller, 'gmail')).rejects.toBeInstanceOf(
-          ForbiddenException,
-        );
-        expect(broker.unlinkBrokerIdentity).not.toHaveBeenCalled();
+        await expect(controller.disconnect(caller, 'gmail')).resolves.toMatchObject({
+          provider: 'gmail',
+          status: 'disconnected',
+        });
+        expect(broker.unlinkBrokerIdentity).toHaveBeenCalledWith(caller, 'google');
+        expect(rows.find((row) => row.id === 'mine')?.active).toBe(false);
+        expect(rows.find((row) => row.id === 'mine-cursor')?.active).toBe(false);
+        expect(rows.find((row) => row.id === 'other-user')?.active).toBe(true);
+        expect(rows.find((row) => row.id === 'team')?.active).toBe(true);
       } finally {
         restore();
       }
     });
 
-    it.failing('writes an audit entry for the disconnect', async () => {
+    it('writes an audit entry for the disconnect', async () => {
       const restore = silenceLogger();
       try {
         const { tx, service } = harness();
@@ -273,7 +285,16 @@ describe('mailbox disconnect action (#82)', () => {
 
         expect(tx.agentActionEvent.create).toHaveBeenCalledWith(
           expect.objectContaining({
-            data: expect.objectContaining({ workspaceId: 'ws-1' }),
+            data: expect.objectContaining({
+              workspaceId: 'ws-1',
+              actorUcUid: 'kc-ada',
+              kind: 'MAILBOX_UPDATED',
+              detail: JSON.stringify({
+                action: 'disconnect',
+                provider: 'gmail',
+                outcome: 'disconnected',
+              }),
+            }),
           }),
         );
       } finally {
@@ -281,7 +302,33 @@ describe('mailbox disconnect action (#82)', () => {
       }
     });
 
-    it.failing('clears the mailbox sync cursor on disconnect', async () => {
+    it('writes one audit entry per workspace with rows, and none for an empty workspace', async () => {
+      const restore = silenceLogger();
+      try {
+        const rows = [
+          ...freshRows(),
+          box('mine-ws-2', 'ws-2', 'gmail', 'kc-ada', 'ada.ws2@example.com'),
+        ];
+        const { tx, membership, service } = harness(rows);
+        membership.listActiveMemberships.mockResolvedValue([
+          { workspaceId: 'ws-1' },
+          { workspaceId: 'ws-2' },
+          { workspaceId: 'ws-empty' },
+        ]);
+
+        await service.disconnectProvider(caller, 'gmail');
+
+        expect(tx.agentActionEvent.create).toHaveBeenCalledTimes(2);
+        expect(
+          tx.agentActionEvent.create.mock.calls.map(([call]) => call.data.workspaceId),
+        ).toEqual(['ws-1', 'ws-2']);
+        expect(JSON.stringify(tx.agentActionEvent.create.mock.calls)).not.toContain(refreshToken);
+      } finally {
+        restore();
+      }
+    });
+
+    it('clears the mailbox sync cursor on disconnect', async () => {
       const restore = silenceLogger();
       try {
         const { rows, service } = harness();

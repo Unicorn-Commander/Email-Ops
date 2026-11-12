@@ -60,6 +60,9 @@ describe('ConnectedAccountsService', () => {
       delete: jest.fn(),
       deleteMany: jest.fn(),
     },
+    agentActionEvent: {
+      create: jest.fn().mockResolvedValue({ id: 'event-1' }),
+    },
   } as any;
 
   const prisma = {
@@ -890,8 +893,11 @@ describe('ConnectedAccountsService', () => {
       expect(updates).toEqual(
         expect.arrayContaining([
           { where: { id: 'hosted' }, data: { isDefault: true } },
-          { where: { id: 'mine' }, data: { active: false, isDefault: false } },
-          { where: { id: 'mine-ws2' }, data: { active: false } },
+          {
+            where: { id: 'mine' },
+            data: { active: false, isDefault: false, inboundCursor: null },
+          },
+          { where: { id: 'mine-ws2' }, data: { active: false, inboundCursor: null } },
         ]),
       );
       expect(updates.some((call) => call.where.id === 'other-user')).toBe(false);
