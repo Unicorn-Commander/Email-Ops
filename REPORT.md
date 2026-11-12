@@ -1,40 +1,29 @@
-Task 1209b78b: EO tests (Qwen Aaron Strix): mailbox Disconnect wipes credentials
+# Task 0ff202c6 report
 
 What changed
-- 4dd0e16 test(connected-accounts): pin #82 disconnect credential wipe,
-  workspace fence, idempotency, audit absence. One new file:
-  backend/src/connected-accounts/disconnect.credentials.spec.ts (hermetic
-  unit lane). No production code touched. No it.failing, no skips.
+- `1197c72 docs: design vendor pitch notice auto-acknowledge`
+- `5cecdac docs: make customer guard global`
+- Added `docs/design/2026-11-12-mail-rule-auto-acknowledge.md` only.
+- The proposal is opt-in and off by default, with explicit `vendor_pitch`
+  classification, trusted-sender, reply-thread, Customer-Ops, content, cap, and
+  idempotency guards.
+- Specified AUTO_ACKNOWLEDGED state, Auto-acknowledged filter, reason snapshot,
+  append-only audit, human undo to PENDING, data/API/UI changes, tests, and
+  dogfood rollout for `support@majiks.studio`.
 
-Review round note
-- The branch arrived with no prior commits (tip was the base; the earlier
-  disconnect spec 923fdff was merged to main via PR #88 and used it.failing
-  pins). No REVIEW text was in the task description, so this round re-did
-  the task strictly to the four numbered requirements, asserting only actual
-  shipped behavior (that removes the it.failing pattern PR #88 drew).
+Verification
+- `git diff --check`: passed.
+- Unicode em-dash scan on the design doc: no matches.
+- Citation scan confirmed every cited source path exists in the repository.
+- Read `.forgejo/workflows/ci.yml`: this is documentation-only, so backend,
+  frontend, and cleaner-engine CI lanes do not apply; no code tests were run.
 
-The four proofs (real service + controller; fakes only for DB and broker)
-1. Credential wipe: Disconnect calls the broker revoke (unlinkBrokerIdentity
-   = Keycloak linked-identity DELETE), the vault read then returns null,
-   listConnectedAccounts reports linked:false, User.kcRefreshTokenEnc is
-   null on a later row read, the mailbox row reads active:false with
-   secretRef:null, and no stored row or result JSON contains the secret.
-2. Cross-workspace: a ws-b member's Disconnect never opens ws-a
-   (withWorkspace never called with ws-a) and the ws-a row stays active; a
-   caller with no membership gets the code's actual 403
-   (membership.service.ts:110) before any broker or DB write.
-3. Idempotency: second call resolves as already_absent, deactivated 0, no
-   throw, no create/delete, cleared token unchanged.
-4. Audit: NO audit event is written. FINDING: disconnectProvider
-   (connected-accounts.service.ts:172-231) writes no audit row; only a
-   logger line at :224. The spec pins agentActionEvent.create not called.
+Left and why
+- No implementation, migration, API, UI, or tests were changed by design.
+- Customer-Ops customer-status contract and provider reply evidence remain
+  implementation dependencies for a future task.
 
-Verification (in backend/)
-- npx jest --selectProjects unit <new spec>: 6 passed
-- npm run test:unit -- --maxWorkers=4 (full CI unit lane): 134 suites, 1485
-  tests, all passed
-- npx tsc --noEmit: clean; prettier --check: clean; eslint ignores spec
-  files; em dash count in new file: 0; fictional data only; no network.
-
-Left for Aaron
-- Decide if Disconnect should write an audit row (finding above); if so the spec flips to assert the write.
+Aaron must decide
+- Confirm the first mailbox and Customer-Ops guard semantics.
+- Confirm the recommended 10-per-rule-per-day cap, hard maximum 50.
+- Confirm whether undo is for all inbox reviewers or owners/admins only.
