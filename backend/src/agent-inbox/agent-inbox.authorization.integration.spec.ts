@@ -34,13 +34,13 @@ describe('agent inbox decision workspace roles', () => {
     Promise.resolve(visibleIn(workspaceId, itemId) ? { inbox: { state: 'approved' }, message: null } : null)),
    rejectAgentInboxItem: jest.fn((workspaceId: string, _uid: string | null, itemId: string) =>
     Promise.resolve(visibleIn(workspaceId, itemId) ? { inbox: { state: 'rejected' }, message: null } : null)),
-   bulkApproveAgentInboxItems: jest.fn((_workspaceId: string, _uid: string | null, itemIds: string[]) =>
-    Promise.resolve({ items: itemIds.map((id) => visibleIn(ws, id)
+   bulkApproveAgentInboxItems: jest.fn((workspaceId: string, _uid: string | null, itemIds: string[]) =>
+    Promise.resolve({ items: itemIds.map((id) => visibleIn(workspaceId, id)
       ? { item_id: id, status: 'approved', send_at: null }
       : { item_id: id, status: 'refused', reason: 'not_found' }),
       schedule: { first_send: null, last_send: null, count: 0, count_per_sender: {} },
-      approved_count: itemIds.filter((id) => visibleIn(ws, id)).length,
-      refused_count: itemIds.filter((id) => !visibleIn(ws, id)).length })) };
+      approved_count: itemIds.filter((id) => visibleIn(workspaceId, id)).length,
+      refused_count: itemIds.filter((id) => !visibleIn(workspaceId, id)).length })) };
  const prev = {db:process.env.DATABASE_URL,admin:process.env.ADMIN_DATABASE_URL,ent:process.env.UC_ENTITLEMENT_MODE};
  beforeAll(async()=>{
   process.env.DATABASE_URL=TEST_DATABASE_URL; process.env.ADMIN_DATABASE_URL=TEST_DATABASE_URL;
