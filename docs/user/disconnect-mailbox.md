@@ -67,7 +67,7 @@ You must be signed in as a person to disconnect. An automation token cannot disc
 - The route is `POST /api/v1/connected-accounts/:provider/disconnect`. It refreshes the caller's broker token, unlinks the alias, then sets `active=false` on that user's HUMAN-owned mailbox rows for that provider. Rows are matched by owner key, so other users are never updated, and nothing is deleted.
 - The saved Keycloak refresh token is shared across providers, so it is cleared only when the broker reports the other provider's alias is gone.
 - The route gate checks workspace membership only. It does not check the member's role, so any active member (including a viewer) can disconnect their own link today.
-- Disconnect does not write an audit entry, and it does not clear a mailbox sync cursor. Deactivation flips the active flag only.
+- Disconnect writes one workspace audit entry with the actor, provider, and outcome, without storing a token. It also clears the inbound sync cursor when it deactivates your mailbox rows, so reconnecting starts with a clean first sync.
 <!-- backend/src/connected-accounts/connected-accounts.controller.ts:117; backend/src/connected-accounts/connected-accounts.service.ts:172; backend/src/connected-accounts/connected-accounts.service.ts:1827 -->
 
 ## Related

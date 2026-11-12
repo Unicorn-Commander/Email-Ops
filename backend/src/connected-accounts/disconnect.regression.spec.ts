@@ -70,6 +70,9 @@ describe('mailbox disconnect regression (#82)', () => {
         groupBy: jest.fn().mockResolvedValue([]),
         count: jest.fn().mockResolvedValue(0),
       },
+      agentActionEvent: {
+        create: jest.fn().mockResolvedValue({ id: 'event-1' }),
+      },
     };
     const prisma = {
       user: {
