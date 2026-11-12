@@ -27,6 +27,7 @@
 
 ## ops
 
+- [ops/agent-inbox-states.md](ops/agent-inbox-states.md) - Agent-inbox item lifecycle (operator)
 - [ops/external-imap-allowlist.md](ops/external-imap-allowlist.md) - External IMAP allowlist (operator)
 
 ## screenshots
