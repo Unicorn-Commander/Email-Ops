@@ -25,6 +25,10 @@
 - [operations/external-imap-allowlist.md](operations/external-imap-allowlist.md) - External IMAP allowlist (operator)
 - [operations/external-mailbox-send.md](operations/external-mailbox-send.md) - Send operator guide: external IMAP mailboxes
 
+## ops
+
+- [ops/external-imap-allowlist.md](ops/external-imap-allowlist.md) - External IMAP allowlist (operator)
+
 ## screenshots
 
 - [screenshots/approvals.webp](screenshots/approvals.webp)
