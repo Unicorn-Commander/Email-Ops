@@ -134,9 +134,9 @@ function harness(rows: Row[]) {
       }),
     },
     agentInboxItem: {
-      findMany: jest.fn().mockImplementation(({ where }) =>
-        Promise.resolve(rows.filter((r) => visible(r, where))),
-      ),
+      findMany: jest
+        .fn()
+        .mockImplementation(({ where }) => Promise.resolve(rows.filter((r) => visible(r, where)))),
       findFirst: jest.fn().mockImplementation(({ where }) => {
         const row = rows.find((r) => visible(r, where));
         return Promise.resolve(row ? { ...row, message: { ...row.message } } : null);
@@ -294,10 +294,7 @@ describe('agent-inbox bulk approve: the workspace fence per item id (real servic
   });
 
   it('the mirror case holds: an A caller cannot schedule B ids either', async () => {
-    const { rows, service, engine } = harness([
-      makeRow('item-a1', WS_A),
-      makeRow('item-b1', WS_B),
-    ]);
+    const { rows, service, engine } = harness([makeRow('item-a1', WS_A), makeRow('item-b1', WS_B)]);
 
     const out = await service.bulkApproveAgentInboxItems(WS_A, UID_A, ['item-b1', 'item-a1']);
 
