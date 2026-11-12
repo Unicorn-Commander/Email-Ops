@@ -3787,6 +3787,31 @@ export class EmailService {
         payload.sends_at = scheduled.sendAt.toISOString();
         payload.approval_seconds_between = scheduled.approvalSecondsBetween;
         payload.agent_principal = agentPrincipal;
+        const claimed = await tx.agentInboxItem.updateMany({
+          where: { id: scheduled.itemId, workspaceId, state: AgentInboxState.PENDING },
+          data: { state: AgentInboxState.APPROVED },
+        });
+        if (claimed.count === 0) {
+          const current = await tx.agentInboxItem.findFirst({
+            where: { id: scheduled.itemId, workspaceId },
+            include: { message: true },
+          });
+          if (!current) {
+            resultById.set(scheduled.itemId, {
+              item_id: scheduled.itemId,
+              status: 'refused',
+              reason: 'not_found',
+            });
+            continue;
+          }
+          resultById.set(scheduled.itemId, {
+            item_id: scheduled.itemId,
+            status:
+              current.state === AgentInboxState.REJECTED ? 'already_rejected' : 'already_approved',
+            send_at: current.message?.sendAt?.toISOString?.() ?? null,
+          });
+          continue;
+        }
         await tx.emailMessage.update({
           where: { id: source.message.id },
           data: { sendAt: scheduled.sendAt },
@@ -3942,6 +3967,7 @@ export class EmailService {
         const scheduledApproval = Boolean(
           item.state === AgentInboxState.APPROVED &&
           item.kind === AgentInboxKind.EMAIL &&
+          item.message?.status === EmailMessageStatus.PENDING_APPROVAL &&
           item.message?.sendAt &&
           item.message.sendAt.getTime() <= Date.now() &&
           this.readSendAt(item.payload) !== null,
@@ -4228,8 +4254,46 @@ export class EmailService {
         // send. The staged message remains the immutable draft baseline; the
         // approval row stores the exact sent hash and edit decision.
         const sentBody = scheduledApproval
-          ? item.message.body ?? ''
-          : approvedBody ?? item.message.body ?? '';
+          ? (item.message.body ?? '')
+          : (approvedBody ?? item.message.body ?? '');
+
+        // Claim before leaving the transaction: only the winner may call the
+        // external send lane. Scheduled rows are already APPROVED, so their
+        // message status is the conditional claim instead of the inbox state.
+        const claimed = scheduledApproval
+          ? await tx.emailMessage.updateMany({
+              where: {
+                id: item.message.id,
+                workspaceId,
+                status: EmailMessageStatus.PENDING_APPROVAL,
+              },
+              data: { status: EmailMessageStatus.QUEUED },
+            })
+          : await tx.agentInboxItem.updateMany({
+              where: { id: itemId, workspaceId, state: AgentInboxState.PENDING },
+              data: { state: AgentInboxState.APPROVED },
+            });
+        if (claimed.count === 0) {
+          const current = await tx.agentInboxItem.findFirst({
+            where: { id: itemId, workspaceId, ...this.agentInboxScopeWhere(scope) },
+            include: { message: true },
+          });
+          return current
+            ? {
+                kind: 'result',
+                value: {
+                  inbox: this.inboxView(current, current.message),
+                  message: current.message ? this.composeView(current.message) : null,
+                },
+              }
+            : { kind: 'null' };
+        }
+        if (!scheduledApproval) {
+          await tx.emailMessage.update({
+            where: { id: item.message.id },
+            data: { status: EmailMessageStatus.QUEUED },
+          });
+        }
 
         return {
           kind: 'send',
@@ -4380,7 +4444,18 @@ export class EmailService {
     // tx (degrade-clean: a failed send returns accepted:false, never throws).
     if (prep.mailbox?.provider === 'external_imap' && !agentPrincipal && ucUid)
       prep.req.sendAuthorization = 'approval';
-    const result = await this.callEngine(prep.mailbox, prep.req);
+    let result: EngineSendResult;
+    try {
+      result = await this.callEngine(prep.mailbox, prep.req);
+    } catch (error) {
+      result = {
+        accepted: false,
+        providerMessageId: null,
+        threadId: null,
+        lane: null,
+        reason: error instanceof Error ? error.message : 'approval_failed',
+      };
+    }
 
     // Wave 7 learning (default ON): the approval vouches for the external
     // recipients. Runs in its OWN fenced call, degrade-clean, so a learning
@@ -4403,6 +4478,10 @@ export class EmailService {
     if (!result.accepted) {
       await this.prisma.withWorkspace(workspaceId, ucUid, async (tx) => {
         await this.stampSendResult(tx, prep.messageId, result);
+        await tx.agentInboxItem.update({
+          where: { id: prep.itemId },
+          data: { state: AgentInboxState.PENDING },
+        });
         if (prep.kitId && this.suppressions) {
           await this.suppressions.discardKitToken(tx, workspaceId, prep.messageId);
         }
