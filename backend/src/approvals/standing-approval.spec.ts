@@ -138,6 +138,16 @@ describe('standing cap reservations and existing kit fallback', () => {
       },
       agentInboxItem: {
         findFirst: jest.fn().mockResolvedValue(item),
+        updateMany: jest.fn().mockImplementation(({ where, data }) => {
+          if (
+            item.id !== where.id ||
+            item.workspaceId !== where.workspaceId ||
+            item.state !== where.state
+          )
+            return { count: 0 };
+          Object.assign(item, data);
+          return { count: 1 };
+        }),
         update: jest.fn().mockResolvedValue({ ...item, state: 'APPROVED' }),
       },
       agentSendKit: { findFirst: jest.fn().mockResolvedValue(kit) },
@@ -507,12 +517,7 @@ describe('human campaign lifecycle', () => {
     );
     expect(h.tx.standingApproval.updateMany).not.toHaveBeenCalled();
     await expect(
-      h.service.approve(
-        'workspace-1',
-        h.user,
-        h.row.id,
-        standingBinding(h.row).definitionSha256,
-      ),
+      h.service.approve('workspace-1', h.user, h.row.id, standingBinding(h.row).definitionSha256),
     ).resolves.toMatchObject({ approved: true });
     expect(standingRefusalReason(approval({ approvedAt: NOW }), message(), 0, NOW)).toBeNull();
     expect(agentRequesterLabel(agent)).toBe('fictional-agent');

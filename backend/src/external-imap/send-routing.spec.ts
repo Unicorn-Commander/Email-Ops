@@ -132,6 +132,16 @@ describe('external IMAP existing send routing authorization', () => {
       agent: { findFirst: jest.fn().mockResolvedValue(null) },
       workspace: { findUnique: jest.fn().mockResolvedValue({ agentsPaused: false }) },
       emailMessage: {
+        updateMany: jest.fn(async ({ where, data }) => {
+          if (
+            message?.id !== where.id ||
+            message?.workspaceId !== where.workspaceId ||
+            message?.status !== where.status
+          )
+            return { count: 0 };
+          message = { ...message, ...data };
+          return { count: 1 };
+        }),
         findUnique: jest.fn().mockResolvedValue(null),
         create: jest.fn(
           async ({ data }) =>
@@ -140,6 +150,16 @@ describe('external IMAP existing send routing authorization', () => {
         update: jest.fn(async ({ data }) => (message = { ...message, ...data })),
       },
       agentInboxItem: {
+        updateMany: jest.fn(async ({ where, data }) => {
+          if (
+            item?.id !== where.id ||
+            item?.workspaceId !== where.workspaceId ||
+            item?.state !== where.state
+          )
+            return { count: 0 };
+          item = { ...item, ...data };
+          return { count: 1 };
+        }),
         create: jest.fn(
           async ({ data }) => (item = { id: 'item-one', kind: 'EMAIL', createdAt: now, ...data }),
         ),
@@ -218,7 +238,10 @@ describe('external IMAP existing send routing authorization', () => {
       expect(smtp.messages).toHaveLength(0);
       expect(smtp.sockets).toHaveLength(0);
       expect(imap.connections).toHaveLength(0);
-      expect(tx.agentInboxItem.update).not.toHaveBeenCalled();
+      expect(tx.agentInboxItem.update).toHaveBeenCalledWith({
+        where: { id: 'item-one' },
+        data: { state: 'PENDING' },
+      });
       expect(tx.emailMessage.update).toHaveBeenCalledWith({
         where: { id: 'message-one' },
         data: expect.objectContaining({ status: 'FAILED', sentAt: null }),
@@ -261,7 +284,10 @@ describe('external IMAP existing send routing authorization', () => {
     expect(accounts.credentials).not.toHaveBeenCalled();
     expect(smtp.messages).toHaveLength(0);
     expect(smtp.sockets).toHaveLength(0);
-    expect(tx.agentInboxItem.update).not.toHaveBeenCalled();
+    expect(tx.agentInboxItem.update).toHaveBeenCalledWith({
+      where: { id: 'item-one' },
+      data: { state: 'PENDING' },
+    });
     expect(tx.emailMessage.update).toHaveBeenCalledWith({
       where: { id: 'message-one' },
       data: expect.objectContaining({ status: 'FAILED', sentAt: null }),
@@ -302,6 +328,9 @@ describe('external IMAP existing send routing authorization', () => {
       service.approveAgentInboxItem('workspace-one', 'owner-one', 'item-one', null, false, true),
     ).rejects.toThrow('human send or approval');
     expect(send.mock.calls[0][1].sendAuthorization).toBeUndefined();
-    expect(tx.agentInboxItem.update).not.toHaveBeenCalled();
+    expect(tx.agentInboxItem.update).toHaveBeenCalledWith({
+      where: { id: 'item-one' },
+      data: { state: 'PENDING' },
+    });
   });
 });

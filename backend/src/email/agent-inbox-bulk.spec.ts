@@ -56,6 +56,17 @@ describe('EmailService bulk agent-inbox approval', () => {
       },
       agentInboxItem: {
         findMany: jest.fn().mockImplementation(() => Promise.resolve(rows)),
+        updateMany: jest.fn().mockImplementation(({ where, data }) => {
+          const row = rows.find(
+            (item) =>
+              item.id === where.id &&
+              item.workspaceId === where.workspaceId &&
+              item.state === where.state,
+          );
+          if (!row) return Promise.resolve({ count: 0 });
+          Object.assign(row, data);
+          return Promise.resolve({ count: 1 });
+        }),
         update: jest.fn().mockImplementation(({ where, data }) => {
           const row = rows.find((item) => item.id === where.id);
           if (!row) return Promise.resolve(null);
