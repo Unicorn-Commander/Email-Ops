@@ -62,7 +62,9 @@ After a successful test, choose **Connect mailbox**. Email-Ops runs the same che
 
 ## Disconnect
 
-There is no separate disconnect button for this kind of mailbox yet. To stop Email-Ops from reaching the mailbox right away, delete or revoke the app password at your provider. That blocks the connection on the provider side, and nothing is deleted from your mailbox. To reconnect later with a new app password, an owner of the same address can run Connect again.
+In the Mail account list, choose **Disconnect** next to your external IMAP mailbox and confirm. Email-Ops wipes its stored app password and marks the mailbox inactive. Your mail stays at the provider, and Email-Ops does not delete messages or history. Only the mailbox owner can use this control, and it is available only while external IMAP is enabled for the workspace.
+
+You can also delete or revoke the app password at your provider. To reconnect later, an owner of the same address can run Connect again with a new app password.
 
 ## Related
 

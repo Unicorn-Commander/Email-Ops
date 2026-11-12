@@ -407,7 +407,11 @@ export function useMailClient(): UseMailClient {
       }
     };
     window.addEventListener('external-imap:connected', onConnected);
-    return () => window.removeEventListener('external-imap:connected', onConnected);
+    window.addEventListener('external-imap:disconnected', onConnected);
+    return () => {
+      window.removeEventListener('external-imap:connected', onConnected);
+      window.removeEventListener('external-imap:disconnected', onConnected);
+    };
   }, [activeWorkspaceId]);
 
   useEffect(() => {

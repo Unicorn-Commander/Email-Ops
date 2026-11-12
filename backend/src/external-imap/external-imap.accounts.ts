@@ -1,4 +1,10 @@
-import { ConflictException, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { MailboxAccount, User } from '@prisma/client';
 import { encrypt, decrypt, isEncryptionConfigured } from '../connected-accounts/crypto';
 import {
@@ -108,6 +114,41 @@ export class ExternalImapAccounts {
     });
   }
 
+  async disconnect(
+    workspaceId: string,
+    user: User,
+    mailboxId: string,
+  ): Promise<ExternalImapDisconnectResult> {
+    requireExternalImap(workspaceId);
+    const ownerKey = user.keycloakId ?? user.id;
+
+    return this.prisma.withWorkspace(workspaceId, ownerKey, async (tx) => {
+      const mailbox = await tx.mailboxAccount.findFirst({
+        where: { id: mailboxId, workspaceId },
+      });
+      if (!mailbox) throw new NotFoundException('External IMAP mailbox not found.');
+      if (
+        mailbox.provider !== 'external_imap' ||
+        mailbox.ownerKind !== 'HUMAN' ||
+        mailbox.ownerKey !== ownerKey
+      ) {
+        throw new ForbiddenException('Only the mailbox owner may disconnect it.');
+      }
+
+      const removed = await tx.externalImapAccount.deleteMany({ where: { mailboxId } });
+      await tx.mailboxAccount.update({
+        where: { id: mailboxId },
+        data: { active: false },
+      });
+
+      return {
+        mailbox_id: mailboxId,
+        status: 'disconnected' as const,
+        credential: removed.count > 0 ? ('wiped' as const) : ('already_absent' as const),
+      };
+    });
+  }
+
   async credentials(
     mailbox: MailboxAccount,
   ): Promise<ImapCredentials & { smtp?: import('./smtp-connection').SmtpCredentials }> {
@@ -155,4 +196,10 @@ export class ExternalImapAccounts {
         : {}),
     };
   }
+}
+
+export interface ExternalImapDisconnectResult {
+  mailbox_id: string;
+  status: 'disconnected';
+  credential: 'wiped' | 'already_absent';
 }
