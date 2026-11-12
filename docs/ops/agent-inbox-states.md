@@ -191,3 +191,40 @@ retried request sends once
 of the same item also send once: only the caller whose conditional update
 claims the row reaches the send lane, and the other gets the current state
 (PR #102; covered by `backend/src/agent-inbox/agent-inbox.approve-sends-once.spec.ts`).
+
+## Notices in the approval queue (user guide)
+
+A notice is an approval-queue card for an inbound message that a mail rule
+flagged for a person. It is not an outbound draft and it never sends mail. The
+queue shows it with a `Notice` badge and the rule name, and you clear it by
+acknowledging or dismissing it (Email-Ops #107).
+
+The card shows the flagged message inline so you can judge it without leaving
+the queue:
+
+- From, Subject, and Received are read from the notice payload
+  (`frontend/components/agent-inbox/NoticeMessagePreview.tsx:44-52`).
+- The body preview is the first 40 lines of the message text, taken from the
+  linked message when it loads and otherwise from the payload
+  (`frontend/components/agent-inbox/NoticeMessagePreview.tsx:4`,
+  `frontend/components/agent-inbox/NoticeMessagePreview.tsx:16-21`).
+- If the message has no readable body the card says "No message body captured."
+  (`frontend/components/agent-inbox/NoticeMessagePreview.tsx:59`).
+
+To read the whole conversation, use the "Open thread" link on the card. It opens
+the mail view on the flagged thread, using the thread and mailbox ids resolved
+from the item and its payload
+(`frontend/app/agent-inbox/page.tsx:1493-1504`,
+`frontend/components/agent-inbox/queue.ts:26-44`). The inline preview itself is
+loaded from that same thread, matched to the flagged message id when present and
+otherwise the first message in the thread
+(`frontend/app/agent-inbox/page.tsx:1465-1491`).
+
+"This notice has no linked message" means the card cannot point you at a thread
+to open. It appears in two cases: the notice payload is missing or failed
+validation, so there is nothing to show
+(`frontend/components/agent-inbox/NoticeMessagePreview.tsx:32`,
+`frontend/lib/api.ts:447-468`), or the item carries no resolvable thread id, so
+the "Open thread" link is replaced by this text
+(`frontend/app/agent-inbox/page.tsx:1576-1586`). In both cases acknowledge or
+dismiss the notice from the card; there is no thread to open.
