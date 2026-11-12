@@ -20,12 +20,27 @@ import { TEST_DATABASE_URL } from '../../test/test-db';
 describe('agent inbox decision workspace roles', () => {
  let prisma: PrismaService, membership: MembershipService, auth: AuthService;
  let app: INestApplication, origin: string, tools: EmailOpsTools;
- const ws = randomUUID(), foreign = randomUUID(), userId = randomUUID();
- let user: any;
- const mail = { listAgentInbox: jest.fn().mockResolvedValue([]),
-  peekAgentInboxKind: jest.fn().mockResolvedValue(AgentInboxKind.CLEANUP),
-  approveAgentInboxItem: jest.fn().mockResolvedValue({inbox:{state:'approved'},message:null}),
-  rejectAgentInboxItem: jest.fn().mockResolvedValue({inbox:{state:'rejected'},message:null}) };
+  const ws = randomUUID(), foreign = randomUUID(), userId = randomUUID();
+  let user: any;
+  // An item that lives in `ws` only: the mock reproduces the service's
+  // workspaceId fence, so it is invisible (null / not_found) from `foreign`.
+  const ITEM_A = '00000000-0000-0000-0000-0000000000aa';
+  const visibleIn = (workspaceId: string, itemId: string) =>
+    !(itemId === ITEM_A && workspaceId !== ws);
+  const mail = { listAgentInbox: jest.fn().mockResolvedValue([]),
+   peekAgentInboxKind: jest.fn((workspaceId: string, _uid: string | null, itemId: string) =>
+    Promise.resolve(visibleIn(workspaceId, itemId) ? AgentInboxKind.CLEANUP : null)),
+   approveAgentInboxItem: jest.fn((workspaceId: string, _uid: string | null, itemId: string) =>
+    Promise.resolve(visibleIn(workspaceId, itemId) ? { inbox: { state: 'approved' }, message: null } : null)),
+   rejectAgentInboxItem: jest.fn((workspaceId: string, _uid: string | null, itemId: string) =>
+    Promise.resolve(visibleIn(workspaceId, itemId) ? { inbox: { state: 'rejected' }, message: null } : null)),
+   bulkApproveAgentInboxItems: jest.fn((workspaceId: string, _uid: string | null, itemIds: string[]) =>
+    Promise.resolve({ items: itemIds.map((id) => visibleIn(workspaceId, id)
+      ? { item_id: id, status: 'approved', send_at: null }
+      : { item_id: id, status: 'refused', reason: 'not_found' }),
+      schedule: { first_send: null, last_send: null, count: 0, count_per_sender: {} },
+      approved_count: itemIds.filter((id) => visibleIn(workspaceId, id)).length,
+      refused_count: itemIds.filter((id) => !visibleIn(workspaceId, id)).length })) };
  const prev = {db:process.env.DATABASE_URL,admin:process.env.ADMIN_DATABASE_URL,ent:process.env.UC_ENTITLEMENT_MODE};
  beforeAll(async()=>{
   process.env.DATABASE_URL=TEST_DATABASE_URL; process.env.ADMIN_DATABASE_URL=TEST_DATABASE_URL;
@@ -55,16 +70,36 @@ describe('agent inbox decision workspace roles', () => {
   for(const action of ['approve','reject'])expect((await request(action)).status).toBe(403);
   expect(mail.peekAgentInboxKind).not.toHaveBeenCalled();expect(mail.approveAgentInboxItem).not.toHaveBeenCalled();expect(mail.rejectAgentInboxItem).not.toHaveBeenCalled();
  });
- it('MCP viewer denies both actions before item lookup',async()=>{
-  for(const method of ['approveAgentInboxItem','rejectAgentInboxItem'] as const)await expect(tools[method](user,{workspace_id:ws,item_id:'absent'})).rejects.toThrow('MEMBER');
-  expect(mail.peekAgentInboxKind).not.toHaveBeenCalled();expect(mail.approveAgentInboxItem).not.toHaveBeenCalled();expect(mail.rejectAgentInboxItem).not.toHaveBeenCalled();
- });
+  it('MCP viewer denies approve, reject and bulk-approve before item lookup',async()=>{
+   for(const method of ['approveAgentInboxItem','rejectAgentInboxItem'] as const)await expect(tools[method](user,{workspace_id:ws,item_id:'absent'})).rejects.toThrow('MEMBER');
+   await expect(tools.bulkApproveAgentInboxItems(user,{workspace_id:ws,item_ids:['absent']})).rejects.toThrow('MEMBER');
+   expect(mail.peekAgentInboxKind).not.toHaveBeenCalled();expect(mail.approveAgentInboxItem).not.toHaveBeenCalled();expect(mail.rejectAgentInboxItem).not.toHaveBeenCalled();expect(mail.bulkApproveAgentInboxItems).not.toHaveBeenCalled();
+  });
+  it('anonymous callers get 401 on list, approve, reject and bulk-approve',async()=>{
+   const anon=(path:string,init?:RequestInit)=>fetch(origin+`/workspaces/${ws}/agent-inbox${path}`,init);
+   expect((await anon('')).status).toBe(401);
+   for(const action of ['approve','reject'])expect((await anon(`/${ITEM_A}/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).status).toBe(401);
+   expect((await anon('/bulk-approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({item_ids:[ITEM_A]})})).status).toBe(401);
+   expect(mail.approveAgentInboxItem).not.toHaveBeenCalled();expect(mail.rejectAgentInboxItem).not.toHaveBeenCalled();expect(mail.bulkApproveAgentInboxItems).not.toHaveBeenCalled();
+  });
  it.each([WorkspaceRole.MEMBER,WorkspaceRole.MANAGER,WorkspaceRole.ADMIN,WorkspaceRole.OWNER])('preserves %s approval/rejection contracts with inert transport',async role=>{
   await patch({role});expect((await request('approve')).status).toBe(201);expect((await request('reject')).status).toBe(201);
   await tools.approveAgentInboxItem(user,{workspace_id:ws,item_id:'synthetic'});await tools.rejectAgentInboxItem(user,{workspace_id:ws,item_id:'synthetic'});
   expect(mail.approveAgentInboxItem).toHaveBeenCalledTimes(2);expect(mail.rejectAgentInboxItem).toHaveBeenCalledTimes(2);
  });
- it('same MCP object immediately loses authority after demotion/suspension',async()=>{
+  it('a foreign-workspace caller cannot act on A items by id, singly or inside a mixed bulk approve',async()=>{
+   const token=(await auth.generateTokenForUser(user)).access_token;
+   const call=(path:string,body?:unknown)=>fetch(`${origin}/workspaces/${foreign}/agent-inbox${path}`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(body??{})});
+   expect((await call(`/${ITEM_A}/approve`)).status).toBe(404);
+   expect((await call(`/${ITEM_A}/reject`)).status).toBe(404);
+   expect(mail.approveAgentInboxItem).not.toHaveBeenCalled();
+   const bulk=await call('/bulk-approve',{item_ids:[ITEM_A,'foreign-item']});
+   expect(bulk.status).toBe(201);
+   expect(await bulk.json()).toMatchObject({items:[{item_id:ITEM_A,status:'refused',reason:'not_found'},{item_id:'foreign-item',status:'approved'}],refused_count:1,approved_count:1});
+   expect(mail.bulkApproveAgentInboxItems).toHaveBeenCalledTimes(1);
+   expect(mail.bulkApproveAgentInboxItems.mock.calls[0][0]).toBe(foreign);
+  });
+  it('same MCP object immediately loses authority after demotion/suspension',async()=>{
   await patch({role:WorkspaceRole.VIEWER});await expect(tools.rejectAgentInboxItem(user,{workspace_id:ws,item_id:'absent'})).rejects.toThrow('MEMBER');
   await patch({role:WorkspaceRole.MEMBER,status:MembershipStatus.SUSPENDED});expect((await request('reject')).status).toBe(403);
   await expect(tools.approveAgentInboxItem(user,{workspace_id:ws,item_id:'absent'})).rejects.toThrow();expect(mail.peekAgentInboxKind).not.toHaveBeenCalled();
