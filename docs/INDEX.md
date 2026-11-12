@@ -49,3 +49,4 @@
 
 - [user/connect-other-mailbox.md](user/connect-other-mailbox.md) - Connect a mailbox from another provider (IMAP, read only)
 - [user/disconnect-mailbox.md](user/disconnect-mailbox.md) - Disconnect a Gmail or Microsoft mailbox
+- [user/mail-rules.md](user/mail-rules.md) - Mail rules (user guide)
