@@ -37,5 +37,4 @@ Verification (in backend/)
   files; em dash count in new file: 0; fictional data only; no network.
 
 Left for Aaron
-- Decide whether Disconnect should write an audit row (finding above); if
-  yes, the audit test flips to assert the expected write.
+- Decide if Disconnect should write an audit row (finding above); if so the spec flips to assert the write.
