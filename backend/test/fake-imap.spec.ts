@@ -20,6 +20,7 @@ export class FakeImapServer implements ImapTransport {
   seen = new Set<number>();
   validity = 42;
   empty = false;
+  independentThreads = false;
   failureCode: string | null = null;
   refuseInbox = false;
   silent = false;
@@ -131,8 +132,13 @@ export class FakeImapServer implements ImapTransport {
           `* STATUS "INBOX" (MESSAGES ${this.empty ? 0 : 3} UNSEEN ${this.empty ? 0 : 3 - this.seen.size})\r\n`,
         );
         return;
-      case 'FETCH':
-      case 'UID': {
+      case 'UID':
+        if (/^\S+ UID SEARCH\b/.test(line)) {
+          ok(`* SEARCH${this.empty ? '' : ' 1 2 3'}\r\n`);
+          return;
+        }
+      // Other UID commands are handled with FETCH below.
+      case 'FETCH': {
         const match = /(?:UID )?(FETCH|STORE) ([\d,:*]+) (.*)/.exec(line);
         if (!match) break;
         const [, operation, range, query] = match;
@@ -154,14 +160,17 @@ export class FakeImapServer implements ImapTransport {
             fields.push(`INTERNALDATE "0${uid}-Nov-2026 10:00:00 +0000"`);
           if (query.includes('ENVELOPE'))
             fields.push(
-              `ENVELOPE ("0${uid} Nov 2026 10:00:00 +0000" "${uid === 2 ? 'Re: Plans' : uid === 1 ? 'Plans' : 'Unrelated'}" (("Sender" NIL "sender" "example.com")) NIL NIL ((NIL NIL "reader" "example.com")) NIL NIL ${uid === 2 ? '"<one@example.com>"' : 'NIL'} "<${uid === 1 ? 'one' : uid === 2 ? 'two' : 'three'}@example.com>")`,
+              `ENVELOPE ("0${uid} Nov 2026 10:00:00 +0000" "${this.independentThreads ? `Message ${uid}` : uid === 2 ? 'Re: Plans' : uid === 1 ? 'Plans' : 'Unrelated'}" (("Sender" NIL "sender" "example.com")) NIL NIL ((NIL NIL "reader" "example.com")) NIL NIL ${uid === 2 && !this.independentThreads ? '"<one@example.com>"' : 'NIL'} "<${uid === 1 ? 'one' : uid === 2 ? 'two' : 'three'}@example.com>")`,
             );
           const sections = [...query.matchAll(/BODY\.PEEK\[([^\]]+)\](?:<(\d+)\.(\d+)>)?/g)];
           for (const section of sections) {
             const name = section[1];
             let content: string;
             if (name.startsWith('HEADER.FIELDS'))
-              content = uid === 2 ? 'References: <one@example.com>\r\n\r\n' : '\r\n';
+              content =
+                uid === 2 && !this.independentThreads
+                  ? 'References: <one@example.com>\r\n\r\n'
+                  : '\r\n';
             else if (name === '1.MIME')
               content =
                 'Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\n';
