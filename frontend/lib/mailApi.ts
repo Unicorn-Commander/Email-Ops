@@ -382,6 +382,25 @@ export async function connectMailbox(
   return apiPost<MailboxPick>(`/workspaces/${seg(workspaceId)}/mailboxes/connected`, body, token);
 }
 
+export interface ExternalImapDisconnectResponse {
+  mailbox_id: string;
+  status: 'disconnected';
+  credential: 'wiped' | 'already_absent';
+}
+
+/** Wipe the caller-owned external IMAP credential and park the mailbox. */
+export async function disconnectExternalImap(
+  workspaceId: string,
+  mailboxId: string,
+  token?: string,
+): Promise<ExternalImapDisconnectResponse> {
+  return apiPost<ExternalImapDisconnectResponse>(
+    `/workspaces/${seg(workspaceId)}/external-imap/${seg(mailboxId)}/disconnect`,
+    {},
+    token,
+  );
+}
+
 const mailboxBase = (workspaceId: string, mailboxId: string) =>
   `/workspaces/${seg(workspaceId)}/mailboxes/${seg(mailboxId)}`;
 

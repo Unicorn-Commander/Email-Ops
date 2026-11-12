@@ -77,6 +77,7 @@ import { useMailShortcuts } from '@/components/mail/useMailShortcuts';
 import { CommandPalette, type CommandAction } from '@/components/mail/CommandPalette';
 import { MailTopBar } from '@/components/mail/MailTopBar';
 import { ListBannerView, type ListBanner } from '@/components/mail/ListBannerView';
+import { ExternalImapDisconnect } from '@/components/mail/ExternalImapDisconnect';
 import { MailIconNav } from '@/components/mail/MailIconNav';
 import { AgentRail } from '@/components/mail/AgentRail';
 import { AgentDraftCard } from '@/components/mail/AgentDraftCard';
@@ -1434,6 +1435,7 @@ export default function MailPage() {
             ) : (
               <FoldersColumn
                 mailboxes={visibleMailboxes}
+                workspaceId={mail.workspace?.workspace_id ?? null}
                 selectedId={
                   mail.unified
                     ? ALL_INBOXES
@@ -1442,6 +1444,7 @@ export default function MailPage() {
                       : null
                 }
                 onSelect={mail.selectMailbox}
+                onMailboxDisconnected={() => void mail.refresh()}
                 showAllInboxes={showAllInboxes}
                 unreadByMailbox={unreadByMailbox}
                 totalUnread={totalUnread}
@@ -1955,8 +1958,10 @@ function CustomFoldersSection({
 
 function FoldersColumn({
   mailboxes,
+  workspaceId,
   selectedId,
   onSelect,
+  onMailboxDisconnected,
   showAllInboxes,
   unreadByMailbox,
   totalUnread,
@@ -1979,8 +1984,10 @@ function FoldersColumn({
   onOpenRules,
 }: {
   mailboxes: MailboxPick[];
+  workspaceId: string | null;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onMailboxDisconnected: () => void;
   showAllInboxes: boolean;
   unreadByMailbox: Map<string, number> | null;
   totalUnread: number | null;
@@ -2045,6 +2052,15 @@ function FoldersColumn({
             name={mb.display_name?.trim() || mb.email_address}
             sub={mb.email_address}
             count={unread}
+            action={
+              mb.provider === 'external_imap' && workspaceId ? (
+                <ExternalImapDisconnect
+                  workspaceId={workspaceId}
+                  mailboxId={mb.id}
+                  onDisconnected={onMailboxDisconnected}
+                />
+              ) : undefined
+            }
           />
         );
       })}
@@ -2187,6 +2203,7 @@ function AccountButton({
   name,
   sub,
   count,
+  action,
 }: {
   active: boolean;
   onClick: () => void;
@@ -2195,40 +2212,44 @@ function AccountButton({
   name: string;
   sub: string;
   count: number | null;
+  action?: ReactNode;
 }) {
   const unread = count != null && count > 0;
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-current={active}
-      className={cn(
-        'mx-2 my-px flex items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left transition-colors',
-        active ? 'bg-accent/[0.13] text-primary' : 'text-secondary hover:bg-surface-overlay',
-      )}
-    >
-      <span
-        className={cn('h-2 w-2 shrink-0 rounded-[3px]', active && 'ring-2 ring-accent/40')}
-        style={{
-          background:
-            tag === 'gradient'
-              ? 'linear-gradient(135deg,rgb(var(--accent)),rgb(var(--accent-2)))'
-              : tag,
-        }}
-      />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[13px] font-medium">{name}</span>
-        <span className="block truncate text-[11px] text-tertiary mono">{sub}</span>
-      </span>
-      <span
+    <div className="mx-2 my-px flex items-start gap-1">
+      <button
+        type="button"
+        onClick={onClick}
+        aria-current={active}
         className={cn(
-          'shrink-0 text-[11px] font-semibold mono',
-          unread ? 'text-accent' : 'text-tertiary',
+          'flex min-w-0 flex-1 items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left transition-colors',
+          active ? 'bg-accent/[0.13] text-primary' : 'text-secondary hover:bg-surface-overlay',
         )}
       >
-        {count == null ? '—' : count > 999 ? '999+' : count}
-      </span>
-    </button>
+        <span
+          className={cn('h-2 w-2 shrink-0 rounded-[3px]', active && 'ring-2 ring-accent/40')}
+          style={{
+            background:
+              tag === 'gradient'
+                ? 'linear-gradient(135deg,rgb(var(--accent)),rgb(var(--accent-2)))'
+                : tag,
+          }}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[13px] font-medium">{name}</span>
+          <span className="block truncate text-[11px] text-tertiary mono">{sub}</span>
+        </span>
+        <span
+          className={cn(
+            'shrink-0 text-[11px] font-semibold mono',
+            unread ? 'text-accent' : 'text-tertiary',
+          )}
+        >
+          {count == null ? '-' : count > 999 ? '999+' : count}
+        </span>
+      </button>
+      {action && <div className="shrink-0 pt-1">{action}</div>}
+    </div>
   );
 }
 
